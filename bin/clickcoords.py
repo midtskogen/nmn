@@ -631,7 +631,7 @@ class Zoom_Advanced(ttk.Frame):
             self.timestamps.append(0)
         if int(x2 - x1) > 0 and int(y2 - y1) > 0:  # show image if it in the visible area
             pos.date = datetime.fromtimestamp(self.timestamps[self.num], UTC)
-            stars = brightstar(pano, args.image, pos, 6.5, -30, 256)
+            stars = brightstar(pano, args.image, pos, 6.5, -30, int(128*self.imscale))
             x = min(x2 / self.imscale, self.width)   # sometimes it is larger on 1 pixel...
             y = min(y2 / self.imscale, self.height)  # ...and sometimes not
             self.x = x1 / self.imscale

@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 import shutil
 import glob
+import concurrent.futures
+import multiprocessing
 
 def get_video_start_time(video_file):
     """Uses ffprobe to get the start time of the video."""
@@ -34,14 +36,15 @@ def stitch_frames_with_nona(pto_file, temp_dir, frame_num):
     """Uses nona to stitch frames from different cameras for a specific frame."""
     frame_files = [os.path.join(temp_dir, f"frame{i+1}_{frame_num:06d}.jpg") for i in range(7)]
     output_stitched = os.path.join(temp_dir, f"stitched_{frame_num:06d}_")
-    cmd = ['nona', '-o', output_stitched, pto_file] + frame_files
+    cmd = ['nona', '-z', 'NONE', '-o', output_stitched, pto_file] + frame_files
     print(" ".join(cmd))
     subprocess.run(cmd)
     output_file = os.path.join(temp_dir, f"stitched_{frame_num:06d}.jpg")
-    if frame_num == 1:
-        cmd = ['enblend', '--save-masks', '-o', output_file] + glob.glob(output_stitched + "*")
-    else:
-        cmd = ['multiblend', '--load-masks', '-o', output_file] + glob.glob(output_stitched + "*")
+#    if frame_num == 1:
+#        cmd = ['multiblend', '--wideblend', '--quiet', '--save-seams', 'seams.png', '-o', output_file] + glob.glob(output_stitched + "*")
+#    else:
+#        cmd = ['multiblend', '--wideblend', '--quiet', '--load-seams', 'seams.png', '-o', output_file] + glob.glob(output_stitched + "*")
+    cmd = ['multiblend', '--quiet', '-o', output_file] + glob.glob(output_stitched + "*")
     print(" ".join(cmd))
     subprocess.run(cmd)
 #    cmd = ['convert', '-crop', '2895x2895+1112+1112', output_file, output_file + ".jpg"]
@@ -66,6 +69,7 @@ def encode_stitched_frames_to_video(temp_dir, output_video_file):
 def main(video_path, pto_file):
     # Define paths
     base_video_path = Path(video_path)
+#    cameras = [f"cam{i}/{base_video_path}" for i in range(1, 8)]
     cameras = [f"/meteor/cam{i}/{base_video_path}" for i in range(1, 8)]
     
     # Get the start times of all videos
@@ -77,20 +81,26 @@ def main(video_path, pto_file):
 
     try:
         # Extract frames from each video synchronizing based on the max start time
-        for i, cam in enumerate(cameras):
-            time_diff = max_start_time - start_times[cam]
-            extract_frames(cam, time_diff, temp_dir, i + 1)
+        num_cpus = multiprocessing.cpu_count()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_cpus) as executor:
+            futures = []
+            for i, cam in enumerate(cameras):
+                time_diff = max_start_time - start_times[cam]
+                futures.append(executor.submit(extract_frames, cam, time_diff, temp_dir, i + 1))
+            concurrent.futures.wait(futures)
 
         # Process frames and stitch them
-        frame_num = 1
         stitched_files = []
-        while True:
-            stitched_frame = stitch_frames_with_nona(pto_file, temp_dir, frame_num)
-            if stitched_frame:
-                stitched_files.append(stitched_frame)
-            else:
-                break
-            frame_num += 1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_cpus) as executor:
+            future_to_frame = {executor.submit(stitch_frames_with_nona, pto_file, temp_dir, frame_num): frame_num for frame_num in range(1, len(glob.glob(os.path.join(temp_dir, "frame1_*.jpg"))))}
+            for future in concurrent.futures.as_completed(future_to_frame):
+                frame_num = future_to_frame[future]
+                try:
+                    stitched_frame = future.result()
+                    if stitched_frame:
+                        stitched_files.append(stitched_frame)
+                except Exception as exc:
+                    print(f"Frame {frame_num} generated an exception: {exc}")
 
         # Encode the final stitched frames into a video
         output_video_file = f"stitched_{base_video_path.stem}.mp4"

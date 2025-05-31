@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
-#include <jpeglib.h>
 #include <stdio.h>
+#include <jpeglib.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>

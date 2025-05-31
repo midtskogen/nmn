@@ -1,33 +1,35 @@
-#include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <float.h>
-#include <fstream>
-#include <jpeglib.h>
-#include <math.h>
-#include <pthread.h>
-#include <setjmp.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <sys/sendfile.h>
-#include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <jpeglib.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <math.h>
+#include <float.h>
+#include <sys/types.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <stdarg.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <pthread.h>
+#include <setjmp.h>
+#include <sys/sendfile.h>
+#include <errno.h>
+#include <fstream>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/mem.h>
 }
 
-#include "PanoToolsInterface.h"
 #include "Panorama.h"
+#include "PanoToolsInterface.h"
 
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(55, 28, 1)
 #define av_frame_alloc avcodec_alloc_frame
@@ -39,35 +41,15 @@ extern "C" {
 
 // Example compile options and usage:
 
-// g++ -o bin/metdetect src/metdetect.c -msse4.2 -Wno-deprecated-declarations
-// -Isrc/hugin-2023.0.0/build/src -Isrc/hugin-2023.0.0/src/hugin_base/panotools
-// -Isrc/hugin-2023.0.0/src/hugin_base
-// -Isrc/hugin-2023.0.0/src/hugin_base/panodata -Isrc/hugin-2023.0.0/src -O6
-// -ljpeg -lm -lavutil -lavcodec -pthread -Wl,-rpath=/usr/lib/hugin
-// /usr/lib/hugin/libhuginbase.so.0.0
+// g++ -o metdetect metdetect.c -Isrc/hugin -O6 -ljpeg -lm -lavutil -lavcodec -pthread -Wl,-rpath=/usr/lib/hugin
+// /usr/lib/hugin/libhuginbase.so.0.0 g++ -o bin/metdetect src/metdetect.c -Isrc/hugin -O6 -mfpu=neon -fomit-frame-pointer -ljpeg -lm
+// -lavutil -lavcodec -pthread -Wl,-rpath=/usr/lib/hugin /usr/lib/hugin/libhuginbase.so.0.0
 
-// g++ -o bin/metdetect src/metdetect.c -march=native -mfpu=neon
-// -Wno-deprecated-declarations -Isrc/hugin-2022.0.0/build/src
-// -Isrc/hugin-2022.0.0/src/hugin_base/panotools
-// -Isrc/hugin-2022.0.0/src/hugin_base
-// -Isrc/hugin-2022.0.0/src/hugin_base/panodata -Isrc/hugin-2022.0.0/src -O6
-// -ljpeg -lm -lavutil -lavcodec -pthread -Wl,-rpath=/usr/local/lib/hugin
-// /usr/lib/hugin/libhuginbase.so.0.0
+// ffmpeg -loglevel quiet -vsync 0 -nostdin -i /meteor/cam1/20141202/21/mini_13.mp4 -f rawvideo -pix_fmt gray - | time ./metdetect -w800
+// -h600 -m/meteor/cam1/mask-mini.jpg -j 0 -; eog frame-00*
 
-// g++ -o metdetect metdetect.c -Isrc/hugin -O6 -ljpeg -lm -lavutil -lavcodec
-// -pthread -Wl,-rpath=/usr/lib/hugin /usr/lib/hugin/libhuginbase.so.0.0
-
-// g++ -o bin/metdetect src/metdetect.c -Isrc/hugin -O6 -mfpu=neon
-// -fomit-frame-pointer -ljpeg -lm -lavutil -lavcodec -pthread
-// -Wl,-rpath=/usr/lib/hugin /usr/lib/hugin/libhuginbase.so.0.0
-
-// ffmpeg -loglevel quiet -vsync 0 -nostdin -i
-// /meteor/cam1/20141202/21/mini_13.mp4 -f rawvideo -pix_fmt gray - | time
-// ./metdetect -w800 -h600 -m/meteor/cam1/mask-mini.jpg -j 0 -; eog frame-00*
-
-// ffmpeg -loglevel quiet -vsync 0 -nostdin -i
-// /meteor/cam3/20150428/00/full_32.mp4 -f rawvideo -codec:v copy -codec:a none
-// -bsf:v h264_mp4toannexb - | ./metdetect -m/meteor/cam3/mask-mini.jpg -e -
+// ffmpeg -loglevel quiet -vsync 0 -nostdin -i /meteor/cam3/20150428/00/full_32.mp4 -f rawvideo -codec:v copy -codec:a none -bsf:v
+// h264_mp4toannexb - | ./metdetect -m/meteor/cam3/mask-mini.jpg -e -
 
 static FILE *inputfile = 0;
 static int mfc_open = 0;
@@ -806,8 +788,7 @@ typedef struct {
   char *maskfile;                       // Optional mask file for video
   char *maxfile;                        // When contains a filename, a max image is written
   char *savefile;                       // Actual file for max image (internal)
-  char *ptofile;                        // Optional (but recommended) pto file for converting x,y to
-                                        // az,alt
+  char *ptofile;                        // Optional (but recommended) pto file for converting x,y to az,alt
   HuginBase::Panorama *pano;            // Hugin panorama
   HuginBase::PTools::Transform *trafo;  // Hugin transform
   char *execute;                        // Command to run after detection
@@ -857,37 +838,25 @@ typedef struct {
 
 static void printhelp() {
   printf(
-      "metdetect reads a raw 8 bit greyscale video stream from file or stdin, "
-      "looks for\n"
-      "meteors, reports any events, and also stores a max frame (a continuous "
-      "expsure\n"
-      "since the last such store) to file when instructed by an external "
-      "application.\n\n"
+      "metdetect reads a raw 8 bit greyscale video stream from file or stdin, looks for\n"
+      "meteors, reports any events, and also stores a max frame (a continuous expsure\n"
+      "since the last such store) to file when instructed by an external application.\n\n"
       "Options:\n"
       "  -C <config file>: Read arguments from a configuration file.\n"
       "  -w <input width>: Width of input stream.  Implies raw input.\n"
       "  -h <input height>: Height of input stream.  Implies raw input.\n"
-      "  -m <mask file>: A jpeg file serving as a mask for the input.  Black "
-      "pixels in\n"
-      "      the mask will remove the corresponding pixel in the input "
-      "stream.\n"
-      "  -x <max file>: Whenever a filename is written into this file, the max "
-      "frame\n"
-      "      will be written to that file, the file will be deleted and the "
-      "max buffer\n"
-      "      will be reset.  An external application could for instance update "
-      "this file\n"
+      "  -m <mask file>: A jpeg file serving as a mask for the input.  Black pixels in\n"
+      "      the mask will remove the corresponding pixel in the input stream.\n"
+      "  -x <max file>: Whenever a filename is written into this file, the max frame\n"
+      "      will be written to that file, the file will be deleted and the max buffer\n"
+      "      will be reset.  An external application could for instance update this file\n"
       "      once an hour to have metdetect store one hour exposures.\n"
-      "  -d <event directory>: When an event occurs, a report will be written "
-      "in a\n"
-      "      subdirectory in the given event directory.  The date of the event "
-      "will be\n"
+      "  -d <event directory>: When an event occurs, a report will be written in a\n"
+      "      subdirectory in the given event directory.  The date of the event will be\n"
       "      the name of the subdirectory.  Default: \"/tmp\"\n"
       "  -e: Turn off event reporting to file.\n"
-      "  -j <image number>: Write annotated jpeg files of the input.  The "
-      "files will be\n"
-      "      named frame-<sequence number>.jpg.  Useful for debugging and "
-      "offline\n"
+      "  -j <image number>: Write annotated jpeg files of the input.  The files will be\n"
+      "      named frame-<sequence number>.jpg.  Useful for debugging and offline\n"
       "      analysis.\n"
       "      0: Input image\n"
       "      1: Enhanced input image\n"
@@ -895,157 +864,96 @@ static void printhelp() {
       "      3: Input image with mask\n"
       "      4: Enhanced input image with mask\n"
       "      5: Difference image with mask\n"
-      "  -n <number of spots>: Only the brightest moving spots in the input "
-      "stream will\n"
-      "      be examined.  The number of spots can be changed.  Legal values "
-      "are 1 .. 16.\n"
-      "      This ensures that meteors can be detected even if there are "
-      "brighter\n"
-      "      airplanes or other artificial objects moving in the frame.  "
-      "Default: 3\n"
-      "  -t <minimum trail length>: Minimum duration for a meteor in seconds. "
-      "If the\n"
-      "      number is very low, false detections get more likely.  If the "
-      "number is\n"
+      "  -n <number of spots>: Only the brightest moving spots in the input stream will\n"
+      "      be examined.  The number of spots can be changed.  Legal values are 1 .. 16.\n"
+      "      This ensures that meteors can be detected even if there are brighter\n"
+      "      airplanes or other artificial objects moving in the frame.  Default: 3\n"
+      "  -t <minimum trail length>: Minimum duration for a meteor in seconds. If the\n"
+      "      number is very low, false detections get more likely.  If the number is\n"
       "      high, short lived meteors will not be detected.  Default: 1.2.\n"
       "  -u <maximum trail length>: Maximum duration for a meteor in seconds.\n"
-      "      Meteors are rarely visible for more than 10 seconds, so objects "
-      "visible for\n"
-      "      longer than this are likely airplanes or satellites.  Default: "
-      "10.0.\n"
-      "  -p <minimum speed>: An object moving slower than this value, given as "
-      "percent\n"
-      "      of the frame width per frame, will not be considered a meteor.  "
-      "Slow moving\n"
-      "      objects are frequently airplanes, satellites or noise.  Default: "
-      "0.15\n"
-      "  -q <maximum speed>: An object moving faster than this value, given as "
-      "percent\n"
-      "      of the frame width per frame, will not be considered a meteor.  "
-      "Apparently\n"
+      "      Meteors are rarely visible for more than 10 seconds, so objects visible for\n"
+      "      longer than this are likely airplanes or satellites.  Default: 10.0.\n"
+      "  -p <minimum speed>: An object moving slower than this value, given as percent\n"
+      "      of the frame width per frame, will not be considered a meteor.  Slow moving\n"
+      "      objects are frequently airplanes, satellites or noise.  Default: 0.15\n"
+      "  -q <maximum speed>: An object moving faster than this value, given as percent\n"
+      "      of the frame width per frame, will not be considered a meteor.  Apparently\n"
       "      very fast moving objects are likely noise.  Default: 5.0\n"
-      "  -P <minimum lateral speed>: An object with a lateral speed in km/s "
-      "less than this\n"
+      "  -P <minimum lateral speed>: An object with a lateral speed in km/s less than this\n"
       "      value will not be considered a meteor.  Default: 2.0\n"
-      "  -Q <maximum lateral speed>: An object with a lateral speed in km/s "
-      "greater than this\n"
+      "  -Q <maximum lateral speed>: An object with a lateral speed in km/s greater than this\n"
       "      value will not be considered a meteor.  Default: 50.0\n"
-      "  -W <frame width threshold>: If the frame width is equal or larger "
-      "than the specified\n"
-      "      threshold, the input will be downscaled prior to processing to "
-      "improve processing\n"
+      "  -W <frame width threshold>: If the frame width is equal or larger than the specified\n"
+      "      threshold, the input will be downscaled prior to processing to improve processing\n"
       "      speed.  Default: 1600.\n"
       "  -l: Do not exclude objects moving horizontally near the horizon\n"
       "  -a <lookahead>: Number of lookahead frames.\n"
-      "      This should be at least twice the maximum trail length.  A low "
-      "value could\n"
-      "      cause the maximum trail length to fail giving false detections.  "
-      "A high value\n"
-      "      causes latency in the detection.  Events are still detected, but "
-      "it could be\n"
-      "      minutes after the fact.  Default: 900 (three minutes at 5 "
-      "fps).\n");
+      "      This should be at least twice the maximum trail length.  A low value could\n"
+      "      cause the maximum trail length to fail giving false detections.  A high value\n"
+      "      causes latency in the detection.  Events are still detected, but it could be\n"
+      "      minutes after the fact.  Default: 900 (three minutes at 5 fps).\n");
   printf(
-      "  -b <minimum brightness>: The minimum brightness for a spot to be "
-      "examined.\n"
-      "      A useful range could be 1 (faint) .. 1000 (bright), but it "
-      "depends on the\n"
-      "      input resolution, light sensitivity, noise level, etc.  Default: "
-      "16.  A low\n"
-      "      value will increase the chances of detecting faint meteors, but "
-      "also increase\n"
+      "  -b <minimum brightness>: The minimum brightness for a spot to be examined.\n"
+      "      A useful range could be 1 (faint) .. 1000 (bright), but it depends on the\n"
+      "      input resolution, light sensitivity, noise level, etc.  Default: 16.  A low\n"
+      "      value will increase the chances of detecting faint meteors, but also increase\n"
       "      the chances for false detections due to noise.\n"
-      "  -y <energy threshold>: Threshold used in a Hadamard transform of "
-      "potential\n"
-      "      objects in the original frame.  A high value reduces the "
-      "likelihood\n"
+      "  -y <energy threshold>: Threshold used in a Hadamard transform of potential\n"
+      "      objects in the original frame.  A high value reduces the likelihood\n"
       "      that noise gets interpreted as an object, but also increases the\n"
-      "      minimum brightness needed for detection.  Useful range: 0 - "
-      "2000.\n"
+      "      minimum brightness needed for detection.  Useful range: 0 - 2000.\n"
       "      Default: 256.\n"
-      "  -Y <energy threshold>: Threshold used in a DCT of the brightness "
-      "values of a\n"
-      "      trail.  Meteors brightness changes are low frequency signals "
-      "whilst airplanes\n"
-      "      are often blinking resulting in a more high frequency signal.  A "
-      "high\n"
-      "      threshold will reduce the number of events discarded as unlikely "
-      "meteors.\n"
+      "  -Y <energy threshold>: Threshold used in a DCT of the brightness values of a\n"
+      "      trail.  Meteors brightness changes are low frequency signals whilst airplanes\n"
+      "      are often blinking resulting in a more high frequency signal.  A high\n"
+      "      threshold will reduce the number of events discarded as unlikely meteors.\n"
       "      Default: auto\n"
-      "  -c <correlations>: Correlation thresholds determining a track given "
-      "as three\n"
-      "      values (%%f,%%f,%%f).  1.0 means a perfect line, 0.0 means that "
-      "anything goes.\n"
-      "      The first value is the line correlation in the original frame.  "
-      "The second is\n"
-      "      the spacing correlation.  The third is the line correlation in a "
-      "gnomonic\n"
-      "      projection (only used in a pto file is specified with the -o "
-      "option.  A low\n"
-      "      value for the line correlation in the original frame doesn\'t "
-      "necessarily mean\n"
-      "      that there will be more false detections since the gnomonic "
-      "correlation will\n"
-      "      will discard most of these.  A low value would often increase the "
-      "chances that\n"
-      "      curved paths will be detected and discarded.  Default: "
-      "0.50,0.90,0.9985.  If\n"
-      "      no pto file is available, 0.90 is a better threshold than the "
-      "default 0.50.\n"
-      "  -f <flash threshold>: Threshold for flash detection.  Must be a value "
-      "above\n"
-      "      1.0, or 0 to disable.  Higher value for less sensitivity.  "
-      "Default: 1.2\n"
-      "  -g <minimum peak brightness multiplier>: The minimum peak brightness "
-      "for a trail\n"
-      "      as a multiplier of the minimum brightness setting (-b).  A high "
-      "value lowers\n"
-      "      the chances for false detections due to noise happening to line "
-      "up.\n"
+      "  -c <correlations>: Correlation thresholds determining a track given as three\n"
+      "      values (%%f,%%f,%%f).  1.0 means a perfect line, 0.0 means that anything goes.\n"
+      "      The first value is the line correlation in the original frame.  The second is\n"
+      "      the spacing correlation.  The third is the line correlation in a gnomonic\n"
+      "      projection (only used in a pto file is specified with the -o option.  A low\n"
+      "      value for the line correlation in the original frame doesn\'t necessarily mean\n"
+      "      that there will be more false detections since the gnomonic correlation will\n"
+      "      will discard most of these.  A low value would often increase the chances that\n"
+      "      curved paths will be detected and discarded.  Default: 0.50,0.90,0.9985.  If\n"
+      "      no pto file is available, 0.90 is a better threshold than the default 0.50.\n"
+      "  -f <flash threshold>: Threshold for flash detection.  Must be a value above\n"
+      "      1.0, or 0 to disable.  Higher value for less sensitivity.  Default: 1.2\n"
+      "  -g <minimum peak brightness multiplier>: The minimum peak brightness for a trail\n"
+      "      as a multiplier of the minimum brightness setting (-b).  A high value lowers\n"
+      "      the chances for false detections due to noise happening to line up.\n"
       "      Default: 4.0\n"
       "  -l <log file>: File to log debug messages.  Default: no logging.\n"
-      "  -o <pto file>: Hugin pto file for an equirectangular panorama and the "
-      "optical\n"
-      "      for the camera lens.  Used to map pixel coordinates to azimuth "
-      "and altitude.\n"
+      "  -o <pto file>: Hugin pto file for an equirectangular panorama and the optical\n"
+      "      for the camera lens.  Used to map pixel coordinates to azimuth and altitude.\n"
       "      Optional.\n"
-      "  -r <executable>: Optional executable to run (asynchronously) after an "
-      "event is\n"
-      "      detected.  The event report file is passed as an argument.  "
-      "Ignored with -e.\n"
+      "  -r <executable>: Optional executable to run (asynchronously) after an event is\n"
+      "      detected.  The event report file is passed as an argument.  Ignored with -e.\n"
       "  -k: Use software decoder.\n"
       "  -s: Single threaded operation.\n"
-      "  -i: Allow video timestamps in the future.  Useful if the computer or "
-      "camera\n"
+      "  -i: Allow video timestamps in the future.  Useful if the computer or camera\n"
       "      has a known error.\n"
-      "  -T: Look for timestamp in the upper part of the frame instead of the "
-      "lower part.\n"
+      "  -T: Look for timestamp in the upper part of the frame instead of the lower part.\n"
       "  -R: Restart program rather than exit if input is stdin.\n"
       "  -v: Log timestamp every nth frame (0).\n"
-      "  -S <interval>: Save a snapshot every nth second as indicated by this "
-      "argument.  Not\n"
-      "      supported for raw input video.  Stored as <snapshot "
-      "dir>/%%Y%%m%%d/%%H/%%M/%%S.jpg\n"
-      "      and <snapshor_dir>/snapshot.jpg.  <snapshot_dir> can be specified "
-      "with -D.\n"
+      "  -S <interval>: Save a snapshot every nth second as indicated by this argument.  Not\n"
+      "      supported for raw input video.  Stored as <snapshot dir>/%%Y%%m%%d/%%H/%%M/%%S.jpg\n"
+      "      and <snapshor_dir>/snapshot.jpg.  <snapshot_dir> can be specified with -D.\n"
       "  -I <frames>: Snapshot integration in frames.\n"
-      "  -X <errors>: Exit after the specified number of consecutive errors.  "
-      "0 = never.\n"
+      "  -X <errors>: Exit after the specified number of consecutive errors.  0 = never.\n"
       "  -D <dir>: Directory for snapshots.  Default /tmp.\n"
       "  -R: Restart rather than exit.\n"
-      "  -M <name>: Camera model name.  Used to detect timestamps.  Supported "
-      "models are:\n"
-      "     IP8172, IP816A, IP9171, IP8151, IMX291, IMX291SD, IMX291HD, "
-      "IMX307, IMX307SD, IMX307HD.\n"
+      "  -M <name>: Camera model name.  Used to detect timestamps.  Supported models are:\n"
+      "     IP8172, IP816A, IP9171, IP8151, IMX291, IMX291SD, IMX291HD, IMX307, IMX307SD, IMX307HD.\n"
       "     Default: guess (less reliable timestamp detection).\n"
       "  -A <seconds>: Number of seconds to wait for thread join (120).\n"
       "  -F: Use old detection algorith.\n"
       "  -L: Disable test for near horizontal tracks near the horizon.\n"
       "  -H: This help page.\n"
-      "Written by Steinar Midtskogen <steinar@norskmeteornettverk.no> "
-      "originally for the\n"
-      "Vivotek IP8172 camera using 800x600 or 2560x1920 stream at 5 or 10 fps. "
-      " The default\n"
+      "Written by Steinar Midtskogen <steinar@norskmeteornettverk.no> originally for the\n"
+      "Vivotek IP8172 camera using 800x600 or 2560x1920 stream at 5 or 10 fps.  The default\n"
       "values reflect useful settings for this camera.\n");
 }
 
@@ -1369,30 +1277,6 @@ static time_t gettimestamp(unsigned char *img, int width, int height, int indica
   };
   static const uint16_t text8_bits[10] = { 53 * 9, 31 * 9, 42 * 9, 43 * 9, 47 * 9, 51 * 9, 52 * 9, 34 * 9, 57 * 9, 52 * 9 };
 
-  // IMX307 HD 16x24 font
-  static const uint16_t text9_0[24] = { 0x0ff0, 0x0ff0, 0x3ffc, 0x3ffc, 0x3c3c, 0x3c3c, 0xf00f, 0xf00f, 0xf00f, 0xf00f, 0xf00f, 0xf00f,
-                                        0xf00f, 0xf00f, 0xf00f, 0xf00f, 0xf00f, 0xf00f, 0xfc3c, 0xfc3c, 0x3ffc, 0x3ffc, 0x0ff0, 0x0ff0 };
-  static const uint16_t text9_1[24] = { 0x00f0, 0x00f0, 0x03f0, 0x03f0, 0x3ff0, 0x3ff0, 0x3ff0, 0x3ff0, 0x00f0, 0x00f0, 0x00f0, 0x00f0,
-                                        0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x00f0 };
-  static const uint16_t text9_2[24] = { 0x03f0, 0x03f0, 0x0ffc, 0x0ffc, 0x3c3c, 0x3c3c, 0x3c3c, 0x3c3c, 0x003c, 0x003c, 0x00fc, 0x00fc,
-                                        0x00f0, 0x00f0, 0x03c0, 0x03c0, 0x0f00, 0x0f00, 0x3f00, 0x3f00, 0x3ffc, 0x3ffc, 0x3ffc, 0x3ffc };
-  static const uint16_t text9_3[24] = { 0x0ff0, 0x0ff0, 0x3ffc, 0x3ffc, 0x3c3c, 0x3c3c, 0x003c, 0x003c, 0x03f0, 0x03f0, 0x03fc, 0x03fc,
-                                        0x000f, 0x000f, 0x000f, 0x000f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x0ffc, 0x0ffc, 0x03f0, 0x03f0 };
-  static const uint16_t text9_4[24] = { 0x003c, 0x003c, 0x00fc, 0x00fc, 0x00fc, 0x00fc, 0x03fc, 0x03fc, 0x0f3c, 0x0f3c, 0x3f3c, 0x3f3c,
-                                        0x3c3c, 0x3c3c, 0xffff, 0xffff, 0xffff, 0xffff, 0x003c, 0x003c, 0x003c, 0x003c, 0x003c, 0x003c };
-  static const uint16_t text9_5[24] = { 0x3ffc, 0x3ffc, 0x3ffc, 0x3ffc, 0x3c00, 0x3c00, 0x3c00, 0x3c00, 0x3ff0, 0x3ff0, 0x3ffc, 0x3ffc,
-                                        0x3c3f, 0x3c3f, 0x000f, 0x000f, 0x3c0f, 0x3c0f, 0x3c3f, 0x3c3f, 0x0ffc, 0x0ffc, 0x03f0, 0x03f0 };
-  static const uint16_t text9_6[24] = { 0x03fc, 0x03fc, 0x0fff, 0x0fff, 0x0f0f, 0x0f0f, 0x3c00, 0x3c00, 0x3ff0, 0x3ff0, 0x3ffc, 0x3ffc,
-                                        0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3f0f, 0x3f0f, 0x0ffc, 0x0ffc, 0x03f0, 0x03f0 };
-  static const uint16_t text9_7[24] = { 0x3fff, 0x3fff, 0x3fff, 0x3fff, 0x000f, 0x000f, 0x003c, 0x003c, 0x003c, 0x003c, 0x00f0, 0x00f0,
-                                        0x00f0, 0x00f0, 0x00f0, 0x00f0, 0x03c0, 0x03c0, 0x03c0, 0x03c0, 0x03c0, 0x03c0, 0x0f00, 0x0f00 };
-  static const uint16_t text9_8[24] = { 0x0ffc, 0x0ffc, 0x3fff, 0x3fff, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3f3f, 0x3f3f, 0x0ffc, 0x0ffc,
-                                        0x0ffc, 0x0ffc, 0x3f0f, 0x3f0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x0ffc, 0x0ffc, 0x03f0, 0x03f0 };
-  static const uint16_t text9_9[24] = { 0x03f0, 0x03f0, 0x0ffc, 0x0ffc, 0x3c3f, 0x3c3f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f, 0x3c0f,
-                                        0x0fff, 0x0fff, 0x03ff, 0x03ff, 0x000f, 0x000f, 0x3c3c, 0x3c3c, 0x3ffc, 0x3ffc, 0x0ff0, 0x0ff0 };
-
-  static const uint16_t text9_bits[10] = { 53 * 4, 31 * 4, 42 * 4, 43 * 4, 47 * 4, 51 * 4, 52 * 4, 34 * 4, 57 * 4, 52 * 4 };
-
   static const uint8_t *text_numbers[10] = { text_0, text_1, text_2, text_3, text_4, text_5, text_6, text_7, text_8, text_9 };
   static const uint8_t *text2_numbers[10] = { text2_0, text2_1, text2_2, text2_3, text2_4, text2_5, text2_6, text2_7, text2_8, text2_9 };
   static const uint8_t *text3_numbers[10] = { text3_0, text3_1, text3_2, text3_3, text3_4, text3_5, text3_6, text3_7, text3_8, text3_9 };
@@ -1400,7 +1284,6 @@ static time_t gettimestamp(unsigned char *img, int width, int height, int indica
   static const uint16_t *text5_numbers[10] = { text5_0, text5_1, text5_2, text5_3, text5_4, text5_5, text5_6, text5_7, text5_8, text5_9 };
   static const uint8_t *text7_numbers[10] = { text7_0, text7_1, text7_2, text7_3, text7_4, text7_5, text7_6, text7_7, text7_8, text7_9 };
   static const uint32_t *text8_numbers[10] = { text8_0, text8_1, text8_2, text8_3, text8_4, text8_5, text8_6, text8_7, text8_8, text8_9 };
-  static const uint16_t *text9_numbers[10] = { text9_0, text9_1, text9_2, text9_3, text9_4, text9_5, text9_6, text9_7, text9_8, text9_9 };
 
   // Vivotek IP8172 8x11 number positions
   static const int16_t text_xpos[12] = { 26, 36, 51, 61, 76, 86, 101, 111, 127, 137, 153, 163 };
@@ -1427,17 +1310,13 @@ static time_t gettimestamp(unsigned char *img, int width, int height, int indica
   static const int16_t text6_ypos = -26;
 
   // IMX307SD 8x12 number positions
-  static const int16_t text7_xpos[12] = { 18, 27, 42, 51, 66, 75, 89, 98, 112, 121, 135, 144 };  // 1080P
-  static const int16_t text7_ypos = -19;
-  // static const int16_t text7_ypos = -23;
+  static const int16_t text7_xpos[12] = { 18, 27, 42, 51, 66, 75, 89, 98, 112, 121, 135, 144 };
+  // static const int16_t text7_ypos = -19;  // 3M
+  static const int16_t text7_ypos = -23;  // 1080P
 
   // IMX307HD 24x36 number positions
   static const int16_t text8_xpos[12] = { 54, 81, 126, 153, 198, 225, 267, 294, 336, 363, 405, 432 };
   static const int16_t text8_ypos = -51;
-
-  // IMX307HD 16x24 number positions
-  static const int16_t text9_xpos[12] = { 36, 54, 84, 102, 132, 150, 178, 196, 224, 242, 270, 288 };
-  static const int16_t text9_ypos = -36;
 
   const static uint8_t max_numbers[12] = { 9, 9, 1, 9, 3, 9, 2, 9, 5, 9, 5, 9 };
   char text[20];
@@ -1449,7 +1328,6 @@ static time_t gettimestamp(unsigned char *img, int width, int height, int indica
   uint8_t numbers6[12];
   uint8_t numbers7[12];
   uint8_t numbers8[12];
-  uint8_t numbers9[12];
 
   int tot_err = 0;
   int tot_err2 = 0;
@@ -1459,7 +1337,6 @@ static time_t gettimestamp(unsigned char *img, int width, int height, int indica
   int tot_err6 = 0;
   int tot_err7 = 0;
   int tot_err8 = 0;
-  int tot_err9 = 0;
   for (unsigned int i = 0; i < sizeof(numbers); i++) {
     uint8_t number[11];
     unsigned char *p = img + (height + text_ypos) * width + text_xpos[i];
@@ -1571,21 +1448,6 @@ static time_t gettimestamp(unsigned char *img, int width, int height, int indica
       // printf("\n");
       number8[k] = n;
       p += width - 24;
-    }
-
-    uint32_t number9[24];
-    p = img + (height + text9_ypos) * width + text9_xpos[i];
-    for (int k = 0; k < 24; k++) {
-      uint16_t bit = 1U << 15;
-      uint16_t n = 0;
-      for (int j = 0; j < 16; j++) {
-        // printf("%c", *p > 192 ? '*' : ' ');
-        n += bit * (*p++ > 192);
-        bit >>= 1;
-      }
-      // printf("\n");
-      number9[k] = n;
-      p += width - 16;
     }
 
     if (camera == ALL || camera == IP8172) {
@@ -1759,60 +1621,34 @@ static time_t gettimestamp(unsigned char *img, int width, int height, int indica
       // printf("%d: %d\n", best_number, best_bitcount);
     } else
       tot_err8 = 1 << 30;
-
-    if (camera == ALL || camera == IMX307 || camera == IMX307HD) {
-      int best_number = -1;
-      int best_bitcount = 16 * 24;
-      for (int k = 0; k <= max_numbers[i]; k++) {
-        int bitcount = text9_bits[k];
-        // IMX307HD
-        for (int j = 0; j < 24; j++) {
-          bitcount -= __builtin_popcount(number9[j] & text9_numbers[k][j]);
-          bitcount += __builtin_popcount(number9[j] & ~text9_numbers[k][j]);
-        }
-        bitcount = bitcount * 256 / 24 / 16;
-        if (bitcount <= best_bitcount) {
-          best_number = k;
-          best_bitcount = bitcount;
-        }
-        tot_err9 += best_bitcount;
-      }
-      numbers9[i] = best_number + 0x30;
-      // printf("%d: %d\n", best_number, best_bitcount);
-    } else
-      tot_err9 = 1 << 30;
   }
 
   if (tot_err < tot_err2 && tot_err < tot_err3 && tot_err < tot_err4 && tot_err < tot_err5 && tot_err < tot_err6 && tot_err < tot_err7 &&
-      tot_err < tot_err8 && tot_err < tot_err9)
+      tot_err < tot_err8)
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5], numbers[6],
             numbers[7], numbers[8], numbers[9], numbers[10], numbers[11]);
   else if (tot_err2 < tot_err3 && tot_err2 < tot_err4 && tot_err2 < tot_err5 && tot_err2 < tot_err6 && tot_err2 < tot_err7 &&
-           tot_err2 < tot_err8 && tot_err2 < tot_err9)  // IP9171
+           tot_err2 < tot_err8)  // IP9171
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers2[0], numbers2[1], numbers2[2], numbers2[3], numbers2[4], numbers2[5],
             numbers2[6], numbers2[7], numbers2[8], numbers2[9], numbers2[10], numbers2[11]);
-  else if (tot_err3 < tot_err4 && tot_err3 < tot_err5 && tot_err3 < tot_err6 && tot_err3 < tot_err7 && tot_err3 < tot_err8 &&
-           tot_err3 < tot_err9)  // IP8151
+  else if (tot_err3 < tot_err4 && tot_err3 < tot_err5 && tot_err3 < tot_err6 && tot_err3 < tot_err7 && tot_err3 < tot_err8)  // IP8151
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers3[0], numbers3[1], numbers3[2], numbers3[3], numbers3[4], numbers3[5],
             numbers3[6], numbers3[7], numbers3[8], numbers3[9], numbers3[10], numbers3[11]);
-  else if (tot_err4 < tot_err5 && tot_err4 < tot_err6 && tot_err4 < tot_err7 && tot_err4 < tot_err8 && tot_err4 < tot_err9)  // IP816A-HP
+  else if (tot_err4 < tot_err5 && tot_err4 < tot_err6 && tot_err4 < tot_err7 && tot_err4 < tot_err8)  // IP816A-HP
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers4[0], numbers4[1], numbers4[2], numbers4[3], numbers4[4], numbers4[5],
             numbers4[6], numbers4[7], numbers4[8], numbers4[9], numbers4[10], numbers4[11]);
-  else if (tot_err5 < tot_err6 && tot_err5 < tot_err7 && tot_err5 < tot_err8 && tot_err5 < tot_err9)  // IMX291SD
+  else if (tot_err5 < tot_err6 && tot_err5 < tot_err7 && tot_err5 < tot_err8)  // IMX291SD
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers5[0], numbers5[1], numbers5[2], numbers5[3], numbers5[4], numbers5[5],
             numbers5[6], numbers5[7], numbers5[8], numbers5[9], numbers5[10], numbers5[11]);
-  else if (tot_err6 < tot_err7 && tot_err6 < tot_err8 && tot_err6 < tot_err9)  // IMX291HD
+  else if (tot_err6 < tot_err7 && tot_err6 < tot_err8)  // IMX291HD
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers6[0], numbers6[1], numbers6[2], numbers6[3], numbers6[4], numbers6[5],
             numbers6[6], numbers6[7], numbers6[8], numbers6[9], numbers6[10], numbers6[11]);
-  else if (tot_err7 < tot_err8 && tot_err7 < tot_err9)  // IMX291SD
+  else if (tot_err7 < tot_err8)  // IMX291SD
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers7[0], numbers7[1], numbers7[2], numbers7[3], numbers7[4], numbers7[5],
             numbers7[6], numbers7[7], numbers7[8], numbers7[9], numbers7[10], numbers7[11]);
-  else if (tot_err8 < tot_err9)  // IMX291SD
+  else  // IMX307HD
     sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers8[0], numbers8[1], numbers8[2], numbers8[3], numbers8[4], numbers8[5],
             numbers8[6], numbers8[7], numbers8[8], numbers8[9], numbers8[10], numbers8[11]);
-  else  // IMX307HD
-    sprintf(text, "20%c%c-%c%c-%c%c %c%c:%c%c:%c%c", numbers9[0], numbers9[1], numbers9[2], numbers9[3], numbers9[4], numbers9[5],
-            numbers9[6], numbers9[7], numbers9[8], numbers9[9], numbers9[10], numbers9[11]);
 
   struct tm tm;
   if (!strptime(text, "%Y-%m-%d %H:%M:%S", &tm)) return 0;
@@ -2049,8 +1885,7 @@ static double simple_linreg(int n, const point *p, double *a, double *b, int com
 }
 
 // Generic algorithm from https://en.wikipedia.org/wiki/Random_sample_consensus
-// Return k and b in f(x) = k*x + b and the correlation.  n is the minimum
-// number of data points.
+// Return k and b in f(x) = k*x + b and the correlation.  n is the minimum number of data points.
 double ransac(int size, const point *p, point *best, int *best_num, double *k, double *b, double fps, double t = 0.01, int n = 3,
               int maxit = 100000) {
   double best_corr = 0, best_model_k = 0, best_model_b = 0;
@@ -2310,8 +2145,8 @@ static void detect_trail2(record *history, unsigned int length, config *config, 
   // Sort result
   qsort(track, best_num, sizeof(*track), pointcmp);
 
-  // Discard partial tracks, i.e. tracks crossing the beginning or end of the
-  // history These have already been detected or will be detected later
+  // Discard partial tracks, i.e. tracks crossing the beginning or end of the history
+  // These have already been detected or will be detected later
   if (track[0].timestamp == history[0].timestamp || track[best_num - 1].timestamp == history[n - 1].timestamp) {
     free(track);
     return;
@@ -2329,13 +2164,11 @@ static void detect_trail2(record *history, unsigned int length, config *config, 
   // Start and end altitude above horizon
   double a1 = track[0].alt * M_PI / 180, a2 = track[best_num - 1].alt * M_PI / 180;
   double h1 = 90, h2 = 30;  // Typical meteor altitudes
-  // Estimate distance to a meteor given altitude above horizon (angle) and
-  // altitude above ground.
+  // Estimate distance to a meteor given altitude above horizon (angle) and altitude above ground.
   double d1 = (sqrt(4 * radius * radius * sin(a1) * sin(a1) + 8 * h1 * radius) - 2 * radius * sin(a1)) / 2;
   double d2 = (sqrt(4 * radius * radius * sin(a2) * sin(a2) + 8 * h2 * radius) - 2 * radius * sin(a2)) / 2;
   double d = d1 < d2 ? d1 : d2;        // Whichever of start or end that is most close
-  double speed = config->minspeedkms;  // Assume at least X km/s lateral motion, should be
-                                       // safe unless it's heading our way
+  double speed = config->minspeedkms;  // Assume at least X km/s lateral motion, should be safe unless it's heading our way
   double motion1 = 2 * atan(speed / (2 * d)) * 180 / M_PI;
   // Observed motion across the sky in degrees/s.
   double observed_motion = arc / (track[best_num - 1].timestamp - track[0].timestamp);
@@ -2476,8 +2309,7 @@ static void detect_trail2(record *history, unsigned int length, config *config, 
   free(track);
 }
 
-// An n-dimensional search (n = config->mintrail).  Use recursion since n is not
-// fixed.
+// An n-dimensional search (n = config->mintrail).  Use recursion since n is not fixed.
 static void best_paths(double *x, double *y, int *z, int *zz, record *history, signed char *best, signed char *path, unsigned int depth,
                        const config *config, double *bestcorr, int stride) {
   if (depth == config->mintrail) {
@@ -2684,9 +2516,7 @@ static void detect_trail(record *history, unsigned int length, config *config, u
         }
 
         skip = 0;
-        for (unsigned int i = 0; i < config->numspots /*&& history[b].brightness[i] > config->brightness*/
-             ;
-             i++) {
+        for (unsigned int i = 0; i < config->numspots /*&& history[b].brightness[i] > config->brightness*/; i++) {
           x[b] = history[b].x[i];
           y[b] = history[b].y[i];
           z[b] = history[b].brightness[i];
@@ -2721,8 +2551,7 @@ static void detect_trail(record *history, unsigned int length, config *config, u
       b = min(b, config->lookahead - 1);
       while (!z[b - 1] && b > a) b--;
 
-      // Check if there are other points just before and after nearby this trail
-      // and its extensions
+      // Check if there are other points just before and after nearby this trail and its extensions
       int proximity = 0;
       if (r > config->corr && dr > config->spacing_corr) {
         int n = b - a;
@@ -2879,25 +2708,20 @@ static void detect_trail(record *history, unsigned int length, config *config, u
               struct tm *t = localtime(&ts);
               strftime(tsbuf, sizeof(tsbuf), "%Y-%m-%d %H:%M:%S", t);
               debug(config->log,
-                    "Detection at %s discarded because the flight is too level "
-                    "(%.2f,%.2f -> %.2f,%.2f).  Duration = %f.  Frames=%d.\n",
+                    "Detection at %s discarded because the flight is too level (%.2f,%.2f -> %.2f,%.2f).  Duration = %f.  Frames=%d.\n",
                     tsbuf, az[b - 1], alt[b - 1], az[a], alt[a], history[b - 1].timestamp - history[a].timestamp, b - a);
             } else {
-              // Check whether speed is consistent with a meteor at this
-              // altitude
+              // Check whether speed is consistent with a meteor at this altitude
               double r = 6370;  // Earth's radius
               // Start and end altitude above horizon
               double a1 = alt[a] * M_PI / 180, a2 = alt[b - 1] * M_PI / 180;
               double h1 = 90, h2 = 30;  // Typical meteor altitudes
-              // Estimate distance to a meteor given altitude above horizon
-              // (angle) and altitude above ground.
+              // Estimate distance to a meteor given altitude above horizon (angle) and altitude above ground.
               double d1 = (sqrt(4 * r * r * sin(a1) * sin(a1) + 8 * h1 * r) - 2 * r * sin(a1)) / 2;
               double d2 = (sqrt(4 * r * r * sin(a2) * sin(a2) + 8 * h2 * r) - 2 * r * sin(a2)) / 2;
               double d = d1 < d2 ? d1 : d2;  // Whichever of start or end that is most close
 
-              double speed = config->minspeedkms;  // Assume at least X km/s lateral motion,
-                                                   // should be safe unless it's heading our
-                                                   // way
+              double speed = config->minspeedkms;  // Assume at least X km/s lateral motion, should be safe unless it's heading our way
               double motion1 = 2 * atan(speed / (2 * d)) * 180 / M_PI;
               // Observed motion across the sky in degrees/s.
               double observed_motion = arc / (history[b - 1].timestamp - history[a].timestamp);
@@ -2913,9 +2737,8 @@ static void detect_trail(record *history, unsigned int length, config *config, u
                 struct tm *t = localtime(&ts);
                 strftime(tsbuf, sizeof(tsbuf), "%Y-%m-%d %H:%M:%S", t);
                 debug(config->log,
-                      "Detection at %s discarded because the speed %f deg/s is "
-                      "not within %f - %f.  Arc = %f.  Duration = %f (%f - "
-                      "%f).  Frames=%d.\n",
+                      "Detection at %s discarded because the speed %f deg/s is not within %f - %f.  Arc = %f.  Duration = %f (%f - %f).  "
+                      "Frames=%d.\n",
                       tsbuf, observed_motion, motion1, motion2, arc, history[b - 1].timestamp - history[a].timestamp, history[a].timestamp,
                       history[b - 1].timestamp, b - a);
               }
@@ -2927,8 +2750,7 @@ static void detect_trail(record *history, unsigned int length, config *config, u
         // int size = 0;
         // for (unsigned int i = a; i < b; i++)
         //  size += zz[i];
-        // checks_passed &= size * history[a].framebrightness / 2.560 / (b - a)
-        // < config->swidth;
+        // checks_passed &= size * history[a].framebrightness / 2.560 / (b - a) < config->swidth;
 
         // Detection!
         if (checks_passed) {
@@ -3242,9 +3064,7 @@ int parseopts(config *config, int argc, char **argv, char *fargs) {
   int c;
   int size = 0;
 
-  while ((c = getopt(argc, argv,
-                     "A:a:b:c:C:d:f:g:y:Y:r:w:h:W:l:m:M:n:x:o:z:t:u:p:q:P:Q:j:"
-                     "v:S:I:D:X:HeFksiLTR")) != -1) {
+  while ((c = getopt(argc, argv, "A:a:b:c:C:d:f:g:y:Y:r:w:h:W:l:m:M:n:x:o:z:t:u:p:q:P:Q:j:v:S:I:D:X:HeFksiLTR")) != -1) {
     switch (c) {
       case 'A': config->thread_timeout = atoi(optarg); break;
       case 'a': config->lookahead = atoi(optarg); break;
@@ -3380,7 +3200,7 @@ int parseopts(config *config, int argc, char **argv, char *fargs) {
             config->pano = nullptr;
           }
           config->pano->setFilePrefix(hugin_utils::getPathPrefix(optarg));
-          if (!config->pano->ReadPTOFile(config->ptofile)) {
+          if (config->pano->readData(ptofile) != AppBase::DocumentData::SUCCESSFUL) {
             fprintf(stderr, "Could not parse pto file %s\n", optarg);
             delete config->pano;
             config->pano = nullptr;
@@ -3440,6 +3260,7 @@ char **_argv;
 void metdetect(void);
 
 int main(int argc, char **argv) {
+  close(2);  // Ignore stderr
   _argc = argc;
   _argv = argv;
   metdetect();
@@ -3701,10 +3522,10 @@ void metdetect(void) {
     debug(config.log, "Max file is %s (%d x %d)\n", config.savefile, x, y);
     if (config.width < x || config.height < y || !prev_max) {
       debug(config.log, "Corrupt max %s %d x %d vs %d x %d\n", config.savefile, x, y, config.width, config.height);
-      memset(maxbuf, 0, xa * ya);
+      memset(maxbuf, 0, x * y);
     } else {
       debug(config.log, "Old max file %s restored\n", config.savefile);
-      memcpy(maxbuf, prev_max, xa * ya);
+      memcpy(maxbuf, prev_max, x * y);
     }
     if (prev_max) aligned_free(prev_max);
   } else
@@ -3850,8 +3671,7 @@ void metdetect(void) {
       args.frame = &h264frame2;
       args.frame_u = &h264frame_u;
       args.frame_v = &h264frame_v;
-      // Single threaded operation seems faster when using sw decoder, perhaps
-      // due to cache smashing
+      // Single threaded operation seems faster when using sw decoder, perhaps due to cache smashing
       decode_thread_init = !ffmpeg_open && !config.nothreads && !pthread_create(&decode_thread, nullptr, decode_thread_func, &args);
       if (!decode_thread_init) {
         unsigned int width = 0, height = 0, stride = 0;
@@ -4105,8 +3925,7 @@ void metdetect(void) {
     // Fill up add buffer
     memset(add2, 0, 32 + ((x + 15) & ~15));
     for (unsigned int b = 0; b < x; b += 16) {
-      // Use the max of the two most recent frames to avoid detection of dark
-      // objects.
+      // Use the max of the two most recent frames to avoid detection of dark objects.
       v128 d = v128_padd_u8(v128_max_u8(v128_load_aligned(orig + b), v128_load_aligned(orig2 + b)));
       v128 c = v128_add_16(d, v128_shl_16(d, 3));
       for (int a = 1; a < 8; a++)
@@ -4412,8 +4231,7 @@ unsigned char *readh264frame(unsigned int *l) {
     int end, i;
     do {
       unsigned int r = 0;
-      int len = chunksize * (1 + (surplus > chunksize)) - surplus;
-      if (len < 0) len = 0;
+      unsigned int len = chunksize * (1 + (surplus > chunksize)) - surplus;
       len += 16 - ((pos + surplus + len) & 15);  // Align end
       r = (unsigned int)fread(curr + pos + surplus, 1, len, inputfile);
 
@@ -4561,17 +4379,17 @@ int init_ffmpegdec(int single_thread) {
 
 // TODO: Strip down to what's strictly needed and convert to C99.
 
-#include <dirent.h>
 #include <errno.h>
-#include <linux/media.h>
-#include <linux/videodev2.h>
-#include <poll.h>
-#include <queue>
-#include <string>
-#include <sys/ioctl.h>
+#include <dirent.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>
+#include <queue>
+#include <string>
+#include <poll.h>
+#include <linux/videodev2.h>
+#include <linux/media.h>
 
 #ifndef V4L2_CAP_VIDEO_M2M_MPLANE
 #define V4L2_CAP_VIDEO_M2M_MPLANE 0x00004000
@@ -4809,8 +4627,7 @@ bool CDVDVideoCodecMFC::decopen(unsigned char *h264, unsigned int size) {
   fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
   if (!m_MFCCapture->SetFormat(&fmt)) return false;
 
-  // Turn on MFC Output with header in it to initialize MFC with all we just
-  // setup
+  // Turn on MFC Output with header in it to initialize MFC with all we just setup
   m_MFCOutput->StreamOn(VIDIOC_STREAMON);
 
   // Initialize MFC Capture
@@ -4848,9 +4665,8 @@ const picture *CDVDVideoCodecMFC::Decode(unsigned char *pData, int iSize) {
     } else {
       if (errno == EAGAIN)
         fprintf(stderr,
-                "MFC OUTPUT All buffers are queued and busy, no space "
-                "for new frame to decode. Very broken situation. "
-                "Current encoded frame will be lost\n");
+                "MFC OUTPUT All buffers are queued and busy, no space for new frame to decode. Very broken situation. Current encoded "
+                "frame will be lost\n");
       else {
         return 0;
       }
@@ -4862,8 +4678,7 @@ const picture *CDVDVideoCodecMFC::Decode(unsigned char *pData, int iSize) {
     return 0;
   }
 
-  // We got a new buffer to show, so we can enqeue back the buffer wich was on
-  // screen
+  // We got a new buffer to show, so we can enqeue back the buffer wich was on screen
   if (m_BufferNowOnScreen->iIndex > -1) {
     m_MFCCapture->PushBuffer(m_BufferNowOnScreen);
     m_BufferNowOnScreen->iIndex = -1;
@@ -4905,10 +4720,7 @@ bool CLinuxV4l2Sink::Init(int buffersCount = 0) {
     struct v4l2_control ctrl;
     ctrl.id = V4L2_CID_MIN_BUFFERS_FOR_CAPTURE;
     if (ioctl(device->device, VIDIOC_G_CTRL, &ctrl)) {
-      fprintf(stderr,
-              "Type %d, Error getting number of buffers for capture "
-              "(V4L2_CID_MIN_BUFFERS_FOR_CAPTURE VIDIOC_G_CTRL)\n",
-              type);
+      fprintf(stderr, "Type %d, Error getting number of buffers for capture (V4L2_CID_MIN_BUFFERS_FOR_CAPTURE VIDIOC_G_CTRL)\n", type);
       return false;
     }
     buffersCount = ctrl.value + 1;  // One extra buffer

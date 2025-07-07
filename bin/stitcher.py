@@ -10,6 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 import argparse
 import warnings
+import datetime
+import pytz
+
 
 try:
     import pto_mapper
@@ -18,9 +21,17 @@ except ImportError:
     print("Please ensure pto_mapper.py is in the same directory as this script.", file=sys.stderr)
     sys.exit(1)
 
+# Import get_timestamp directly from the timestamp.py file
+try:
+    from timestamp import get_timestamp
+except ImportError:
+    print("Error: The 'timestamp.py' module was not found.", file=sys.stderr)
+    print("Please ensure timestamp.py is in the same directory as this script.", file=sys.stderr)
+    sys.exit(1)
+
+
 try:
     import av
-    av.logging.set_level(av.logging.ERROR)
 except ImportError:
     print("Warning: 'PyAV' library not found. Video processing functionality will be unavailable.")
     av = None
@@ -248,11 +259,19 @@ def build_mappings(pto_file, pad, num_workers):
     return all_mappings, global_options
 
 def load_image_to_yuv(image_path, pad):
+    # Add a compatibility check for different Pillow versions
+    try:
+        resample_filter = Image.Resampling.BICUBIC
+    except AttributeError:
+        # Fallback for older versions
+        resample_filter = Image.BICUBIC
+
     img_pil = Image.open(image_path).convert("RGB")
     img_ycbcr = img_pil.convert("YCbCr")
     y, u, v = img_ycbcr.split()
-    u_resized = u.resize((img_pil.width // 2, img_pil.height // 2), Image.Resampling.BICUBIC)
-    v_resized = v.resize((img_pil.width // 2, img_pil.height // 2), Image.Resampling.BICUBIC)
+    # Use the determined resampling filter
+    u_resized = u.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
+    v_resized = v.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     padded_y = np.pad(np.array(y, np.uint8), pad, mode='edge')
     padded_u = np.pad(np.array(u_resized, np.uint8), pad // 2, mode='edge')
     padded_v = np.pad(np.array(v_resized, np.uint8), pad // 2, mode='edge')
@@ -261,10 +280,17 @@ def load_image_to_yuv(image_path, pad):
     return (padded_y[:target_h_y, :], padded_u[:target_h_uv, :], padded_v[:target_h_uv, :], img_pil.width, img_pil.height)
 
 def save_image_yuv420(y_plane, u_plane, v_plane, output_path):
+    # Add a compatibility check for different Pillow versions
+    try:
+        resample_filter = Image.Resampling.BICUBIC
+    except AttributeError:
+        # Fallback for older versions
+        resample_filter = Image.BICUBIC
+        
     h, w = y_plane.shape
     y_img = Image.fromarray(y_plane,"L")
-    u_img = Image.fromarray(u_plane,"L").resize((w,h),Image.Resampling.BICUBIC)
-    v_img = Image.fromarray(v_plane,"L").resize((w,h),Image.Resampling.BICUBIC)
+    u_img = Image.fromarray(u_plane,"L").resize((w,h), resample_filter)
+    v_img = Image.fromarray(v_plane,"L").resize((w,h), resample_filter)
     Image.merge("YCbCr", (y_img,u_img,v_img)).convert("RGB").save(output_path, "JPEG", quality=95)
 
 def process_and_reproject_image(args):
@@ -490,7 +516,6 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
     if len(input_files) != num_images:
         raise ValueError(f"Input files ({len(input_files)}) != PTO images ({num_images}).")
 
-    # Pre-allocate shared buffers for all worker results
     all_reproj_y = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     all_reproj_u = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     all_reproj_v = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
@@ -498,7 +523,6 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
     all_weights_uv = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.float32)
     all_penalty_y = np.empty((num_images, final_h, final_w), dtype=np.float32) if use_seam else None
 
-    # Prepare arguments for each worker, including slices of the shared buffers
     process_args = [
         (
             (input_files[i], final_w, final_h, mappings[i], pad, use_seam),
@@ -508,10 +532,8 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
     ]
 
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
-        # Workers run and write directly into the pre-allocated buffers
         list(executor.map(process_and_reproject_image, process_args))
 
-    # All data is now ready in the 'all_*' arrays
     y_planes = all_reproj_y
     u_planes = all_reproj_u
     v_planes = all_reproj_v
@@ -551,9 +573,8 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
 
     y_final, u_final, v_final = _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weights_uv, masking_stack)
 
-    save_image_yuv420(y_final, u_final, v_final, output_path)
+    save_image_yuv420(y_final, u_final, v_final, output_file)
     print(f"Panoramic image saved to {output_file}")
-
 
 def worker_for_video_frame(args):
     """Worker function for video frames, writing to pre-allocated buffers."""
@@ -577,165 +598,226 @@ def worker_for_video_frame(args):
     padded_sw_y = py_src.shape[1]
     map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
     
-    # Initialize output buffers
     reproj_y.fill(0)
     reproj_u.fill(128)
     reproj_v.fill(128)
     reproj_weights_y.fill(0)
     reproj_weights_uv.fill(0)
-    if use_seam:
-        reproj_penalty_y.fill(0)
 
-    # Reproject directly into the provided output buffers
     reproject_y(py_src.ravel(), dw, dh, padded_sw_y, map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel())
     reproject_uv(pu_src.ravel(), pv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel())
     reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
     reproject_uv_float(blend_weights_uv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_weights_uv.ravel())
 
-    if use_seam:
-        reproject_float(corner_penalty_src.ravel(), dw, dh, corner_penalty_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_penalty_y.ravel())
+    # Add a check to ensure corner_penalty_src is valid before processing
+    if use_seam and corner_penalty_src is not None:
+        if reproj_penalty_y is not None:
+            reproj_penalty_y.fill(0)
+            reproject_float(corner_penalty_src.ravel(), dw, dh, corner_penalty_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_penalty_y.ravel())
     
     return idx
 
-
-def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq):
+def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, use_sync=False, model=None):
     if av is None: raise ImportError("PyAV is not installed.")
 
-    mappings,global_options = build_mappings(pto_file, pad, num_cores)
-    final_w,final_h = global_options['final_w'],global_options['final_h']
+    mappings, global_options = build_mappings(pto_file, pad, num_cores)
+    final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
-    if len(input_files)!=num_images: raise ValueError("Number of videos does not match PTO.")
+    if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")
     in_containers = [av.open(f) for f in input_files]
     in_streams = [c.streams.video[0] for c in in_containers]
-    for s in in_streams:
-        s.thread_type = 'AUTO'
-
-    blend_weights_y, blend_weights_uv, corner_penalties_y = [], [], []
-    for stream in in_streams:
-        sw_padded, sh_padded = stream.width + 2 * pad, stream.height + pad
-        weights_y = create_blend_weight_map(sw_padded, sh_padded)
-        blend_weights_y.append(weights_y)
-        blend_weights_uv.append(np.ascontiguousarray(weights_y[::2,::2]))
-        if use_seam:
-            corner_penalties_y.append(create_corner_penalty_map(sw_padded, sh_padded))
+    for s in in_streams: s.thread_type = 'AUTO'
 
     out_container = av.open(output_file, mode='w')
     out_stream = out_container.add_stream("libx264", rate=in_streams[0].average_rate)
     out_stream.width, out_stream.height, out_stream.pix_fmt = final_w, final_h, 'yuv420p'
-    out_stream.options = {"preset":"fast", "crf":"28"}
+    out_stream.options = {"preset": "fast", "crf": "28"}
 
     frame_iters = [c.decode(s) for c, s in zip(in_containers, in_streams)]
     frame_count = 0
     
-    cached_seam_weights = None
-    target_leveling_params = None
-    previous_leveling_params = None
+    cached_seam_weights, target_leveling_params, previous_leveling_params = None, None, None
     recalc_frame_number = 1
     
-    # Pre-allocate reusable buffers for frame processing results.
-    # This is done ONCE before the loop to avoid repeated memory allocation.
     frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     frame_u_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     frame_v_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     frame_weights_y = np.empty((num_images, final_h, final_w), dtype=np.float32)
     frame_weights_uv = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.float32)
     frame_penalty_y = np.empty((num_images, final_h, final_w), dtype=np.float32) if use_seam else None
+    blend_weights_y, blend_weights_uv, corner_penalties_y = [], [], []
+    for stream in in_streams:
+        sw_padded, sh_padded = stream.width + 2 * pad, stream.height + pad
+        weights_y = create_blend_weight_map(sw_padded, sh_padded)
+        blend_weights_y.append(weights_y)
+        blend_weights_uv.append(np.ascontiguousarray(weights_y[::2, ::2]))
+        if use_seam:
+            corner_penalties_y.append(create_corner_penalty_map(sw_padded, sh_padded))
 
+    if use_sync:
+        print("Timestamp synchronization enabled.")
+        current_frames = [None] * num_images
+        current_timestamps = [None] * num_images
+        stream_intervals = [datetime.timedelta(seconds=4)] * num_images
+        stream_ended = [False] * num_images
 
+        def advance_stream(i, prev_ts):
+            try:
+                frame = next(frame_iters[i])
+                
+                read_ts = None
+                try:
+                    # Wrap timestamp reading in a try/except block ---
+                    read_ts = get_timestamp(frame.to_image(), robust=False, model=model)
+                    if read_ts is None:
+                        read_ts = get_timestamp(frame.to_image(), robust=True, model=model)
+                except ValueError as e:
+                    read_ts = None # Ensure it is None if parsing fails
+
+                expected_ts = prev_ts + stream_intervals[i]
+                
+                is_plausible = False
+                if read_ts:
+                    if abs((read_ts - expected_ts).total_seconds()) < 300: # 5-minute plausibility window
+                        is_plausible = True
+
+                if is_plausible:
+                    new_ts = read_ts
+                    time_diff = new_ts - prev_ts
+                    if 0.1 < time_diff.total_seconds() < 300:
+                        stream_intervals[i] = datetime.timedelta(seconds=(0.8 * stream_intervals[i].total_seconds() + 0.2 * time_diff.total_seconds()))
+                else:
+                    new_ts = expected_ts
+                
+                return frame, new_ts, False
+            except StopIteration:
+                return None, None, True
+
+        print("Initializing frame synchronization...")
+        for i in range(num_images):
+            try:
+                ts1, f1 = None, None
+                for _ in range(200):
+                    f1 = next(frame_iters[i])
+                    ts1 = get_timestamp(f1.to_image(), robust=True, model=model)
+                    if ts1: break
+                if not ts1: raise StopIteration("Could not find a valid initial timestamp.")
+                
+                ts2, f2 = None, None
+                for _ in range(200):
+                    f2 = next(frame_iters[i])
+                    ts2 = get_timestamp(f2.to_image(), robust=True, model=model)
+                    if ts2 and ts2 > ts1: break
+                if not ts2: raise StopIteration("Could not find a subsequent valid timestamp.")
+                
+                stream_intervals[i] = ts2 - ts1
+                current_frames[i] = f2
+                current_timestamps[i] = ts2
+
+            except StopIteration as e:
+                stream_ended[i] = True
+
+        if any(stream_ended):
+            print("\nError: One or more video streams are empty or failed to initialize. Terminating.", file=sys.stderr)
+            for c in in_containers: c.close()
+            out_container.close()
+            return
+            
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         while True:
-            try:
-                current_frames = [next(it) for it in frame_iters]
+            if use_sync:
+                if any(stream_ended):
+                    print("\nA video stream has ended. Terminating process.", file=sys.stderr)
+                    break
+                
+                avg_interval = datetime.timedelta(seconds=np.mean([iv.total_seconds() for iv in stream_intervals]))
+                tolerance = datetime.timedelta(seconds=avg_interval.total_seconds() * 1.5)
+
+                while (max(current_timestamps) - min(current_timestamps)) > tolerance:
+                    min_ts = min(current_timestamps)
+                    min_idx = current_timestamps.index(min_ts)
+                    
+                    frame, new_ts, ended = advance_stream(min_idx, current_timestamps[min_idx])
+                    if ended:
+                        stream_ended[min_idx] = True
+                        break
+                    current_frames[min_idx] = frame
+                    current_timestamps[min_idx] = new_ts
+                
+                if any(stream_ended): continue
+
+                final_group_frames = current_frames
                 frame_count += 1
-                
-                is_leveling_frame = (use_seam and num_images > 1 and 
-                                     (frame_count == 1 or (frame_count - 1) % level_freq == 0))
-                
-                status_message = f"Processing frame: {frame_count}"
-                if is_leveling_frame:
-                    status_message += " (Recalculating leveling target...)"
-                
+                dt_object = datetime.datetime.fromtimestamp(np.mean([ts.timestamp() for ts in current_timestamps]), tz=pytz.utc)
+                status_message = f"Processing synced frame: {frame_count} @ {dt_object.strftime('%Y-%m-%d %H:%M:%S')}"
                 sys.stdout.write('\r' + status_message.ljust(os.get_terminal_size().columns - 1))
                 sys.stdout.flush()
 
-            except StopIteration:
-                break
+            else: 
+                try:
+                    final_group_frames = [next(it) for it in frame_iters]
+                    frame_count += 1
+                except StopIteration:
+                    break
 
+            is_leveling_frame = (use_seam and num_images > 1 and (frame_count == 1 or (frame_count - 1) % level_freq == 0))
+            
             worker_args = [
                 (
-                    (i, current_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], blend_weights_uv[i], pad, use_seam, corner_penalties_y[i] if use_seam else None),
+                    (i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], blend_weights_uv[i], pad, use_seam, corner_penalties_y[i] if use_seam else None),
                     (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i], frame_penalty_y[i] if use_seam else None)
-                )
-                for i in range(num_images)
+                ) for i in range(num_images)
             ]
             
             list(executor.map(worker_for_video_frame, worker_args))
-
-            y_planes = frame_y_planes
-            u_planes = frame_u_planes
-            v_planes = frame_v_planes
-
+            
+            y_planes, u_planes, v_planes = frame_y_planes, frame_u_planes, frame_v_planes
             if use_seam:
+                y_weight_stack, penalty_stack = frame_weights_y, frame_penalty_y
                 if cached_seam_weights is None:
-                    y_weight_stack = frame_weights_y
-                    penalty_stack = frame_penalty_y
                     cached_seam_weights = _calculate_seam_blend_weights(y_weight_stack, penalty_stack, seam_subsample)
-                
                 final_weights_y, final_weights_uv, penalized_scores = cached_seam_weights
                 masking_stack = penalized_scores
-
                 if is_leveling_frame:
-                    y_weight_stack = frame_weights_y
-                    background_mask = np.max(y_weight_stack, axis=0) < 1e-9
                     y_indices = np.argmax(penalized_scores, axis=0)
-                    y_indices[background_mask] = -1
+                    y_indices[np.max(frame_weights_y, axis=0) < 1e-9] = -1
                     new_params = solve_corrections(y_indices, y_planes, u_planes, v_planes, num_images, level_subsample)
-                    
                     previous_leveling_params = target_leveling_params if target_leveling_params is not None else new_params
                     target_leveling_params = new_params
                     recalc_frame_number = frame_count
-
                 if target_leveling_params:
-                    frames_into_period = frame_count - recalc_frame_number
-                    alpha = min(frames_into_period / level_freq, 1.0) 
-
+                    alpha = min((frame_count - recalc_frame_number) / level_freq, 1.0)
                     p_gain, p_y_off, p_u_off, p_v_off = previous_leveling_params
                     t_gain, t_y_off, t_u_off, t_v_off = target_leveling_params
-                    interp_gain = (1 - alpha) * p_gain + alpha * t_gain
-                    interp_y_off = (1 - alpha) * p_y_off + alpha * t_y_off
-                    interp_u_off = (1 - alpha) * p_u_off + alpha * t_u_off
-                    interp_v_off = (1 - alpha) * p_v_off + alpha * t_v_off
-                    
-                    y_planes_leveled = y_planes.astype(np.float32)
-                    u_planes_leveled = u_planes.astype(np.float32)
-                    v_planes_leveled = v_planes.astype(np.float32)
-
+                    interp_gain, interp_y_off, interp_u_off, interp_v_off = (1 - alpha) * p_gain + alpha * t_gain, (1 - alpha) * p_y_off + alpha * t_y_off, (1 - alpha) * p_u_off + alpha * t_u_off, (1 - alpha) * p_v_off + alpha * t_v_off
+                    y_planes_leveled, u_planes_leveled, v_planes_leveled = y_planes.astype(np.float32), u_planes.astype(np.float32), v_planes.astype(np.float32)
                     _apply_gain_offset_numba(y_planes_leveled, interp_gain, interp_y_off)
                     _apply_offset_numba(u_planes_leveled, interp_u_off)
                     _apply_offset_numba(v_planes_leveled, interp_v_off)
-                    
                     y_planes, u_planes, v_planes = y_planes_leveled, u_planes_leveled, v_planes_leveled
-            
             else: # Feathering
-                y_weight_stack = frame_weights_y
-                uv_weight_stack = frame_weights_uv
-                final_weights_y, final_weights_uv = _calculate_feather_blend_weights(y_weight_stack, uv_weight_stack)
-                masking_stack = y_weight_stack
+                final_weights_y, final_weights_uv = _calculate_feather_blend_weights(frame_weights_y, frame_weights_uv)
+                masking_stack = frame_weights_y
 
             y_final, u_final, v_final = _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weights_uv, masking_stack)
-
             out_frame = av.VideoFrame(width=final_w, height=final_h, format='yuv420p')
-            out_frame.planes[0].update(y_final)
-            out_frame.planes[1].update(u_final)
-            out_frame.planes[2].update(v_final)
+            out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
 
-    for packet in out_stream.encode():
-        out_container.mux(packet)
+            if use_sync:
+                for i in range(num_images):
+                    if stream_ended[i]: continue
+                    frame, new_ts, ended = advance_stream(i, current_timestamps[i])
+                    if ended:
+                        stream_ended[i] = True
+                        continue
+                    current_frames[i] = frame
+                    current_timestamps[i] = new_ts
+
+    for packet in out_stream.encode(): out_container.mux(packet)
     out_container.close()
-    for c in in_containers:
-        c.close()
+    for c in in_containers: c.close()
     print(f"\nPanoramic video saved to {output_file}")
 
 def main():
@@ -755,10 +837,13 @@ def main():
     parser.add_argument("--level-subsample", type=int, default=16, help="Subsampling factor for seam leveling to improve performance. Higher is faster. Defaults to 16.")
     parser.add_argument("--seam-subsample", type=int, default=16, help="Subsampling factor for the seam finder to improve performance. Higher is faster. Defaults to 16.")
     parser.add_argument("--level-freq", type=int, default=8, help="Frequency of seam leveling recalculation for videos. Defaults to 8 frames.")
+    parser.add_argument("--sync", action='store_true', help="For videos, synchronize streams by their embedded timestamps before stitching.")
+    parser.add_argument("--model", type=str, default=None, help="Specify the model for timestamp extraction.")
     args = parser.parse_args()
     
     if len(args.input_files) < 2:
         args.seamless = False
+        args.sync = False
     if not args.input_files:
         print("Error: No input files specified.", file=sys.stderr)
         sys.exit(1)
@@ -770,7 +855,7 @@ def main():
         if is_image_input:
             reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores)
         elif is_video_input:
-            reproject_videos(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, args.level_freq)
+            reproject_videos(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, args.level_freq, args.sync, args.model)
         else:
             print("Error: Input files must all be either images or videos.", file=sys.stderr)
             sys.exit(1)

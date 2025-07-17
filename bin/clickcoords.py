@@ -13,6 +13,8 @@ import io
 import wand
 import hsi
 import sys
+import re
+import subprocess
 from datetime import datetime, timedelta, UTC
 from tkinter import ttk
 from PIL import Image, ImageTk, ImageEnhance
@@ -166,23 +168,64 @@ if args.station != None:
     args.name = config.get('station', 'code')
 
 
-# To extract frames from mp4: ffmpeg -vsync 0 -i video.mp4 image%03d.png
-def read_frames(filename, dir):
-    out, err = (
-        ffmpeg
-        .input(filename)
-        .output(dir + '%04d.tif', format='image2')
-        .overwrite_output()
-        .run(quiet=True)
-    )
-    return out
+def read_frames(filename, directory):
+    """Decodes a video file into individual frames, showing a progress bar."""
+    try:
+        probe = ffmpeg.probe(filename)
+        total_frames = int(next(s['nb_frames'] for s in probe['streams'] if s['codec_type'] == 'video'))
+    except (ffmpeg.Error, StopIteration, KeyError, ValueError):
+        total_frames = None
+
+    print(f"Decoding video {filename}...")
+
+    # Build the ffmpeg command arguments using ffmpeg-python
+    stream = ffmpeg.input(filename).output(f'{directory}/%04d.tif', format='image2', vsync=0).overwrite_output()
+    args = stream.get_args()
+    
+    # Add progress reporting if we have the total frame count
+    if total_frames:
+        # Use a list to prepend arguments
+        final_args = ['ffmpeg', '-progress', 'pipe:1'] + args
+    else:
+        final_args = ['ffmpeg'] + args
+
+    proc = subprocess.Popen(final_args, stdout=subprocess.PIPE if total_frames else None, stderr=subprocess.PIPE)
+
+    if not total_frames:
+        # If we don't know the total frames, we can't show a progress bar. Just wait.
+        _, err = proc.communicate()
+        if proc.returncode != 0:
+            raise ffmpeg.Error('ffmpeg', None, err)
+        return
+
+    # If we have total_frames, parse stdout for progress
+    bar_length = 40
+    for line in iter(proc.stdout.readline, b''):
+        line_str = line.decode('utf-8')
+        match = re.search(r'frame=\s*(\d+)', line_str)
+        if match:
+            current_frame = int(match.group(1))
+            progress = current_frame / total_frames
+            block = int(round(bar_length * progress))
+            text = f"\rProgress: [{'#' * block + '-' * (bar_length - block)}] {current_frame}/{total_frames} ({progress*100:.0f}%)"
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+    # Finalize the progress bar
+    text = f"\rProgress: [{'#' * bar_length}] {total_frames}/{total_frames} (100%)"
+    sys.stdout.write(text)
+    sys.stdout.write("\n\n")
+
+    err = proc.stderr.read()
+    if proc.wait() != 0:
+        raise ffmpeg.Error('ffmpeg', None, err)
+
 
 #def read_timestamps(files):
 #    for f in files:
 #        ts = subprocess.run(["timestamp", f], cwd=str(pathlib.Path.home()) + "/bin", stdout=subprocess.PIPE, text=True)
 #        timestamps.append(float(ts.stdout.rstrip().lstrip()))
 #    return timestamps
-
 
 def timestamp(timestamps, files, i):
     """
@@ -216,52 +259,76 @@ def timestamp(timestamps, files, i):
             sys.stderr.write("Please provide a start time using the -d argument (e.g., -d '2023-10-27 10:30:00.000')\n")
             sys.exit(1)
 
-def interpolate_timestamps():
-    timestamps = [None] * len(images)
+def interpolate_timestamps(timestamps):
+    """Performs interpolation on a pre-populated list of timestamps."""
+    if not timestamps:
+        return []
+    
+    interpolated_stamps = list(timestamps) # Make a copy
 
     fractions = []
-    prev = timestamp(timestamps, images, 0)
+    prev = interpolated_stamps[0]
 
     i = 1
     previ = -1
-    while i < len(timestamps):
-        if timestamp(timestamps, images, i) == prev:
-            while i < len(timestamps) and timestamp(timestamps, images, i) == prev:
+    while i < len(interpolated_stamps):
+        if interpolated_stamps[i] == prev:
+            while i < len(interpolated_stamps) and interpolated_stamps[i] == prev:
                 i += 1
             fractions.append(i - previ)
             previ = i
-            if i < len(timestamps):
-                prev = timestamp(timestamps, images, i)
+            if i < len(interpolated_stamps):
+                prev = interpolated_stamps[i]
         else:
             previ += 1
-            while timestamp(timestamps, images, i) != prev:
+            while interpolated_stamps[i] != prev:
                 i -= 1
             fractions.append(i + 2 - previ)
             previ = i + 1
-            prev = timestamp(timestamps, images, i + 1)
+            if i + 1 < len(interpolated_stamps):
+                prev = interpolated_stamps[i + 1]
+            else:
+                # Reached the end, break the loop
+                break
+        
+        if not fractions or fractions[-1] == 0:
+            # Avoid infinite loop if fraction logic fails
+            i+=1
+            continue
+            
         i += fractions[-1]
 
-    fractions.append(len(timestamps) - previ)
-    fractions[-1] = fractions[-2]
-    prev = timestamp(timestamps, images, 0)
-    f = 1 - fractions[0] / fractions[1]
+    fractions.append(len(interpolated_stamps) - previ)
+    if len(fractions) > 1:
+        fractions[-1] = fractions[-2]
+
+    prev = interpolated_stamps[0]
+    if not fractions or len(fractions) < 2 or fractions[1] == 0:
+         f = 0
+    else:
+        f = 1 - fractions[0] / fractions[1]
+
     fi = 0
-    fractions[0] = fractions[1]
+    if not fractions or fractions[0] == 0:
+        pass
+    else:
+        fractions[0] = fractions[1]
     
-    for i in range(1, len(timestamps)):
-        if timestamps[i] == None:
-            timestamps[i] = timestamps[i - 1]
+    for i in range(1, len(interpolated_stamps)):
+        if interpolated_stamps[i] is None:
+            interpolated_stamps[i] = interpolated_stamps[i - 1]
     
-    for i in range(0, len(timestamps)):
-        if timestamps[i] == prev:
-            f = f + 1.0 / fractions[fi]
-            timestamps[i] += round(f, 2)
+    for i in range(len(interpolated_stamps)):
+        if interpolated_stamps[i] == prev:
+            if fi < len(fractions) and fractions[fi] > 0:
+                f = f + 1.0 / fractions[fi]
+            interpolated_stamps[i] += round(f, 2)
         else:
-            prev = timestamps[i]
+            prev = interpolated_stamps[i]
             f = 0.0
             fi += 1
 
-    return timestamps
+    return interpolated_stamps
 
 def midpoint(az1, alt1, az2, alt2):
     x1 = math.radians(az1)
@@ -441,51 +508,50 @@ class Zoom_Advanced(ttk.Frame):
                     if l != None:
                         f.write(l + "\n")
         if event.char == 's':
-            centroid2 = []
-            for l in centroid:
-                if l != None:
-                    centroid2.append(l)
-            with open("event.txt","w") as f:
-                print("[trail]")
-                print("frames = " + str(len(centroid2)))
-                print("duration = " + str(round(float(centroid2[-1].split(" ")[1]) - float(centroid2[0].split(" ")[1]), 2)))
-                print("positions = ", end = "")
-                for i in positions:
-                    print(str(i[0]) + "," + str(i[1]) + " ", end = "")
-                print()
-                print("coordinates = ", end = "")
-                for i in centroid2:
-                    print(i.split(" ")[3] + "," + i.split(" ")[2] + " ", end = "")
-                print()
-                print("timestamps = ", end = "")
-                for i in centroid2:
-                    print(str(self.timestamps[int(i.split(" ")[0])]) + " ", end = "")
-                print()
+            centroid2 = [l for l in centroid if l is not None]
+            if not centroid2:
+                print("No centroid data to save to event.txt")
+                return
+                
+            with open("event.txt", "w") as f:
+                print("[trail]", file=f)
+                print(f"frames = {len(centroid2)}", file=f)
+                print(f"duration = {round(float(centroid2[-1].split(' ')[1]) - float(centroid2[0].split(' ')[1]), 2)}", file=f)
+                
+                pos_str = " ".join([f"{p[0]},{p[1]}" for p in positions])
+                print(f"positions = {pos_str}", file=f)
+
+                coord_str = " ".join([f"{i.split(' ')[3]},{i.split(' ')[2]}" for i in centroid2])
+                print(f"coordinates = {coord_str}", file=f)
+
+                ts_str = " ".join([str(self.timestamps[int(i.split(' ')[0])]) for i in centroid2])
+                print(f"timestamps = {ts_str}", file=f)
+                
                 midaz, midalt, arc = midpoint(float(centroid2[0].split(" ")[3]), float(centroid2[0].split(" ")[2]),
                                               float(centroid2[-1].split(" ")[3]), float(centroid2[-1].split(" ")[2]))
-                print("midpoint = " + str(midaz) + "," + str(midalt))
-                print("arc = " + str(arc))
-                print("brightness = ", end = "")
-                for i in centroid2:
-                    print("0 ", end = "")
-                print()
-                print("frame_brightness = ", end = "")
-                for i in centroid2:
-                    print("0 ", end = "")
-                print()
-                print("size = ", end = "")
-                for i in centroid2:
-                    print("0 ", end = "")
-                print()
-                print("manual = 1")
-                print()
+                print(f"midpoint = {midaz},{midalt}", file=f)
+                print(f"arc = {arc}", file=f)
+                
+                print("brightness = " + " ".join(["0"] * len(centroid2)), file=f)
+                print("frame_brightness = " + " ".join(["0"] * len(centroid2)), file=f)
+                print("size = " + " ".join(["0"] * len(centroid2)), file=f)
+                
+                print("manual = 1", file=f)
+                print(file=f)
 
-                print()
-                print("[video]")
-                print("start = " + " ".join(centroid2[0].split(" ")[6:]) + " (" + str(self.timestamps[int(centroid2[0].split(" ")[0])]) + ")")
-                print("end = " + " ".join(centroid2[-1].split(" ")[6:]) + " (" + str(self.timestamps[int(centroid2[-1].split(" ")[0])]) + ")")
-                print("width = " + str(width))
-                print("height = " + str(height))
+                print("[video]", file=f)
+                start_info = " ".join(centroid2[0].split(" ")[6:])
+                start_ts = self.timestamps[int(centroid2[0].split(" ")[0])]
+                print(f"start = {start_info} ({start_ts})", file=f)
+                
+                end_info = " ".join(centroid2[-1].split(" ")[6:])
+                end_ts = self.timestamps[int(centroid2[-1].split(" ")[0])]
+                print(f"end = {end_info} ({end_ts})", file=f)
+                
+                print(f"width = {width}", file=f)
+                print(f"height = {height}", file=f)
+            
+            print("Saved event data to event.txt")
         if event.char == 'h':
             self.show_text ^= 1
         if event.char == 'i':
@@ -768,9 +834,8 @@ images = []
 for i in args.imgfiles:
     if i.endswith('.mp4'):
         temp.append(tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp"))
-        print("Decoding video " + i + "...")
         try:
-            read_frames(i, temp[-1].name + "/")
+            read_frames(i, temp[-1].name)
             for file in sorted(glob.glob(temp[-1].name + "/*.tif")):
                 images.append(file)
         except Exception as e:
@@ -782,15 +847,37 @@ for i in args.imgfiles:
 timestamps = None
 positions = []
 
-if args.start == None:
+if args.start is None:
+    # First, extract all timestamps and populate the cache.
+    raw_timestamps = [None] * len(images)
+    total_images = len(images)
+    bar_length = 40
+    
     print("Extracting timestamps...")
-    timestamps = interpolate_timestamps()
-    starttime = timestamps[0]
+    if total_images > 0:
+        for i in range(total_images):
+            timestamp(raw_timestamps, images, i) # This populates the list
+            
+            # Update progress bar
+            progress = (i + 1) / total_images
+            block = int(round(bar_length * progress))
+            text = f"\rProgress: [{'#' * block + '-' * (bar_length - block)}] {i+1}/{total_images} ({progress*100:.0f}%)"
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        sys.stdout.write("\n\n")
+
+    # Second, run the interpolation on the fully populated list of timestamps.
+    print("Interpolating timestamps...")
+    timestamps = interpolate_timestamps(raw_timestamps)
+    if timestamps:
+        starttime = timestamps[0]
+    else:
+        starttime = datetime.now().timestamp() # Fallback
 else:
-    starttime = datetime.strptime(args.start, '%Y-%m-%d %H:%M:%S.%f')
+    starttime = datetime.strptime(args.start, '%Y-%m-%d %H:%M:%S.%f').timestamp()
     timestamps = [None] * len(images)
     for x in range(len(images)):
-        timestamps[x] = (starttime + timedelta(seconds=x/args.fps)).timestamp()
+        timestamps[x] = starttime + (x / args.fps)
 
     
 centroid = [None] * len(images)

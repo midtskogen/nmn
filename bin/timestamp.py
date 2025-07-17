@@ -336,7 +336,7 @@ def get_timestamp(source: ImgSource, robust: bool = False, debug: bool = False, 
         if not os.path.exists(source):
             raise FileNotFoundError(f"Input file not found: {source}")
         _, ext = os.path.splitext(source.lower())
-        if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']:
+        if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff']:
             img = Image.open(source)
         elif ext in ['.mp4', '.mov', '.avi', '.mkv']:
             if not AV_AVAILABLE:

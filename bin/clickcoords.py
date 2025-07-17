@@ -5,8 +5,6 @@ import argparse
 import ffmpeg
 import tempfile
 import glob
-import subprocess
-import pathlib
 import os
 import configparser
 import ephem
@@ -14,11 +12,13 @@ import math
 import io
 import wand
 import hsi
+import sys
 from datetime import datetime, timedelta, UTC
 from tkinter import ttk
 from PIL import Image, ImageTk, ImageEnhance
 from brightstar import brightstar
 from recalibrate import recalibrate
+from timestamp import get_timestamp
 
 class RecalibrateDialog:
     def __init__(self, parent, image, pano, zoom):
@@ -185,12 +185,37 @@ def read_frames(filename, dir):
 
 
 def timestamp(timestamps, files, i):
-    if i < len(timestamps) and timestamps[i] != None:
+    """
+    Gets the timestamp for the file at index i, using a cache.
+    It calls get_timestamp, first normally, then in robust mode on failure.
+    """
+    if i < len(timestamps) and timestamps[i] is not None:
         return timestamps[i]
-    ts = subprocess.run([str(pathlib.Path.home()) + "/bin/timestamp", files[i]], stdout=subprocess.PIPE, text=True)
-    timestamps[i] = float(ts.stdout.rstrip().lstrip())
-    return timestamps[i]
-    
+
+    # First attempt: Call get_timestamp without robust mode for speed.
+    datetime_obj = get_timestamp(files[i])
+
+    # If the first attempt fails, try again with robust mode.
+    if not datetime_obj:
+        datetime_obj = get_timestamp(files[i], robust=True)
+
+    # Proceed with the result from the attempts.
+    if datetime_obj:
+        ts = datetime_obj.timestamp()
+        timestamps[i] = ts
+        return ts
+    else:
+        # If a timestamp can't be read even with robust mode, fall back.
+        if i > 0:
+            # Assume the timestamp is the same as the previous frame.
+            timestamps[i] = timestamps[i-1]
+            return timestamps[i-1]
+        else:
+            # If the very first frame is unreadable, we cannot proceed.
+            sys.stderr.write(f"Error: Could not extract timestamp from the first image: {files[i]}\n")
+            sys.stderr.write("Please provide a start time using the -d argument (e.g., -d '2023-10-27 10:30:00.000')\n")
+            sys.exit(1)
+
 def interpolate_timestamps():
     timestamps = [None] * len(images)
 

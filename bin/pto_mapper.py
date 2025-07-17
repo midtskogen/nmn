@@ -168,9 +168,18 @@ def map_pano_to_image(pto_data, pano_x, pano_y):
         src_norm_radius = min(sw,sh)/2.
         r_ideal_val = math.sqrt(x_ideal**2 + y_ideal**2)
         mag = 1.0
+        
         if src_norm_radius > 1e-6:
             r_norm = r_ideal_val / src_norm_radius
             d_coeff = 1.0 - (a + b + c)
+
+            # Check if the mapping is monotonic. If the derivative of the distortion
+            # function is negative, the mapping "folds back" on itself, which
+            # creates artifacts and makes the function non-invertible.
+            derivative = d_coeff + r_norm * (2.0*c + r_norm * (3.0*b + r_norm * 4.0*a))
+            if derivative < 0.0:
+                continue # This mapping is in an invalid region, try the next image
+
             mag = d_coeff + r_norm * (c + r_norm * (b + r_norm * a))
         
         x_dist, y_dist = x_ideal * mag, y_ideal * mag
@@ -371,13 +380,38 @@ def calculate_source_coords(coords_y, final_w, final_h, orig_w, orig_h, crop_off
             if not is_valid_src:
                 coords_y[y_dest,x_dest,0], coords_y[y_dest,x_dest,1] = INVALID_COORD, INVALID_COORD
                 continue
-            
-            r_ideal_val, mag = math.sqrt(x_ideal**2+y_ideal**2), 1.
+
+            # --- START: CORRECTED LENS DISTORTION LOGIC ---
+            r_ideal_val = math.sqrt(x_ideal**2 + y_ideal**2)
+            mag = 1.0
+            is_valid_dist = True
+
             if src_norm_radius > 1e-6:
-                r_norm, d_coeff = r_ideal_val / src_norm_radius, 1.-(a+b+c)
-                mag = d_coeff + r_norm * (c + r_norm * (b + r_norm * a))
-            x_dist, y_dist, x_shifted, y_shifted = x_ideal*mag, y_ideal*mag, x_ideal*mag-cx, y_ideal*mag-cy
-            coords_y[y_dest,x_dest,0], coords_y[y_dest,x_dest,1] = x_shifted+sw/2., -y_shifted+sh/2.
+                r_norm = r_ideal_val / src_norm_radius
+                d_coeff = 1.0 - (a + b + c)
+                
+                # Check if the mapping is monotonic. If the derivative is negative,
+                # the function "folds back" on itself, creating artifacts.
+                derivative = d_coeff + r_norm * (2.0*c + r_norm * (3.0*b + r_norm * 4.0*a))
+                if derivative < 0.0:
+                    is_valid_dist = False
+                else:
+                    mag = d_coeff + r_norm * (c + r_norm * (b + r_norm * a))
+
+            if not is_valid_dist:
+                coords_y[y_dest, x_dest, 0] = INVALID_COORD
+                coords_y[y_dest, x_dest, 1] = INVALID_COORD
+            else:
+                x_dist = x_ideal * mag
+                y_dist = y_ideal * mag
+                
+                # Apply center shift (d, e params) and convert to final pixel coordinates
+                x_shifted = x_dist - cx
+                y_shifted = y_dist - cy
+                coords_y[y_dest, x_dest, 0] = x_shifted + sw / 2.0
+                coords_y[y_dest, x_dest, 1] = -y_shifted + sh / 2.0
+            # --- END: CORRECTED LENS DISTORTION LOGIC ---
+
 
 class TestPtoMapping(unittest.TestCase):
     # Class variable to hold the command-line override file

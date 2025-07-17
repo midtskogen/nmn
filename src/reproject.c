@@ -11,28 +11,96 @@ extern "C" {
 #include <libavutil/opt.h>
 }
 
-/* Compile:
- wget http://launchpadlibrarian.net/678162060/libboost-filesystem1.81.0_1.81.0-6_amd64.deb && sudo dpkg -i libboost-filesystem1.81.0_1.81.0-6_amd64.deb && rm libboost-filesystem1.81.0_1.81.0-6_amd64.deb
+// Compile:
+// g++ -msse4.2 -O3 -ljpeg -g -Wno-deprecated-declarations -o bin/reproject src/reproject.c -Isrc/hugin -O6 -ljpeg -lm -lavutil -lavcodec -lavformat -pthread -Wl,-rpath=/usr/lib/hugin /usr/lib/hugin/libhuginbase.so.0.0 
 
- cd src
- wget https://sourceforge.net/projects/hugin/files/hugin/hugin-2022.0/hugin-2022.0.0.tar.bz2
- tar xvf hugin-2022.0.0.tar.bz2
- mkdir hugin-2022.0.0/build
- cd hugin-2022.0.0/build
- cmake ..
- cd -
- g++ -march=native -g -Wno-deprecated-declarations -o reproject reproject.c -Isrc/hugin-2022.0.0/build/src -Isrc/hugin-2022.0.0/src/hugin_base/panotools -Isrc/hugin-2021.0.0/build/src -Isrc/hugin-2022.0.0/src/hugin_base -Isrc/hugin-2022.0.0/src/hugin_base/panodata -Isrc/hugin-2022.0.0/src -O6 -L/usr/local/lib -ljpeg -pthread -lavcodec -lz -llzma -lavformat -lswscale -lavutil -lavfilter -lswresample -lavdevice -lbz2 -lx264 -lx265 -Wl,-rpath=/usr/local/lib/hugin /usr/lib/hugin/libhuginbase.so.0.0
+#ifndef SIMD_INLINE
+#ifdef __GNUC__
+#define SIMD_INLINE static inline __attribute__((always_inline))
+#elif __STDC_VERSION__ >= 199901L
+#define SIMD_INLINE static inline
+#else
+#define SIMD_INLINE static
+#endif
+#endif
 
-# g++ -mavx2 -g -Wno-deprecated-declarations -o bin/reproject src/reproject.c -Isrc/hugin -O6 -L/usr/local/lib -ljpeg -pthread -lavcodec -lz -llzma -lavformat -lswscale -lavutil -lavfilter -lswresample -lavdevice -lbz2 -lx264 -lx265 -Wl,-rpath=/usr/local/lib/hugin /usr/lib/hugin/libhuginbase.so.0.0
+#if defined(__ARM_NEON__) || defined(__aarch64__)
+#include "arm_neon.h"
 
-# g++ -mavx2 -g -Wno-deprecated-declarations -o bin/reproject src/reproject.c -Isrc/hugin -O6 -ljpeg -pthread -lavcodec -lz -llzma -lavformat -lswscale -lavutil -lavfilter -lswresample -lavdevice -lbz2 -lx264 -lx265 -L/usr/lib/x86_64-linux-gnu/ -Wl,-rpath=/usr/lib/hugin /usr/lib/hugin/libhuginbase.so.0.0
+typedef int64x2_t v128;
+typedef int64x1_t v64;
 
-Examples:
- bin/reproject gnomonic.pto gaustatoppen-20230829025919.mp4 out.mp4
- bin/reproject gnomonic.pto gaustatoppen-20230829025919.jpg out.jpg
-*/
+SIMD_INLINE v128 v128_load_aligned(const void *p) {
+  return vreinterpretq_s64_u8(vld1q_u8((const uint8_t*)p));
+}
+
+SIMD_INLINE int v128_haszero_u8(v128 a) {
+  v128 t = vreinterpretq_s64_u8(vceqq_u8(vreinterpretq_u8_s64(a), vdupq_n_u8(0)));
+  return !!((uint64_t)vget_low_s64(t) | (uint64_t)vget_high_s64(t));
+}
+
+#elif __SSE2__
+#include <emmintrin.h>
+#if defined (__SSE4_1__)
+#include <smmintrin.h>
+#endif
+
+typedef __m128i v128;
+typedef __m128i v64;
+
+SIMD_INLINE v128 v128_load_aligned(const void *p) {
+  return _mm_load_si128((__m128i*)p);
+}
+
+SIMD_INLINE int v128_haszero_u8(v128 a) {
+  return _mm_movemask_epi8(_mm_cmpeq_epi8(a, _mm_setzero_si128()));
+}
+
+#else
+
+#warning Compiling without SIMD optimisations
+
+typedef union {
+  uint8_t u8[16];
+  uint16_t u16[8];
+  uint32_t u32[4];
+  uint64_t u64[2];
+  int8_t s8[16];
+  int16_t s16[8];
+  int32_t s32[4];
+  int64_t s64[2];
+} v128;
+
+typedef union {
+  uint8_t u8[8];
+  uint16_t u16[4];
+  uint32_t u32[2];
+  uint64_t u64;
+  int8_t s8[8];
+  int16_t s16[4];
+  int32_t s32[2];
+  int64_t s64;
+} v64;
+
+SIMD_INLINE v128 v128_load_aligned(const void *p) {
+  if ((uintptr_t)p & 15) {
+    fprintf(stderr, "Warning: unaligned v128 load at %p\n", p);
+    abort();
+  }
+  return v128_load_unaligned(p);
+}
+
+SIMD_INLINE int v128_haszero_u8(v128 a) {
+  int c, r = 0;
+  for (c = 0; c < 16; c++)
+    r |= a.u8[c] == 0;
+  return r;
+}
+
+#endif
 
 
+inline unsigned int log2i(uint32_t x) { return 31 - __builtin_clz(x); }
 #if defined(__aarch64__) || defined(__arm__)
 #include <arm_neon.h>
 #include <arm_acle.h>
@@ -45,7 +113,6 @@ static inline uint32_t u32_crc_u16(uint32_t crc, uint16_t v) { return __crc32ch(
 inline uint32_t u32_crc_u16(uint32_t crc, uint16_t v) { return (uint32_t)_mm_crc32_u16(crc, v); }
 #endif
 
-inline unsigned int log2i(uint32_t x) { return 31 - __builtin_clz(x); }
 #define ALIGN(c) __attribute__((aligned(c)))
 #define NOISE_SIZE 2048
 #define imax(a, b) ((a) > (b) ? (a) : (b))
@@ -82,7 +149,6 @@ int enhance(uint8_t *image, int width, int height, int t, int log2sizex, int log
 
   static int indices[] = { -31, -23, -14, -5, 5, 14, 23, 31 };
   int log2indices = log2i(sizeof(indices) / sizeof(*indices));
-
   while (i < height + size2y - 1) {
     // Filter horizontally
     int ii = i & mask;
@@ -334,7 +400,7 @@ static uint8_t *reproject(uint8_t *py, uint8_t *pu, uint8_t *pv,
       int32_t offset1 = map[y * dw + x + 1];
       int32_t offset2 = map[y * dw + x + dw];
       int32_t offset3 = map[y * dw + x + 1 + dw];
-      int32_t coffset = (offset0 / sw) / 2 * sw/2 + (offset0 % sw) / 2;
+      int32_t coffset = offset0 / 4;
       reprojected[y * dw + x] = offset0 < 0 ? 0 :
 	(py[offset0 + 0] * (c01[y * dw + x] >> 8) +
 	 py[offset0 + 1] * (uint8_t)c01[y * dw + x] +
@@ -359,7 +425,7 @@ static uint8_t *reproject(uint8_t *py, uint8_t *pu, uint8_t *pv,
       reprojected[y/2 * dw/2 + x/2 + voff] = offset0 < 0 ? 128 : pv[coffset];
     }
   }
-  enhance(reprojected, dw, dh, 16, 5, 5, 6, rand());
+  //enhance(reprojected, dw, dh, 16, 5, 5, 6, rand());
   return reprojected;
 }
 
@@ -403,7 +469,7 @@ int encode_video(StreamingContext *decoder, StreamingContext *encoder, AVFrame *
 
     output_packet->stream_index = decoder->video_index;
     output_packet->duration = encoder->video_avs->time_base.den / encoder->video_avs->time_base.num / decoder->video_avs->avg_frame_rate.num * decoder->video_avs->avg_frame_rate.den;
-    
+
     av_packet_rescale_ts(output_packet, decoder->video_avs->time_base, encoder->video_avs->time_base);
     response = av_interleaved_write_frame(encoder->avfc, output_packet);
     if (response != 0) {
@@ -436,13 +502,12 @@ static int decode_packet_and_encode(AVPacket *pPacket, AVCodecContext *pCodecCon
     }
 
     if (response >= 0) {
-      if (1)
-	printf("Frame %d (type=%c, size=%d bytes, format=%d) pts %ld key_frame %d [DTS %d]\n",
+      printf("Frame %d (type=%c, size=%d bytes, format=%d) pts %ld key_frame %d [DTS %d]\n",
 	     pCodecContext->frame_number,
 	     av_get_picture_type_char(pFrame->pict_type),
 	     pFrame->pkt_size,
 	     pFrame->format,
-	     (long int)pFrame->pts,
+	     pFrame->pts,
 	     pFrame->key_frame,
 	     pFrame->coded_picture_number
 	     );
@@ -457,10 +522,6 @@ static int decode_packet_and_encode(AVPacket *pPacket, AVCodecContext *pCodecCon
       pFrame->data[0] = reprojected;
       pFrame->data[1] = reprojected + w * h;
       pFrame->data[2] = reprojected + w * h + w * h / 4;
-      pFrame->width = w;
-      pFrame->height = h;
-      pFrame->linesize[0] = w;
-      pFrame->linesize[1] = pFrame->linesize[2] = w/2;
       if (encode_video(decoder, encoder, pFrame)) return -1;
       *pFrame = pFrame2;
       delete[] reprojected;
@@ -517,7 +578,7 @@ int prepare_video_encoder(StreamingContext *sc, AVCodecContext *decoder_ctx, AVR
 
   sc->video_avc = avcodec_find_encoder_by_name(sp.video_codec);
   if (!sc->video_avc) {
-    fprintf(stderr, "Could not find the proper codec %s\n", sp.video_codec);
+    fprintf(stderr, "Could not find the proper codec\n");
     return -1;
   }
 
@@ -527,7 +588,7 @@ int prepare_video_encoder(StreamingContext *sc, AVCodecContext *decoder_ctx, AVR
     return -1;
   }
 
-  av_opt_set(sc->video_avcc->priv_data, "preset", "slow", 0);
+  av_opt_set(sc->video_avcc->priv_data, "preset", "veryslow", 0);
   if (sp.codec_priv_key && sp.codec_priv_value)
     av_opt_set(sc->video_avcc->priv_data, sp.codec_priv_key, sp.codec_priv_value, 0);
 
@@ -559,7 +620,6 @@ int main(int argc, char *argv[]) {
   if (argc == 4) {
     // Open pto file
     std::ifstream ptofile(argv[1]);
-
     if (!ptofile.good()) {
       fprintf(stderr, "Could not open pto file %s\n", argv[1]);
       return -1;
@@ -568,13 +628,8 @@ int main(int argc, char *argv[]) {
     // Parse pto file
     HuginBase::Panorama *pano = new HuginBase::Panorama;;
     pano->setFilePrefix(hugin_utils::getPathPrefix(argv[1]));
-    AppBase::DocumentData::ReadWriteError err = pano->readData(ptofile);
-    if (err != AppBase::DocumentData::SUCCESSFUL) {
-      std::cerr << "Could not parse pto file " << argv[1] << ".  Error code: " << err << std::endl;
-      if (err == AppBase::DocumentData::UNKNOWN_ERROR) std::cerr << "UNKNOWN_ERROR" << std::endl;
-      if (err == AppBase::DocumentData::INCOMPATIBLE_TYPE) std::cerr << "INCOMPATIBLE_TYPE" << std::endl;
-      if (err == AppBase::DocumentData::INVALID_DATA) std::cerr << "INVALID_DATA" << std::endl;
-      if (err == AppBase::DocumentData::PARSER_ERROR) std::cerr << "PARSER_ERROR" << std::endl;
+    if (pano->readData(ptofile) != AppBase::DocumentData::SUCCESSFUL) {
+      fprintf(stderr, "Could not parse pto file %s\n", argv[1]);
       delete pano;
       return -1;
     }
@@ -637,11 +692,8 @@ int main(int argc, char *argv[]) {
 	fprintf(stderr, "Could not allocate memory for Format Context\n");
 	return -1;
       }
-      int err = 0;
-      if ((err = avformat_open_input(&pFormatContext, argv[2], NULL, NULL) != 0)) {
-	char errbuf[128];
-	av_strerror(err, errbuf, sizeof(errbuf));
-	fprintf(stderr, "Could not open video file %s (%d): %s\n", argv[2], err, errbuf);
+      if (avformat_open_input(&pFormatContext, argv[2], NULL, NULL) != 0) {
+	fprintf(stderr, "Could not open video file\n");
 	return -1;
       }
       if (avformat_find_stream_info(pFormatContext,  NULL) < 0) {
@@ -661,8 +713,8 @@ int main(int argc, char *argv[]) {
 	input_framerate = pFormatContext->streams[i]->r_frame_rate;
 	printf("AVStream->time_base before open coded %d/%d\n", pFormatContext->streams[i]->time_base.num, pFormatContext->streams[i]->time_base.den);
 	printf("AVStream->r_frame_rate before open coded %d/%d\n", pFormatContext->streams[i]->r_frame_rate.num, pFormatContext->streams[i]->r_frame_rate.den);
-	printf("AVStream->start_time %ld\n", (long int)pFormatContext->streams[i]->start_time);
-	printf("AVStream->duration %ld\n", (long int)pFormatContext->streams[i]->duration);
+	printf("AVStream->start_time %ld\n", pFormatContext->streams[i]->start_time);
+	printf("AVStream->duration %ld\n", pFormatContext->streams[i]->duration);
 
 	printf("finding the proper decoder (CODEC)\n");
 
@@ -684,7 +736,7 @@ int main(int argc, char *argv[]) {
 	  printf("Video Codec: resolution %d x %d\n", pLocalCodecParameters->width, pLocalCodecParameters->height);
 	}
 	// print its name, id and bitrate
-	printf("\tCodec %s ID %d bit_rate %ld\n", pLocalCodec->name, pLocalCodec->id, (long int)pLocalCodecParameters->bit_rate);
+	printf("\tCodec %s ID %d bit_rate %ld\n", pLocalCodec->name, pLocalCodec->id, pLocalCodecParameters->bit_rate);
       }
 
       if (video_stream_index == -1) {
@@ -725,7 +777,7 @@ int main(int argc, char *argv[]) {
       sp.copy_video = 1;
       sp.video_codec = "libx264";
       sp.codec_priv_key = "x264-params";
-      sp.codec_priv_value = "keyint=9999:min-keyint=9999:qp=24:bframes=0:rc-lookahead=0:sync-lookahead=0:threads=4";
+      sp.codec_priv_value = "keyint=9999:min-keyint=9999:scenecut=0:force-cfr=1:crf=24";
 
       StreamingContext *encoder = (StreamingContext*) calloc(1, sizeof(StreamingContext));
       encoder->filename = argv[3];
@@ -749,6 +801,7 @@ int main(int argc, char *argv[]) {
       }
 
       AVDictionary* muxer_opts = NULL;
+
       if (sp.muxer_opt_key && sp.muxer_opt_value) {
 	av_dict_set(&muxer_opts, sp.muxer_opt_key, sp.muxer_opt_value, 0);
       }

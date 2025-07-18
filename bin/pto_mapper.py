@@ -63,7 +63,7 @@ def create_pr_rotation_matrix(p, r):
     R_roll = np.array([[cos_r,-sin_r,0],[sin_r,cos_r,0],[0,0,1.]],dtype=np.float32)
     return np.dot(R_pitch, R_roll)
 
-def map_pano_to_image(pto_data, pano_x, pano_y):
+def map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=False):
     """
     Maps a coordinate from the final panorama to a source image.
 
@@ -74,6 +74,8 @@ def map_pano_to_image(pto_data, pano_x, pano_y):
         pto_data (tuple): The (global_options, images) tuple from parse_pto_file().
         pano_x (float): The x-coordinate in the panorama.
         pano_y (float): The y-coordinate in the panorama.
+        restrict_to_bounds (bool): If True, returns None for coordinates that
+            fall outside the source image's dimensions. Defaults to False.
 
     Returns:
         tuple: A tuple (image_number, x, y) if a mapping is found.
@@ -185,8 +187,8 @@ def map_pano_to_image(pto_data, pano_x, pano_y):
         x_dist, y_dist = x_ideal * mag, y_ideal * mag
         sx, sy = (x_dist - cx) + sw / 2.0, -(y_dist - cy) + sh / 2.0
 
-        # 6. If the coordinate is within the image bounds, we found our match
-        if 0 <= sx < sw and 0 <= sy < sh:
+        # 6. If the coordinate is within bounds (or if not restricted), we found our match
+        if not restrict_to_bounds or (0 <= sx < sw and 0 <= sy < sh):
             return i, sx, sy
 
     return None # No matching image found
@@ -469,7 +471,8 @@ class TestPtoMapping(unittest.TestCase):
                 if abs(pitch_deg) > 89.0:
                     continue
 
-            pano_to_img_result = map_pano_to_image(pto_data, orig_pano_x, orig_pano_y)
+            # For testing, we must restrict to bounds to have a valid round-trip
+            pano_to_img_result = map_pano_to_image(pto_data, orig_pano_x, orig_pano_y, restrict_to_bounds=True)
             
             if pano_to_img_result is None:
                 continue
@@ -524,7 +527,7 @@ if __name__ == '__main__':
         # Print usage information if the number of arguments is incorrect
         print("Usage:")
         print(f"  Run unit test: python {sys.argv[0]} <pto_file>")
-        print(f"  Pano -> Image: python {sys.argv[0]} <pto_file> <pano_x> <pano_y>")
+        print(f"  Pano -> Image: python {sys.argv[0]} <pto_file> <pano_x> <pano_y> [--restrict]")
         print(f"  Image -> Pano: python {sys.argv[0]} <pto_file> <src_x> <src_y> <image_index>")
         sys.exit(1)
 
@@ -548,8 +551,11 @@ if __name__ == '__main__':
         print(f"Error parsing PTO file: {e}")
         sys.exit(1)
 
-    # Mode 2: Forward mapping (Panorama -> Image)
-    if num_args == 4:
+    # Determine which mapping mode is being invoked
+    is_pano_to_image = (num_args == 4) or (num_args == 5 and sys.argv[4] == '--restrict')
+
+    if is_pano_to_image:
+        # Mode 2: Forward mapping (Panorama -> Image)
         try:
             pano_x = float(sys.argv[2])
             pano_y = float(sys.argv[3])
@@ -557,14 +563,16 @@ if __name__ == '__main__':
             print("Error: Panorama coordinates <pano_x> and <pano_y> must be numbers.")
             sys.exit(1)
         
-        result = map_pano_to_image(pto_data, pano_x, pano_y)
+        restrict_bounds = (num_args == 5 and sys.argv[4] == '--restrict')
+        result = map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=restrict_bounds)
+        
         if result:
             print(f"{result[1]} {result[2]} {result[0]}")
         else:
             print("None")
 
-    # Mode 3: Reverse mapping (Image -> Panorama)
-    if num_args == 5:
+    elif num_args == 5:
+        # Mode 3: Reverse mapping (Image -> Panorama)
         try:
             src_x = float(sys.argv[2])
             src_y = float(sys.argv[3])

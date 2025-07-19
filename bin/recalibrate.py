@@ -6,7 +6,7 @@ import sys
 import ephem
 from datetime import datetime, UTC
 import math
-import hsi
+import pto_mapper
 import argparse
 from wand.image import Image
 from wand.drawing import Drawing
@@ -22,7 +22,7 @@ parser = argparse.ArgumentParser(description='Improve calibration of a pto file 
 
 parser.add_argument('-n', '--number', dest='objects', help='maximum number of objects (default: 500)', default=500, type=int)
 parser.add_argument('-f', '--faintest', dest='faintest', help='faintest objects to include (default: 3)', default=3, type=float)
-parser.add_argument('-a', '--altitude', dest='sunalt', help="don't recalibrate if the sun is this many degrees below the horizon or higher (default: 8)", default=-5, type=float)
+parser.add_argument('-a', '--altitude', dest='sunalt', help="don't recalibrate if the sun is this many degrees below the horizon or higher (default: -5)", default=-5, type=float)
 parser.add_argument('-b', '--brightest', dest='brightest', help='brightest objects to include (default: -5)', default=-5, type=float)
 parser.add_argument('-x', '--longitude', dest='longitude', help='observer longitude', type=float)
 parser.add_argument('-y', '--latitude', dest='latitude', help='observer latitude', type=float)
@@ -42,41 +42,114 @@ parser.add_argument(action='store', dest='picture', help='Image file')
 parser.add_argument(action='store', dest='outfile', help='Hugin .pto file (output)')
 
 
-def recalibrate(timestamp, infile, picture, outfile, pos, image, radius = 1.0, lensopt = False, faintest = 3, brightest = -5, objects = 500, blur = 50, verbose = False, sigma = 20):
-    pano = hsi.Panorama()
-    try:
-        pano.ReadPTOFile(infile)
-    except:
-        pano.readData(hsi.ifstream(infile))
-    img = pano.getImage(image)
-    width = img.getWidth()
-    height = img.getHeight()
-    scale = int(pano.getOptions().getWidth() / pano.getOptions().getHFOV())
-    dst = hsi.FDiff2D();
-    trafo = hsi.Transform()
-    trafo.createTransform(img, pano.getOptions())
+def format_pto_line(line_type, params):
+    """Helper function to format a line for the PTO file."""
+    parts = [line_type]
+    for key, val in params.items():
+        if isinstance(val, str) and ' ' in val:
+            parts.append(f'{key}"{val}"')
+        else:
+            parts.append(f'{key}{val}')
+    return ' '.join(parts)
 
-    radius = int(radius*width/img.getHFOV())
-    blur = radius * blur / 100
+def write_pto_for_optimisation(outfile, pto_data, image_index, control_points, lens_opt):
+    """
+    Writes a new PTO file configured for optimizing a single image against itself.
+    """
+    global_options, images = pto_data
+    img_to_optimise = images[image_index].copy()
+
+    with open(outfile, 'w') as f:
+        f.write(format_pto_line('p', global_options) + '\n')
+
+        img_line_0 = img_to_optimise.copy()
+        img_line_0['n'] = 0
+        f.write(format_pto_line('i', img_line_0) + '\n')
+
+        img_line_1 = img_to_optimise.copy()
+        img_line_1['n'] = 1
+        f.write(format_pto_line('i', img_line_1) + '\n')
+
+        for cp in control_points:
+            x_expected, y_expected, x_found, y_found = cp
+            f.write(f'c n0 N1 x{x_found:.4f} y{y_found:.4f} X{x_expected:.4f} Y{y_expected:.4f}\n')
+
+        if lens_opt:
+            f.write('o f0 r+p+y+v+b+c+d+e n"0"\n')
+        else:
+            f.write('o f0 r+p+y n"0"\n')
+        
+        f.write('*\n')
+
+
+def recalibrate(timestamp, infile, picture, outfile, pos, image, radius = 1.0, lensopt = False, faintest = 3, brightest = -5, objects = 500, blur = 50, verbose = False, sigma = 20):
+    out_stream = sys.stdout if verbose else subprocess.DEVNULL
+    
+    if verbose:
+        print(f"Parsing PTO file: {infile}")
+    try:
+        pto_data = pto_mapper.parse_pto_file(infile)
+        global_options, images = pto_data
+    except (ValueError, FileNotFoundError) as e:
+        print(f"Error parsing PTO file '{infile}': {e}", file=sys.stderr)
+        exit(1)
+
+    img_params = images[image]
+    width, height = img_params['w'], img_params['h']
+    pano_width, pano_height = global_options['w'], global_options['h']
+    
+    if global_options.get('f') != 2:
+        print("Error: The panorama projection (p-line 'f' parameter) must be 2 (Equirectangular).", file=sys.stderr)
+        exit(1)
+
+    img_hfov = img_params.get('v', 180)
+    pixel_radius = radius * width / img_hfov
+    blur_radius = pixel_radius * blur / 100
+    
+    if verbose:
+        print(f"Using image {image}: width={width}, height={height}, HFOV={img_hfov:.2f} deg")
+        print(f"Search radius is {radius:.2f} deg, which corresponds to {pixel_radius:.2f} pixels.")
 
     starlist = []
 
     def test_body(body, name, faintest, brightest):
+        """
+        Computes celestial object position, maps it to an image coordinate,
+        and adds it to the list of expected star locations.
+        """
         body.compute(pos)
-        az = math.degrees(float(repr(body.az)))
-        alt = math.degrees(float(repr(body.alt)))
-        alt2 = alt + 0.01666 / math.tan(math.pi/180*(alt + (7.31/(alt + 4.4))))
-        if alt > -0.5 and body.mag <= faintest and body.mag >= brightest:
-            trafo.transformImgCoord(dst, hsi.FDiff2D(az*scale, (90-alt2)*scale));
-            if dst.x > 0 and dst.y > 0 and dst.x < width and dst.y < height:
-                starlist.append((dst.x, dst.y, 0, 0))
+        az_rad, alt_rad = float(repr(body.az)), float(repr(body.alt))
+        alt_deg = math.degrees(alt_rad)
+        if alt_deg < -0.5:
+            return 0
+        
+        alt_corrected_deg = alt_deg + 0.01666 / math.tan(math.radians(alt_deg + (7.31/(alt_deg + 4.4))))
+        alt_corrected_rad = math.radians(alt_corrected_deg)
+
+        if body.mag > faintest or body.mag < brightest:
+            return 0
+
+        pano_x = (az_rad / (2 * math.pi)) * pano_width
+        pano_y = ((-alt_corrected_rad / math.pi) + 0.5) * pano_height
+
+        result = pto_mapper.map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=True)
+
+        if result:
+            mapped_image_index, x, y = result
+            if mapped_image_index == image:
+                if verbose:
+                    print(f"  Found expected position for {name} (mag: {body.mag:.2f}) at ({x:.2f}, {y:.2f})")
+                starlist.append((x, y, 0, 0))
                 return 1
         return 0
 
+    if verbose:
+        print(f"Calculating expected positions for up to {objects} celestial objects (mag {brightest} to {faintest})...")
+    
     count = 0
     for (body, name) in [ (ephem.Sun(), "Sol"), (ephem.Moon(), "Moon") , (ephem.Mercury(), "Mercury"), (ephem.Venus(), "Venus"), (ephem.Mars(), "Mars"), (ephem.Jupiter(), "Jupiter"), (ephem.Saturn(), "Saturn") ]:
         count += test_body(body, name, faintest, brightest)
-        if count == objects:
+        if count >= objects:
             break
 
     if count < objects:
@@ -84,131 +157,144 @@ def recalibrate(timestamp, infile, picture, outfile, pos, image, radius = 1.0, l
             if (mag <= faintest and mag >= brightest):
                 body = ephem.FixedBody()
                 body._ra, body._pmra, body._dec, body._pmdec, body._epoch = str(ra), pmra, str(dec), pmdec, ephem.J2000
-                count += test_body(body, name, 5, -30)
-
-                if count == objects:
+                count += test_body(body, name, faintest, brightest)
+                if count >= objects:
                     break
+    
+    if not starlist:
+        print("No expected stars could be mapped to the input image. Check PTO parameters and timestamp.", file=sys.stderr)
+        exit(1)
+
+    if verbose:
+        print("Generating star mask for feature detection...")
 
     stars = Image(width=width, height=height, background=Color('black'))
-    if isinstance(picture, str):
-        pic = Image(filename=picture)
-    else:
-        pic = picture
-    axy = []
+    pic = Image(filename=picture)
 
     with Drawing() as draw:
         draw.fill_color = Color('white')
-        masked = stars.clone()
         draw.stroke_color = Color('white')
         for (x, y, _, _) in starlist:
-            draw.circle((x, y), (x+radius, y))
-
+            draw.circle((x, y), (x + pixel_radius, y))
         draw(stars)
-        stars.gaussian_blur(blur, blur)
-        pic.gaussian_blur(blur/32, blur/32)
-        masked = stars.clone()
-        with Drawing() as draw:
-            draw.composite(operator='bumpmap', left=0, top=0,
-                           width=pic.width, height=pic.height, image=pic)
-            draw(masked)
+        stars.gaussian_blur(blur_radius, blur_radius)
 
+    pic.gaussian_blur(blur_radius/32, blur_radius/32)
+    
+    masked = stars.clone()
+    with Drawing() as draw:
+        draw.composite(operator='bumpmap', left=0, top=0,
+                       width=pic.width, height=pic.height, image=pic)
+        draw(masked)
 
-
-        temp = tempfile.NamedTemporaryFile(prefix='recalibrate_', suffix='.png', dir='/tmp', delete=False)
+    with tempfile.NamedTemporaryFile(prefix='recalibrate_', suffix='.png', dir='/tmp', delete=False) as temp:
+        temp_name = temp.name
         masked.format = 'png'
-        masked.save(temp)
-        temp.close()
+        masked.save(file=temp)
 
-        out = sys.stdout if verbose else open(os.devnull, 'wb')
-
-        try:
-            #print(['solve-field', '--overwrite', '--sigma', str(sigma), '--just-augment', temp.name])
-            subprocess.Popen(['solve-field', '--sigma', str(sigma), '--just-augment', temp.name], stdout=out, stderr=out).wait()
-            axyfile = os.path.splitext(temp.name)[0] + '.axy'
-            axy = fits.open(axyfile)
-            os.unlink(axyfile)
-        except Exception as e:
-            print(str(e))
-            os.unlink(temp.name)
-            exit(1)
-
-        #os.unlink(temp.name)
+    if verbose:
+        print(f"Running solve-field to find actual star positions (sigma={sigma})...")
+    try:
+        subprocess.run(['solve-field', '--sigma', str(sigma), '--just-augment', temp_name], check=True, stdout=out_stream, stderr=out_stream)
+        axyfile = os.path.splitext(temp_name)[0] + '.axy'
+        with fits.open(axyfile) as hdul:
+            axy_data = hdul[1].data
+        os.unlink(axyfile)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Error running solve-field: {e}", file=sys.stderr)
+        exit(1)
+    finally:
+        os.unlink(temp_name)
 
     def dist(x1, y1, x2, y2):
         return math.sqrt((x2-x1)**2+(y2-y1)**2)
 
+    if verbose:
+        print("Matching expected stars to found stars...")
     remap = []
+    found_stars = [(row[0]-1, row[1]-1) for row in axy_data]
 
-    for (x1, y1, _, _) in starlist:
-        mindist = 9999999
-        x, y = -1, -1
-        for (x2, y2, _, _) in axy[1].data:
-            x2 -= 1
-            y2 -= 1
-            d = dist(x1, y1, x2, y2)
-            if d < mindist and d <= radius:
-                mindist = d
-                x, y = x2, y2
-        if mindist <= radius:
-            remap.append((x1, y1, x, y))
+    for (x_expected, y_expected, _, _) in starlist:
+        min_dist = float('inf')
+        best_match = None
+        for (x_found, y_found) in found_stars:
+            d = dist(x_expected, y_expected, x_found, y_found)
+            if d < min_dist:
+                min_dist = d
+                best_match = (x_found, y_found)
+        
+        if min_dist <= pixel_radius:
+            remap.append((x_expected, y_expected, best_match[0], best_match[1]))
 
     if verbose:
-        print('Stars expected: ' + str(len(starlist)))
-        print('Stars found: ' + str(len(axy[1].data)))
-        print('Stars remapped: ' + str(len(remap)))
+        print(f'Stars expected: {len(starlist)}')
+        print(f'Stars found: {len(found_stars)}')
+        print(f'Stars remapped: {len(remap)}')
         for (x1, y1, x2, y2) in remap:
-            print('{0:8.3f},{1:8.3f} -> {2:8.3f},{3:8.3f}'.format(x1, y1, x2, y2))
+            print(f'  {x1:8.3f},{y1:8.3f} -> {x2:8.3f},{y2:8.3f}')
+            
+    if not remap:
+        print("Could not remap any stars. No control points generated. Check search radius or image quality.", file=sys.stderr)
+        exit(1)
 
-    pano.addImage(img)
-    pano.addImage(img)
-    while pano.getNrOfImages() > 2:
-        pano.removeImage(0)
-
-    for (x1, y1, x2, y2) in remap:
-        pano.addCtrlPoint(hsi.ControlPoint(0, float(x2), float(y2), 1, float(x1), float(y1)))
-
-    if lensopt:
-        #pano.setOptimizeVector([('r', 'p', 'y', 'v', 'a', 'b', 'c', 'd', 'e'), ()])
-        pano.setOptimizeVector([('r', 'p', 'y', 'v', 'b', 'c', 'd', 'e'), ()])
-    else:
-        pano.setOptimizeVector([('r', 'p', 'y'), ()])
-
+    if verbose:
+        print(f"Writing new PTO file for optimisation to {outfile}...")
+    write_pto_for_optimisation(outfile, pto_data, image, remap, lensopt)
 
     try:
-        pano.WritePTOFile(outfile)
-    except:
-        pano.writeData(hsi.ofstream(outfile))
-    try:
-        subprocess.Popen(['cpclean', '-n', '1', '-o', outfile, outfile], stdout=out, stderr=out).wait()
-    except:
-        print('Failed to run cpclean')
+        if verbose: print(f"Running cpclean on {outfile}...")
+        subprocess.run(['cpclean', '-n', '1', '-o', outfile, outfile], check=True, stdout=out_stream, stderr=out_stream)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print('Failed to run cpclean. Please ensure Hugin tools are in your PATH.', file=sys.stderr)
 
     try:
-        subprocess.Popen(['autooptimiser', '-n', '-o', outfile, outfile], stdout=out, stderr=out).wait()
-    except:
-        print('Failed to run autooptimiser')
+        if verbose: print(f"Running autooptimiser on {outfile}...")
+        subprocess.run(['autooptimiser', '-n', '-o', outfile, outfile], check=True, stdout=out_stream, stderr=out_stream)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print('Failed to run autooptimiser. Please ensure Hugin tools are in your PATH.', file=sys.stderr)
+    
+    if verbose:
+        print("Recalibration complete.")
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
     pos = ephem.Observer()
     config = configparser.ConfigParser()
+    
     config.read(['/etc/meteor.cfg', os.path.expanduser('~/meteor.cfg')])
-    pos.lat = config.get('astronomy', 'latitude')
-    pos.lon = config.get('astronomy', 'longitude')
-    pos.elevation = float(config.get('astronomy', 'elevation'))
-    pos.temp = float(config.get('astronomy', 'temperature'))
-    pos.pressure = float(config.get('astronomy', 'pressure'))
-    if args.longitude:
-        pos.lon = args.longitude
-    if args.latitude:
-        pos.lat = args.latitude
-    if args.elevation:
+    try:
+        pos.lat = config.get('astronomy', 'latitude')
+        pos.lon = config.get('astronomy', 'longitude')
+        pos.elevation = float(config.get('astronomy', 'elevation'))
+        pos.temp = float(config.get('astronomy', 'temperature'))
+        pos.pressure = float(config.get('astronomy', 'pressure'))
+    except (configparser.NoSectionError, configparser.NoOptionError) as e:
+        print(f"Configuration error: {e}. Please ensure meteor.cfg is set up or provide location via command line.", file=sys.stderr)
+        if not (args.latitude and args.longitude):
+            exit(1)
+
+    if args.longitude is not None:
+        pos.lon = str(args.longitude)
+    if args.latitude is not None:
+        pos.lat = str(args.latitude)
+    if args.elevation is not None:
         pos.elevation = args.elevation
-    if args.temperature:
+    if args.temperature is not None:
         pos.temp = args.temperature
-    if args.pressure:
+    if args.pressure is not None:
         pos.pressure = args.pressure
 
-    pos.date = datetime.fromtimestamp(float(args.timestamp), UTC).strftime('%Y-%m-%d %H:%M:%S')
-    recalibrate(args.timestamp, args.infile, args.picture, args.outfile, pos, args.image, args.radius, args.lensopt, args.faintest, args.brightest, args.objects, args.blur, args.verbose, args.sigma)
+    pos.date = datetime.fromtimestamp(float(args.timestamp), UTC)
+
+    sun = ephem.Sun(pos)
+    sun_alt_deg = math.degrees(sun.alt)
+    if sun_alt_deg > args.sunalt:
+        print(f"Sun is too high (altitude: {sun_alt_deg:.2f} deg, limit: {args.sunalt:.2f} deg). Skipping recalibration.", file=sys.stderr)
+        exit(0)
+
+    recalibrate(
+        args.timestamp, args.infile, args.picture, args.outfile, pos, 
+        args.image, args.radius, args.lensopt, args.faintest, 
+        args.brightest, args.objects, args.blur, args.verbose, args.sigma
+    )

@@ -22,9 +22,11 @@ except ImportError:
 
 from stars import cat
 
-def brightstar(pto_data, pos, faintest, brightest, objects):
+def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=True):
     """
-    Finds visible celestial objects and maps them to source image coordinates.
+    Finds visible celestial objects.
+    If map_to_source_image is True, it maps them to source image coordinates.
+    Otherwise, it returns the raw celestial coordinates.
     """
     global_options, _ = pto_data
     pano_w = global_options.get('w')
@@ -32,12 +34,11 @@ def brightstar(pto_data, pos, faintest, brightest, objects):
 
     if not pano_w or not pano_h:
         raise ValueError("PTO 'p' line is missing width 'w' or height 'h'.")
-    # This mapping technique is only valid for equirectangular panoramas
     if global_options.get('f', 2) != 2:
         print("Warning: Panorama projection is not equirectangular (f=2). Results may be incorrect.", file=sys.stderr)
 
     def test_body(body, name, faintest, brightest):
-        """Calculates a celestial body's position and finds its pixel coordinates."""
+        """Calculates a celestial body's position and finds its coordinates."""
         body.compute(pos)
         mag = body.mag
         
@@ -51,6 +52,11 @@ def brightstar(pto_data, pos, faintest, brightest, objects):
             return None
         
         az_rad = float(repr(body.az))
+        az_deg = math.degrees(az_rad)
+        
+        # If we don't need to map to a source image, we can return early.
+        if not map_to_source_image:
+            return (az_deg, alt_deg, name, mag)
 
         # Apply atmospheric refraction correction; formula expects degrees
         try:
@@ -59,18 +65,14 @@ def brightstar(pto_data, pos, faintest, brightest, objects):
         except ValueError: # Avoid math domain error near zenith
             return None
         
-        # Convert spherical (az, alt) to equirectangular (x, y) coordinates.
-        # Assumes panorama yaw=0 is South, pitch=0 is horizon.
-        pano_x = (az_rad / (2 * math.pi)) * pano_w      # Azimuth [0, 2pi] -> x [0, w]
-        pano_y = (0.5 - alt2_rad / math.pi) * pano_h  # Altitude [-pi/2, pi/2] -> y [h, 0]
+        pano_x = (az_rad / (2 * math.pi)) * pano_w
+        pano_y = (0.5 - alt2_rad / math.pi) * pano_h
 
-        # Map the panorama coordinate to a source image coordinate
         mapping = pto_mapper.map_pano_to_image(pto_data, pano_x, pano_y)
 
         if mapping:
-            # map_pano_to_image returns (image_index, x, y)
             sx, sy = mapping[1], mapping[2]
-            return (sx, sy, math.degrees(az_rad), alt_deg, name, mag)
+            return (sx, sy, az_deg, alt_deg, name, mag)
 
         return None
 
@@ -166,6 +168,6 @@ if __name__ == '__main__':
 
     # --- Find and print stars ---
     # Output format: image_x image_y azimuth altitude "Name" magnitude
-    results = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects)
+    results = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects, map_to_source_image=True)
     for res_line in results:
         print(*res_line)

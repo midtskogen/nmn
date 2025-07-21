@@ -12,6 +12,7 @@ import argparse
 import warnings
 import datetime
 import pytz
+import json
 
 
 try:
@@ -573,7 +574,7 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
 
     y_final, u_final, v_final = _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weights_uv, masking_stack)
 
-    save_image_yuv420(y_final, u_final, v_final, output_file)
+    save_image_yuv420(y_final, u_final, v_final, output_path)
     print(f"Panoramic image saved to {output_file}")
 
 def worker_for_video_frame(args):
@@ -609,7 +610,6 @@ def worker_for_video_frame(args):
     reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
     reproject_uv_float(blend_weights_uv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_weights_uv.ravel())
 
-    # Add a check to ensure corner_penalty_src is valid before processing
     if use_seam and corner_penalty_src is not None:
         if reproj_penalty_y is not None:
             reproj_penalty_y.fill(0)
@@ -617,13 +617,213 @@ def worker_for_video_frame(args):
     
     return idx
 
-def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, use_sync=False, model=None):
+def _extract_timestamps_from_file(args):
+    """
+    Worker function for ThreadPoolExecutor. Extracts all timestamps from a single video file.
+    This function is executed in a separate thread for each video file.
+    """
+    i, video_file, model = args
+    # Ensure the absolute full path is printed for clarity.
+    full_path = os.path.abspath(video_file)
+    print(f"\nAnalyzing timestamps for {full_path}...")
+    
+    timestamps = []
+    frame_idx = 0
+
+    try:
+        with av.open(video_file) as container:
+            stream = container.streams.video[0]
+            stream.thread_type = 'AUTO'
+            for frame in container.decode(stream):
+                ts = None
+                try:
+                    ts = get_timestamp(frame.to_image(), robust=False, model=model)
+                    if ts is None:
+                        ts = get_timestamp(frame.to_image(), robust=True, model=model)
+                    # If we successfully get a timestamp, clear the last error.
+
+                except (ValueError, TypeError) as e:
+                    # This block catches timestamp parsing errors from get_timestamp,
+                    # logs them, and allows processing to continue without crashing.
+                    error_msg = str(e)
+                    ts = None  # Set the timestamp to None for this frame.
+
+                if ts:
+                    ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
+                    progress_message = f"  -> Current Timestamp: {ts_str}".ljust(70)
+                    sys.stdout.write(f'\r{progress_message}')
+                    sys.stdout.flush()
+
+                timestamps.append((frame_idx, ts))
+                frame_idx += 1
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+
+    except (av.Error, IndexError) as e:
+        sys.stdout.write('\n')
+        print(f"Warning: Could not process video '{full_path}': {e}", file=sys.stderr)
+
+    return i, timestamps
+
+def _estimate_and_fill_timestamps(all_timestamps):
+    """
+    Analyzes timestamps, calculates frame intervals using the median to resist outliers,
+    and fills in missing values.
+    """
+    cleaned_timestamps = []
+    estimated_intervals_sec = []
+
+    for stream_timestamps in all_timestamps:
+        # Calculate the MEDIAN interval from valid timestamps.
+        # The median is robust to outliers, such as large time gaps.
+        valid_diffs = np.diff([ts.timestamp() for _, ts in stream_timestamps if ts is not None])
+        if len(valid_diffs) > 1:
+            median_interval = np.median(valid_diffs)
+            # Add a sanity check for the calculated interval
+            if not (0.01 < median_interval < 10):
+                median_interval = None
+        else:
+            median_interval = None
+        
+        if median_interval:
+            estimated_intervals_sec.append(median_interval)
+
+        filled_stream_ts = []
+        last_valid_ts = None
+        last_valid_idx = -1
+
+        # Find first valid timestamp to start from
+        for idx, ts in stream_timestamps:
+            if ts:
+                last_valid_ts = ts
+                last_valid_idx = idx
+                break
+        
+        if last_valid_ts is None:
+            print("Warning: No valid timestamps found in a stream. It will be ignored in synchronization.", file=sys.stderr)
+            cleaned_timestamps.append([]) # Add empty list to maintain stream count
+            continue
+
+        # Forward fill and estimate missing timestamps
+        for idx, ts in stream_timestamps:
+            if ts:
+                if median_interval and last_valid_idx != -1:
+                    expected_ts = last_valid_ts + datetime.timedelta(seconds=(idx - last_valid_idx) * median_interval)
+                    # If a timestamp deviates too much, treat it as invalid.
+                    if abs((ts - expected_ts).total_seconds()) > median_interval * 5:
+                         filled_stream_ts.append((idx, expected_ts))
+                         continue
+                
+                filled_stream_ts.append((idx, ts))
+                last_valid_ts = ts
+                last_valid_idx = idx
+            else: # ts is None, so we estimate
+                 if median_interval and last_valid_idx != -1:
+                    estimated_ts = last_valid_ts + datetime.timedelta(seconds=(idx - last_valid_idx) * median_interval)
+                    filled_stream_ts.append((idx, estimated_ts))
+                 else:
+                     filled_stream_ts.append((idx, None))
+
+        cleaned_timestamps.append(filled_stream_ts)
+    
+    # Calculate overall median interval for sync tolerance
+    median_overall_interval = np.median(estimated_intervals_sec) if estimated_intervals_sec else (1/30.0) # Default to 30fps
+    return cleaned_timestamps, median_overall_interval
+
+def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
+    """
+    Finds groups of frames that are synchronized within the given tolerance.
+    """
+    num_videos = len(timestamps_per_video)
+    if num_videos == 0: return []
+
+    valid_streams_data = [(i, ts_list) for i, ts_list in enumerate(timestamps_per_video) if ts_list]
+    if len(valid_streams_data) < num_videos:
+        print(f"Warning: Only {len(valid_streams_data)} of {num_videos} have valid timestamps for synchronization.", file=sys.stderr)
+    if len(valid_streams_data) < 2:
+        print("Error: Synchronization requires at least two video streams with valid timestamps.", file=sys.stderr)
+        return []
+    
+    stream_indices = [d[0] for d in valid_streams_data]
+    ts_data = [d[1] for d in valid_streams_data]
+    num_valid_streams = len(ts_data)
+
+    pointers = [0] * num_valid_streams
+    stream_lengths = [len(s) for s in ts_data]
+    synchronized_frame_groups = []
+
+    while all(p < l for p, l in zip(pointers, stream_lengths)):
+        current_timestamps = [ts_data[i][pointers[i]][1] for i in range(num_valid_streams)]
+        
+        if any(ts is None for ts in current_timestamps):
+            for i, ts in enumerate(current_timestamps):
+                if ts is None: pointers[i] += 1
+            continue
+
+        max_ts = max(current_timestamps)
+
+        if all((max_ts - ts).total_seconds() <= sync_tolerance_sec for ts in current_timestamps):
+            frame_indices = [ts_data[i][pointers[i]][0] for i in range(num_valid_streams)]
+            
+            full_group = [-1] * num_videos
+            for original_idx, frame_idx in zip(stream_indices, frame_indices):
+                full_group[original_idx] = frame_idx
+            synchronized_frame_groups.append(tuple(full_group))
+
+            for i in range(num_valid_streams): pointers[i] += 1
+        else:
+            min_ts = min(current_timestamps)
+            min_idx = current_timestamps.index(min_ts)
+            pointers[min_idx] += 1
+            
+    return synchronized_frame_groups
+
+def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, use_sync=False, model=None, save_sync_file=None, load_sync_file=None):
     if av is None: raise ImportError("PyAV is not installed.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")
+    
+    # --- Video Synchronization Pass ---
+    synchronized_frame_groups = []
+    if use_sync:
+        if load_sync_file:
+            print(f"Loading sync map from {load_sync_file}...")
+            with open(load_sync_file, 'r') as f:
+                synchronized_frame_groups = json.load(f)
+            print(f"Loaded {len(synchronized_frame_groups)} synchronized frame groups.")
+        else:
+            print("Starting Pass 1: Timestamp analysis (utilizing all available cores)...")
+            with ThreadPoolExecutor(max_workers=num_cores) as executor:
+                raw_ts_data_unordered = list(executor.map(_extract_timestamps_from_file, [(i, f, model) for i, f in enumerate(input_files)]))
+            
+            raw_ts_data = [d for _, d in sorted(raw_ts_data_unordered)]
+
+            print("Estimating timestamps using robust median interval...")
+            cleaned_ts_data, median_interval = _estimate_and_fill_timestamps(raw_ts_data)
+            
+            sync_tolerance = median_interval * 1.5
+            print(f"Calculated median frame interval: {median_interval:.3f}s. Using sync tolerance: {sync_tolerance:.3f}s")
+
+            print("Starting Pass 2: Finding synchronized frame groups...")
+            synchronized_frame_groups = _find_synchronized_frames(cleaned_ts_data, sync_tolerance)
+
+            if not synchronized_frame_groups:
+                print("\nError: Could not find any synchronized frames. Aborting.", file=sys.stderr)
+                return
+                
+            print(f"Found {len(synchronized_frame_groups)} synchronized frame groups to stitch.")
+
+            if save_sync_file:
+                print(f"Saving sync map to {save_sync_file}...")
+                with open(save_sync_file, 'w') as f:
+                    json.dump(synchronized_frame_groups, f, indent=2)
+                print("Sync map saved.")
+
+    # --- Stitching Pass ---
+    print("\nStarting stitching process...")
     in_containers = [av.open(f) for f in input_files]
     in_streams = [c.streams.video[0] for c in in_containers]
     for s in in_streams: s.thread_type = 'AUTO'
@@ -632,9 +832,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     out_stream = out_container.add_stream("libx264", rate=in_streams[0].average_rate)
     out_stream.width, out_stream.height, out_stream.pix_fmt = final_w, final_h, 'yuv420p'
     out_stream.options = {"preset": "fast", "crf": "28"}
-
-    frame_iters = [c.decode(s) for c, s in zip(in_containers, in_streams)]
-    frame_count = 0
     
     cached_seam_weights, target_leveling_params, previous_leveling_params = None, None, None
     recalc_frame_number = 1
@@ -645,120 +842,63 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     frame_weights_y = np.empty((num_images, final_h, final_w), dtype=np.float32)
     frame_weights_uv = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.float32)
     frame_penalty_y = np.empty((num_images, final_h, final_w), dtype=np.float32) if use_seam else None
+    
     blend_weights_y, blend_weights_uv, corner_penalties_y = [], [], []
-    for stream in in_streams:
-        sw_padded, sh_padded = stream.width + 2 * pad, stream.height + pad
+    for i, stream in enumerate(in_streams):
+        sw_map, sh_map = mappings[i][4], mappings[i][5]
+        sw_padded, sh_padded = sw_map + 2 * pad, sh_map + pad
         weights_y = create_blend_weight_map(sw_padded, sh_padded)
         blend_weights_y.append(weights_y)
         blend_weights_uv.append(np.ascontiguousarray(weights_y[::2, ::2]))
         if use_seam:
             corner_penalties_y.append(create_corner_penalty_map(sw_padded, sh_padded))
 
-    if use_sync:
-        print("Timestamp synchronization enabled.")
-        current_frames = [None] * num_images
-        current_timestamps = [None] * num_images
-        stream_intervals = [datetime.timedelta(seconds=4)] * num_images
-        stream_ended = [False] * num_images
-
-        def advance_stream(i, prev_ts):
-            try:
-                frame = next(frame_iters[i])
-                
-                read_ts = None
-                try:
-                    # Wrap timestamp reading in a try/except block ---
-                    read_ts = get_timestamp(frame.to_image(), robust=False, model=model)
-                    if read_ts is None:
-                        read_ts = get_timestamp(frame.to_image(), robust=True, model=model)
-                except ValueError as e:
-                    read_ts = None # Ensure it is None if parsing fails
-
-                expected_ts = prev_ts + stream_intervals[i]
-                
-                is_plausible = False
-                if read_ts:
-                    if abs((read_ts - expected_ts).total_seconds()) < 300: # 5-minute plausibility window
-                        is_plausible = True
-
-                if is_plausible:
-                    new_ts = read_ts
-                    time_diff = new_ts - prev_ts
-                    if 0.1 < time_diff.total_seconds() < 300:
-                        stream_intervals[i] = datetime.timedelta(seconds=(0.8 * stream_intervals[i].total_seconds() + 0.2 * time_diff.total_seconds()))
-                else:
-                    new_ts = expected_ts
-                
-                return frame, new_ts, False
-            except StopIteration:
-                return None, None, True
-
-        print("Initializing frame synchronization...")
-        for i in range(num_images):
-            try:
-                ts1, f1 = None, None
-                for _ in range(200):
-                    f1 = next(frame_iters[i])
-                    ts1 = get_timestamp(f1.to_image(), robust=True, model=model)
-                    if ts1: break
-                if not ts1: raise StopIteration("Could not find a valid initial timestamp.")
-                
-                ts2, f2 = None, None
-                for _ in range(200):
-                    f2 = next(frame_iters[i])
-                    ts2 = get_timestamp(f2.to_image(), robust=True, model=model)
-                    if ts2 and ts2 > ts1: break
-                if not ts2: raise StopIteration("Could not find a subsequent valid timestamp.")
-                
-                stream_intervals[i] = ts2 - ts1
-                current_frames[i] = f2
-                current_timestamps[i] = ts2
-
-            except StopIteration as e:
-                stream_ended[i] = True
-
-        if any(stream_ended):
-            print("\nError: One or more video streams are empty or failed to initialize. Terminating.", file=sys.stderr)
-            for c in in_containers: c.close()
-            out_container.close()
-            return
-            
+    frame_iters = [c.decode(s) for c, s in zip(in_containers, in_streams)]
+    frame_count = 0
+    
+    loop_iterator = synchronized_frame_groups if use_sync else zip(*frame_iters)
+    
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
-        while True:
+        current_frame_indices = [-1] * num_images
+        
+        for group in loop_iterator:
+            final_group_frames = [None] * num_images
+            
             if use_sync:
-                if any(stream_ended):
-                    print("\nA video stream has ended. Terminating process.", file=sys.stderr)
-                    break
-                
-                avg_interval = datetime.timedelta(seconds=np.mean([iv.total_seconds() for iv in stream_intervals]))
-                tolerance = datetime.timedelta(seconds=avg_interval.total_seconds() * 1.5)
-
-                while (max(current_timestamps) - min(current_timestamps)) > tolerance:
-                    min_ts = min(current_timestamps)
-                    min_idx = current_timestamps.index(min_ts)
+                target_indices = group
+                for i, target_idx in enumerate(target_indices):
+                    if target_idx == -1: continue
                     
-                    frame, new_ts, ended = advance_stream(min_idx, current_timestamps[min_idx])
-                    if ended:
-                        stream_ended[min_idx] = True
+                    frame = None
+                    try:
+                        while current_frame_indices[i] < target_idx:
+                            frame = next(frame_iters[i])
+                            current_frame_indices[i] += 1
+                        
+                        if frame and current_frame_indices[i] == target_idx:
+                             final_group_frames[i] = frame
+                        else:
+                             raise StopIteration
+                    except StopIteration:
+                        print(f"\nWarning: Stream {i} ended unexpectedly while seeking frame {target_idx}. Terminating.", file=sys.stderr)
+                        group = None 
                         break
-                    current_frames[min_idx] = frame
-                    current_timestamps[min_idx] = new_ts
-                
-                if any(stream_ended): continue
+                if group is None: break
 
-                final_group_frames = current_frames
-                frame_count += 1
-                dt_object = datetime.datetime.fromtimestamp(np.mean([ts.timestamp() for ts in current_timestamps]), tz=pytz.utc)
-                status_message = f"Processing synced frame: {frame_count} @ {dt_object.strftime('%Y-%m-%d %H:%M:%S')}"
-                sys.stdout.write('\r' + status_message.ljust(os.get_terminal_size().columns - 1))
-                sys.stdout.flush()
-
-            else: 
+            else:
                 try:
-                    final_group_frames = [next(it) for it in frame_iters]
-                    frame_count += 1
+                    final_group_frames = list(group)
                 except StopIteration:
                     break
+            
+            if any(f is None for f in final_group_frames):
+                continue
+
+            frame_count += 1
+            status_message = f"Processing frame group: {frame_count}"
+            if use_sync: status_message += f" / {len(synchronized_frame_groups)}"
+            sys.stdout.write('\r' + status_message.ljust(os.get_terminal_size().columns - 1))
+            sys.stdout.flush()
 
             is_leveling_frame = (use_seam and num_images > 1 and (frame_count == 1 or (frame_count - 1) % level_freq == 0))
             
@@ -766,7 +906,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                 (
                     (i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], blend_weights_uv[i], pad, use_seam, corner_penalties_y[i] if use_seam else None),
                     (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i], frame_penalty_y[i] if use_seam else None)
-                ) for i in range(num_images)
+                ) for i in range(num_images) if final_group_frames[i] is not None
             ]
             
             list(executor.map(worker_for_video_frame, worker_args))
@@ -795,7 +935,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                     _apply_offset_numba(u_planes_leveled, interp_u_off)
                     _apply_offset_numba(v_planes_leveled, interp_v_off)
                     y_planes, u_planes, v_planes = y_planes_leveled, u_planes_leveled, v_planes_leveled
-            else: # Feathering
+            else:
                 final_weights_y, final_weights_uv = _calculate_feather_blend_weights(frame_weights_y, frame_weights_uv)
                 masking_stack = frame_weights_y
 
@@ -804,16 +944,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
-
-            if use_sync:
-                for i in range(num_images):
-                    if stream_ended[i]: continue
-                    frame, new_ts, ended = advance_stream(i, current_timestamps[i])
-                    if ended:
-                        stream_ended[i] = True
-                        continue
-                    current_frames[i] = frame
-                    current_timestamps[i] = new_ts
 
     for packet in out_stream.encode(): out_container.mux(packet)
     out_container.close()
@@ -839,8 +969,17 @@ def main():
     parser.add_argument("--level-freq", type=int, default=8, help="Frequency of seam leveling recalculation for videos. Defaults to 8 frames.")
     parser.add_argument("--sync", action='store_true', help="For videos, synchronize streams by their embedded timestamps before stitching.")
     parser.add_argument("--model", type=str, default=None, help="Specify the model for timestamp extraction.")
+    parser.add_argument("--save-sync", type=str, default=None, help="Save the synchronization map to a JSON file (requires --sync).")
+    parser.add_argument("--load-sync", type=str, default=None, help="Load a pre-computed synchronization map from a JSON file (requires --sync).")
     args = parser.parse_args()
     
+    # --- Argument Validation ---
+    if args.save_sync and args.load_sync:
+        print("Error: --save-sync and --load-sync cannot be used at the same time.", file=sys.stderr)
+        sys.exit(1)
+    if (args.save_sync or args.load_sync) and not args.sync:
+        print("Error: --save-sync and --load-sync require the --sync flag to be enabled.", file=sys.stderr)
+        sys.exit(1)
     if len(args.input_files) < 2:
         args.seamless = False
         args.sync = False
@@ -855,7 +994,12 @@ def main():
         if is_image_input:
             reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores)
         elif is_video_input:
-            reproject_videos(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, args.level_freq, args.sync, args.model)
+            reproject_videos(
+                args.pto_file, args.input_files, args.output_file, 
+                args.pad, args.seamless, args.level_subsample, args.seam_subsample, 
+                num_cores, args.level_freq, args.sync, args.model, 
+                save_sync_file=args.save_sync, load_sync_file=args.load_sync
+            )
         else:
             print("Error: Input files must all be either images or videos.", file=sys.stderr)
             sys.exit(1)

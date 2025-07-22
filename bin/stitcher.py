@@ -574,7 +574,7 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
 
     y_final, u_final, v_final = _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weights_uv, masking_stack)
 
-    save_image_yuv420(y_final, u_final, v_final, output_path)
+    save_image_yuv420(y_final, u_final, v_final, output_file)
     print(f"Panoramic image saved to {output_file}")
 
 def worker_for_video_frame(args):

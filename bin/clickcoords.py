@@ -641,6 +641,99 @@ class Zoom_Advanced(ttk.Frame):
         self.right_key(event)
 
 
+def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_callback):
+    """
+    Recursively divides the file list to find and fill blocks of identical timestamps.
+    This is a helper function for extract_timestamps.
+    """
+    if start_idx > end_idx:
+        return
+
+    # For a single element range, ensure its timestamp is calculated.
+    if start_idx == end_idx:
+        if timestamps[start_idx] is None:
+            timestamp(timestamps, files, start_idx)
+            if timestamps[start_idx] is not None:
+                report_progress_callback()
+        return
+
+    # Ensure timestamps for boundaries are known to make a comparison.
+    if timestamps[start_idx] is None:
+        timestamp(timestamps, files, start_idx)
+        if timestamps[start_idx] is not None:
+            report_progress_callback()
+    if timestamps[end_idx] is None:
+        timestamp(timestamps, files, end_idx)
+        if timestamps[end_idx] is not None:
+            report_progress_callback()
+
+    # If timestamps at boundaries are identical and not None, fill the gap.
+    if timestamps[start_idx] is not None and timestamps[start_idx] == timestamps[end_idx]:
+        frames_filled = 0
+        for i in range(start_idx + 1, end_idx):
+            if timestamps[i] is None:
+                timestamps[i] = timestamps[start_idx]
+                frames_filled += 1
+        if frames_filled > 0:
+            report_progress_callback(num_frames=frames_filled)
+        return
+    
+    # If the block is too small to divide further, stop recursion.
+    if end_idx <= start_idx + 1:
+        return
+
+    # Otherwise, find the middle and recurse on both halves.
+    mid_idx = (start_idx + end_idx) // 2
+    _recursive_extract(timestamps, files, start_idx, mid_idx, report_progress_callback)
+    _recursive_extract(timestamps, files, mid_idx + 1, end_idx, report_progress_callback)
+
+
+def extract_timestamps(files):
+    """
+    Optimized timestamp extraction using a divide-and-conquer strategy
+    to quickly fill blocks of files with the same timestamp.
+    """
+    total_files = len(files)
+    if not files:
+        return []
+    
+    raw_timestamps = [None] * total_files
+    print("Extracting timestamps...")
+
+    # --- Progress Bar State & Callback ---
+    progress_state = {'processed_count': 0}
+    bar_length = 40
+
+    def _update_progress_bar():
+        count = progress_state['processed_count']
+        # Prevent count from exceeding total for display purposes
+        count = min(count, total_files)
+        progress = count / total_files
+        block = int(round(bar_length * progress))
+        text = f"\rProgress: [{'#' * block + '-' * (bar_length - block)}] {count}/{total_files} ({progress*100:.0f}%)"
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    def _report_progress(num_frames=1):
+        progress_state['processed_count'] += num_frames
+        _update_progress_bar()
+
+    # --- Recursive pre-pass to fill large, uniform sections ---
+    _recursive_extract(raw_timestamps, files, 0, total_files - 1, _report_progress)
+
+    # --- Final linear pass to fill any remaining gaps ---
+    for i in range(total_files):
+        if raw_timestamps[i] is None:
+            timestamp(raw_timestamps, files, i)
+            if raw_timestamps[i] is not None:
+                _report_progress() # Report progress for this single frame
+    
+    # Ensure the bar shows 100% at the end
+    sys.stdout.write(f"\rProgress: [{'#' * bar_length}] {total_files}/{total_files} (100%)\n\n")
+
+    return raw_timestamps
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Click on images to find coordinates.')
     parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
@@ -683,22 +776,7 @@ if __name__ == '__main__':
 
     timestamps = [None] * len(images)
     if args.start is None:
-        raw_timestamps = [None] * len(images)
-        total_images = len(images)
-        bar_length = 40
-        
-        print("Extracting timestamps...")
-        if total_images > 0:
-            for i in range(total_images):
-                timestamp(raw_timestamps, images, i)
-                
-                progress = (i + 1) / total_images
-                block = int(round(bar_length * progress))
-                text = f"\rProgress: [{'#' * block + '-' * (bar_length - block)}] {i+1}/{total_images} ({progress*100:.0f}%)"
-                sys.stdout.write(text)
-                sys.stdout.flush()
-            sys.stdout.write("\n\n")
-
+        raw_timestamps = extract_timestamps(images)
         print("Interpolating timestamps...")
         timestamps = interpolate_timestamps(raw_timestamps)
         starttime = timestamps[0] if timestamps and timestamps[0] is not None else datetime.now().timestamp()

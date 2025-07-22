@@ -510,12 +510,48 @@ def _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weig
 
     return y_final, u_final, v_final
 
+def _precompile_numba_functions():
+    """
+    Call all Numba JIT functions with dummy data to force compilation 
+    in a single thread, avoiding race conditions in thread pools.
+    """
+    # Dummy arrays with correct types and minimal dimensions
+    dw, dh = 8, 8
+    sw_src, sh_src = 16, 16 # Larger than dest to avoid index errors
+    
+    map_y_idx = np.full(dw * dh, -1, dtype=np.int32)
+    c01 = np.zeros(dw * dh, dtype=np.uint16)
+    c23 = np.zeros(dw * dh, dtype=np.uint16)
+    map_uv_idx = np.full((dw // 2) * (dh // 2), -1, dtype=np.int32)
+    
+    p_y = np.zeros(sw_src * sh_src, dtype=np.uint8)
+    p_uv = np.zeros((sw_src // 2) * (sh_src // 2), dtype=np.uint8)
+    p_float = np.zeros(sw_src * sh_src, dtype=np.float32)
+    p_float_uv = np.zeros((sw_src // 2) * (sh_src // 2), dtype=np.float32)
+    
+    out_y = np.zeros(dw * dh, dtype=np.uint8)
+    out_u = np.zeros((dw // 2) * (dh // 2), dtype=np.uint8)
+    out_v = np.zeros((dw // 2) * (dh // 2), dtype=np.uint8)
+    out_float = np.zeros(dw * dh, dtype=np.float32)
+    out_float_uv = np.zeros((dw // 2) * (dh // 2), dtype=np.float32)
+
+    # Call each function once to compile it
+    _ = create_blend_weight_map(dw, dh)
+    _ = create_corner_penalty_map(dw, dh)
+    reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y)
+    reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v)
+    reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float)
+    reproject_uv_float(p_float_uv, dw, dh, map_uv_idx, out_float_uv)
+    
 def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores):
     mappings, global_options = build_mappings(pto_file, pad, num_cores)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images:
         raise ValueError(f"Input files ({len(input_files)}) != PTO images ({num_images}).")
+
+    # Eagerly compile Numba functions before entering the thread pool
+    _precompile_numba_functions()
 
     all_reproj_y = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     all_reproj_u = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
@@ -785,6 +821,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")
+    
+    # Eagerly compile Numba functions before entering the thread pool
+    _precompile_numba_functions()
     
     # --- Video Synchronization Pass ---
     synchronized_frame_groups = []

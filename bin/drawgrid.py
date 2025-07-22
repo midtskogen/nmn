@@ -48,6 +48,7 @@ def main():
     parser.add_argument('-d', '--date', dest='timestamp', help='Unix timestamp (seconds since 1970-01-01 00:00:00UTC)', type=int)
     parser.add_argument("--radec", help="use RA/DEC instead of az/alt", action="store_true")
     parser.add_argument("--verbose", help="more verbose labels", action="store_true")
+    parser.add_argument("--refract", help="Apply atmospheric refraction correction (Az/Alt mode only).", action="store_true")
 
     parser.add_argument(action='store', dest='infile', help='input .pto file')
     parser.add_argument(action='store', dest='outfile', help='output grid file (default "grid.png")', default="grid.png", nargs='?')
@@ -172,6 +173,11 @@ def main():
         pos.pressure = args.pressure
     if args.timestamp:
         pos.date = datetime.fromtimestamp(float(args.timestamp), UTC).strftime('%Y-%m-%d %H:%M:%S')
+    if args.radec and not args.refract:
+        # Disable ephem's internal refraction correction.
+        # This is done for RA/Dec mode (to prevent grid distortion) or if 
+        # the user hasn't explicitly requested refraction for Az/Alt mode.
+        pos.pressure = 0
 
     # Get image properties from pto_data
     width = img0_data['w']
@@ -278,10 +284,23 @@ def main():
     minalt3 = max(minalt, 10)
 
     def refract(alt):
-        return 0 if args.radec else 0.016/(math.tan(3.141592/180*(alt + (7.31/(alt + 4.4)))))
+        """Calculates atmospheric refraction offset, only if --refract is enabled and not in RA/Dec mode."""
+        # In RA/Dec mode, refraction is disabled as it would distort the grid incorrectly.
+        if args.radec or not args.refract:
+            return 0.0
+        
+        # Refraction formula is not stable for altitudes at or below the horizon.
+        val_for_tan = alt + (7.31 / (alt + 4.4))
+        if val_for_tan <= 0:
+            return 0.0
+        
+        return 0.016 / (math.tan(math.radians(val_for_tan)))
 
     def scalealt(alt, scale):
-        return (90.0 - alt)*scale if args.radec else (90-((alt)+refract(alt)))*scale
+        """Calculates the y-coordinate on the image from altitude, applying refraction if enabled."""
+        # Refraction makes objects appear higher; the correction is added to the true altitude.
+        alt_apparent = alt + refract(alt)
+        return (90.0 - alt_apparent) * scale
 
     def frange(x, y, jump):
         while x < y:
@@ -376,8 +395,9 @@ def main():
             if alt == 10 and az % (30 if args.radec else 20) == 0:
                 continue
             
-            alt2 = alt-refract(alt)
-            y_coord = (90.0 - alt2) * scale
+            # Apply refraction to find the apparent altitude for the label position
+            alt_apparent = alt + refract(alt)
+            y_coord = (90.0 - alt_apparent) * scale
             az2 = az*scale
             
             forward_transform_new(dst, Vector2D(az2, y_coord))

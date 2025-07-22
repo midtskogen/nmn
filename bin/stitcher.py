@@ -154,16 +154,9 @@ def reproject_uv(pu, pv, dw, dh, map_uv_idx, out_u, out_v):
             coffset = map_uv_idx[base_uv + x_uv]
             if coffset >= 0:
                 out_u[base_uv + x_uv], out_v[base_uv + x_uv] = pu[coffset], pv[coffset]
-
-@numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def reproject_uv_float(p_float_uv_src, dw, dh, map_uv_idx, out_float_uv):
-    half_w, half_h = dw // 2, dh // 2
-    for y_uv in prange(half_h):
-        base_uv = y_uv * half_w
-        for x_uv in range(half_w):
-            coffset = map_uv_idx[base_uv + x_uv]
-            if coffset >= 0:
-                out_float_uv[base_uv + x_uv] = p_float_uv_src[coffset]
+            else:
+                out_u[base_uv + x_uv] = 128
+                out_v[base_uv + x_uv] = 128
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
 def compute_map_and_weights(coords_y, sw, sh, pad):
@@ -304,7 +297,6 @@ def process_and_reproject_image(args):
     sw_padded, sh_padded = sw_orig + 2 * pad, sh_orig + pad
     
     blend_weights_y = create_blend_weight_map(sw_padded, sh_padded)
-    blend_weights_uv = np.ascontiguousarray(blend_weights_y[::2,::2])
 
     map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
     
@@ -314,14 +306,21 @@ def process_and_reproject_image(args):
     reproj_v.fill(128)
     reproj_weights_y.fill(0)
     reproj_weights_uv.fill(0)
-    if use_seam:
+    if use_seam and reproj_penalty_y is not None:
         reproj_penalty_y.fill(0)
 
     # Reproject into shared buffers
     reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel())
     reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel())
     reproject_float(blend_weights_y.ravel(), dw, dh, blend_weights_y.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
-    reproject_uv_float(blend_weights_uv.ravel(), dw, dh, map_uv_idx.ravel(), reproj_weights_uv.ravel())
+
+    # Average the smooth luma weights down to the chroma resolution.
+    # This ensures the chroma weights are consistent with the luma weights, preventing color artifacts.
+    h, w = dh, dw
+    reproj_weights_uv[:, :] = 0.25 * (reproj_weights_y[0:h:2, 0:w:2] +
+                                      reproj_weights_y[1:h:2, 0:w:2] +
+                                      reproj_weights_y[0:h:2, 1:w:2] +
+                                      reproj_weights_y[1:h:2, 1:w:2])
 
     if use_seam:
         corner_penalty_src = create_corner_penalty_map(sw_padded, sh_padded)
@@ -515,6 +514,8 @@ def _precompile_numba_functions():
     Call all Numba JIT functions with dummy data to force compilation 
     in a single thread, avoiding race conditions in thread pools.
     """
+    print("Pre-compiling JIT functions...")
+    
     # Dummy arrays with correct types and minimal dimensions
     dw, dh = 8, 8
     sw_src, sh_src = 16, 16 # Larger than dest to avoid index errors
@@ -527,13 +528,11 @@ def _precompile_numba_functions():
     p_y = np.zeros(sw_src * sh_src, dtype=np.uint8)
     p_uv = np.zeros((sw_src // 2) * (sh_src // 2), dtype=np.uint8)
     p_float = np.zeros(sw_src * sh_src, dtype=np.float32)
-    p_float_uv = np.zeros((sw_src // 2) * (sh_src // 2), dtype=np.float32)
     
     out_y = np.zeros(dw * dh, dtype=np.uint8)
     out_u = np.zeros((dw // 2) * (dh // 2), dtype=np.uint8)
     out_v = np.zeros((dw // 2) * (dh // 2), dtype=np.uint8)
     out_float = np.zeros(dw * dh, dtype=np.float32)
-    out_float_uv = np.zeros((dw // 2) * (dh // 2), dtype=np.float32)
 
     # Call each function once to compile it
     _ = create_blend_weight_map(dw, dh)
@@ -541,8 +540,9 @@ def _precompile_numba_functions():
     reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y)
     reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v)
     reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float)
-    reproject_uv_float(p_float_uv, dw, dh, map_uv_idx, out_float_uv)
     
+    print("Pre-compilation complete.")
+
 def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores):
     mappings, global_options = build_mappings(pto_file, pad, num_cores)
     final_w, final_h = global_options['final_w'], global_options['final_h']
@@ -644,7 +644,13 @@ def worker_for_video_frame(args):
     reproject_y(py_src.ravel(), dw, dh, padded_sw_y, map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel())
     reproject_uv(pu_src.ravel(), pv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel())
     reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
-    reproject_uv_float(blend_weights_uv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_weights_uv.ravel())
+
+    # Average the smooth luma weights down to the chroma resolution.
+    h, w = dh, dw
+    reproj_weights_uv[:, :] = 0.25 * (reproj_weights_y[0:h:2, 0:w:2] +
+                                      reproj_weights_y[1:h:2, 0:w:2] +
+                                      reproj_weights_y[0:h:2, 1:w:2] +
+                                      reproj_weights_y[1:h:2, 1:w:2])
 
     if use_seam and corner_penalty_src is not None:
         if reproj_penalty_y is not None:
@@ -824,7 +830,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     
     # Eagerly compile Numba functions before entering the thread pool
     _precompile_numba_functions()
-    
+
     # --- Video Synchronization Pass ---
     synchronized_frame_groups = []
     if use_sync:

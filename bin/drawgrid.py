@@ -201,48 +201,60 @@ def main():
     a = math.sin((y2-y1)/2) * math.sin((y2-y1)/2) + math.cos(y1) * math.cos(y2) * math.sin((x2-x1)/2) * math.sin((x2-x1)/2)
     fov = math.degrees(2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
-    # Find az and alt range
-    minaz = minaz2 = 360
-    maxaz = maxaz2 = -360
-    minalt = 90
-    maxalt = -90
+    # --- NEW BOUNDS DETECTION ---
+    # Find az and alt range by sampling the entire image area to be robust against projection distortions.
+    minalt = 90.0
+    maxalt = -90.0
+    az_values = set()
+    
+    # Define a sampling step. A smaller step is more accurate but slower.
+    sample_step = 30 
 
-    inverse_transform_new(centre, Vector2D(width/2, height/2))
+    for y in range(0, height + 1, sample_step):
+        img_y = min(y, height)
+        for x in range(0, width + 1, sample_step):
+            img_x = min(x, width)
+            inverse_transform_new(dst, Vector2D(img_x, img_y))
+            
+            # inverse_transform_new returns dst.x = -1 on failure
+            if dst.x == -1:
+                continue
 
-    for i in range(0, width+1, 4):
-        inverse_transform_new(dst, Vector2D(i, 0))
-        az, alt = dst.x / scale, 90.0 - (dst.y / scale)
-        minaz = min(minaz, az); maxaz = max(maxaz, az)
-        minalt = min(minalt, alt); maxalt = max(maxalt, alt)
-        if az > 180: minaz2 = min(minaz2, az - 360)
-        if az < 180: maxaz2 = max(maxaz2, az)
+            az, alt = dst.x / scale, 90.0 - (dst.y / scale)
+            
+            minalt = min(minalt, alt)
+            maxalt = max(maxalt, alt)
+            az_values.add(az)
 
-        inverse_transform_new(dst, Vector2D(i, height))
-        az, alt = dst.x / scale, 90.0 - (dst.y / scale)
-        minaz = min(minaz, az); maxaz = max(maxaz, az)
-        minalt = min(minalt, alt); maxalt = max(maxalt, alt)
-        if az > 180: minaz2 = min(minaz2, az - 360)
-        if az < 180: maxaz2 = max(maxaz2, az)
-
-
-    for i in range(0, height+1, 4):
-        inverse_transform_new(dst, Vector2D(0, i))
-        az, alt = dst.x / scale, 90.0 - (dst.y / scale)
-        minaz = min(minaz, az); maxaz = max(maxaz, az)
-        minalt = min(minalt, alt); maxalt = max(maxalt, alt)
-        if az > 180: minaz2 = min(minaz2, az - 360)
-        if az < 180: maxaz2 = max(maxaz2, az)
-
-        inverse_transform_new(dst, Vector2D(width, i))
-        az, alt = dst.x / scale, 90.0 - (dst.y / scale)
-        minaz = min(minaz, az); maxaz = max(maxaz, az)
-        minalt = min(minalt, alt); maxalt = max(maxalt, alt)
-        if az > 180: minaz2 = min(minaz2, az - 360)
-        if az < 180: maxaz2 = max(maxaz2, az)
-
-    # Handle az wrap
-    if maxaz - minaz > 180:
-        minaz, maxaz = minaz2 + 360, maxaz2 + 360
+    if not az_values:
+        print("Warning: Could not map any image points to celestial coordinates. Grid will not be drawn.")
+        minaz, maxaz = 0, 0
+    else:
+        # Determine the min and max azimuth, correctly handling the 0/360 wrap-around.
+        sorted_az = sorted(list(az_values))
+        
+        if len(sorted_az) == 1:
+            minaz = maxaz = sorted_az[0]
+        else:
+            # Find the largest gap between sorted azimuth values. A large gap indicates the 0/360 discontinuity.
+            max_gap = 0
+            gap_index = -1
+            for i in range(len(sorted_az) - 1):
+                gap = sorted_az[i+1] - sorted_az[i]
+                if gap > max_gap:
+                    max_gap = gap
+                    gap_index = i
+            
+            # A gap > 180 degrees signifies that the azimuth range crosses the 0/360 boundary.
+            if max_gap > 180:
+                # The range is wrapped. E.g., from 340 deg to 20 deg.
+                # We re-order it so the loop can run continuously, e.g., from 340 to 380.
+                minaz = sorted_az[gap_index + 1]
+                maxaz = sorted_az[gap_index] + 360
+            else:
+                # The range is contiguous, e.g., from 100 to 250 degrees.
+                minaz = sorted_az[0]
+                maxaz = sorted_az[-1]
 
     azsep = 15 if args.radec else 10
     minaz = max(int(minaz/azsep)*azsep, 0)
@@ -284,7 +296,6 @@ def main():
         thinning = int(round(thinning / 10.0)) * 10
         thinning = min(90, max(0, thinning - 10))
         
-        # Use the absolute value to handle convergence at both the North and South poles.
         val = abs(declination_or_altitude)
         for a in range(80, thinning - 10, -10):
             if val >= a:
@@ -292,77 +303,73 @@ def main():
         return base_spacing
 
     def drawline(outermin, outermax, outerstep, innermin, innermax, innerstep, d, linelist, thinning=80):
-        # If drawing vertical lines, loop over altitude bands to apply thinning
+        """
+        Draws grid lines, breaking the line if any point is unmappable to avoid artifacts.
+        """
+        # Logic for drawing vertical lines (d=False) with thinning near poles
         if not d:
-            for alt_band_start in range(int(innermin), int(innermax), 10):
+            for alt_band_start in frange(innermin, innermax, 10):
                 alt_band_end = alt_band_start + 10
-                # Get the spacing for this altitude band
                 current_outerstep = get_azimuth_spacing(outerstep, alt_band_start, thinning)
                 
                 for outer in frange(outermin, outermax + 0.01, current_outerstep):
                     line = []
-                    for inner in frange(alt_band_start, alt_band_end + 0.01, innerstep):
-                        az = inner if d else outer
-                        alt = outer if d else inner
+                    for inner in frange(alt_band_start, min(alt_band_end, innermax) + 0.01, innerstep):
+                        az = outer
+                        alt = inner
                         y_coord = scalealt(alt, scale)
-                        forward_transform_new(dst, Vector2D(az*scale, y_coord))
-                        
-                        dst.x = min(width+1000, max(-1000, dst.x))
-                        dst.y = min(height+1000, max(-1000, dst.y))
-                        line.append((dst.x * args.xscale, dst.y * args.yscale))
-                    if line:
-                        linelist.append(line)
-        else: # Original logic for horizontal lines
-            for outer in frange(outermin, outermax+0.01, outerstep):
-                line = []
-                for inner in frange(innermin, innermax+0.01, innerstep):
-                    az = inner if d else outer
-                    alt = outer if d else inner
-                    y_coord = scalealt(alt, scale)
-                    forward_transform_new(dst, Vector2D(az*scale, y_coord))
-                    
-                    dst.x = min(width+1000, max(-1000, dst.x))
-                    dst.y = min(height+1000, max(-1000, dst.y))
-                    line.append((dst.x * args.xscale, dst.y * args.yscale))
-                if line:
-                    linelist.append(line)
+                        forward_transform_new(dst, Vector2D(az * scale, y_coord))
 
+                        if dst.x < -9000 or dst.y < -9000:
+                            if len(line) > 1: linelist.append(line)
+                            line = []
+                        else:
+                            line.append((dst.x * args.xscale, dst.y * args.yscale))
+                    
+                    if len(line) > 1:
+                        linelist.append(line)
+        else:  # Logic for horizontal lines (d=True)
+            for outer in frange(outermin, outermax + 0.01, outerstep):
+                line = []
+                for inner in frange(innermin, innermax + 0.01, innerstep):
+                    az = inner
+                    alt = outer
+                    y_coord = scalealt(alt, scale)
+                    forward_transform_new(dst, Vector2D(az * scale, y_coord))
+
+                    if dst.x < -9000 or dst.y < -9000:
+                        if len(line) > 1: linelist.append(line)
+                        line = []
+                    else:
+                        line.append((dst.x * args.xscale, dst.y * args.yscale))
+
+                if len(line) > 1:
+                    linelist.append(line)
 
     tiny_list = []
     small_list = []
     big_list = []
 
-    # This block for grey lines is now simplified as the logic is in drawline
     base_grey_step = 1.0
     drawline(minaz, maxaz, base_grey_step, minalt, maxalt, 2, False, small_list, thinning=60)
-    drawline(minalt, maxalt, 1, minaz, maxaz, 1, True, small_list) # Horizontal grey lines
+    drawline(minalt, maxalt, 1, minaz, maxaz, 1, True, small_list)
 
-    # --- Major (yellow) grid lines ---
-    # Vertical lines (RA or Azimuth)
     base_yellow_az_step = 15 if args.radec else 10
-    # Draw vertical lines across the full declination/altitude range
     drawline(minaz, maxaz - 1, base_yellow_az_step, minalt, maxalt, 1, False, big_list)
-
-    # Horizontal lines (DEC or Altitude)
     drawline(minalt, maxalt, 10, minaz, maxaz, 1, True, big_list)
 
-    # This special case for lines near the horizon only applies to non-radec mode
     if not args.radec and abs(minalt) <= 10:
         drawline(minaz, maxaz - 1, 20, 0, 10, 1, False, big_list)
-
 
     textlist = []
     label_spacing_lat = args.label_spacing
     base_label_spacing_lon = int(args.label_spacing * 1.5) if args.radec else args.label_spacing
 
-    # Determine the minimum latitude for the label-drawing loop
     label_loop_minalt = minalt
     if not args.radec:
-        # In non-radec mode, don't draw labels below 10 degrees.
         label_loop_minalt = max(minalt, 10)
 
     for alt in range(maxalt - label_spacing_lat, int(label_loop_minalt) - 1, -label_spacing_lat):
-        # Use the generalized spacing function for labels as well
         current_label_spacing_lon = get_azimuth_spacing(base_label_spacing_lon, alt)
 
         for az in range(minaz, maxaz, current_label_spacing_lon):
@@ -387,22 +394,17 @@ def main():
 
             if -100 < x < width+100 and -100 < y < height+100:
                 if args.radec:
-                    # Use 'h' for RA hours and '°' for declination
                     lontext = str(int(az / 15)) + 'h'
                     lattext = str(int(alt)) + '°'
-
-                    # Swap alignment: RA is right-aligned, DEC is left-aligned
                     textlist.append((lontext + ' ', angle+90, x+3*math.cos(angle/180*math.pi), y+3*math.sin(angle/180*math.pi), 'right'))
                     textlist.append((' ' + lattext, angle2+90, x+4*math.cos(angle2/180*math.pi), y+4*math.sin(angle2/180*math.pi), 'left'))
                 else:
-                    # Non-radec mode remains unchanged
                     lontext = str(int(az % 360))
                     textlist.append((' ' + lontext, angle+90, x+3*math.cos(angle/180*math.pi), y+3*math.sin(angle/180*math.pi), 'left'))
                     textlist.append((str(int(alt)) + ' ', angle2+90, x+4*math.cos(angle2/180*math.pi), y+4*math.sin(angle2/180*math.pi), 'right'))
 
     image = wand.image.Image(width=int(round(width * args.xscale)), height=int(round(height * args.yscale)), background=wand.color.Color('transparent'))
 
-    # Draw text at an angle
     def writetext(draw, text, x, y, angle, alignment):
         if x < 0 or y < 0:
             return
@@ -419,7 +421,7 @@ def main():
     with wand.drawing.Drawing() as draw:
         draw.fill_color = wand.color.Color('none')
         draw.stroke_color = wand.color.Color('grey50')
-        draw.stroke_opacity = 0.5 # Unified opacity
+        draw.stroke_opacity = 0.5
         for line in small_list:
             draw.polyline(line)
         draw.stroke_opacity = 0.8
@@ -435,7 +437,6 @@ def main():
         for text, angle, x, y, alignment in textlist:
             writetext(draw, text, x, y, angle, alignment)
 
-        # Annotate if we have a position and timestamp
         if pos.date and pos.lat and pos.long and args.timestamp:
             stars = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects)
             draw.stroke_color = wand.color.Color('white')
@@ -443,7 +444,6 @@ def main():
             draw.fill_color = wand.color.Color('transparent')
             for s in stars:
                 x, y = s[0] * args.xscale, s[1] * args.yscale
-                # Bounds check for circle
                 if 0 <= x < image.width and 0 <= y < image.height:
                      draw.circle((x, y), (x + 5, y + 5))
 
@@ -453,7 +453,6 @@ def main():
             draw.stroke_opacity = 1
             draw.stroke_color = wand.color.Color('transparent')
             for s in stars:
-                # Bounds check for text
                 text_x = int(s[0] * args.xscale + 10)
                 text_y = int(s[1] * args.yscale + 6)
                 if not (0 <= text_x < image.width and 0 <= text_y < image.height):

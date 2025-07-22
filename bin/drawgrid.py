@@ -1,9 +1,10 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # Makes a file grid.png from a .pto file
 # Result usage example: composite -blend 40 meteor-20141010.jpg grid.png x.jpg
 
+import pto_mapper
 import ephem
 import math
 import argparse
@@ -15,7 +16,6 @@ import os
 import re
 from datetime import datetime, UTC
 from brightstar import brightstar
-import pto_mapper
 import numpy as np
 
 class Vector2D:

@@ -62,23 +62,39 @@ def write_pto_for_optimisation(outfile, pto_data, image_index, control_points, l
     with open(outfile, 'w') as f:
         f.write(format_pto_line('p', global_options) + '\n')
 
+        # Write two 'i' lines for the same image, which is how autooptimiser
+        # works when optimizing one image against a set of control points.
         img_line_0 = img_to_optimise.copy()
-        img_line_0['n'] = 0
+        img_line_0['n'] = 0 # First image reference
         f.write(format_pto_line('i', img_line_0) + '\n')
 
         img_line_1 = img_to_optimise.copy()
-        img_line_1['n'] = 1
+        img_line_1['n'] = 1 # Second image reference
         f.write(format_pto_line('i', img_line_1) + '\n')
 
+        # Write control points linking the two image references
         for cp in control_points:
             x_expected, y_expected, x_found, y_found = cp
             f.write(f'c n0 N1 x{x_found:.4f} y{y_found:.4f} X{x_expected:.4f} Y{y_expected:.4f}\n')
 
-        if lens_opt:
-            f.write('o f0 r+p+y+v+b+c+d+e n"0"\n')
-        else:
-            f.write('o f0 r+p+y n"0"\n')
+        # Define the optimization variables in the correct multi-line 'v' format
+        f.write('\n# specify variables that should be optimized\n')
         
+        # Base variables for orientation and FOV
+        base_vars = ['v', 'r', 'p', 'y']
+        for var in base_vars:
+            f.write(f"v {var}{image_index}\n")
+
+        if lens_opt:
+            # Add lens distortion parameters if requested
+            lens_vars = ['a', 'b', 'c', 'd', 'e']
+            for var in lens_vars:
+                 f.write(f"v {var}{image_index}\n")
+        
+        # Final terminating 'v' line required by autooptimiser
+        f.write('v\n')
+
+        # Final line required by autooptimiser
         f.write('*\n')
 
 
@@ -240,6 +256,10 @@ def recalibrate(timestamp, infile, picture, outfile, pos, image, radius = 1.0, l
     if verbose:
         print(f"Writing new PTO file for optimisation to {outfile}...")
     write_pto_for_optimisation(outfile, pto_data, image, remap, lensopt)
+    
+    # Optional: uncomment to see the PTO file before autooptimiser runs
+    # with open(outfile, 'r') as f:
+    #     print(f.read())
 
     try:
         if verbose: print(f"Running cpclean on {outfile}...")

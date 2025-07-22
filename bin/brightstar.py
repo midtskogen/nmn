@@ -22,11 +22,13 @@ except ImportError:
 
 from stars import cat
 
-def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=True):
+def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=True, include_img_idx=False):
     """
     Finds visible celestial objects.
     If map_to_source_image is True, it maps them to source image coordinates.
     Otherwise, it returns the raw celestial coordinates.
+    If include_img_idx is True, the returned tuple for mapped objects will
+    include the source image index as the first element.
     """
     global_options, _ = pto_data
     pano_w = global_options.get('w')
@@ -54,15 +56,13 @@ def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=
         az_rad = float(repr(body.az))
         az_deg = math.degrees(az_rad)
         
-        # If we don't need to map to a source image, we can return early.
         if not map_to_source_image:
             return (az_deg, alt_deg, name, mag)
 
-        # Apply atmospheric refraction correction; formula expects degrees
         try:
             alt2_deg = alt_deg + 0.006 / math.tan(math.radians(alt_deg + (7.31 / (alt_deg + 4.4))))
             alt2_rad = math.radians(alt2_deg)
-        except ValueError: # Avoid math domain error near zenith
+        except ValueError:
             return None
         
         pano_x = (az_rad / (2 * math.pi)) * pano_w
@@ -71,15 +71,17 @@ def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=
         mapping = pto_mapper.map_pano_to_image(pto_data, pano_x, pano_y)
 
         if mapping:
-            sx, sy = mapping[1], mapping[2]
-            return (sx, sy, az_deg, alt_deg, name, mag)
+            img_idx, sx, sy = mapping
+            if include_img_idx:
+                return (img_idx, sx, sy, az_deg, alt_deg, name, mag)
+            else:
+                return (sx, sy, az_deg, alt_deg, name, mag)
 
         return None
 
     # --- Main processing loop ---
     count = 0
     res = []
-    # Process Sun, Moon, and Planets first
     solar_system_bodies = [
         (ephem.Sun(), "Sol"), (ephem.Moon(), "Moon"), (ephem.Mercury(), "Mercury"),
         (ephem.Venus(), "Venus"), (ephem.Mars(), "Mars"), (ephem.Jupiter(), "Jupiter"),
@@ -92,7 +94,6 @@ def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=
             count += 1
             res.append(r)
 
-    # Then process fixed stars from the catalog if more objects are needed
     if count < objects:
         for (ra, pmra, dec, pmdec, mag, name) in cat:
             if count >= objects: break
@@ -100,7 +101,7 @@ def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=
                 body = ephem.FixedBody()
                 body._ra, body._pmra, body._dec, body._pmdec, body._epoch = str(ra), pmra, str(dec), pmdec, ephem.J2000
                 body.mag = mag
-                r = test_body(body, name, faintest, -30) # Use wide brightness range for stars
+                r = test_body(body, name, faintest, -30)
                 if r:
                     count += 1
                     res.append(r)
@@ -111,63 +112,61 @@ if __name__ == '__main__':
         description='List the brightest visible stars and their image coordinates for a Hugin .pto file.',
         epilog='Example: brightstar.py 1678886400 my_pano.pto'
     )
-
     parser.add_argument('-n', '--number', dest='objects', help='maximum number of objects to find (default: 500)', default=500, type=int)
     parser.add_argument('-f', '--faintest', dest='faintest', help='faintest magnitude to include (default: 5)', default=5, type=float)
     parser.add_argument('-b', '--brightest', dest='brightest', help='brightest magnitude to include (default: -30)', default=-30, type=float)
-    parser.add_argument('-c', '--config', dest='config', help='observer config file (default: /etc/meteor.cfg)', default='/etc/meteor.cfg', type=str)
-    
-    # Observer location arguments
+    parser.add_argument('-c', '--config', dest='config', help='observer config file (e.g., /etc/meteor.cfg)', type=str)
     obs_group = parser.add_argument_group('Observer Location (overrides config file)')
     obs_group.add_argument('-x', '--longitude', dest='longitude', help='observer longitude (degrees)', type=float)
     obs_group.add_argument('-y', '--latitude', dest='latitude', help='observer latitude (degrees)', type=float)
     obs_group.add_argument('-a', '--altitude', dest='elevation', help='observer altitude (meters)', type=float)
-
-    # Atmospheric conditions arguments
     atm_group = parser.add_argument_group('Atmospheric Conditions (overrides config file)')
     atm_group.add_argument('-t', '--temperature', dest='temperature', help='observer temperature (Celsius)', type=float)
     atm_group.add_argument('-p', '--pressure', dest='pressure', help='observer air pressure (hPa)', type=float)
-
     parser.add_argument(action='store', dest='timestamp', help='Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)')
     parser.add_argument(action='store', dest='ptofile', help='Hugin .pto panorama project file')
-
     args = parser.parse_args()
     
-    # --- Set up Observer ---
     pos = ephem.Observer()
+    config_files = []
+    if args.config:
+        config_files.append(args.config)
+    config_files.append(os.path.expanduser('~/.config/meteor.cfg'))
+    config_files.append('/etc/meteor.cfg')
+    
     config = configparser.ConfigParser()
-    try:
-        config.read([args.config, os.path.expanduser('~/meteor.cfg')])
-        pos.lat = config.get('astronomy', 'latitude')
-        pos.lon = config.get('astronomy', 'longitude')
-        pos.elevation = float(config.get('astronomy', 'elevation'))
-        pos.temp = float(config.get('astronomy', 'temperature'))
-        pos.pressure = float(config.get('astronomy', 'pressure'))
-    except (configparser.NoSectionError, configparser.NoOptionError, FileNotFoundError):
-        print("Warning: Could not read config file. Using defaults and command-line arguments.", file=sys.stderr)
+    read_configs = config.read(config_files)
+
+    if read_configs:
+        try:
+            pos.lat = config.get('astronomy', 'latitude')
+            pos.lon = config.get('astronomy', 'longitude')
+            pos.elevation = float(config.get('astronomy', 'elevation'))
+            pos.temp = float(config.get('astronomy', 'temperature', fallback=15))
+            pos.pressure = float(config.get('astronomy', 'pressure', fallback=1010))
+        except (configparser.NoSectionError, configparser.NoOptionError):
+             print("Warning: Could not read all astronomy settings from config. Using defaults.", file=sys.stderr)
+             pos.lat, pos.lon, pos.elevation, pos.temp, pos.pressure = '0', '0', 0, 15, 1010
+    else:
+        print("Warning: No config file found. Using defaults.", file=sys.stderr)
         pos.lat, pos.lon, pos.elevation, pos.temp, pos.pressure = '0', '0', 0, 15, 1010
         
-    # Override config with any command-line arguments
     if args.longitude is not None: pos.lon = str(args.longitude)
     if args.latitude is not None: pos.lat = str(args.latitude)
     if args.elevation is not None: pos.elevation = args.elevation
     if args.temperature is not None: pos.temp = args.temperature
     if args.pressure is not None: pos.pressure = args.pressure
 
-    pos.date = datetime.fromtimestamp(float(args.timestamp), timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    pos.date = datetime.fromtimestamp(float(args.timestamp), timezone.utc)
 
-    # --- Parse PTO file ---
     try:
         pto_data = pto_mapper.parse_pto_file(args.ptofile)
     except FileNotFoundError:
-        print(f"Error: PTO file not found at '{args.ptofile}'", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f"Error: PTO file not found at '{args.ptofile}'")
     except Exception as e:
-        print(f"Error reading or parsing PTO file: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f"Error reading or parsing PTO file: {e}")
 
-    # --- Find and print stars ---
-    # Output format: image_x image_y azimuth altitude "Name" magnitude
-    results = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects, map_to_source_image=True)
+    results = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects, map_to_source_image=True, include_img_idx=False)
     for res_line in results:
-        print(*res_line)
+        sx, sy, az, alt, name, mag = res_line
+        print(f'{sx} {sy} {az} {alt} "{name}" {mag}')

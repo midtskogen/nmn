@@ -419,8 +419,8 @@ class Zoom_Advanced(ttk.Frame):
         self.show_image()
 
     def key(self, event):
-        key_char = event.char.lower()
-        is_upper = event.char.isupper()
+        key_char = event.char
+        is_upper = key_char.isupper()
         
         actions = {
             'p': ('p', 0.01), 'y': ('y', 0.01), 'r': ('r', 0.01),
@@ -428,8 +428,8 @@ class Zoom_Advanced(ttk.Frame):
             'c': ('c', 0.001), 'd': ('d', -0.5), 'e': ('e', 0.5)
         }
 
-        if key_char in actions:
-            param, change = actions[key_char]
+        if key_char.lower() in actions:
+            param, change = actions[key_char.lower()]
             if is_upper: change *= -1
             self.img_data[param] = self.img_data.get(param, 0) + change * self.boost
 
@@ -437,6 +437,20 @@ class Zoom_Advanced(ttk.Frame):
             root = tk.Toplevel(self.master)
             RecalibrateDialog(root, self.image, self)
             root.mainloop()
+        elif key_char == 'x': # Snap points to fitted line
+            if self.curve_coeffs is not None:
+                for p in self.positions:
+                    snapped_pos = self._project_point_on_curve(p['current'])
+                    p['current'] = snapped_pos
+                    self._update_centroid_entry(p['frame'], snapped_pos)
+                self.update_curve_fit()
+                self.update_prediction()
+        elif key_char == 'X': # Undo snap
+            for p in self.positions:
+                p['current'] = p['original']
+                self._update_centroid_entry(p['frame'], p['original'])
+            self.update_curve_fit()
+            self.update_prediction()
         elif key_char == '*':
             _, fresh_images_data = pto_mapper.parse_pto_file(args.ptofile)
             self.images_data[self.image_index] = fresh_images_data[self.image_index]
@@ -447,7 +461,7 @@ class Zoom_Advanced(ttk.Frame):
                 print(f"Saved PTO file to {args.ptofile}")
             except Exception as e:
                 print(f"Error saving PTO file: {e}", file=sys.stderr)
-        elif key_char == 's' and is_upper:
+        elif key_char == 'S': # Note: 'S' is already uppercase
             with open("centroid.txt","w") as f:
                 for l in self.centroid:
                     if l is not None: f.write(l + "\n")
@@ -470,9 +484,33 @@ class Zoom_Advanced(ttk.Frame):
         
         self.show_image()
 
+    def _update_centroid_entry(self, frame_num, xy_coords):
+        """Recalculates and updates the centroid string for a given frame and xy coordinate."""
+        if self.centroid[frame_num] is None:
+            return
+            
+        x, y = xy_coords
+        pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
+        if pano_coords:
+            pano_x, pano_y = pano_coords
+            pano_w, pano_h = self.global_options.get('w'), self.global_options.get('h')
+            if self.global_options.get('f', 2) == 2:
+                az_rad = (pano_x / pano_w) * 2 * math.pi
+                alt_rad = (0.5 - pano_y / pano_h) * math.pi
+                az_deg, alt_deg = math.degrees(az_rad), math.degrees(alt_rad)
+            else:
+                az_deg, alt_deg = -998, -998
+        else:
+            az_deg, alt_deg = -999, -999
+
+        parts = self.centroid[frame_num].split(' ')
+        parts[2] = f"{alt_deg:.2f}"
+        parts[3] = f"{az_deg % 360:.2f}"
+        self.centroid[frame_num] = ' '.join(parts)
+        
     def save_event_txt(self):
         # Use a filtered list of positions that corresponds to non-None centroid entries
-        valid_positions = [p for p in self.positions if self.centroid[p[0]] is not None]
+        valid_positions = [p for p in self.positions if self.centroid[p['frame']] is not None]
         centroid2 = [l for l in self.centroid if l is not None]
 
         if not centroid2:
@@ -484,7 +522,7 @@ class Zoom_Advanced(ttk.Frame):
             print(f"frames = {len(centroid2)}", file=f)
             print(f"duration = {round(float(centroid2[-1].split(' ')[1]) - float(centroid2[0].split(' ')[1]), 2)}", file=f)
             
-            pos_str = " ".join([f"{p[1]},{p[2]}" for p in valid_positions])
+            pos_str = " ".join([f"{p['current'][0]:.2f},{p['current'][1]:.2f}" for p in valid_positions])
             print(f"positions = {pos_str}", file=f)
 
             coord_str = " ".join([f"{i.split(' ')[3]},{i.split(' ')[2]}" for i in centroid2])
@@ -522,11 +560,11 @@ class Zoom_Advanced(ttk.Frame):
     def _update_highlight_state(self):
         self.last_click_to_highlight = None
         if self.positions:
-            last_recorded_frame = self.positions[-1][0]
+            last_recorded_frame = self.positions[-1]['frame']
             if self.num < last_recorded_frame:
                 for pos_data in reversed(self.positions):
-                    if pos_data[0] <= self.num:
-                        self.last_click_to_highlight = pos_data[1:]
+                    if pos_data['frame'] <= self.num:
+                        self.last_click_to_highlight = pos_data['current']
                         break
 
     def change_image(self, new_num):
@@ -604,16 +642,16 @@ class Zoom_Advanced(ttk.Frame):
 
         if self.curve_coeffs is not None and len(self.positions) >= 3:
             p = np.poly1d(self.curve_coeffs)
-            p_first = self.positions[0]
-            p_last = self.positions[-1]
+            p_first = self.positions[0]['current']
+            p_last = self.positions[-1]['current']
 
             if self.curve_orientation == 'y_is_f_of_x':
-                x_coords = [pos[1] for pos in self.positions]
+                x_coords = [p['current'][0] for p in self.positions]
                 min_x, max_x = min(x_coords), max(x_coords)
                 span = max_x - min_x
                 extension = span * 0.2 if span > 0 else 50
                 
-                if p_last[1] >= p_first[1]:
+                if p_last[0] >= p_first[0]:
                     start_point, end_point = min_x, max_x + extension
                 else:
                     start_point, end_point = min_x - extension, max_x
@@ -621,12 +659,12 @@ class Zoom_Advanced(ttk.Frame):
                 fit_x = np.linspace(start_point, end_point, 100)
                 fit_y = p(fit_x)
             else:
-                y_coords = [pos[2] for pos in self.positions]
+                y_coords = [p['current'][1] for p in self.positions]
                 min_y, max_y = min(y_coords), max(y_coords)
                 span = max_y - min_y
                 extension = span * 0.2 if span > 0 else 50
                 
-                if p_last[2] >= p_first[2]:
+                if p_last[1] >= p_first[1]:
                     start_point, end_point = min_y, max_y + extension
                 else:
                     start_point, end_point = min_y - extension, max_y
@@ -644,7 +682,14 @@ class Zoom_Advanced(ttk.Frame):
                 self.overlay.append(self.canvas.create_line(canvas_points, fill="cyan", width=2, smooth=True))
 
         for pos_data in self.positions:
-            px, py = pos_data[1], pos_data[2]
+            ox, oy = pos_data['original']
+            canvas_ox = (ox - self.x) * self.imscale + canvas_origin_x
+            canvas_oy = (oy - self.y) * self.imscale + canvas_origin_y
+            size = 2
+            if bbox2[0] < canvas_ox < bbox2[2] and bbox2[1] < canvas_oy < bbox2[3]:
+                self.overlay.append(self.canvas.create_oval(canvas_ox - size, canvas_oy - size, canvas_ox + size, canvas_oy + size, fill="grey50", outline=""))
+
+            px, py = pos_data['current']
             canvas_x = (px - self.x) * self.imscale + canvas_origin_x
             canvas_y = (py - self.y) * self.imscale + canvas_origin_y
             size = 5
@@ -686,6 +731,7 @@ class Zoom_Advanced(ttk.Frame):
                 "  a/A,b/B,c/C = radial distortion params\n" +
                 "  d/D,e/E = radial distortion shift\n" +
                 "  i=toggle star info, !=toggle boost (100x)\n" +
+                "  x=snap points to line, X=undo snap\n" +
                 "  *=reset orientation, l=save ptofile\n" +
                 "  s=save event.txt, S=save centroid.txt\n" +
                 "  arrows=move frame, pgup/dn=move 10 frames\n" +
@@ -706,13 +752,40 @@ class Zoom_Advanced(ttk.Frame):
     def _distance(self, p1, p2):
         return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
 
+    def _project_point_on_curve(self, point_to_project):
+        """Finds the closest point on the fitted curve to a given point."""
+        if self.curve_coeffs is None:
+            return point_to_project
+
+        p_curve = np.poly1d(self.curve_coeffs)
+        
+        search_span_x = (self.width / 10) / self.imscale
+        search_span_y = (self.height / 10) / self.imscale
+
+        if self.curve_orientation == 'y_is_f_of_x':
+            search_x = np.linspace(point_to_project[0] - search_span_x, point_to_project[0] + search_span_x, 500)
+            search_y = p_curve(search_x)
+        else:
+            search_y = np.linspace(point_to_project[1] - search_span_y, point_to_project[1] + search_span_y, 500)
+            search_x = p_curve(search_y)
+
+        min_dist_sq = float('inf')
+        closest_point = point_to_project
+        for i in range(len(search_x)):
+            dist_sq = (search_x[i] - point_to_project[0])**2 + (search_y[i] - point_to_project[1])**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_point = (search_x[i], search_y[i])
+                
+        return closest_point
+
     def update_prediction(self):
         if len(self.positions) < 2:
             self.predicted_point = None
             return
 
-        p_n_minus_1 = self.positions[-2][1:]
-        p_n = self.positions[-1][1:]
+        p_n_minus_1 = self.positions[-2]['current']
+        p_n = self.positions[-1]['current']
         
         direction_vector = (p_n[0] - p_n_minus_1[0], p_n[1] - p_n_minus_1[1])
         norm = self._distance((0,0), direction_vector)
@@ -723,7 +796,7 @@ class Zoom_Advanced(ttk.Frame):
             
         normalized_vector = (direction_vector[0] / norm, direction_vector[1] / norm)
 
-        distances = [self._distance(self.positions[i][1:], self.positions[i+1][1:]) for i in range(len(self.positions) - 1)]
+        distances = [self._distance(self.positions[i]['current'], self.positions[i+1]['current']) for i in range(len(self.positions) - 1)]
         
         dist_next = 0
         if len(distances) < 2:
@@ -738,32 +811,8 @@ class Zoom_Advanced(ttk.Frame):
             dist_next = distances[-1] if distances else 10
 
         p_pred_linear = (p_n[0] + normalized_vector[0] * dist_next, p_n[1] + normalized_vector[1] * dist_next)
-
-        if self.curve_coeffs is None:
-            self.predicted_point = p_pred_linear
-            return
-
-        p_curve = np.poly1d(self.curve_coeffs)
         
-        last_segment_length = self._distance(p_n, p_n_minus_1)
-        search_span = last_segment_length * 2.0
-
-        if self.curve_orientation == 'y_is_f_of_x':
-            search_x = np.linspace(p_pred_linear[0] - search_span, p_pred_linear[0] + search_span, 500)
-            search_y = p_curve(search_x)
-        else:
-            search_y = np.linspace(p_pred_linear[1] - search_span, p_pred_linear[1] + search_span, 500)
-            search_x = p_curve(search_y)
-
-        min_dist_sq = float('inf')
-        closest_point = None
-        for i in range(len(search_x)):
-            dist_sq = (search_x[i] - p_pred_linear[0])**2 + (search_y[i] - p_pred_linear[1])**2
-            if dist_sq < min_dist_sq:
-                min_dist_sq = dist_sq
-                closest_point = (search_x[i], search_y[i])
-                
-        self.predicted_point = closest_point
+        self.predicted_point = self._project_point_on_curve(p_pred_linear)
 
     def update_curve_fit(self):
         """Fits a 2nd degree polynomial to the clicked points."""
@@ -771,8 +820,8 @@ class Zoom_Advanced(ttk.Frame):
             self.curve_coeffs = None
             return
 
-        x_coords = np.array([p[1] for p in self.positions])
-        y_coords = np.array([p[2] for p in self.positions])
+        x_coords = np.array([p['current'][0] for p in self.positions])
+        y_coords = np.array([p['current'][1] for p in self.positions])
 
         if np.ptp(x_coords) > np.ptp(y_coords):
             self.curve_coeffs = np.polyfit(x_coords, y_coords, 2)
@@ -783,16 +832,16 @@ class Zoom_Advanced(ttk.Frame):
             
     def click(self, event):
         if self.positions:
-            last_click_frame = self.positions[-1][0]
+            last_click_frame = self.positions[-1]['frame']
             if self.num < last_click_frame:
                 truncate_index = -1
                 for i, pos_data in enumerate(self.positions):
-                    if pos_data[0] >= self.num:
+                    if pos_data['frame'] >= self.num:
                         truncate_index = i
                         break
                 
                 if truncate_index != -1:
-                    frames_to_clear = {p[0] for p in self.positions[truncate_index:]}
+                    frames_to_clear = {p['frame'] for p in self.positions[truncate_index:]}
                     for frame_idx in frames_to_clear:
                         if frame_idx < len(self.centroid):
                             self.centroid[frame_idx] = None
@@ -800,16 +849,18 @@ class Zoom_Advanced(ttk.Frame):
 
         x, y = event.x / self.imscale + self.x, event.y / self.imscale + self.y
         x += self.offsetx; y += self.offsety
-        self.positions.append((self.num, x, y))
+        
+        new_point = {'frame': self.num, 'original': (x,y), 'current': (x,y)}
+        self.positions.append(new_point)
+
+        if len(self.positions) >= 3:
+            self.update_curve_fit()
+        else:
+            self.curve_coeffs = None
 
         if len(self.positions) >= 2:
             self.update_prediction()
-        if len(self.positions) >= 3:
-            self.update_curve_fit()
-        
-        if len(self.positions) < 3:
-            self.curve_coeffs = None
-        if len(self.positions) < 2:
+        else:
             self.predicted_point = None
 
         self._update_highlight_state()

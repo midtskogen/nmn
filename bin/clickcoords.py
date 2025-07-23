@@ -14,6 +14,7 @@ import wand.image
 import sys
 import re
 import subprocess
+import numpy as np
 from datetime import datetime, timedelta, timezone
 from tkinter import ttk
 from PIL import Image, ImageTk, ImageEnhance
@@ -379,6 +380,14 @@ class Zoom_Advanced(ttk.Frame):
         self.boost = 1
         self.offsetx = 0
         self.offsety = 0
+        
+        self.positions = []
+        self.centroid = [None] * len(files)
+        self.curve_coeffs = None
+        self.curve_orientation = None
+        self.predicted_point = None
+        self.last_click_to_highlight = None
+        
         self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
         
         self.canvas.update()
@@ -440,8 +449,9 @@ class Zoom_Advanced(ttk.Frame):
                 print(f"Error saving PTO file: {e}", file=sys.stderr)
         elif key_char == 's' and is_upper:
             with open("centroid.txt","w") as f:
-                for l in centroid:
+                for l in self.centroid:
                     if l is not None: f.write(l + "\n")
+            print("Saved centroid data to centroid.txt")
         elif key_char == 's':
             self.save_event_txt()
         elif key_char == 'h': self.show_text ^= 1
@@ -461,7 +471,10 @@ class Zoom_Advanced(ttk.Frame):
         self.show_image()
 
     def save_event_txt(self):
-        centroid2 = [l for l in centroid if l is not None]
+        # Use a filtered list of positions that corresponds to non-None centroid entries
+        valid_positions = [p for p in self.positions if self.centroid[p[0]] is not None]
+        centroid2 = [l for l in self.centroid if l is not None]
+
         if not centroid2:
             print("No centroid data to save to event.txt")
             return
@@ -471,7 +484,7 @@ class Zoom_Advanced(ttk.Frame):
             print(f"frames = {len(centroid2)}", file=f)
             print(f"duration = {round(float(centroid2[-1].split(' ')[1]) - float(centroid2[0].split(' ')[1]), 2)}", file=f)
             
-            pos_str = " ".join([f"{p[0]},{p[1]}" for p in positions])
+            pos_str = " ".join([f"{p[1]},{p[2]}" for p in valid_positions])
             print(f"positions = {pos_str}", file=f)
 
             coord_str = " ".join([f"{i.split(' ')[3]},{i.split(' ')[2]}" for i in centroid2])
@@ -506,10 +519,21 @@ class Zoom_Advanced(ttk.Frame):
         
         print("Saved event data to event.txt")
 
+    def _update_highlight_state(self):
+        self.last_click_to_highlight = None
+        if self.positions:
+            last_recorded_frame = self.positions[-1][0]
+            if self.num < last_recorded_frame:
+                for pos_data in reversed(self.positions):
+                    if pos_data[0] <= self.num:
+                        self.last_click_to_highlight = pos_data[1:]
+                        break
+
     def change_image(self, new_num):
         if 0 <= new_num < len(self.files):
             self.num = new_num
             self.image = Image.open(self.files[self.num])
+            self._update_highlight_state()
             self.show_image()
 
     def left_key(self, event): self.change_image(self.num - 1)
@@ -578,6 +602,72 @@ class Zoom_Advanced(ttk.Frame):
         self.canvas.lower(imageid)
         self.canvas.imagetk = imagetk
 
+        if self.curve_coeffs is not None and len(self.positions) >= 3:
+            p = np.poly1d(self.curve_coeffs)
+            p_first = self.positions[0]
+            p_last = self.positions[-1]
+
+            if self.curve_orientation == 'y_is_f_of_x':
+                x_coords = [pos[1] for pos in self.positions]
+                min_x, max_x = min(x_coords), max(x_coords)
+                span = max_x - min_x
+                extension = span * 0.2 if span > 0 else 50
+                
+                if p_last[1] >= p_first[1]:
+                    start_point, end_point = min_x, max_x + extension
+                else:
+                    start_point, end_point = min_x - extension, max_x
+                
+                fit_x = np.linspace(start_point, end_point, 100)
+                fit_y = p(fit_x)
+            else:
+                y_coords = [pos[2] for pos in self.positions]
+                min_y, max_y = min(y_coords), max(y_coords)
+                span = max_y - min_y
+                extension = span * 0.2 if span > 0 else 50
+                
+                if p_last[2] >= p_first[2]:
+                    start_point, end_point = min_y, max_y + extension
+                else:
+                    start_point, end_point = min_y - extension, max_y
+
+                fit_y = np.linspace(start_point, end_point, 100)
+                fit_x = p(fit_y)
+
+            canvas_points = []
+            for i in range(len(fit_x)):
+                canvas_x = (fit_x[i] - self.x) * self.imscale + canvas_origin_x
+                canvas_y = (fit_y[i] - self.y) * self.imscale + canvas_origin_y
+                canvas_points.extend([canvas_x, canvas_y])
+            
+            if len(canvas_points) > 2:
+                self.overlay.append(self.canvas.create_line(canvas_points, fill="cyan", width=2, smooth=True))
+
+        for pos_data in self.positions:
+            px, py = pos_data[1], pos_data[2]
+            canvas_x = (px - self.x) * self.imscale + canvas_origin_x
+            canvas_y = (py - self.y) * self.imscale + canvas_origin_y
+            size = 5
+            if bbox2[0] < canvas_x < bbox2[2] and bbox2[1] < canvas_y < bbox2[3]:
+                self.overlay.append(self.canvas.create_line(canvas_x - size, canvas_y - size, canvas_x + size, canvas_y + size, fill="dark green", width=2))
+                self.overlay.append(self.canvas.create_line(canvas_x - size, canvas_y + size, canvas_x + size, canvas_y - size, fill="dark green", width=2))
+        
+        if self.last_click_to_highlight:
+            px, py = self.last_click_to_highlight
+            canvas_x = (px - self.x) * self.imscale + canvas_origin_x
+            canvas_y = (py - self.y) * self.imscale + canvas_origin_y
+            radius = 12
+            if bbox2[0] < canvas_x < bbox2[2] and bbox2[1] < canvas_y < bbox2[3]:
+                self.overlay.append(self.canvas.create_oval(canvas_x - radius, canvas_y - radius, canvas_x + radius, canvas_y + radius, outline="red", width=2))
+
+        if self.predicted_point:
+            canvas_x = (self.predicted_point[0] - self.x) * self.imscale + canvas_origin_x
+            canvas_y = (self.predicted_point[1] - self.y) * self.imscale + canvas_origin_y
+            size = 10
+            if bbox2[0] < canvas_x < bbox2[2] and bbox2[1] < canvas_y < bbox2[3]:
+                self.overlay.append(self.canvas.create_line(canvas_x - size, canvas_y, canvas_x + size, canvas_y, fill="red", width=1))
+                self.overlay.append(self.canvas.create_line(canvas_x, canvas_y - size, canvas_x, canvas_y + size, fill="red", width=1))
+
         ts = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
         info_text = (f"  time = {ts.strftime('%Y-%m-%d %H:%M:%S.%f UTC')} ({self.timestamps[self.num]:.2f})\n"
                      f"  pitch={self.img_data.get('p', 0):.2f}° yaw={self.img_data.get('y', 0):.2f}° roll={self.img_data.get('r', 0):.2f}° "
@@ -605,20 +695,124 @@ class Zoom_Advanced(ttk.Frame):
 
         for s in stars:
             sx, sy, _, _, name, mag = s
-            # Translate star's absolute image coordinates to canvas coordinates
             canvas_x = (sx - self.x) * self.imscale + canvas_origin_x
             canvas_y = (sy - self.y) * self.imscale + canvas_origin_y
             
-            # Only draw if the star is within the visible canvas area (bbox2)
             if bbox2[0] < canvas_x < bbox2[2] and bbox2[1] < canvas_y < bbox2[3]:
                 self.overlay.append(self.canvas.create_oval(canvas_x-1, canvas_y-1, canvas_x+1, canvas_y+1, width=(max(0.1, 5-mag)*2 if self.show_info else 1), outline="red"))
                 if self.show_info:
                     self.overlay.append(self.canvas.create_text(canvas_x+3, canvas_y+3, text=f"{name} ({mag})", anchor="nw", fill="green", font=("helvetica", 10)))
+
+    def _distance(self, p1, p2):
+        return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+
+    def update_prediction(self):
+        if len(self.positions) < 2:
+            self.predicted_point = None
+            return
+
+        p_n_minus_1 = self.positions[-2][1:]
+        p_n = self.positions[-1][1:]
+        
+        direction_vector = (p_n[0] - p_n_minus_1[0], p_n[1] - p_n_minus_1[1])
+        norm = self._distance((0,0), direction_vector)
+        
+        if norm == 0:
+            self.predicted_point = None
+            return
+            
+        normalized_vector = (direction_vector[0] / norm, direction_vector[1] / norm)
+
+        distances = [self._distance(self.positions[i][1:], self.positions[i+1][1:]) for i in range(len(self.positions) - 1)]
+        
+        dist_next = 0
+        if len(distances) < 2:
+            dist_next = distances[-1] if distances else 10
+        else:
+            indices = np.arange(1, len(distances) + 1)
+            coeffs = np.polyfit(indices, distances, 1)
+            p = np.poly1d(coeffs)
+            dist_next = p(len(distances) + 1)
+
+        if dist_next < 0:
+            dist_next = distances[-1] if distances else 10
+
+        p_pred_linear = (p_n[0] + normalized_vector[0] * dist_next, p_n[1] + normalized_vector[1] * dist_next)
+
+        if self.curve_coeffs is None:
+            self.predicted_point = p_pred_linear
+            return
+
+        p_curve = np.poly1d(self.curve_coeffs)
+        
+        last_segment_length = self._distance(p_n, p_n_minus_1)
+        search_span = last_segment_length * 2.0
+
+        if self.curve_orientation == 'y_is_f_of_x':
+            search_x = np.linspace(p_pred_linear[0] - search_span, p_pred_linear[0] + search_span, 500)
+            search_y = p_curve(search_x)
+        else:
+            search_y = np.linspace(p_pred_linear[1] - search_span, p_pred_linear[1] + search_span, 500)
+            search_x = p_curve(search_y)
+
+        min_dist_sq = float('inf')
+        closest_point = None
+        for i in range(len(search_x)):
+            dist_sq = (search_x[i] - p_pred_linear[0])**2 + (search_y[i] - p_pred_linear[1])**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_point = (search_x[i], search_y[i])
+                
+        self.predicted_point = closest_point
+
+    def update_curve_fit(self):
+        """Fits a 2nd degree polynomial to the clicked points."""
+        if len(self.positions) < 3:
+            self.curve_coeffs = None
+            return
+
+        x_coords = np.array([p[1] for p in self.positions])
+        y_coords = np.array([p[2] for p in self.positions])
+
+        if np.ptp(x_coords) > np.ptp(y_coords):
+            self.curve_coeffs = np.polyfit(x_coords, y_coords, 2)
+            self.curve_orientation = 'y_is_f_of_x'
+        else:
+            self.curve_coeffs = np.polyfit(y_coords, x_coords, 2)
+            self.curve_orientation = 'x_is_f_of_y'
             
     def click(self, event):
+        if self.positions:
+            last_click_frame = self.positions[-1][0]
+            if self.num < last_click_frame:
+                truncate_index = -1
+                for i, pos_data in enumerate(self.positions):
+                    if pos_data[0] >= self.num:
+                        truncate_index = i
+                        break
+                
+                if truncate_index != -1:
+                    frames_to_clear = {p[0] for p in self.positions[truncate_index:]}
+                    for frame_idx in frames_to_clear:
+                        if frame_idx < len(self.centroid):
+                            self.centroid[frame_idx] = None
+                    self.positions = self.positions[:truncate_index]
+
         x, y = event.x / self.imscale + self.x, event.y / self.imscale + self.y
         x += self.offsetx; y += self.offsety
-        positions.append((x, y))
+        self.positions.append((self.num, x, y))
+
+        if len(self.positions) >= 2:
+            self.update_prediction()
+        if len(self.positions) >= 3:
+            self.update_curve_fit()
+        
+        if len(self.positions) < 3:
+            self.curve_coeffs = None
+        if len(self.positions) < 2:
+            self.predicted_point = None
+
+        self._update_highlight_state()
         
         pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
         if pano_coords:
@@ -635,8 +829,8 @@ class Zoom_Advanced(ttk.Frame):
         diff = self.timestamps[self.num] - self.timestamps[0]
         ts = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
         
-        centroid[self.num] = f'{self.num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} 1.0 {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
-        print(centroid[self.num])
+        self.centroid[self.num] = f'{self.num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} 1.0 {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
+        print(self.centroid[self.num])
         
         self.right_key(event)
 
@@ -649,7 +843,6 @@ def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_ca
     if start_idx > end_idx:
         return
 
-    # For a single element range, ensure its timestamp is calculated.
     if start_idx == end_idx:
         if timestamps[start_idx] is None:
             timestamp(timestamps, files, start_idx)
@@ -657,7 +850,6 @@ def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_ca
                 report_progress_callback()
         return
 
-    # Ensure timestamps for boundaries are known to make a comparison.
     if timestamps[start_idx] is None:
         timestamp(timestamps, files, start_idx)
         if timestamps[start_idx] is not None:
@@ -667,7 +859,6 @@ def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_ca
         if timestamps[end_idx] is not None:
             report_progress_callback()
 
-    # If timestamps at boundaries are identical and not None, fill the gap.
     if timestamps[start_idx] is not None and timestamps[start_idx] == timestamps[end_idx]:
         frames_filled = 0
         for i in range(start_idx + 1, end_idx):
@@ -678,11 +869,9 @@ def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_ca
             report_progress_callback(num_frames=frames_filled)
         return
     
-    # If the block is too small to divide further, stop recursion.
     if end_idx <= start_idx + 1:
         return
 
-    # Otherwise, find the middle and recurse on both halves.
     mid_idx = (start_idx + end_idx) // 2
     _recursive_extract(timestamps, files, start_idx, mid_idx, report_progress_callback)
     _recursive_extract(timestamps, files, mid_idx + 1, end_idx, report_progress_callback)
@@ -700,13 +889,11 @@ def extract_timestamps(files):
     raw_timestamps = [None] * total_files
     print("Extracting timestamps...")
 
-    # --- Progress Bar State & Callback ---
     progress_state = {'processed_count': 0}
     bar_length = 40
 
     def _update_progress_bar():
         count = progress_state['processed_count']
-        # Prevent count from exceeding total for display purposes
         count = min(count, total_files)
         progress = count / total_files
         block = int(round(bar_length * progress))
@@ -718,17 +905,14 @@ def extract_timestamps(files):
         progress_state['processed_count'] += num_frames
         _update_progress_bar()
 
-    # --- Recursive pre-pass to fill large, uniform sections ---
     _recursive_extract(raw_timestamps, files, 0, total_files - 1, _report_progress)
 
-    # --- Final linear pass to fill any remaining gaps ---
     for i in range(total_files):
         if raw_timestamps[i] is None:
             timestamp(raw_timestamps, files, i)
             if raw_timestamps[i] is not None:
-                _report_progress() # Report progress for this single frame
+                _report_progress()
     
-    # Ensure the bar shows 100% at the end
     sys.stdout.write(f"\rProgress: [{'#' * bar_length}] {total_files}/{total_files} (100%)\n\n")
 
     return raw_timestamps
@@ -783,9 +967,6 @@ if __name__ == '__main__':
     else:
         starttime = datetime.strptime(args.start, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()
         timestamps = [starttime + (x / args.fps) for x in range(len(images))]
-
-    centroid = [None] * len(images)
-    positions = []
 
     try:
         pto_data = pto_mapper.parse_pto_file(args.ptofile)

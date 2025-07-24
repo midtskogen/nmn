@@ -435,9 +435,177 @@ def calculate_source_coords(coords_y, final_w, final_h, orig_w, orig_h, crop_off
                 coords_y[y_dest, x_dest, 1] = -y_shifted + sh / 2.0
 
 class TestPtoMapping(unittest.TestCase):
-    # ... (unittest class remains unchanged) ...
-    pass
+    # Class variable to hold the command-line override file
+    pto_file_override = None
+    
+    def setUp(self):
+        """
+        Create a dummy PTO file for testing, or use the one
+        provided via command line.
+        """
+        self.created_dummy_file = False
+        if TestPtoMapping.pto_file_override:
+            self.pto_filename = TestPtoMapping.pto_file_override
+            print(f"\n--- Using provided test file: {self.pto_filename} ---")
+        else:
+            self.pto_filename = "test_project.pto"
+            self.created_dummy_file = True
+            pto_content = ""
+            with open(self.pto_filename, "w") as f:
+                f.write(pto_content)
+
+    def tearDown(self):
+        """Remove the dummy PTO file only if it was created by setUp."""
+        if self.created_dummy_file:
+            os.remove(self.pto_filename)
+
+    def test_roundtrip_mapping_randomized(self):
+        """
+        Tests mapping from panorama to image and back for 100000 random
+        points. Points that don't map to an image are ignored.
+        Failures are collected and reported at the end.
+        """
+        pto_data = parse_pto_file(self.pto_filename)
+        
+        global_options = pto_data[0]
+        pano_w = global_options['w']
+        pano_h = global_options['h']
+        pano_proj_f = int(global_options.get('f', 2))
+        
+        num_to_generate = 100000
+        mapped_points_tested = 0
+        successful_roundtrips = 0
+        failures = []
+        
+        print(f"\n--- Testing {num_to_generate} random coordinates (w={pano_w}, h={pano_h}) ---")
+        
+        for i in range(num_to_generate):
+            orig_pano_x = random.uniform(0, pano_w)
+            orig_pano_y = random.uniform(0, pano_h)
+            
+            # For equirectangular, exclude the poles to avoid instability
+            if pano_proj_f == 2:
+                # pitch_deg = (0.5 - y/h) * 180
+                pitch_deg = (0.5 - (orig_pano_y / pano_h)) * 180.0
+                if abs(pitch_deg) > 89.0:
+                    continue
+
+            # For testing, we must restrict to bounds to have a valid round-trip
+            pano_to_img_result = map_pano_to_image(pto_data, orig_pano_x, orig_pano_y, restrict_to_bounds=True)
+            
+            if pano_to_img_result is None:
+                continue
+            
+            mapped_points_tested += 1
+            img_idx, src_x, src_y = pano_to_img_result
+            
+            img_to_pano_result = map_image_to_pano(pto_data, img_idx, src_x, src_y)
+            if img_to_pano_result is None:
+                failures.append(f"Point {i+1} failed: Reverse mapping returned None for img {img_idx} at ({src_x:.2f}, {src_y:.2f})")
+                continue
+
+            final_pano_x, final_pano_y = img_to_pano_result
+            
+            # Check if the coordinates match within a 1.0 pixel tolerance
+            x_ok = abs(orig_pano_x - final_pano_x) <= 1.0
+            y_ok = abs(orig_pano_y - final_pano_y) <= 1.0
+
+            if x_ok and y_ok:
+                successful_roundtrips += 1
+            else:
+                msg = f"Point {i+1} failed:"
+                if not x_ok:
+                    msg += f" X mismatch (Orig: {orig_pano_x:.2f}, Final: {final_pano_x:.2f})"
+                if not y_ok:
+                    msg += f" Y mismatch (Orig: {orig_pano_y:.2f}, Final: {final_pano_y:.2f})"
+                failures.append(msg)
+        
+        # --- Final Report ---
+        print(f"--- Test Summary ---")
+        print(f"Total points generated: {num_to_generate}")
+        print(f"Points that mapped to an image: {mapped_points_tested}")
+        print(f"Successful round-trips: {successful_roundtrips}")
+        print(f"Failed round-trips: {len(failures)}")
+
+        # Don't fail if no points landed in the project, as some PTOs are sparse
+        if mapped_points_tested == 0:
+            print("Warning: No random points mapped to any source image. Test could not be completed.")
+            return
+
+        if failures:
+            # Report the first 10 failures for brevity
+            report = "\n".join(failures[:10])
+            self.fail(f"{len(failures)} round-trip mapping failures occurred:\n{report}")
+
 
 if __name__ == '__main__':
-    # ... (main block remains unchanged) ...
-    pass
+    num_args = len(sys.argv)
+
+    # Dispatch based on number of command-line arguments
+    if num_args not in [2, 4, 5]:
+        # Print usage information if the number of arguments is incorrect
+        print("Usage:")
+        print(f"  Run unit test: python {sys.argv[0]} <pto_file>")
+        print(f"  Pano -> Image: python {sys.argv[0]} <pto_file> <pano_x> <pano_y> [--restrict]")
+        print(f"  Image -> Pano: python {sys.argv[0]} <pto_file> <src_x> <src_y> <image_index>")
+        sys.exit(1)
+
+    pto_path = sys.argv[1]
+    if not os.path.exists(pto_path):
+        print(f"Error: PTO file not found at '{pto_path}'")
+        sys.exit(1)
+
+    # Mode 1: Run the unit test with the given pto file
+    if num_args == 2:
+        TestPtoMapping.pto_file_override = pto_path
+        # Remove the argument from sys.argv for unittest framework
+        sys.argv.pop(1)
+        unittest.main()
+        sys.exit(0)
+
+    # For direct mapping, parse the PTO file first
+    try:
+        pto_data = parse_pto_file(pto_path)
+    except Exception as e:
+        print(f"Error parsing PTO file: {e}")
+        sys.exit(1)
+
+    # Determine which mapping mode is being invoked
+    is_pano_to_image = (num_args == 4) or (num_args == 5 and sys.argv[4] == '--restrict')
+
+    if is_pano_to_image:
+        # Mode 2: Forward mapping (Panorama -> Image)
+        try:
+            pano_x = float(sys.argv[2])
+            pano_y = float(sys.argv[3])
+        except ValueError:
+            print("Error: Panorama coordinates <pano_x> and <pano_y> must be numbers.")
+            sys.exit(1)
+        
+        restrict_bounds = (num_args == 5 and sys.argv[4] == '--restrict')
+        result = map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=restrict_bounds)
+        
+        if result:
+            print(f"{result[1]} {result[2]} {result[0]}")
+        else:
+            print("None")
+
+    elif num_args == 5:
+        # Mode 3: Reverse mapping (Image -> Panorama)
+        try:
+            src_x = float(sys.argv[2])
+            src_y = float(sys.argv[3])
+            img_idx = int(sys.argv[4])
+        except ValueError:
+            print("Error: Source coordinates <src_x>, <src_y> must be numbers and <image_index> must be an integer.")
+            sys.exit(1)
+            
+        try:
+            result = map_image_to_pano(pto_data, img_idx, src_x, src_y)
+            if result:
+                print(f"{result[0]} {result[1]}")
+            else:
+                print("None")
+        except IndexError:
+            print(f"Error: Image index {img_idx} is out of bounds.")
+            sys.exit(1)

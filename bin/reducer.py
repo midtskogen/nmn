@@ -566,6 +566,76 @@ class Zoom_Advanced(ttk.Frame):
         
         print("Saved event data to event.txt")
 
+    def load_event_file(self, filepath):
+        """
+        Loads positions and timestamps from an event.txt file, validates the data,
+        and sets up the application state for editing.
+        """
+        try:
+            config = configparser.ConfigParser()
+            config.read(filepath)
+
+            positions_str = config.get('trail', 'positions')
+            timestamps_str = config.get('trail', 'timestamps')
+
+            # Process the position and timestamp strings into lists
+            event_positions_xy = []
+            for part in positions_str.split(' '):
+                if ',' in part:
+                    x_str, y_str = part.split(',')
+                    event_positions_xy.append((float(x_str), float(y_str)))
+            
+            event_timestamps = [float(t) for t in timestamps_str.split(' ')]
+
+            # Create a lookup map of application timestamps for validation
+            # We round to 2 decimal places for robust float comparison
+            app_ts_map = {round(ts, 2): i for i, ts in enumerate(self.timestamps)}
+            frame_indices = []
+
+            for t_event in event_timestamps:
+                if round(t_event, 2) in app_ts_map:
+                    frame_indices.append(app_ts_map[round(t_event, 2)])
+                else:
+                    print(f"Warning: Timestamp {t_event:.2f} from event file not found in loaded images.", file=sys.stderr)
+                    print("Ignoring event file and starting normally.", file=sys.stderr)
+                    return # Abort loading
+
+            print(f"Successfully loaded {len(frame_indices)} points from {filepath}")
+            self.positions = []
+            for i, frame_idx in enumerate(frame_indices):
+                pos_xy = event_positions_xy[i]
+                point_data = {'frame': frame_idx, 'original': pos_xy, 'current': pos_xy}
+                self.positions.append(point_data)
+
+                # Re-create the corresponding centroid entry from scratch
+                x, y = pos_xy
+                pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
+                if pano_coords:
+                    pano_x, pano_y = pano_coords
+                    pano_w, pano_h = self.global_options.get('w'), self.global_options.get('h')
+                    if self.global_options.get('f', 2) == 2: # equirectangular
+                        az_rad = (pano_x / pano_w) * 2 * math.pi
+                        alt_rad = (0.5 - pano_y / pano_h) * math.pi
+                        az_deg, alt_deg = math.degrees(az_rad), math.degrees(alt_rad)
+                    else:
+                        az_deg, alt_deg = -998, -998 # non-equirectangular
+                else:
+                    az_deg, alt_deg = -999, -999 # outside panorama
+
+                diff = self.timestamps[frame_idx] - self.timestamps[0]
+                ts_obj = datetime.fromtimestamp(self.timestamps[frame_idx], timezone.utc)
+                self.centroid[frame_idx] = f'{frame_idx} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} 1.0 {args.name} {ts_obj.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
+            
+            # Update the UI and jump to the first frame of the event
+            if self.positions:
+                self.update_curve_fit()
+                self.update_prediction()
+                self.change_image(self.positions[0]['frame'])
+
+        except Exception as e:
+            print(f"Error loading event file '{filepath}': {e}", file=sys.stderr)
+            print("Starting normally with a clean slate.", file=sys.stderr)
+
     def _update_highlight_state(self):
         self.last_click_to_highlight = None
         if self.positions:
@@ -1045,6 +1115,7 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
     parser.add_argument('-s', '--station', dest='station', help='station config file', type=str)
     parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
+    parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
     parser.add_argument(action='store', dest='ptofile', help='input .pto file')
     parser.add_argument(action='store', nargs="*", dest='imgfiles', help='input image or video files (.mp4 or image files)')
     args = parser.parse_args()
@@ -1104,6 +1175,10 @@ if __name__ == '__main__':
     window = tk.Tk()
     window.geometry("1600x960")
     app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image)
+
+    # If an event file is provided, load it
+    if args.event_file:
+        app.load_event_file(args.event_file)
     window.mainloop()
 
     for d in temp_dirs:

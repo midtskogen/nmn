@@ -970,28 +970,44 @@ class Zoom_Advanced(ttk.Frame):
             self.curve_orientation = 'x_is_f_of_y'
             
     def click(self, event):
-        if self.positions:
-            last_click_frame = self.positions[-1]['frame']
-            if self.num < last_click_frame:
-                truncate_index = -1
-                for i, pos_data in enumerate(self.positions):
-                    if pos_data['frame'] >= self.num:
-                        truncate_index = i
-                        break
-                
-                if truncate_index != -1:
-                    frames_to_clear = {p['frame'] for p in self.positions[truncate_index:]}
-                    for frame_idx in frames_to_clear:
-                        if frame_idx < len(self.centroid):
-                            self.centroid[frame_idx] = None
-                    self.positions = self.positions[:truncate_index]
+        # Determine if the current frame already has a point marked on it.
+        existing_frames = {p['frame'] for p in self.positions}
 
+        # The deletion of subsequent points will only happen if the user clicks on a
+        # frame that *already* has a point.
+        if self.num in existing_frames:
+            if self.positions:
+                last_click_frame = self.positions[-1]['frame']
+                if self.num < last_click_frame:
+                    truncate_index = -1
+                    for i, pos_data in enumerate(self.positions):
+                        if pos_data['frame'] >= self.num:
+                            truncate_index = i
+                            break
+                    
+                    if truncate_index != -1:
+                        frames_to_clear = {p['frame'] for p in self.positions[truncate_index:]}
+                        for frame_idx in frames_to_clear:
+                            if frame_idx < len(self.centroid):
+                                self.centroid[frame_idx] = None
+                        self.positions = self.positions[:truncate_index]
+
+        # Get the coordinates for the new point
         x, y = event.x / self.imscale + self.x, event.y / self.imscale + self.y
         x += self.offsetx; y += self.offsety
         
         new_point = {'frame': self.num, 'original': (x,y), 'current': (x,y)}
-        self.positions.append(new_point)
 
+        # Find the correct insertion index to keep the list sorted by frame number.
+        # This correctly handles both appending to the end and inserting in the middle.
+        insert_index = len(self.positions)
+        for i, pos_data in enumerate(self.positions):
+            if pos_data['frame'] > self.num:
+                insert_index = i
+                break
+        self.positions.insert(insert_index, new_point)
+
+        # Update curve fitting, prediction, and other states
         if len(self.positions) >= 3:
             self.update_curve_fit()
         else:
@@ -1004,6 +1020,7 @@ class Zoom_Advanced(ttk.Frame):
 
         self._update_highlight_state()
         
+        # Calculate celestial coordinates and update the centroid data
         pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
         if pano_coords:
             pano_x, pano_y = pano_coords
@@ -1022,6 +1039,7 @@ class Zoom_Advanced(ttk.Frame):
         self.centroid[self.num] = f'{self.num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} 1.0 {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
         print(self.centroid[self.num])
         
+        # Advance to the next frame
         self.right_key(event)
 
 

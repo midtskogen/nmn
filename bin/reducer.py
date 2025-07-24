@@ -18,6 +18,7 @@ import re
 import subprocess
 import numpy as np
 import tkinter as tk
+from collections import deque
 from tkinter import messagebox
 from tkinter import ttk
 from datetime import datetime, timedelta, timezone
@@ -522,7 +523,8 @@ class Zoom_Advanced(ttk.Frame):
                 for p in self.positions:
                     snapped_pos = self._project_point_on_curve(p['current'])
                     p['current'] = snapped_pos
-                    self._update_centroid_entry(p['frame'], snapped_pos)
+                    #self._update_centroid_entry(p['frame'], snapped_pos)
+                    self._create_or_update_centroid(p['frame'], snapped_pos)
                 self.update_curve_fit()
                 self.update_prediction()
         elif key_char == 'X': # Undo snap
@@ -592,6 +594,86 @@ class Zoom_Advanced(ttk.Frame):
         parts[3] = f"{az_deg % 360:.2f}"
         self.centroid[frame_num] = ' '.join(parts)
         
+    def _estimate_brightness(self, image, center_xy, tolerance_percent=0.05):
+        """
+        Estimates brightness by measuring the area of contiguous pixels with
+        a similar color to a center point, using a flood-fill algorithm.
+        """
+        try:
+            img_gray = image.convert('L')
+            img_array = np.array(img_gray)
+            height, width = img_array.shape
+
+            center_x, center_y = int(round(center_xy[0])), int(round(center_xy[1]))
+
+            # Ensure the starting point is within the image bounds
+            if not (0 <= center_x < width and 0 <= center_y < height):
+                return 0.0
+
+            # Get the color value of the starting pixel
+            start_value = float(img_array[center_y, center_x])
+
+            # Calculate the allowed color range based on the 5% tolerance
+            tolerance_value = 255 * tolerance_percent
+            min_val = start_value - tolerance_value
+            max_val = start_value + tolerance_value
+
+            q = deque([(center_x, center_y)])
+            visited = set([(center_x, center_y)])
+            area = 0
+
+            while q:
+                x, y = q.popleft()
+                area += 1
+
+                # Check the four direct neighbors
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nx, ny = x + dx, y + dy
+
+                    # If the neighbor hasn't been visited yet...
+                    if (nx, ny) not in visited:
+                        visited.add((nx, ny))
+                        # ...and it is a valid pixel within the color tolerance, add it to the queue.
+                        if (0 <= nx < width and 0 <= ny < height and
+                                min_val <= img_array[ny, nx] <= max_val):
+                            q.append((nx, ny))
+
+            return float(area)
+
+        except Exception as e:
+            print(f"Saturation brightness estimation failed: {e}", file=sys.stderr)
+            return 0.0
+
+    def _create_or_update_centroid(self, frame_num, xy_coords):
+        """
+        Estimates brightness and creates/updates the centroid string for a given frame.
+        """
+        # Load the specific image for the given frame to analyze
+        image_to_analyze = Image.open(self.files[frame_num])
+        brightness = self._estimate_brightness(image_to_analyze, xy_coords)
+
+        # Calculate celestial coordinates
+        x, y = xy_coords
+        pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
+        if pano_coords:
+            pano_x, pano_y = pano_coords
+            pano_w, pano_h = self.global_options.get('w'), self.global_options.get('h')
+            if self.global_options.get('f', 2) == 2:
+                az_rad = (pano_x / pano_w) * 2 * math.pi
+                alt_rad = (0.5 - pano_y / pano_h) * math.pi
+                az_deg, alt_deg = math.degrees(az_rad), math.degrees(alt_rad)
+            else:
+                az_deg, alt_deg = -998, -998
+        else:
+            az_deg, alt_deg = -999, -999
+
+        # Create the full centroid string with the new brightness value
+        diff = self.timestamps[frame_num] - self.timestamps[0]
+        ts = datetime.fromtimestamp(self.timestamps[frame_num], timezone.utc)
+        
+        self.centroid[frame_num] = f'{frame_num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} {brightness:.2f} {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
+        print(self.centroid[frame_num])
+
     def save_event_txt(self):
         # Use a filtered list of positions that corresponds to non-None centroid entries
         valid_positions = [p for p in self.positions if self.centroid[p['frame']] is not None]
@@ -620,7 +702,8 @@ class Zoom_Advanced(ttk.Frame):
             print(f"midpoint = {midaz},{midalt}", file=f)
             print(f"arc = {arc}", file=f)
             
-            print("brightness = " + " ".join(["0"] * len(centroid2)), file=f)
+            brightness_values = [c.split(' ')[4] for c in centroid2]
+            print(f"brightness = {' '.join(brightness_values)}", file=f)
             print("frame_brightness = " + " ".join(["0"] * len(centroid2)), file=f)
             print("size = " + " ".join(["0"] * len(centroid2)), file=f)
             
@@ -652,6 +735,7 @@ class Zoom_Advanced(ttk.Frame):
 
             positions_str = config.get('trail', 'positions')
             timestamps_str = config.get('trail', 'timestamps')
+            brightness_str = config.get('trail', 'brightness', fallback="0")
 
             # Process the position and timestamp strings into lists
             event_positions_xy = []
@@ -699,7 +783,8 @@ class Zoom_Advanced(ttk.Frame):
 
                 diff = self.timestamps[frame_idx] - self.timestamps[0]
                 ts_obj = datetime.fromtimestamp(self.timestamps[frame_idx], timezone.utc)
-                self.centroid[frame_idx] = f'{frame_idx} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} 1.0 {args.name} {ts_obj.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
+                brightness_val = event_brightnesses[i] if i < len(event_brightnesses) else "0.0"
+                self.centroid[frame_idx] = f'{frame_idx} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} {brightness_val} {args.name} {ts_obj.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
             
             # Update the UI and jump to the first frame of the event
             if self.positions:
@@ -790,7 +875,7 @@ class Zoom_Advanced(ttk.Frame):
             final_coords = dragged_point_data['current']
 
             # Update the corresponding centroid data and recalculate the curve
-            self._update_centroid_entry(frame_num, final_coords)
+            self._create_or_update_centroid(frame_num, final_coords)
             self.update_curve_fit()
             self.update_prediction()
 
@@ -835,6 +920,26 @@ class Zoom_Advanced(ttk.Frame):
         if int(x2 - x1) <= 0 or int(y2 - y1) <= 0: return
 
         pos.date = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
+        
+        # Check if a point exists for the current frame to display its info
+        point_info_text = ""
+        for p in self.positions:
+            if p['frame'] == self.num:
+                px, py = p['current']
+                brightness, altitude, azimuth = 0.0, 0.0, 0.0
+                
+                # Try to parse data from the corresponding centroid entry
+                if self.centroid and self.num < len(self.centroid) and self.centroid[self.num]:
+                    try:
+                        parts = self.centroid[self.num].split(' ')
+                        altitude = float(parts[2])
+                        azimuth = float(parts[3])
+                        brightness = float(parts[4])
+                    except (IndexError, ValueError):
+                        pass # Keep default values if parsing fails
+                
+                point_info_text = f"\n  marked pos = {azimuth:.2f}, {altitude:.2f}, brightness = {brightness:.2f}"
+                break # Found the point for the current frame
         
         all_stars = brightstar(self.pto_data, pos, 6.5, -30, int(128*self.imscale), map_to_source_image=True, include_img_idx=True)
         stars = [s[1:] for s in all_stars if s[0] == self.image_index]
@@ -935,7 +1040,8 @@ class Zoom_Advanced(ttk.Frame):
                      f"hfov={self.img_data.get('v', 0):.2f}°\n"
                      f"  radial=({self.img_data.get('a', 0):.3f}, {self.img_data.get('b', 0):.3f}, {self.img_data.get('c', 0):.3f}) "
                      f"radial shift=({-self.img_data.get('d', 0):.1f}, {self.img_data.get('e', 0):.1f})"
-                     f"{self.mousepos}\n  h = toggle help text")
+                     f"{self.mousepos}"
+                     f"{point_info_text}\n  h = toggle help text")
         
         help_id = self.canvas.create_text(bbox2[0]+5, bbox2[1]+5, anchor="nw", text=info_text, fill="yellow", font=("helvetica", 10))
         self.overlay.append(help_id)
@@ -1101,27 +1207,10 @@ class Zoom_Advanced(ttk.Frame):
         self._update_highlight_state()
         
         # Calculate celestial coordinates and update the centroid data
-        pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
-        if pano_coords:
-            pano_x, pano_y = pano_coords
-            pano_w, pano_h = self.global_options.get('w'), self.global_options.get('h')
-            if self.global_options.get('f', 2) == 2:
-                az_rad = (pano_x / pano_w) * 2 * math.pi; alt_rad = (0.5 - pano_y / pano_h) * math.pi
-                az_deg, alt_deg = math.degrees(az_rad), math.degrees(alt_rad)
-            else:
-                az_deg, alt_deg = -998, -998
-        else:
-            az_deg, alt_deg = -999, -999
-
-        diff = self.timestamps[self.num] - self.timestamps[0]
-        ts = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
-        
-        self.centroid[self.num] = f'{self.num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} 1.0 {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
-        print(self.centroid[self.num])
+        self._create_or_update_centroid(self.num, (x, y))
         
         # Advance to the next frame
         self.right_key(event)
-
 
 def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_callback):
     """

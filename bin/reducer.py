@@ -382,6 +382,9 @@ class Zoom_Advanced(ttk.Frame):
         self.offsetx = 0
         self.offsety = 0
         
+        self.dragged_point_index = None
+        self.canvas.bind('<ButtonRelease-1>', self.drag_release)
+
         self.positions = []
         self.centroid = [None] * len(files)
         self.curve_coeffs = None
@@ -580,8 +583,68 @@ class Zoom_Advanced(ttk.Frame):
     def page_up(self, event): self.change_image(self.num - 10)
     def page_down(self, event): self.change_image(self.num + 10)
 
-    def move_from(self, event): self.canvas.scan_mark(event.x, event.y)
-    def move_to(self, event): self.canvas.scan_dragto(event.x, event.y, gain=1); self.show_image()
+    def move_from(self, event):
+        """
+        Check if the click is near a marked point. If so, prepare to drag it.
+        Otherwise, prepare to pan the image.
+        """
+        self.dragged_point_index = None
+
+        # Check for proximity to any existing points
+        for i, pos_data in reversed(list(enumerate(self.positions))):
+            px, py = pos_data['current']
+
+            # Convert point's image coordinates to widget coordinates
+            point_widget_x = (px - self.x - self.offsetx) * self.imscale
+            point_widget_y = (py - self.y - self.offsety) * self.imscale
+
+            # Calculate distance in screen pixels
+            distance = math.sqrt((event.x - point_widget_x)**2 + (event.y - point_widget_y)**2)
+
+            # If click is within 5 pixels, select this point for dragging
+            if distance <= 5:
+                self.dragged_point_index = i
+                return  # Exit to prevent starting a pan
+
+        # If no point was close enough, start a pan action
+        self.canvas.scan_mark(event.x, event.y)
+
+    def move_to(self, event):
+        """
+        If a point is being dragged, update its position.
+        Otherwise, pan the image.
+        """
+        if self.dragged_point_index is not None:
+            # We are dragging a point. Convert widget coordinates to image coordinates.
+            new_img_x = (event.x / self.imscale) + self.x + self.offsetx
+            new_img_y = (event.y / self.imscale) + self.y + self.offsety
+
+            # Update the point's 'current' position
+            self.positions[self.dragged_point_index]['current'] = (new_img_x, new_img_y)
+        else:
+            # We are panning the canvas
+            self.canvas.scan_dragto(event.x, event.y, gain=1)
+        
+        self.show_image() # Redraw the canvas
+
+    def drag_release(self, event):
+        """
+        Finalize the drag-and-drop operation when the left mouse button is released.
+        """
+        if self.dragged_point_index is not None:
+            # Get data from the point that was just moved
+            dragged_point_data = self.positions[self.dragged_point_index]
+            frame_num = dragged_point_data['frame']
+            final_coords = dragged_point_data['current']
+
+            # Update the corresponding centroid data and recalculate the curve
+            self._update_centroid_entry(frame_num, final_coords)
+            self.update_curve_fit()
+            self.update_prediction()
+
+            # Reset the drag state
+            self.dragged_point_index = None
+            self.show_image() # Perform a final redraw
 
     def wheel(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)

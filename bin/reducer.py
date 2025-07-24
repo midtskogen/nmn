@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import tkinter as tk
+import copy
 import argparse
 import ffmpeg
 import tempfile
@@ -90,7 +91,6 @@ class RecalibrateDialog:
         )
         self.par_text_label = tk.Label(self.parent, text=par_text, justify=tk.LEFT)
         self.par_text_label.grid(row=7, column=0, columnspan=4, sticky='w', padx=(10, 0))
-
 
     def create_slider(self, label_text, min_val, max_val, variable, row):
         label = tk.Label(self.parent, text=label_text)
@@ -383,6 +383,8 @@ class Zoom_Advanced(ttk.Frame):
         self.boost = 1
         self.offsetx = 0
         self.offsety = 0
+        self.undo_stack = []
+        self.redo_stack = []
         
         self.dragged_point_index = None
         self.canvas.bind('<ButtonRelease-1>', self.drag_release)
@@ -397,6 +399,67 @@ class Zoom_Advanced(ttk.Frame):
         self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
         
         self.canvas.update()
+        self.show_image()
+        
+    def _save_state_for_undo(self):
+        """Saves a deep copy of the current points and centroids to the undo stack."""
+        # A new action clears the redo stack.
+        self.redo_stack.clear()
+
+        state = {
+            'positions': copy.deepcopy(self.positions),
+            'centroid': copy.deepcopy(self.centroid)
+        }
+        self.undo_stack.append(state)
+
+        # To prevent high memory usage, limit the undo history.
+        if len(self.undo_stack) > 50:
+            self.undo_stack.pop(0)
+
+    def undo(self, event=None):
+        """Reverts to the previous state from the undo stack."""
+        if not self.undo_stack:
+            return
+
+        # Save the current state to the redo stack before reverting.
+        current_state = {
+            'positions': copy.deepcopy(self.positions),
+            'centroid': copy.deepcopy(self.centroid)
+        }
+        self.redo_stack.append(current_state)
+
+        # Pop the last state and restore it.
+        last_state = self.undo_stack.pop()
+        self.positions = last_state['positions']
+        self.centroid = last_state['centroid']
+        
+        # Refresh the display to show the reverted state.
+        self.update_curve_fit()
+        self.update_prediction()
+        self._update_highlight_state()
+        self.show_image()
+
+    def redo(self, event=None):
+        """Re-applies a state from the redo stack."""
+        if not self.redo_stack:
+            return
+
+        # Save the current state for a potential future undo.
+        current_state = {
+            'positions': copy.deepcopy(self.positions),
+            'centroid': copy.deepcopy(self.centroid)
+        }
+        self.undo_stack.append(current_state)
+
+        # Pop from the redo stack and restore.
+        next_state = self.redo_stack.pop()
+        self.positions = next_state['positions']
+        self.centroid = next_state['centroid']
+
+        # Refresh the display.
+        self.update_curve_fit()
+        self.update_prediction()
+        self._update_highlight_state()
         self.show_image()
         
     def moved(self, event):
@@ -425,6 +488,16 @@ class Zoom_Advanced(ttk.Frame):
         self.show_image()
 
     def key(self, event):
+        # Check for Control key modifier (mask 0x4)
+        is_control_pressed = (event.state & 0x4) != 0
+
+        if is_control_pressed and event.keysym.lower() == 'z':
+            self.undo()
+            return # Stop further processing
+        if is_control_pressed and event.keysym.lower() == 'y':
+            self.redo()
+            return # Stop further processing
+
         key_char = event.char
         is_upper = key_char.isupper()
         
@@ -444,6 +517,7 @@ class Zoom_Advanced(ttk.Frame):
             RecalibrateDialog(root, self.image, self)
             root.mainloop()
         elif key_char == 'x': # Snap points to fitted line
+            self._save_state_for_undo()
             if self.curve_coeffs is not None:
                 for p in self.positions:
                     snapped_pos = self._project_point_on_curve(p['current'])
@@ -452,6 +526,7 @@ class Zoom_Advanced(ttk.Frame):
                 self.update_curve_fit()
                 self.update_prediction()
         elif key_char == 'X': # Undo snap
+            self._save_state_for_undo()
             for p in self.positions:
                 p['current'] = p['original']
                 self._update_centroid_entry(p['frame'], p['original'])
@@ -707,6 +782,8 @@ class Zoom_Advanced(ttk.Frame):
         Finalize the drag-and-drop operation when the left mouse button is released.
         """
         if self.dragged_point_index is not None:
+            self._save_state_for_undo()
+
             # Get data from the point that was just moved
             dragged_point_data = self.positions[self.dragged_point_index]
             frame_num = dragged_point_data['frame']
@@ -836,14 +913,14 @@ class Zoom_Advanced(ttk.Frame):
                 self.overlay.append(self.canvas.create_line(canvas_x - size, canvas_y - size, canvas_x + size, canvas_y + size, fill="dark green", width=2))
                 self.overlay.append(self.canvas.create_line(canvas_x - size, canvas_y + size, canvas_x + size, canvas_y - size, fill="dark green", width=2))
         
-        if self.last_click_to_highlight:
+        # The red circle should only be drawn if a point exists for the current frame.
+        if self.last_click_to_highlight and any(p['frame'] == self.num for p in self.positions):
             px, py = self.last_click_to_highlight
             canvas_x = (px - self.x) * self.imscale + canvas_origin_x
             canvas_y = (py - self.y) * self.imscale + canvas_origin_y
             radius = 12
             if bbox2[0] < canvas_x < bbox2[2] and bbox2[1] < canvas_y < bbox2[3]:
-                self.overlay.append(self.canvas.create_oval(canvas_x - radius, canvas_y - radius, canvas_x + radius, canvas_y + radius, outline="red", width=2))
-
+                self.overlay.append(self.canvas.create_oval(canvas_x - radius, canvas_y - radius, canvas_x + radius, canvas_y + radius, outline="red", width=2)) 
         if self.predicted_point:
             canvas_x = (self.predicted_point[0] - self.x) * self.imscale + canvas_origin_x
             canvas_y = (self.predicted_point[1] - self.y) * self.imscale + canvas_origin_y
@@ -871,6 +948,7 @@ class Zoom_Advanced(ttk.Frame):
                 "  d/D,e/E = radial distortion shift\n" +
                 "  i=toggle star info, !=toggle boost (100x)\n" +
                 "  x=snap points to line, X=undo snap\n" +
+                "  Ctrl+Z=undo, Ctrl+Y=redo\n" +
                 "  *=reset orientation, l=save ptofile\n" +
                 "  s=save event.txt, S=save centroid.txt\n" +
                 "  arrows=move frame, pgup/dn=move 10 frames\n" +
@@ -970,6 +1048,8 @@ class Zoom_Advanced(ttk.Frame):
             self.curve_orientation = 'x_is_f_of_y'
             
     def click(self, event):
+        self._save_state_for_undo()
+
         # Determine if the current frame already has a point marked on it.
         existing_frames = {p['frame'] for p in self.positions}
 

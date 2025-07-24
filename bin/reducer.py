@@ -16,8 +16,10 @@ import sys
 import re
 import subprocess
 import numpy as np
-from datetime import datetime, timedelta, timezone
+import tkinter as tk
+from tkinter import messagebox
 from tkinter import ttk
+from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageTk, ImageEnhance
 from brightstar import brightstar
 from recalibrate import recalibrate
@@ -475,7 +477,10 @@ class Zoom_Advanced(ttk.Frame):
         elif key_char == 'h': self.show_text ^= 1
         elif key_char == 'i': self.show_info ^= 1
         elif key_char == '!': self.boost = 100 if self.boost == 1 else 1
-        elif key_char == 'q': exit(0)
+        elif key_char == '!': self.boost = 100 if self.boost == 1 else 1
+        elif key_char == 'q':
+            if messagebox.askyesno("Quit", "Are you sure you want to quit?"):
+                exit(0)
         elif key_char == '1': self.contrast -= 0.1
         elif key_char == '2': self.contrast += 0.1
         elif key_char == '3': self.brightness -= 0.1

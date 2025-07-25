@@ -22,7 +22,7 @@ from collections import deque
 from tkinter import messagebox
 from tkinter import ttk
 from datetime import datetime, timedelta, timezone
-from PIL import Image, ImageTk, ImageEnhance
+from PIL import Image, ImageTk, ImageEnhance, ImageOps, ImageFilter
 from brightstar import brightstar
 from recalibrate import recalibrate
 from timestamp import get_timestamp
@@ -386,10 +386,11 @@ class Zoom_Advanced(ttk.Frame):
         self.offsety = 0
         self.undo_stack = []
         self.redo_stack = []
-        
         self.dragged_point_index = None
         self.canvas.bind('<ButtonRelease-1>', self.drag_release)
-
+        self.background_removal_active = False
+        self.background_image = None
+        self._create_background_image()
         self.positions = []
         self.centroid = [None] * len(files)
         self.curve_coeffs = None
@@ -402,6 +403,34 @@ class Zoom_Advanced(ttk.Frame):
         self.canvas.update()
         self.show_image()
         
+    def _create_background_image(self):
+        """Pads, blurs, and crops the first frame to create a static background image."""
+        if not self.files:
+            return
+        try:
+            print("Creating background image for subtraction...")
+            img = Image.open(self.files[0])
+            
+            # Convert the PIL image to a numpy array to use advanced padding
+            img_arr = np.array(img)
+            
+            # Pad the array by extending the edge pixels
+            pad_width = ((32, 32), (32, 32), (0, 0)) # Pad height, width, but not color channels
+            padded_arr = np.pad(img_arr, pad_width, mode='edge')
+
+            # Convert the padded array back to a PIL image
+            padded_img = Image.fromarray(padded_arr)
+            
+            # Blur the correctly padded image
+            blurred_padded = padded_img.filter(ImageFilter.GaussianBlur(radius=32))
+            
+            # Crop the padding off to get a blurred image of the original size
+            self.background_image = blurred_padded.crop((32, 32, 32 + img.width, 32 + img.height))
+            print("Background image created.")
+        except Exception as e:
+            print(f"Failed to create background image: {e}", file=sys.stderr)
+            self.background_image = None
+
     def _save_state_for_undo(self):
         """Saves a deep copy of the current points and centroids to the undo stack."""
         # A new action clears the redo stack.
@@ -576,6 +605,12 @@ class Zoom_Advanced(ttk.Frame):
         elif key_char == '7': self.sharpness -= 0.2
         elif key_char == '8': self.sharpness += 0.2
         elif key_char == '0': self.contrast = self.brightness = self.color = self.sharpness = 1
+        elif key_char == '-':
+            self.background_removal_active = True
+            self.show_image()
+        elif key_char == '+':
+            self.background_removal_active = False
+            self.show_image()
         
         self.show_image()
 
@@ -1089,6 +1124,27 @@ class Zoom_Advanced(ttk.Frame):
         crop_x2 = min(x2 / self.imscale, self.width); crop_y2 = min(y2 / self.imscale, self.height)
         
         image = self.image.crop((self.x, self.y, crop_x2, crop_y2))
+
+        if self.background_removal_active and self.background_image:
+            bg_crop = self.background_image.crop((self.x, self.y, crop_x2, crop_y2))
+
+            # Convert to numpy arrays for subtraction
+            img_arr = np.array(image.convert('L')).astype(np.float32)
+            bg_arr = np.array(bg_crop.convert('L')).astype(np.float32)
+            
+            subtracted_arr = img_arr - bg_arr
+
+            # 1. Clip all negative values to 0. This ensures black stays black.
+            subtracted_arr = np.clip(subtracted_arr, 0, 255)
+            
+            # 2. Renormalize the result to stretch the brightest part back to white.
+            max_val = subtracted_arr.max()
+            if max_val > 0:
+                subtracted_arr = (subtracted_arr / max_val) * 255.0
+            
+            # Convert back to a displayable image
+            image = Image.fromarray(subtracted_arr.astype(np.uint8)).convert('RGB')
+
         image = self.converted_image(image, self.contrast, self.brightness, self.color, self.sharpness)
         imagetk = ImageTk.PhotoImage(image.resize((int(x2 - x1), int(y2 - y1))))
 
@@ -1194,7 +1250,7 @@ class Zoom_Advanced(ttk.Frame):
 
         if self.show_text:
             help_text_content = ("\n" * 6 +
-                "  q=quit, 1/2=contrast, 3/4=brightness, 5/6=color, 7/8=sharpness, 0=reset\n" +
+                "  q=quit, -/+=bg removal, 1/2=contrast, 3/4=brightness, 5/6=color, 7/8=sharpness, 0=reset\n" + # This line is changed
                 "  p/P=pitch, y/Y=yaw, r/R=roll, z/Z=hfov\n" +
                 "  a/A,b/B,c/C = radial distortion params\n" +
                 "  d/D,e/E = radial distortion shift\n" +

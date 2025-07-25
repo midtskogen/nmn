@@ -16,6 +16,7 @@ import re
 import subprocess
 import numpy as np
 import tkinter as tk
+import contextlib
 from collections import deque
 from tkinter import messagebox
 from tkinter import ttk
@@ -61,6 +62,10 @@ class RecalibrateDialog:
         reset_btn = tk.Button(self.parent, text="Reset", command=self.reset)
         reset_btn.grid(row=4, column=1, pady=10, sticky='e')
 
+        # RMS Display Label
+        self.rms_label = tk.Label(self.parent, text="", justify=tk.LEFT)
+        self.rms_label.grid(row=5, column=0, columnspan=2, pady=5, sticky='w')
+
         # Create Close button
         close_btn = tk.Button(self.parent, text="Close", command=self.parent.destroy)
         close_btn.grid(row=6, column=0, columnspan=2, pady=10, sticky='w')
@@ -81,7 +86,7 @@ class RecalibrateDialog:
         - The "Close" button closes the dialog.
         """
         help_text_label = tk.Label(self.parent, text=help_text, justify=tk.LEFT)
-        help_text_label.grid(row=1, column=3, rowspan=5, sticky='w', padx=(10, 0))
+        help_text_label.grid(row=1, column=3, rowspan=6, sticky='w', padx=(10, 0))
 
         par_text = "Original parameters:\n  pitch=%.2f°\n  yaw=%.2f°\n  roll=%.2f°\n  hfov=%.2f°\n  radial=(%.3f, %.3f, %.3f)\n  radial shift=(%.1f, %.1f)" % (
             self.original_params.get('p', 0), self.original_params.get('y', 0), self.original_params.get('r', 0),
@@ -120,6 +125,10 @@ class RecalibrateDialog:
         self.zoom.show_image()
 
     def recal(self):
+        # Provide immediate feedback in the GUI
+        self.rms_label.config(text="Solving...")
+        self.parent.update_idletasks()
+        
         # Create temporary files safely
         with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".png") as img_f:
             self.image.save(img_f, format='PNG')
@@ -143,30 +152,47 @@ class RecalibrateDialog:
             ])
 
         with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".pto") as pto_f:
-            # Pass the optimization variables to the writer
             pto_mapper.write_pto_file(self.pto_data, pto_f.name, optimize_vars=vars_to_optimize)
             old_lens_filename = pto_f.name
 
         new_lens_filename = tempfile.NamedTemporaryFile(delete=True, dir="/tmp", suffix=".pto").name
+        # Create a path for a temporary log file
+        log_file_path = tempfile.mktemp(suffix=".log", dir="/tmp")
 
         try:
-            recalibrate(
-                starttime,
-                old_lens_filename,
-                img_temp_filename,  # Pass image as a filename
-                new_lens_filename,
-                pos,
-                image=self.zoom.image_index,
-                radius=self.radius_var.get(),
-                lensopt=self.lens_optimize_var.get(),
-                faintest=4,
-                brightest=-5,
-                objects=500,
-                blur=self.blur_var.get(),
-                verbose=True,
-                sigma=self.sigma_var.get()
-            )
-            
+            # Open the log file for writing
+            with open(log_file_path, 'w') as log_f:
+                # Redirect stdout to the real file, which has a fileno
+                with contextlib.redirect_stdout(log_f):
+                    recalibrate(
+                        starttime,
+                        old_lens_filename,
+                        img_temp_filename,
+                        new_lens_filename,
+                        pos,
+                        image=self.zoom.image_index,
+                        radius=self.radius_var.get(),
+                        lensopt=self.lens_optimize_var.get(),
+                        faintest=4,
+                        brightest=-5,
+                        objects=500,
+                        blur=self.blur_var.get(),
+                        verbose=True,
+                        sigma=self.sigma_var.get()
+                    )
+
+            # Read the output from the log file now that the process is complete
+            with open(log_file_path, 'r') as log_f:
+                output = log_f.read()
+
+            # Parse the captured output for the RMS value
+            rms_values = re.findall(r"after \d+ iteration\(s\):\s*([\d.]+)\s*units", str(output))
+            if rms_values:
+                last_rms = float(rms_values[-1])
+                self.rms_label.config(text=f"Final RMS: {last_rms:.2f}")
+            else:
+                self.rms_label.config(text="RMS: Not found in output")
+
             _, new_images_data = pto_mapper.parse_pto_file(new_lens_filename)
             new_img_data = new_images_data[self.zoom.image_index]
 
@@ -174,17 +200,19 @@ class RecalibrateDialog:
             for param in params_to_update:
                 if param in new_img_data:
                     self.img_data[param] = new_img_data[param]
-            
+
             self.zoom.show_image()
         except Exception as e:
             print(f"Recalibration failed: {e}", file=sys.stderr)
+            self.rms_label.config(text=f"Error: {e}")
         finally:
-            # Clean up temporary files
+            # Clean up all temporary files
             os.remove(img_temp_filename)
             os.remove(old_lens_filename)
             if os.path.exists(new_lens_filename):
                 os.remove(new_lens_filename)
-
+            if os.path.exists(log_file_path):
+                os.remove(log_file_path)
 
 def read_frames(filename, directory):
     """Decodes a video file into individual frames, showing a progress bar."""

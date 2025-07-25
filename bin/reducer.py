@@ -11,8 +11,6 @@ import os
 import configparser
 import ephem
 import math
-import io
-import wand.image
 import sys
 import re
 import subprocess
@@ -21,8 +19,8 @@ import tkinter as tk
 from collections import deque
 from tkinter import messagebox
 from tkinter import ttk
-from datetime import datetime, timedelta, timezone
-from PIL import Image, ImageTk, ImageEnhance, ImageOps, ImageFilter
+from datetime import datetime, timezone
+from PIL import Image, ImageTk, ImageEnhance, ImageFilter
 from brightstar import brightstar
 from recalibrate import recalibrate
 from timestamp import get_timestamp
@@ -100,7 +98,7 @@ class RecalibrateDialog:
         slider_frame = ttk.Frame(self.parent)
         slider_frame.grid(row=row, column=1, sticky='w')
 
-        slider = ttk.Scale(slider_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, variable=variable, command=lambda val, lbl=label_text: self.update_slider_label(val, lbl))
+        slider = ttk.Scale(slider_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, variable=variable, command=lambda val: self.update_slider_label(val))
         slider.pack(pady=5)
 
         value_label = tk.Label(slider_frame, text=f"{variable.get():.2f}")
@@ -108,7 +106,7 @@ class RecalibrateDialog:
         slider.value_label = value_label
 
 
-    def update_slider_label(self, value, label_text):
+    def update_slider_label(self, value):
         for child in self.parent.winfo_children():
             if isinstance(child, ttk.Frame):
                 for subchild in child.winfo_children():
@@ -403,6 +401,27 @@ class Zoom_Advanced(ttk.Frame):
         self.canvas.update()
         self.show_image()
         
+    def _image_coords_to_celestial(self, x, y):
+        """Converts image (x, y) coordinates to celestial (azimuth, altitude)."""
+        pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
+        if pano_coords:
+            pano_x, pano_y = pano_coords
+            pano_w = self.global_options.get('w')
+            pano_h = self.global_options.get('h')
+            # Check for equirectangular projection (f=2)
+            if self.global_options.get('f', 2) == 2:
+                az_rad = (pano_x / pano_w) * 2 * math.pi
+                alt_rad = (0.5 - pano_y / pano_h) * math.pi
+                az_deg = math.degrees(az_rad)
+                alt_deg = math.degrees(alt_rad)
+                return az_deg, alt_deg
+            else:
+                # Non-equirectangular projection
+                return -998, -998
+        else:
+            # Outside panorama
+            return -999, -999
+
     def _create_background_image(self):
         """Pads, blurs, and crops the first frame to create a static background image."""
         if not self.files:
@@ -512,7 +531,7 @@ class Zoom_Advanced(ttk.Frame):
                 ra, dec = pos.radec_of(str(az_deg % 360), str(alt_deg))
                 self.mousepos="\n  cursor pos = %.2f° az, %.2f° alt / %s ra %.2f dec" % (az_deg % 360, alt_deg, str(ra), math.degrees(float(repr(dec))))
             else:
-                 self.mousepos = "\n  cursor pos = (non-equirectangular)"
+                self.mousepos = "\n  cursor pos = (non-equirectangular)"
         else:
             self.mousepos = "\n  cursor pos = outside panorama"
         self.show_image()
@@ -563,13 +582,6 @@ class Zoom_Advanced(ttk.Frame):
                 self._update_centroid_entry(p['frame'], p['original'])
             self.update_curve_fit()
             self.update_prediction()
-
-        elif key_char == 'X': # Undo snap
-            for p in self.positions:
-                p['current'] = p['original']
-                self._update_centroid_entry(p['frame'], p['original'])
-            self.update_curve_fit()
-            self.update_prediction()
         elif key_char == 't': # Temporally re-space points
             self._temporally_respace_points()
         elif key_char == '*':
@@ -591,7 +603,6 @@ class Zoom_Advanced(ttk.Frame):
             self.save_event_txt()
         elif key_char == 'h': self.show_text ^= 1
         elif key_char == 'i': self.show_info ^= 1
-        elif key_char == '!': self.boost = 100 if self.boost == 1 else 1
         elif key_char == '!': self.boost = 100 if self.boost == 1 else 1
         elif key_char == 'q':
             if messagebox.askyesno("Quit", "Are you sure you want to quit?"):
@@ -620,18 +631,7 @@ class Zoom_Advanced(ttk.Frame):
             return
             
         x, y = xy_coords
-        pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
-        if pano_coords:
-            pano_x, pano_y = pano_coords
-            pano_w, pano_h = self.global_options.get('w'), self.global_options.get('h')
-            if self.global_options.get('f', 2) == 2:
-                az_rad = (pano_x / pano_w) * 2 * math.pi
-                alt_rad = (0.5 - pano_y / pano_h) * math.pi
-                az_deg, alt_deg = math.degrees(az_rad), math.degrees(alt_rad)
-            else:
-                az_deg, alt_deg = -998, -998
-        else:
-            az_deg, alt_deg = -999, -999
+        az_deg, alt_deg = self._image_coords_to_celestial(x, y)
 
         parts = self.centroid[frame_num].split(' ')
         parts[2] = f"{alt_deg:.2f}"
@@ -757,18 +757,7 @@ class Zoom_Advanced(ttk.Frame):
 
         # Calculate celestial coordinates
         x, y = xy_coords
-        pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
-        if pano_coords:
-            pano_x, pano_y = pano_coords
-            pano_w, pano_h = self.global_options.get('w'), self.global_options.get('h')
-            if self.global_options.get('f', 2) == 2:
-                az_rad = (pano_x / pano_w) * 2 * math.pi
-                alt_rad = (0.5 - pano_y / pano_h) * math.pi
-                az_deg, alt_deg = math.degrees(az_rad), math.degrees(alt_rad)
-            else:
-                az_deg, alt_deg = -998, -998
-        else:
-            az_deg, alt_deg = -999, -999
+        az_deg, alt_deg = self._image_coords_to_celestial(x, y)
 
         # Create the full centroid string with the new brightness value
         diff = self.timestamps[frame_num] - self.timestamps[0]
@@ -944,18 +933,7 @@ class Zoom_Advanced(ttk.Frame):
 
                 # Re-create the corresponding centroid entry from scratch
                 x, y = pos_xy
-                pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
-                if pano_coords:
-                    pano_x, pano_y = pano_coords
-                    pano_w, pano_h = self.global_options.get('w'), self.global_options.get('h')
-                    if self.global_options.get('f', 2) == 2: # equirectangular
-                        az_rad = (pano_x / pano_w) * 2 * math.pi
-                        alt_rad = (0.5 - pano_y / pano_h) * math.pi
-                        az_deg, alt_deg = math.degrees(az_rad), math.degrees(alt_rad)
-                    else:
-                        az_deg, alt_deg = -998, -998 # non-equirectangular
-                else:
-                    az_deg, alt_deg = -999, -999 # outside panorama
+                az_deg, alt_deg = self._image_coords_to_celestial(x, y)
 
                 diff = self.timestamps[frame_idx] - self.timestamps[0]
                 ts_obj = datetime.fromtimestamp(self.timestamps[frame_idx], timezone.utc)

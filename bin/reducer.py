@@ -594,7 +594,47 @@ class Zoom_Advanced(ttk.Frame):
         parts[3] = f"{az_deg % 360:.2f}"
         self.centroid[frame_num] = ' '.join(parts)
         
-    def _estimate_brightness(self, image, center_xy, tolerance_percent=0.05):
+    def _estimate_photometry(self, image, center_xy, aperture_r=5, annulus_r_inner=7, annulus_r_outer=10):
+        """
+        Estimates object brightness using aperture photometry.
+        """
+        try:
+            # Work with a grayscale version of the image
+            img_gray = image.convert('L')
+            img_array = np.array(img_gray)
+
+            y_coords, x_coords = np.ogrid[:img_array.shape[0], :img_array.shape[1]]
+            center_x, center_y = center_xy
+
+            # Create masks for the aperture and the background annulus
+            dist_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
+
+            aperture_mask = dist_from_center <= aperture_r
+            annulus_mask = (dist_from_center > annulus_r_inner) & (dist_from_center <= annulus_r_outer)
+
+            # Calculate background level from the annulus
+            background_pixels = img_array[annulus_mask]
+            if background_pixels.size == 0:
+                return 0.0 # Not enough pixels for background estimate
+
+            mean_background = np.mean(background_pixels)
+
+            # Calculate total brightness in the aperture
+            aperture_pixels = img_array[aperture_mask]
+            total_aperture_brightness = np.sum(aperture_pixels)
+
+            # Subtract the background contribution from the aperture
+            background_contribution = mean_background * aperture_pixels.size
+            integrated_brightness = total_aperture_brightness - background_contribution
+
+            # Return a non-negative, scaled value
+            return max(0, round(integrated_brightness / 100.0, 2))
+
+        except Exception as e:
+            print(f"Photometry brightness estimation failed: {e}", file=sys.stderr)
+            return 0.0
+
+    def _estimate_saturation_brightness(self, image, center_xy, tolerance_percent=0.05):
         """
         Estimates brightness by measuring the area of contiguous pixels with
         a similar color to a center point, using a flood-fill algorithm.
@@ -646,11 +686,30 @@ class Zoom_Advanced(ttk.Frame):
 
     def _create_or_update_centroid(self, frame_num, xy_coords):
         """
-        Estimates brightness and creates/updates the centroid string for a given frame.
+        Selects the best brightness algorithm based on pixel saturation
+        and then creates/updates the centroid string for a given frame.
         """
-        # Load the specific image for the given frame to analyze
         image_to_analyze = Image.open(self.files[frame_num])
-        brightness = self._estimate_brightness(image_to_analyze, xy_coords)
+
+        # --- Dispatcher Logic ---
+        img_gray = image_to_analyze.convert('L')
+        img_array = np.array(img_gray)
+        center_x, center_y = int(round(xy_coords[0])), int(round(xy_coords[1]))
+        brightness = 0.0
+        
+        # Check if click is in bounds before accessing pixel data
+        if not (0 <= center_y < img_array.shape[0] and 0 <= center_x < img_array.shape[1]):
+            brightness = 0.0
+        else:
+            start_pixel_value = img_array[center_y, center_x]
+            # A pixel is "white" if its value is 95% of maximum (255) or more
+            saturation_threshold = 255 * 0.95
+
+            brightness = self._estimate_photometry(image_to_analyze, xy_coords)
+            if start_pixel_value >= saturation_threshold:
+                # For saturated ("white") pixels, use the flood-fill area algorithm
+                brightness += self._estimate_saturation_brightness(image_to_analyze, xy_coords)
+        # --- End Dispatcher Logic ---
 
         # Calculate celestial coordinates
         x, y = xy_coords
@@ -670,9 +729,8 @@ class Zoom_Advanced(ttk.Frame):
         # Create the full centroid string with the new brightness value
         diff = self.timestamps[frame_num] - self.timestamps[0]
         ts = datetime.fromtimestamp(self.timestamps[frame_num], timezone.utc)
-        
+
         self.centroid[frame_num] = f'{frame_num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} {brightness:.2f} {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
-        print(self.centroid[frame_num])
 
     def save_event_txt(self):
         # Use a filtered list of positions that corresponds to non-None centroid entries

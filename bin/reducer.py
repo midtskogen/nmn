@@ -527,13 +527,22 @@ class Zoom_Advanced(ttk.Frame):
                     self._create_or_update_centroid(p['frame'], snapped_pos)
                 self.update_curve_fit()
                 self.update_prediction()
-        elif key_char == 'X': # Undo snap
+        elif key_char == 'X' or key_char == 'T': # Undo snap or temporal space
             self._save_state_for_undo()
             for p in self.positions:
                 p['current'] = p['original']
                 self._update_centroid_entry(p['frame'], p['original'])
             self.update_curve_fit()
             self.update_prediction()
+
+        elif key_char == 'X': # Undo snap
+            for p in self.positions:
+                p['current'] = p['original']
+                self._update_centroid_entry(p['frame'], p['original'])
+            self.update_curve_fit()
+            self.update_prediction()
+        elif key_char == 't': # Temporally re-space points
+            self._temporally_respace_points()
         elif key_char == '*':
             _, fresh_images_data = pto_mapper.parse_pto_file(args.ptofile)
             self.images_data[self.image_index] = fresh_images_data[self.image_index]
@@ -1191,6 +1200,7 @@ class Zoom_Advanced(ttk.Frame):
                 "  d/D,e/E = radial distortion shift\n" +
                 "  i=toggle star info, !=toggle boost (100x)\n" +
                 "  x=snap points to line, X=undo snap\n" +
+                "  t=temporally snap points, T=undo temporal snap\n" +
                 "  Ctrl+Z=undo, Ctrl+Y=redo\n" +
                 "  *=reset orientation, l=save ptofile\n" +
                 "  s=save event.txt, S=save centroid.txt\n" +
@@ -1238,6 +1248,75 @@ class Zoom_Advanced(ttk.Frame):
                 closest_point = (search_x[i], search_y[i])
                 
         return closest_point
+
+    def _temporally_respace_points(self):
+        """
+        Adjusts each point's position along the fitted curve to be smoothly
+        spaced in time relative to its immediate neighbors.
+        """
+        if self.curve_coeffs is None or len(self.positions) < 3:
+            print("Not enough points to perform local temporal respacing.", file=sys.stderr)
+            return
+
+        print("Applying local temporal respacing...")
+        
+        # 1. Create a single, high-resolution lookup table for the entire curve
+        N_POINTS = 2000
+        p_curve = np.poly1d(self.curve_coeffs)
+        start_coords, end_coords = self.positions[0]['current'], self.positions[-1]['current']
+
+        if self.curve_orientation == 'y_is_f_of_x':
+            domain = np.linspace(start_coords[0], end_coords[0], N_POINTS)
+            curve_x, curve_y = domain, p_curve(domain)
+        else: # x_is_f_of_y
+            domain = np.linspace(start_coords[1], end_coords[1], N_POINTS)
+            curve_y, curve_x = domain, p_curve(domain)
+
+        arc_lengths = np.zeros(N_POINTS)
+        for i in range(1, N_POINTS):
+            dist = np.sqrt((curve_x[i] - curve_x[i-1])**2 + (curve_y[i] - curve_y[i-1])**2)
+            arc_lengths[i] = arc_lengths[i-1] + dist
+
+        # 2. Find the arc length corresponding to each of the original points
+        original_arc_lengths = []
+        for p in self.positions:
+            # Find the closest point on the discretized curve to the current point
+            dists = np.sqrt((curve_x - p['current'][0])**2 + (curve_y - p['current'][1])**2)
+            closest_idx = np.argmin(dists)
+            original_arc_lengths.append(arc_lengths[closest_idx])
+        
+        # 3. Iterate through each interior point and calculate its new local position
+        new_positions = [p['current'] for p in self.positions] # Start with current positions
+        
+        for i in range(1, len(self.positions) - 1):
+            # Get data for the local window (previous, current, next)
+            t_prev = self.timestamps[self.positions[i-1]['frame']]
+            t_curr = self.timestamps[self.positions[i]['frame']]
+            t_next = self.timestamps[self.positions[i+1]['frame']]
+            
+            arc_prev, arc_next = original_arc_lengths[i-1], original_arc_lengths[i+1]
+            
+            # Calculate where the current point should be based on time
+            local_duration = t_next - t_prev
+            if local_duration <= 0: continue
+            
+            time_fraction = (t_curr - t_prev) / local_duration
+            
+            # Determine the target arc length within the local segment
+            target_arc_length = arc_prev + time_fraction * (arc_next - arc_prev)
+
+            # Interpolate from the main lookup table to find the new coordinate
+            new_x = np.interp(target_arc_length, arc_lengths, curve_x)
+            new_y = np.interp(target_arc_length, arc_lengths, curve_y)
+            new_positions[i] = (new_x, new_y)
+
+        # 4. Apply the new positions and recalculate all data
+        print("Recalculating brightness for all points... (this may take a moment)")
+        for i, p in enumerate(self.positions):
+            p['current'] = new_positions[i]
+            self._create_or_update_centroid(p['frame'], p['current'])
+
+        self.update_prediction()
 
     def update_prediction(self):
         if len(self.positions) < 2:

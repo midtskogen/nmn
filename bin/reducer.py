@@ -732,6 +732,79 @@ class Zoom_Advanced(ttk.Frame):
 
         self.centroid[frame_num] = f'{frame_num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} {brightness:.2f} {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
 
+    def _draw_brightness_graph(self, canvas_bbox):
+        """Draws a brightness vs. time graph on the canvas overlay."""
+        if len(self.positions) < 2:
+            return
+
+        # 1. Extract (time, brightness) data points for the plot
+        graph_data = []
+        current_frame_data = None
+        for p in self.positions:
+            frame = p['frame']
+            if self.centroid and frame < len(self.centroid) and self.centroid[frame]:
+                try:
+                    time = self.timestamps[frame]
+                    brightness = float(self.centroid[frame].split(' ')[4])
+                    point = (time, brightness)
+                    graph_data.append(point)
+                    if frame == self.num:
+                        current_frame_data = point
+                except (IndexError, ValueError):
+                    continue
+
+        if len(graph_data) < 2:
+            return
+
+        # 2. Define graph geometry in the upper-right corner
+        padding = 10
+        graph_width = 200
+        graph_height = 100
+        graph_x = canvas_bbox[2] - graph_width - padding
+        graph_y = canvas_bbox[1] + padding
+
+        # Draw background and border for the graph
+        self.overlay.append(self.canvas.create_rectangle(
+            graph_x, graph_y, graph_x + graph_width, graph_y + graph_height,
+            fill="gray10", outline="gray50", stipple="gray50"
+        ))
+
+        # 3. Get data ranges for scaling
+        times, brightnesses = zip(*graph_data)
+        min_time, max_time = min(times), max(times)
+        min_bright, max_bright = min(brightnesses), max(brightnesses)
+
+        time_range = max_time - min_time if max_time > min_time else 1
+        bright_range = max_bright - min_bright if max_bright > min_bright else 1
+
+        # 4. Draw the graph line
+        scaled_points = []
+        for t, b in graph_data:
+            px = graph_x + ((t - min_time) / time_range) * graph_width
+            py = graph_y + graph_height - ((b - min_bright) / bright_range) * graph_height
+            scaled_points.extend([px, py])
+
+        self.overlay.append(self.canvas.create_line(scaled_points, fill="cyan", width=1))
+
+        # Draw max/min brightness labels
+        self.overlay.append(self.canvas.create_text(
+            graph_x + 5, graph_y + 5, text=f"{max_bright:.1f}", anchor="nw", fill="yellow", font=("helvetica", 8)
+        ))
+        self.overlay.append(self.canvas.create_text(
+            graph_x + 5, graph_y + graph_height - 5, text=f"{min_bright:.1f}", anchor="sw", fill="yellow", font=("helvetica", 8)
+        ))
+
+        # 5. Draw a marker for the current frame's position on the graph
+        if current_frame_data:
+            t, b = current_frame_data
+            px = graph_x + ((t - min_time) / time_range) * graph_width
+            py = graph_y + graph_height - ((b - min_bright) / bright_range) * graph_height
+            radius = 3
+            self.overlay.append(self.canvas.create_oval(
+                px - radius, py - radius, px + radius, py + radius,
+                fill="red", outline=""
+            ))
+
     def save_event_txt(self):
         # Use a filtered list of positions that corresponds to non-None centroid entries
         valid_positions = [p for p in self.positions if self.centroid[p['frame']] is not None]
@@ -794,6 +867,7 @@ class Zoom_Advanced(ttk.Frame):
             positions_str = config.get('trail', 'positions')
             timestamps_str = config.get('trail', 'timestamps')
             brightness_str = config.get('trail', 'brightness', fallback="0")
+            event_brightnesses = brightness_str.split(' ')
 
             # Process the position and timestamp strings into lists
             event_positions_xy = []
@@ -1091,6 +1165,11 @@ class Zoom_Advanced(ttk.Frame):
             if bbox2[0] < canvas_x < bbox2[2] and bbox2[1] < canvas_y < bbox2[3]:
                 self.overlay.append(self.canvas.create_line(canvas_x - size, canvas_y, canvas_x + size, canvas_y, fill="red", width=1))
                 self.overlay.append(self.canvas.create_line(canvas_x, canvas_y - size, canvas_x, canvas_y + size, fill="red", width=1))
+
+        if self.show_info:
+            self.overlay.append(self.canvas.create_text(canvas_x+3, canvas_y+3, text=f"{name} ({mag})", anchor="nw", fill="green", font=("helvetica", 10)))
+
+        self._draw_brightness_graph(bbox2)
 
         ts = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
         info_text = (f"  time = {ts.strftime('%Y-%m-%d %H:%M:%S.%f UTC')} ({self.timestamps[self.num]:.2f})\n"

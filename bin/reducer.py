@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import tkinter as tk
+import amscalib2lens
+import json
 import copy
 import argparse
 import ffmpeg
@@ -1581,22 +1583,77 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--station', dest='station', help='station config file', type=str)
     parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
     parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
-    parser.add_argument(action='store', dest='ptofile', help='input .pto file')
+    parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
+    parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
+    parser.add_argument('--elevation', type=float, help='Observer elevation in meters. Required if --station is not used.')
+    parser.add_argument(action='store', dest='ptofile', help='input .pto or .json calibration file')
     parser.add_argument(action='store', nargs="*", dest='imgfiles', help='input image or video files (.mp4 or image files)')
     args = parser.parse_args()
 
-    pos = None
-    if args.station:
-        pos = ephem.Observer()
-        config = configparser.ConfigParser()
-        config.read(args.station)
-        pos.lat = config.get('astronomy', 'latitude')
-        pos.lon = config.get('astronomy', 'longitude')
-        pos.elevation = float(config.get('astronomy', 'elevation'))
-        pos.temp = float(config.get('astronomy', 'temperature', fallback=15))
-        pos.pressure = float(config.get('astronomy', 'pressure', fallback=1010))
-        args.name = config.get('station', 'code')
+    # Establish observer location from command-line args or station file
+    pos = ephem.Observer()
+    if all(arg is not None for arg in [args.latitude, args.longitude, args.elevation]):
+        print("Using location from command-line arguments.")
+        pos.lat, pos.lon, pos.elevation = str(args.latitude), str(args.longitude), args.elevation
+        pos.temp, pos.pressure = 15.0, 1010.0  # Set reasonable defaults
+    elif args.station:
+        print(f"Using location from station file: {args.station}")
+        try:
+            config = configparser.ConfigParser()
+            config.read(args.station)
+            pos.lat = config.get('astronomy', 'latitude')
+            pos.lon = config.get('astronomy', 'longitude')
+            pos.elevation = float(config.get('astronomy', 'elevation'))
+            pos.temp = float(config.get('astronomy', 'temperature', fallback=15))
+            pos.pressure = float(config.get('astronomy', 'pressure', fallback=1010))
+            args.name = config.get('station', 'code', fallback=args.name)
+        except (configparser.Error, FileNotFoundError) as e:
+            sys.exit(f"Error reading station file '{args.station}': {e}")
+    else:
+        sys.exit("Error: Observer location not specified. Please use the -s/--station option, or --latitude, --longitude, and --elevation.")
 
+    # This list will hold paths to any temporary files that need to be deleted later
+    temp_files_to_clean = []
+
+    # If input is a JSON file, convert it to an optimized PTO in memory
+    if args.ptofile.lower().endswith('.json'):
+        print(f"Detected JSON calibration file: {args.ptofile}. Converting...")
+        try:
+            with open(args.ptofile) as f:
+                calib_data = json.load(f)
+
+            # Use the already configured observer 'pos' to generate PTO data
+            width = calib_data.get('imagew', 1920)
+            height = calib_data.get('imageh', 1080)
+            pto_content = amscalib2lens.generate_pto_from_json(calib_data, pos, width, height, match_dist_limit=0.2)
+
+            # Hugin's optimizer requires a file, so we use a temporary one.
+            with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".pto", dir="/tmp") as temp_pto_file:
+                temp_pto_path = temp_pto_file.name
+                temp_files_to_clean.append(temp_pto_path)
+                temp_pto_file.write(pto_content)
+                temp_pto_file.flush() # Ensure data is written before optimizer runs
+
+                print(f"Running Hugin's autooptimiser on temporary file {temp_pto_path}...")
+                proc = subprocess.run(['autooptimiser', '-n', temp_pto_path, '-o', temp_pto_path], capture_output=True, text=True)
+                
+                if proc.returncode != 0:
+                    print("\nWarning: autooptimiser failed during conversion.", file=sys.stderr)
+                    print(proc.stderr, file=sys.stderr)
+                else:
+                    print("Optimization complete.")
+            
+            # The rest of the script will now use the newly created and optimized PTO file
+            args.ptofile = temp_pto_path
+
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            sys.exit(f"Error reading JSON file: {e}")
+        except (IOError, ValueError) as e:
+            sys.exit(f"Error during JSON to PTO conversion: {e}")
+        except FileNotFoundError:
+            sys.exit("\nError: 'autooptimiser' command not found. Please ensure Hugin is installed.")
+
+    # Process video files into image frames
     temp_dirs = []
     images = []
     for f in args.imgfiles:
@@ -1614,6 +1671,7 @@ if __name__ == '__main__':
     if not images:
         sys.exit("No image files found.")
 
+    # Extract or generate timestamps for all frames
     timestamps = [None] * len(images)
     if args.start is None:
         raw_timestamps = extract_timestamps(images)
@@ -1624,10 +1682,11 @@ if __name__ == '__main__':
         starttime = datetime.strptime(args.start, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()
         timestamps = [starttime + (x / args.fps) for x in range(len(images))]
 
+    # Parse the final PTO data (either original or from conversion)
     try:
         pto_data = pto_mapper.parse_pto_file(args.ptofile)
     except Exception as e:
-        sys.exit(f"Error parsing PTO file: {e}")
+        sys.exit(f"Error parsing PTO file '{args.ptofile}': {e}")
 
     global_options, images_data = pto_data
     if args.image >= len(images_data):
@@ -1637,14 +1696,19 @@ if __name__ == '__main__':
     first_pil = Image.open(images[0])
     img_data['w'], img_data['h'] = first_pil.size
 
+    # Launch the GUI
     window = tk.Tk()
     window.geometry("1600x960")
     app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image)
 
-    # If an event file is provided, load it
     if args.event_file:
         app.load_event_file(args.event_file)
     window.mainloop()
 
+    # Clean up all temporary directories and files
     for d in temp_dirs:
         d.cleanup()
+    for f in temp_files_to_clean:
+        if os.path.exists(f):
+            print(f"Cleaning up temporary file: {f}")
+            os.remove(f)

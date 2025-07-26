@@ -1621,11 +1621,17 @@ if __name__ == '__main__':
         try:
             with open(args.ptofile) as f:
                 calib_data = json.load(f)
+            
+            # Check for the 'cal_params' key and use the correct data dictionary
+            if 'cal_params' in calib_data:
+                cal_params_data = calib_data['cal_params']
+            else:
+                cal_params_data = calib_data
 
             # Use the already configured observer 'pos' to generate PTO data
-            width = calib_data.get('imagew', 1920)
-            height = calib_data.get('imageh', 1080)
-            pto_content = amscalib2lens.generate_pto_from_json(calib_data, pos, width, height, match_dist_limit=0.2)
+            width = cal_params_data.get('imagew', 1920)
+            height = cal_params_data.get('imageh', 1080)
+            pto_content = amscalib2lens.generate_pto_from_json(cal_params_data, pos, width, height, match_dist_limit=0.2)
 
             # Hugin's optimizer requires a file, so we use a temporary one.
             with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".pto", dir="/tmp") as temp_pto_file:

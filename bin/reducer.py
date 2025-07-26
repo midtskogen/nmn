@@ -409,6 +409,7 @@ class Zoom_Advanced(ttk.Frame):
         self.sharpness = 1
         self.show_text = 0
         self.show_info = 0
+        self.show_graph = 1
         self.boost = 1
         self.offsetx = 0
         self.offsety = 0
@@ -633,6 +634,7 @@ class Zoom_Advanced(ttk.Frame):
             self.save_event_txt()
         elif key_char == 'h': self.show_text ^= 1
         elif key_char == 'i': self.show_info ^= 1
+        elif key_char == 'g': self.show_graph ^= 1
         elif key_char == '!': self.boost = 100 if self.boost == 1 else 1
         elif key_char == 'q':
             if messagebox.askyesno("Quit", "Are you sure you want to quit?"):
@@ -984,7 +986,7 @@ class Zoom_Advanced(ttk.Frame):
         self.last_click_to_highlight = None
         if self.positions:
             last_recorded_frame = self.positions[-1]['frame']
-            if self.num < last_recorded_frame:
+            if self.num <= last_recorded_frame:
                 for pos_data in reversed(self.positions):
                     if pos_data['frame'] <= self.num:
                         self.last_click_to_highlight = pos_data['current']
@@ -1239,10 +1241,8 @@ class Zoom_Advanced(ttk.Frame):
                 self.overlay.append(self.canvas.create_line(canvas_x - size, canvas_y, canvas_x + size, canvas_y, fill="red", width=1))
                 self.overlay.append(self.canvas.create_line(canvas_x, canvas_y - size, canvas_x, canvas_y + size, fill="red", width=1))
 
-        if self.show_info:
-            self.overlay.append(self.canvas.create_text(canvas_x+3, canvas_y+3, text=f"{name} ({mag})", anchor="nw", fill="green", font=("helvetica", 10)))
-
-        self._draw_brightness_graph(bbox2)
+        if self.show_graph:
+            self._draw_brightness_graph(bbox2)
 
         ts = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
         info_text = (f"  time = {ts.strftime('%Y-%m-%d %H:%M:%S.%f UTC')} ({self.timestamps[self.num]:.2f})\n"
@@ -1264,6 +1264,7 @@ class Zoom_Advanced(ttk.Frame):
                 "  d/D,e/E = radial distortion shift\n" +
                 "  i=toggle star info, !=toggle boost (100x)\n" +
                 "  x=snap points to line, X=undo snap\n" +
+                "  g=toggle brightness graph\n" +
                 "  t=temporally snap points, T=undo temporal snap\n" +
                 "  Ctrl+Z=undo, Ctrl+Y=redo\n" +
                 "  *=reset orientation, l=save ptofile\n" +
@@ -1580,7 +1581,7 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
     parser.add_argument('-f', '--fps', dest='fps', help='frames per second (default: 10 or extracted from images)', default=10, type=int)
     parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
-    parser.add_argument('-s', '--station', dest='station', help='station config file', type=str)
+    parser.add_argument('-c', '--config', dest='station', help='station config file', type=str)
     parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
     parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
     parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')

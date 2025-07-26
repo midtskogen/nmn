@@ -216,9 +216,12 @@ class RecalibrateDialog:
             if os.path.exists(log_file_path):
                 os.remove(log_file_path)
 
-def read_frames(filename, directory):
+# In reducer.py
+
+def read_frames(filename, directory, skip_seconds=0, total_seconds=None):
     """Decodes a video file into individual frames, showing a progress bar."""
     try:
+        # Probe logic can remain the same
         probe = ffmpeg.probe(filename)
         total_frames = int(next(s['nb_frames'] for s in probe['streams'] if s['codec_type'] == 'video'))
     except (ffmpeg.Error, StopIteration, KeyError, ValueError):
@@ -226,7 +229,14 @@ def read_frames(filename, directory):
 
     print(f"Decoding video {filename}...")
 
-    stream = ffmpeg.input(filename).output(f'{directory}/%04d.tif', format='image2', vsync=0).overwrite_output()
+    # Modify the ffmpeg.input() call to include skip and total seconds
+    input_kwargs = {}
+    if skip_seconds > 0:
+        input_kwargs['ss'] = skip_seconds
+    if total_seconds is not None:
+        input_kwargs['t'] = total_seconds
+
+    stream = ffmpeg.input(filename, **input_kwargs).output(f'{directory}/%04d.tif', format='image2', vsync=0).overwrite_output()
     args = stream.get_args()
     
     final_args = ['ffmpeg']
@@ -1583,6 +1593,8 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
     parser.add_argument('-c', '--config', dest='station', help='station config file', type=str)
     parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
+    parser.add_argument('-s', dest='skip', help='Seconds of the initial video to skip (default: 0)', default=0.0, type=float)
+    parser.add_argument('-t', dest='total', help='Total seconds of video to load after skipping. Applies to the first video only.', type=float, default=None)
     parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
     parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
     parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
@@ -1663,15 +1675,63 @@ if __name__ == '__main__':
     # Process video files into image frames
     temp_dirs = []
     images = []
+    
+    seconds_to_skip = args.skip
+    seconds_to_load = args.total
+    loaded_duration = 0.0
+
     for f in args.imgfiles:
         if f.lower().endswith('.mp4'):
+            # If -t is specified, stop if we have loaded the requested duration
+            if seconds_to_load is not None and loaded_duration >= seconds_to_load:
+                break
+
+            try:
+                probe = ffmpeg.probe(f)
+                video_duration = float(next(s['duration'] for s in probe['streams'] if s['codec_type'] == 'video'))
+            except (ffmpeg.Error, StopIteration, KeyError, ValueError):
+                print(f"Warning: Could not probe duration of {f}. Skipping file.", file=sys.stderr)
+                continue
+
+            # --- Handle Skipping ---
+            if seconds_to_skip > 0:
+                if seconds_to_skip >= video_duration:
+                    # This video is skipped entirely
+                    seconds_to_skip -= video_duration
+                    print(f"Skipping entire video {f} ({video_duration:.2f}s). Remaining skip: {seconds_to_skip:.2f}s.")
+                    continue  # Go to the next file
+                else:
+                    # We will seek within this video; the full skip amount will be satisfied
+                    current_file_skip = seconds_to_skip
+                    seconds_to_skip = 0
+            else:
+                current_file_skip = 0
+
+            # --- Handle Total Duration (-t) ---
+            current_file_load_duration = None
+            if seconds_to_load is not None:
+                remaining_to_load = seconds_to_load - loaded_duration
+                available_in_video = video_duration - current_file_skip
+                current_file_load_duration = min(remaining_to_load, available_in_video)
+                if current_file_load_duration <= 0:
+                    break  # We've loaded enough; stop processing files
+
+            # --- Decode Frames ---
             temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp")
             temp_dirs.append(temp_dir)
             try:
-                read_frames(f, temp_dir.name)
-                images.extend(sorted(glob.glob(temp_dir.name + "/*.tif")))
+                print(f"Processing {f}: skipping {current_file_skip:.2f}s, loading up to {current_file_load_duration or 'all available':.2f}s.")
+                read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
+                
+                decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))
+                images.extend(decoded_files)
+
+                # Update the total duration we have successfully loaded
+                duration_this_run = len(decoded_files) / args.fps
+                loaded_duration += duration_this_run
             except Exception as e:
-                print(e, file=sys.stderr)
+                print(f"Error processing {f}: {e}", file=sys.stderr)
+
         else:
             images.append(os.path.abspath(f))
 

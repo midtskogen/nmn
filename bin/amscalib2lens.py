@@ -24,55 +24,103 @@ import ephem  # For calculating celestial object positions
 from stars import cat  # Star catalog for position cross-referencing
 
 
-def setup_observer(args, config, calib_data):
+def setup_observer(args, config, calib_data, verbose=False):
     """
     Initializes and configures an ephem.Observer object with location,
-    elevation, and atmospheric data.
-
-    Args:
-        args: Command-line arguments or a Namespace object.
-        config: Parsed configuration from meteor.cfg.
-        calib_data: Data from the AMS JSON calibration file.
-
-    Returns:
-        An ephem.Observer instance configured with the best available data.
+    elevation, and atmospheric data, following a specific priority order.
     """
     obs = ephem.Observer()
 
-    # Set defaults from config file, if available
-    if config.has_section('astronomy'):
-        obs.lat = config.get('astronomy', 'latitude')
-        obs.lon = config.get('astronomy', 'longitude')
-        obs.elevation = float(config.get('astronomy', 'elevation'))
-        obs.temp = float(config.get('astronomy', 'temperature'))
-        obs.pressure = float(config.get('astronomy', 'pressure'))
+    def warn_if_overriding(old_val, new_val, name, new_source, old_source):
+        if old_val is not None and str(old_val) != str(new_val):
+            print(f"Warning: {name} from {new_source} ('{new_val}') is overriding value from {old_source} ('{old_val}').")
 
-    # Override with arguments if provided (e.g., from command line or another script)
-    if hasattr(args, 'latitude') and args.latitude is not None: obs.lat = str(args.latitude)
-    if hasattr(args, 'longitude') and args.longitude is not None: obs.lon = str(args.longitude)
-    if hasattr(args, 'elevation') and args.elevation is not None: obs.elevation = args.elevation
-    if hasattr(args, 'temperature') and args.temperature is not None: obs.temp = args.temperature
-    if hasattr(args, 'pressure') and args.pressure is not None: obs.pressure = args.pressure
+    lat_val, lon_val, ele_val = None, None, None
+    lat_source, lon_source, ele_source = "Nothing", "Nothing", "Nothing"
 
-    # Override with data from JSON file if present (highest priority)
-    if 'device_lat' in calib_data: obs.lat = calib_data['device_lat']
-    if 'device_lon' in calib_data: obs.lon = calib_data['device_lon']
-    if 'device_alt' in calib_data: obs.elevation = int(calib_data['device_alt'])
+    # 1. Baseline from JSON data (Lowest Priority)
+    if 'device_lat' in calib_data:
+        lat_val, lat_source = str(calib_data['device_lat']), "JSON"
+    if 'device_lon' in calib_data:
+        lon_val, lon_source = str(calib_data['device_lon']), "JSON"
+    if 'device_alt' in calib_data:
+        ele_val, ele_source = float(calib_data['device_alt']), "JSON"
 
-    # Set the observation time
+    # 2. Override with config file data (Medium Priority)
+    if args.config and config.has_section('astronomy'):
+        conf_lat = config.get('astronomy', 'latitude', fallback=None)
+        conf_lon = config.get('astronomy', 'longitude', fallback=None)
+        conf_ele = config.getfloat('astronomy', 'elevation', fallback=None)
+
+        if conf_lat is not None:
+            warn_if_overriding(lat_val, conf_lat, "Latitude", "Config File", lat_source)
+            lat_val, lat_source = conf_lat, "Config File"
+        if conf_lon is not None:
+            warn_if_overriding(lon_val, conf_lon, "Longitude", "Config File", lon_source)
+            lon_val, lon_source = conf_lon, "Config File"
+        if conf_ele is not None:
+            warn_if_overriding(ele_val, conf_ele, "Elevation", "Config File", ele_source)
+            ele_val, ele_source = conf_ele, "Config File"
+
+    # 3. Override with command-line arguments (Highest Priority)
+    if args.latitude is not None:
+        warn_if_overriding(lat_val, args.latitude, "Latitude", "Command-line", lat_source)
+        lat_val = str(args.latitude)
+    if args.longitude is not None:
+        warn_if_overriding(lon_val, args.longitude, "Longitude", "Command-line", lon_source)
+        lon_val = str(args.longitude)
+    if args.elevation is not None:
+        warn_if_overriding(ele_val, args.elevation, "Elevation", "Command-line", ele_source)
+        ele_val = args.elevation
+
+    # Final validation: ensure we have a complete location
+    if lat_val is None or lon_val is None or ele_val is None:
+        missing = []
+        if lat_val is None: missing.append("Latitude")
+        if lon_val is None: missing.append("Longitude")
+        if ele_val is None: missing.append("Elevation")
+        raise ValueError(f"Observer location is incomplete. Missing: {', '.join(missing)}. Provide the location via the JSON file, a config file (-c), or command-line arguments.")
+
+    obs.lat = lat_val
+    obs.lon = lon_val
+    obs.elevation = ele_val
+
+    # Handle temperature and pressure
+    obs.temp = float(config.get('astronomy', 'temperature', fallback=10))
+    obs.pressure = float(config.get('astronomy', 'pressure', fallback=1010))
+    if args.temperature is not None: obs.temp = args.temperature
+    if args.pressure is not None: obs.pressure = args.pressure
+
+    # Handle timestamp
     timestamp = args.timestamp if hasattr(args, 'timestamp') and args.timestamp else None
     if not timestamp:
         try:
             fname = getattr(args, 'amscalib', '')
             fname_parts = os.path.basename(fname).split('_')
             dt_str = f"{fname_parts[0]}-{fname_parts[1]}-{fname_parts[2]} {fname_parts[3]}:{fname_parts[4]}:{fname_parts[5]}"
-            timestamp = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").timestamp()
+            
+            naive_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+            aware_dt = naive_dt.replace(tzinfo=UTC)
+            timestamp = aware_dt.timestamp()
+
         except (IndexError, ValueError, AttributeError):
             timestamp = datetime.now(UTC).timestamp()
             print("Warning: Could not parse timestamp from filename. Using current time.")
 
-    obs.date = datetime.fromtimestamp(float(timestamp), UTC).strftime('%Y-%m-%d %H:%M:%S')
+    # Create a datetime object from the final timestamp
+    final_dt_utc = datetime.fromtimestamp(float(timestamp), UTC)
+    
+    # Set the observer date for ephem calculations
+    obs.date = final_dt_utc.strftime('%Y-%m-%d %H:%M:%S')
 
+    # If verbose, print the observer details using the new formats
+    if verbose:
+        print("\n--- Observer Details ---")
+        print(f"Timestamp for calculation: {final_dt_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"Latitude: {math.degrees(obs.lat):.5f}")
+        print(f"Longitude: {math.degrees(obs.lon):.5f}")
+        print(f"Elevation: {int(obs.elevation)} m")
+        
     return obs
 
 
@@ -88,8 +136,8 @@ def _get_pto_scaffold(width, height, calib_data, date_str):
     fov_orig_calc = width * pixel_scale / 3600
     center_az = calib_data.get('center_az', 180)
     center_el = calib_data.get('center_el', 0)
+    position_angle = calib_data.get('position_angle', 0)
 
-    # Using an in-memory string builder is more efficient
     with io.StringIO() as header_stream:
         header_stream.write("# hugin project file\n")
         header_stream.write("#hugin_ptoversion 2\n")
@@ -97,7 +145,7 @@ def _get_pto_scaffold(width, height, calib_data, date_str):
         header_stream.write("m g1 i0 m2 p0.00784314\n\n")
         header_stream.write("# image lines\n")
         header_stream.write("#-hugin cropFactor=1\n")
-        header_stream.write(f"i w{width} h{height} f3 v{fov_orig_calc} Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 r0 p{center_el} y{center_az - 180} TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 a0 b0 c0 d0 e0 g0 t0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5\n")
+        header_stream.write(f"i w{width} h{height} f3 v{fov_orig_calc} Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 r{position_angle} p{center_el} y{center_az - 180} TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 a0 b0 c0 d0 e0 g0 t0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5\n")
         header_stream.write('i w36000 h18000 f4 v360 Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 r0 p0 y0 TrX0 TrY0 TrZ0 j0 a0 b0 c0 d0 e0 g0 t0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5 n"dummy.jpg"\n\n')
         header_stream.write("# specify variables that should be optimized\n")
         header_stream.write("v v0\nv r0\nv p0\nv y0\nv a0\nv b0\nv c0\nv d0\nv e0\nv\n\n")
@@ -106,18 +154,20 @@ def _get_pto_scaffold(width, height, calib_data, date_str):
         return header_stream.getvalue()
 
 
-def _get_control_points(calib_data, observer):
+def _get_control_points(calib_data, observer, verbose=False):
     """
-    Generates control point lines from calibration data as a list of strings.
+    Generates control point lines from the provided list of stars.
     """
     control_points = []
+    # This function now expects a pre-filtered list of stars
     for star_data in calib_data.get('cat_image_stars', []):
         dcname, mag, ra, dec, _, _, match_dist, _, _, _, _, _, _, six, siy, _, _ = star_data
         
-        # The 'match_dist' filter has been removed from this function.
+        if verbose:
+            # The initial check is now done elsewhere, but we can still announce the re-verification
+            print(f"\n- Verifying star from JSON: '{dcname if dcname else 'Unnamed'}' at pixel (X:{six}, Y:{siy})")
 
         ra_hours = ra * 24 / 360
-
         best_match_body = None
         best_match_name = "Unknown"
         min_separation = 99999
@@ -142,33 +192,72 @@ def _get_control_points(calib_data, observer):
             best_match_body.compute(observer)
             az = math.degrees(float(repr(best_match_body.az)))
             alt = math.degrees(float(repr(best_match_body.alt)))
-            
+
+            json_star.compute(observer)
+            json_az = math.degrees(float(repr(json_star.az)))
+            json_alt = math.degrees(float(repr(json_star.alt)))
+
+            if verbose:
+                print(f"  - Re-verification match found: '{best_match_name}' (Separation: {min_separation:.6f} rad)")
+                print(f"  - JSON Pos (X:{six}, Y:{siy} -> Az/Alt): {json_az:.4f}° / {json_alt:.4f}°")
+                print(f"  - Ephem Pos (Catalog -> Az/Alt):  {az:.4f}° / {alt:.4f}°")
+
             if alt > 1:
                 pano_x = az * 100
                 pano_y = (90 - alt) * 100
-                control_points.append(f'c n0 N1 x{six} y{siy} X{pano_x:.4f} Y{pano_y:.4f} t0 # {best_match_name}\n')
+                comment = f"Star: {best_match_name}, JSON_px:({six},{siy}), JSON_pos:({json_az:.2f},{json_alt:.2f})"
+                control_points.append(f'c n0 N1 x{six} y{siy} X{pano_x:.4f} Y{pano_y:.4f} t0 # {comment}\n')
+        
+        elif verbose:
+            print(f"  - No close re-verification match found in script's catalog (min separation: {min_separation:.6f} rad).")
+            print("  -> REJECTED.")
     
     return control_points
 
 
-def generate_pto_from_json(calib_data, observer, width, height):
+def generate_pto_from_json(calib_data, observer, width, height, match_dist_limit, verbose=False):
     """
-    Generates the full content of a Hugin .pto file from AMS calibration data.
-    This is the primary function for external use.
+    Selects the best stars and generates the full content of a Hugin .pto file.
     """
-    # Generate the main structure (p, m, i, v lines)
-    scaffold = _get_pto_scaffold(width, height, calib_data, observer.date)
+    # --- New Star Selection Logic ---
+    raw_star_list = calib_data.get('cat_image_stars', [])
+    final_star_list = []
 
-    # Generate the control points (c lines) - no longer needs match_dist_limit
-    control_points = _get_control_points(calib_data, observer)
+    if raw_star_list:
+        # 1. Filter stars by the user-defined quality limit
+        good_stars = [s for s in raw_star_list if s[6] <= match_dist_limit]
 
-    # Combine all parts into a single string
+        # 2. If enough good stars are found, use them.
+        if len(good_stars) >= 3:
+            final_star_list = good_stars
+            if verbose:
+                print(f"Info: Found {len(final_star_list)} stars within the match distance limit of {match_dist_limit}.")
+        # 3. Otherwise, fall back to using the absolute 3 best stars.
+        else:
+            raw_star_list.sort(key=lambda s: s[6])
+            final_star_list = raw_star_list[:3]
+            print(f"Warning: Only {len(good_stars)} stars met the quality limit of {match_dist_limit}.")
+            print("Falling back to using the 3 best-matched stars to attempt a solution.")
+    
+    # Create a new dictionary with the final curated list of stars
+    curated_calib_data = calib_data.copy()
+    curated_calib_data['cat_image_stars'] = final_star_list
+
+    # --- Generation ---
+    scaffold = _get_pto_scaffold(width, height, curated_calib_data, observer.date)
+    # The 'match_dist_limit' is no longer passed as filtering is complete
+    control_points = _get_control_points(curated_calib_data, observer, verbose=verbose)
+
+    # Final validation remains a good safeguard
+    if len(control_points) < 3:
+        raise ValueError(f"Only {len(control_points)} valid control points could be generated. At least 3 are required.")
+
     return scaffold + "".join(control_points)
+
 
 def main():
     """
-    Main execution function for standalone script usage. Parses arguments,
-    reads data, generates the .pto file, and runs the optimizer.
+    Main execution function for standalone script usage.
     """
     parser = argparse.ArgumentParser(
         description='Convert AMS calibration into a Hugin/panotools pto file.',
@@ -179,9 +268,9 @@ def main():
     parser.add_argument('-W', '--width', type=int, default=1920, help='Image width (default: 1920)')
     parser.add_argument('-H', '--height', type=int, default=1080, help='Image height (default: 1080)')
     parser.add_argument('-d', '--match_dist', type=float, default=0.2, help='Maximum allowed match distance (default: 0.2)')
-    parser.add_argument('-c', '--config', default='/etc/meteor.cfg', help='Meteor config file (default: /etc/meteor.cfg)')
+    parser.add_argument('-c', '--config', help='Optional meteor config file for location data')
     parser.add_argument('-T', '--timestamp', help='Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Show the full output from the autooptimiser.')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Show detailed script output.')
     parser.add_argument('-x', '--longitude', type=float, help='Observer longitude')
     parser.add_argument('-y', '--latitude', type=float, help='Observer latitude')
     parser.add_argument('-e', '--elevation', type=float, help='Observer elevation (m)')
@@ -189,7 +278,6 @@ def main():
     parser.add_argument('-p', '--pressure', type=float, help='Observer air pressure (hPa, for refraction)')
     args = parser.parse_args()
 
-    # --- Data Loading ---
     try:
         with open(args.amscalib) as f:
             calib_data = json.load(f)
@@ -198,77 +286,50 @@ def main():
         return
 
     config = configparser.ConfigParser()
-    read_files = config.read([args.config, os.path.expanduser('~/meteor.cfg')])
-    if not read_files:
-        print(f"Warning: Could not read config files. Using defaults.")
-        config.add_section('astronomy')
-        config.set('astronomy', 'latitude', '0'); config.set('astronomy', 'longitude', '0')
-        config.set('astronomy', 'elevation', '0'); config.set('astronomy', 'temperature', '10')
-        config.set('astronomy', 'pressure', '1010')
+    if args.config:
+        if not os.path.exists(args.config):
+            print(f"Error: Config file not found: {args.config}")
+            return
+        config.read(args.config)
 
-    # --- Setup ---
-    observer = setup_observer(args, config, calib_data)
+    try:
+        # Pass the verbose flag to the setup function
+        observer = setup_observer(args, config, calib_data, verbose=args.verbose)
+    except ValueError as e:
+        print(f"Error: Could not determine observer location. {e}")
+        return
 
-    # In the new JSON format, calibration data is nested under 'cal_params'.
+    # The observer details are now printed inside setup_observer()
+
     if 'cal_params' in calib_data:
         cal_params_data = calib_data['cal_params']
     else:
         cal_params_data = calib_data
-
-    # --- STAR SELECTION & VALIDATION ---
-    raw_star_list = cal_params_data.get('cat_image_stars')
-
-    # 1. Check if the star list exists and has at least 3 stars.
-    if not raw_star_list or len(raw_star_list) < 3:
-        num_stars = 0 if not raw_star_list else len(raw_star_list)
-        print(f"Error: The JSON file contains only {num_stars} star(s).")
-        print("At least 3 stars are required to generate a reliable lens model. Exiting.")
-        return
-
-    # 2. Sort all available stars by their match quality (ascending).
-    # The 7th element (index 6) is 'match_dist'.
-    raw_star_list.sort(key=lambda s: s[6])
-
-    # 3. Select the 5 best-matched stars unconditionally.
-    final_star_list = raw_star_list[:5]
     
-    # 4. Add any other stars that are better than the user-defined limit.
-    if len(raw_star_list) > 5:
-        for star in raw_star_list[5:]:
-            # star[6] is match_dist
-            if star[6] <= args.match_dist:
-                final_star_list.append(star)
+    width = cal_params_data.get('imagew', args.width)
+    height = cal_params_data.get('imageh', args.height)
 
-    # 5. Issue a warning if the final count is low.
-    if len(final_star_list) <= 5:
-        print(f"Warning: Using the {len(final_star_list)} best available stars.")
-        print("A low star count may lead to an inaccurate lens model.")
-        
-    # 6. Prepare the data payload with the curated list of stars.
-    filtered_cal_params = cal_params_data.copy()
-    filtered_cal_params['cat_image_stars'] = final_star_list
-
-    # Image dimensions are also inside the calibration data block.
-    width = filtered_cal_params.get('imagew', args.width)
-    height = filtered_cal_params.get('imageh', args.height)
-
-    # --- File Generation ---
     try:
-        # Pass the curated data to the generation function.
-        pto_content = generate_pto_from_json(filtered_cal_params, observer, width, height)
-                
+        if args.verbose:
+            print("\n--- Verifying Stars for Control Points ---")
+            
+        pto_content = generate_pto_from_json(cal_params_data, observer, width, height, match_dist_limit=args.match_dist, verbose=args.verbose)
+        
         with open(args.ptofile, 'w') as ptofile_handle:
             ptofile_handle.write(pto_content)
         print(f"Successfully generated initial .pto file: {args.ptofile}")
+
+        if args.verbose:
+            print("\n--- Generated .pto File Content ---")
+            print(pto_content.strip())
+            print("-----------------------------------")
 
     except (IOError, ValueError) as e:
         print(f"Error generating or writing PTO file: {e}")
         return
 
-    # --- Optimization ---
     try:
         print("Running Hugin's autooptimiser...")
-        # autooptimiser can optimize the file in-place
         proc = subprocess.run(['autooptimiser', '-n', args.ptofile, '-o', args.ptofile],
                               capture_output=True, text=True)
         

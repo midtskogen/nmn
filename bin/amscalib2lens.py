@@ -106,7 +106,7 @@ def _get_pto_scaffold(width, height, calib_data, date_str):
         return header_stream.getvalue()
 
 
-def _get_control_points(calib_data, observer, match_dist_limit):
+def _get_control_points(calib_data, observer):
     """
     Generates control point lines from calibration data as a list of strings.
     """
@@ -114,8 +114,7 @@ def _get_control_points(calib_data, observer, match_dist_limit):
     for star_data in calib_data.get('cat_image_stars', []):
         dcname, mag, ra, dec, _, _, match_dist, _, _, _, _, _, _, six, siy, _, _ = star_data
         
-        if match_dist > match_dist_limit:
-            continue
+        # The 'match_dist' filter has been removed from this function.
 
         ra_hours = ra * 24 / 360
 
@@ -152,30 +151,19 @@ def _get_control_points(calib_data, observer, match_dist_limit):
     return control_points
 
 
-def generate_pto_from_json(calib_data, observer, width, height, match_dist_limit):
+def generate_pto_from_json(calib_data, observer, width, height):
     """
     Generates the full content of a Hugin .pto file from AMS calibration data.
     This is the primary function for external use.
-
-    Args:
-        calib_data (dict): The loaded AMS JSON calibration data.
-        observer (ephem.Observer): The configured observer object.
-        width (int): The width of the image.
-        height (int): The height of the image.
-        match_dist_limit (float): The maximum allowed match distance for stars.
-
-    Returns:
-        str: The complete, unoptimized content of the .pto file.
     """
     # Generate the main structure (p, m, i, v lines)
     scaffold = _get_pto_scaffold(width, height, calib_data, observer.date)
 
-    # Generate the control points (c lines)
-    control_points = _get_control_points(calib_data, observer, match_dist_limit)
+    # Generate the control points (c lines) - no longer needs match_dist_limit
+    control_points = _get_control_points(calib_data, observer)
 
     # Combine all parts into a single string
     return scaffold + "".join(control_points)
-
 
 def main():
     """
@@ -219,15 +207,56 @@ def main():
         config.set('astronomy', 'pressure', '1010')
 
     # --- Setup ---
-    width = calib_data.get('imagew', args.width)
-    height = calib_data.get('imageh', args.height)
     observer = setup_observer(args, config, calib_data)
+
+    # In the new JSON format, calibration data is nested under 'cal_params'.
+    if 'cal_params' in calib_data:
+        cal_params_data = calib_data['cal_params']
+    else:
+        cal_params_data = calib_data
+
+    # --- STAR SELECTION & VALIDATION ---
+    raw_star_list = cal_params_data.get('cat_image_stars')
+
+    # 1. Check if the star list exists and has at least 3 stars.
+    if not raw_star_list or len(raw_star_list) < 3:
+        num_stars = 0 if not raw_star_list else len(raw_star_list)
+        print(f"Error: The JSON file contains only {num_stars} star(s).")
+        print("At least 3 stars are required to generate a reliable lens model. Exiting.")
+        return
+
+    # 2. Sort all available stars by their match quality (ascending).
+    # The 7th element (index 6) is 'match_dist'.
+    raw_star_list.sort(key=lambda s: s[6])
+
+    # 3. Select the 5 best-matched stars unconditionally.
+    final_star_list = raw_star_list[:5]
+    
+    # 4. Add any other stars that are better than the user-defined limit.
+    if len(raw_star_list) > 5:
+        for star in raw_star_list[5:]:
+            # star[6] is match_dist
+            if star[6] <= args.match_dist:
+                final_star_list.append(star)
+
+    # 5. Issue a warning if the final count is low.
+    if len(final_star_list) <= 5:
+        print(f"Warning: Using the {len(final_star_list)} best available stars.")
+        print("A low star count may lead to an inaccurate lens model.")
+        
+    # 6. Prepare the data payload with the curated list of stars.
+    filtered_cal_params = cal_params_data.copy()
+    filtered_cal_params['cat_image_stars'] = final_star_list
+
+    # Image dimensions are also inside the calibration data block.
+    width = filtered_cal_params.get('imagew', args.width)
+    height = filtered_cal_params.get('imageh', args.height)
 
     # --- File Generation ---
     try:
-        # Use the new core function to get the PTO data
-        pto_content = generate_pto_from_json(calib_data, observer, width, height, args.match_dist)
-        
+        # Pass the curated data to the generation function.
+        pto_content = generate_pto_from_json(filtered_cal_params, observer, width, height)
+                
         with open(args.ptofile, 'w') as ptofile_handle:
             ptofile_handle.write(pto_content)
         print(f"Successfully generated initial .pto file: {args.ptofile}")

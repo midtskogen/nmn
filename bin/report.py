@@ -178,25 +178,11 @@ with open(dir2 + '/light.txt', 'w') as light:
     for (t, b, s, f) in zip(timestamps, brightness, size, fbrightness):
         light.write(str(round(float(t) - float(timestamps[0]), 2)) + ' ' + str(b) + ' ' + str(s) + ' ' + str(f) + '\n')
 
-plt.plot([float(x) - float(timestamps[0]) for x in timestamps], list(map(int, brightness)))
+plt.plot([float(x) - float(timestamps[0]) for x in timestamps], list(map(float, brightness)))
 plt.xlabel('Tid [s]')
 plt.ylabel('Lysstyrke')
 plt.savefig(dir2 + '/brightness.svg')
 plt.savefig(dir2 + '/brightness.jpg')
-
-plt.figure()
-plt.plot([float(x) - float(timestamps[0]) for x in timestamps], list(map(int, size)))
-plt.xlabel('Tid [s]')
-plt.ylabel('Utstrekning')
-plt.savefig(dir2 + '/size.svg')
-plt.savefig(dir2 + '/size.jpg')
-
-plt.figure()
-plt.plot([float(x) - float(timestamps[0]) for x in timestamps], list(map(float, fbrightness)))
-plt.xlabel('Tid [s]')
-plt.ylabel('Bakgrunnslysstyrke')
-plt.savefig(dir2 + '/fbrightness.svg')
-plt.savefig(dir2 + '/fbrightness.jpg')
 
 with open('/etc/default/ssh_tunnel') as f:
     for line in f:

@@ -933,7 +933,7 @@ class Zoom_Advanced(ttk.Frame):
     def load_event_file(self, filepath):
         """
         Loads positions and timestamps from an event.txt file, validates the data,
-        and sets up the application state for editing.
+        and sets up the application state for editing. It uses fuzzy matching for timestamps.
         """
         try:
             config = configparser.ConfigParser()
@@ -944,7 +944,6 @@ class Zoom_Advanced(ttk.Frame):
             brightness_str = config.get('trail', 'brightness', fallback="0")
             event_brightnesses = brightness_str.split(' ')
 
-            # Process the position and timestamp strings into lists
             event_positions_xy = []
             for part in positions_str.split(' '):
                 if ',' in part:
@@ -953,36 +952,58 @@ class Zoom_Advanced(ttk.Frame):
             
             event_timestamps = [float(t) for t in timestamps_str.split(' ')]
 
-            # Create a lookup map of application timestamps for validation
-            # We round to 2 decimal places for robust float comparison
-            app_ts_map = {round(ts, 2): i for i, ts in enumerate(self.timestamps)}
+            # --- New timestamp matching logic ---
             frame_indices = []
+            # The tolerance is the duration of a single frame.
+            tolerance = 1.0 / args.fps
+            app_ts_map = {round(ts, 2): i for i, ts in enumerate(self.timestamps)}
 
             for t_event in event_timestamps:
+                # First, try a fast, rounded match.
                 if round(t_event, 2) in app_ts_map:
                     frame_indices.append(app_ts_map[round(t_event, 2)])
-                else:
-                    print(f"Warning: Timestamp {t_event:.2f} from event file not found in loaded images.", file=sys.stderr)
-                    print("Ignoring event file and starting normally.", file=sys.stderr)
-                    return # Abort loading
+                    continue
 
-            print(f"Successfully loaded {len(frame_indices)} points from {filepath}")
+                # If the fast match fails, find the nearest timestamp within the tolerance.
+                min_diff = float('inf')
+                best_match_idx = -1
+
+                for i, app_ts in enumerate(self.timestamps):
+                    diff = abs(t_event - app_ts)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_match_idx = i
+
+                # Check if the closest match found is within our tolerance.
+                if best_match_idx != -1 and min_diff < tolerance:
+                    print(f"Info: Timestamp {t_event:.4f} matched to nearest timestamp {self.timestamps[best_match_idx]:.4f} (difference: {min_diff:.4f}s).")
+                    frame_indices.append(best_match_idx)
+                else:
+                    # If no timestamp is close enough, abort loading the file.
+                    print(f"Warning: Timestamp {t_event:.4f} from event file not found in loaded images.", file=sys.stderr)
+                    if best_match_idx != -1:
+                        print(f"         (Nearest match {self.timestamps[best_match_idx]:.4f} was too far: {min_diff:.4f}s > {tolerance:.4f}s tolerance).", file=sys.stderr)
+                    print("Ignoring event file and starting normally.", file=sys.stderr)
+                    # Clear any partially loaded data before returning.
+                    self.positions.clear()
+                    self.centroid = [None] * len(self.files)
+                    return
+
+            print(f"Successfully loaded and matched {len(frame_indices)} points from {filepath}")
             self.positions = []
             for i, frame_idx in enumerate(frame_indices):
                 pos_xy = event_positions_xy[i]
                 point_data = {'frame': frame_idx, 'original': pos_xy, 'current': pos_xy}
                 self.positions.append(point_data)
 
-                # Re-create the corresponding centroid entry from scratch
+                # Re-create the corresponding centroid entry from scratch.
                 x, y = pos_xy
                 az_deg, alt_deg = self._image_coords_to_celestial(x, y)
-
                 diff = self.timestamps[frame_idx] - self.timestamps[0]
                 ts_obj = datetime.fromtimestamp(self.timestamps[frame_idx], timezone.utc)
                 brightness_val = event_brightnesses[i] if i < len(event_brightnesses) else "0.0"
                 self.centroid[frame_idx] = f'{frame_idx} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} {brightness_val} {args.name} {ts_obj.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
             
-            # Update the UI and jump to the first frame of the event
             if self.positions:
                 self.update_curve_fit()
                 self.update_prediction()

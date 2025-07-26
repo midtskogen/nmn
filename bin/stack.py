@@ -8,16 +8,17 @@ import os
 import typing
 import threading
 import queue
+from concurrent.futures import ThreadPoolExecutor
 
 def get_video_properties(video_path: str) -> typing.Tuple[typing.Optional[cv2.VideoCapture], ...]:
     """Safely opens a video and returns its properties."""
     if not os.path.exists(video_path):
-        print(f"Warning: Video file not found at '{video_path}'. Skipping.", file=sys.stderr)
+        tqdm.write(f"Warning: Video file not found at '{video_path}'. Skipping.", file=sys.stderr)
         return None, None, None, None, None
         
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Warning: Could not open video file at '{video_path}'. Skipping.", file=sys.stderr)
+        tqdm.write(f"Warning: Could not open video file at '{video_path}'. Skipping.", file=sys.stderr)
         return None, None, None, None, None
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -26,41 +27,47 @@ def get_video_properties(video_path: str) -> typing.Tuple[typing.Optional[cv2.Vi
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
     if not all([width, height, fps > 0, frame_count > 0]):
-        print(f"Warning: Could not read valid properties from '{video_path}'. Skipping.", file=sys.stderr)
+        tqdm.write(f"Warning: Could not read valid properties from '{video_path}'. Skipping.", file=sys.stderr)
         cap.release()
         return None, None, None, None, None
 
     return cap, width, height, fps, frame_count
 
-def frame_producer(tasks: list, frame_queue: queue.Queue):
+def video_stack_worker(task: dict) -> typing.Optional[typing.Tuple[np.ndarray, dict]]:
     """
-    Worker thread function to read video frames and put them into a queue.
-    Pre-processes frames into YUV color space to offload work from the main thread.
+    A worker function that creates a stacked image for a single video file task.
+    This function is designed to be run in a separate thread.
     """
-    for task in tasks:
-        cap, _, _, _, _ = get_video_properties(task["path"])
-        if not cap: continue
-        
-        cap.set(cv2.CAP_PROP_POS_FRAMES, task["start_frame"])
-        for _ in range(task["frame_count"]):
-            ret, frame = cap.read()
-            if not ret: break
-            # Offload color conversion to producer threads
-            yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
-            frame_queue.put(yuv_frame)
-        cap.release()
+    cap, width, height, _, _ = get_video_properties(task["path"])
+    if not cap: return None
 
-def stack_video_frames(video_paths: list, output_path: str, start_seconds: float, duration_seconds: typing.Optional[float], denoise: bool, denoise_strength: float, quality: int, num_threads: int):
+    individual_yuv_stack = np.zeros((height, width, 3), dtype=np.uint8)
+    individual_yuv_stack[:, :, 1:] = 128
+    
+    cap.set(cv2.CAP_PROP_POS_FRAMES, task["start_frame"])
+    
+    for _ in range(task["frame_count"]):
+        ret, frame = cap.read()
+        if not ret: break
+        
+        yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+        
+        # Update the stack for this video
+        update_mask = yuv_frame[:, :, 0] > individual_yuv_stack[:, :, 0]
+        individual_yuv_stack[update_mask] = yuv_frame[update_mask]
+        
+    cap.release()
+    return individual_yuv_stack, task
+
+def stack_video_frames(video_paths: list, output_path: str, start_seconds: float, duration_seconds: typing.Optional[float], denoise: bool, denoise_strength: float, quality: int, num_threads: int, individual: bool):
     """
-    Reads video files, stacks frames within a time window, and saves the result.
-    Uses a multi-threaded producer-consumer model for decoding and stacking.
+    Reads and stacks video files in parallel, saving individual and/or a combined result.
     """
     processing_plan = []
-    total_frames_to_process = 0
-    time_cursor = 0.0
     
-    # --- Planning Phase: Scan files and create a processing plan ---
+    # --- Planning Phase ---
     print("Pre-scanning video files to create processing plan...")
+    time_cursor = 0.0
     for path in video_paths:
         cap, _, _, fps, frame_count = get_video_properties(path)
         if not cap: continue
@@ -74,50 +81,46 @@ def stack_video_frames(video_paths: list, output_path: str, start_seconds: float
             frames_to_process_in_video = int((effective_end_time - effective_start_time) * fps)
             if frames_to_process_in_video > 0:
                 processing_plan.append({"path": path, "start_frame": start_frame, "frame_count": frames_to_process_in_video})
-                total_frames_to_process += frames_to_process_in_video
         time_cursor += video_duration
         cap.release()
 
     if not processing_plan:
-        print("Error: No frames found to process with the given start/duration settings.", file=sys.stderr)
+        print("Error: No frames found to process with the given settings.", file=sys.stderr)
         sys.exit(1)
 
-    # --- Execution Phase: Process the plan using multiple threads ---
-    print(f"Ready to stack {total_frames_to_process} frames using {num_threads} threads.")
-    yuv_stack = None
-    frame_queue = queue.Queue(maxsize=num_threads * 4)
+    # --- Execution Phase ---
+    print(f"Ready to process {len(processing_plan)} video file(s) using up to {num_threads} threads.")
+    total_yuv_stack = None
     
-    # Create and start producer threads
-    threads = []
-    tasks_per_thread = [processing_plan[i::num_threads] for i in range(num_threads)]
-    for i in range(num_threads):
-        if tasks_per_thread[i]:
-            thread = threading.Thread(target=frame_producer, args=(tasks_per_thread[i], frame_queue))
-            thread.start()
-            threads.append(thread)
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(video_stack_worker, task) for task in processing_plan]
+        
+        with tqdm(total=len(processing_plan), desc="Processing Files", unit="file") as pbar:
+            for future in futures:
+                result = future.result()
+                pbar.update(1)
+                if result is None: continue
+                
+                individual_stack, task = result
+                
+                if total_yuv_stack is None:
+                    total_yuv_stack = np.copy(individual_stack)
+                else:
+                    update_mask = individual_stack[:, :, 0] > total_yuv_stack[:, :, 0]
+                    total_yuv_stack[update_mask] = individual_stack[update_mask]
 
-    # Main (consumer) thread: pulls YUV frames from queue and stacks them
-    with tqdm(total=total_frames_to_process, desc="Stacking Frames", unit="frame") as pbar:
-        for i in range(total_frames_to_process):
-            yuv_frame = frame_queue.get()
-            if yuv_stack is None:
-                height, width, _ = yuv_frame.shape
-                yuv_stack = np.zeros((height, width, 3), dtype=np.uint8)
-                yuv_stack[:, :, 1:] = 128
-            
-            update_mask = yuv_frame[:, :, 0] > yuv_stack[:, :, 0]
-            yuv_stack[update_mask] = yuv_frame[update_mask]
-            pbar.update(1)
+                if individual:
+                    base_name = os.path.splitext(os.path.basename(task['path']))[0]
+                    individual_output_path = f"{base_name}_max.jpg"
+                    bgr_image = cv2.cvtColor(individual_stack, cv2.COLOR_YUV2BGR)
+                    finalize_and_save(bgr_image, individual_output_path, denoise, denoise_strength, quality, pbar=pbar)
 
-    for thread in threads:
-        thread.join()
-
-    if yuv_stack is None:
+    if total_yuv_stack is None:
         print("\nNo frames were stacked. Exiting.", file=sys.stderr)
         sys.exit(1)
     
-    print("\nConverting final image to BGR color space...")
-    final_bgr_image = cv2.cvtColor(yuv_stack, cv2.COLOR_YUV2BGR)
+    print("\nFinalizing combined stack of all videos...")
+    final_bgr_image = cv2.cvtColor(total_yuv_stack, cv2.COLOR_YUV2BGR)
     finalize_and_save(final_bgr_image, output_path, denoise, denoise_strength, quality)
 
 def stack_raw_frames(width: int, height: int, output_path: str, start_seconds: float, duration_seconds: typing.Optional[float], fps: float, denoise: bool, denoise_strength: float, quality: int):
@@ -165,37 +168,41 @@ def stack_raw_frames(width: int, height: int, output_path: str, start_seconds: f
     final_yuv420_data = np.concatenate([luma_stack.ravel(), chroma_u_stack.ravel(), chroma_v_stack.ravel()])
     yuv_image_i420 = final_yuv420_data.reshape((int(height * 1.5), width))
     final_bgr_image = cv2.cvtColor(yuv_image_i420, cv2.COLOR_YUV2BGR_I420)
-    finalize_and_save(final_bgr_image, output_path, denoise, denoise_strength, quality)
+    finalize_and_save(final_bgr_image, output_path, denoise, denoise_strength, quality, pbar=pbar)
 
-def finalize_and_save(bgr_image, output_path: str, denoise: bool, denoise_strength: float, quality: int):
-    """Denoises (if enabled) and saves the final BGR image."""
+def finalize_and_save(bgr_image, output_path: str, denoise: bool, denoise_strength: float, quality: int, pbar: typing.Optional[tqdm] = None):
+    """Denoises (if enabled) and saves the final BGR image, logging with tqdm if provided."""
+    log = tqdm.write if pbar else print
+    
     final_image = bgr_image
     if denoise:
-        print(f"Denoising final image with strength {denoise_strength} (this may take a moment)...")
+        log(f"Denoising '{output_path}' with strength {denoise_strength}...")
         final_image = cv2.fastNlMeansDenoisingColored(bgr_image, None, h=denoise_strength, hColor=denoise_strength, templateWindowSize=7, searchWindowSize=21)
     
-    print(f"Saving result to '{output_path}'...")
+    log(f"Saving result to '{output_path}'...")
     ext = os.path.splitext(output_path)[1].lower()
     if ext in ['.jpg', '.jpeg']:
         cv2.imwrite(output_path, final_image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     else:
-        # For PNG, TIFF, etc., the quality parameter is ignored.
         cv2.imwrite(output_path, final_image)
-    print("Done!")
 
 def main():
     parser = argparse.ArgumentParser(description="Stack video frames to simulate a long exposure.", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("video_files", nargs='*', help="Path(s) to input video file(s). Ignored if --raw is used.")
-    parser.add_argument("-o", "--output", default="max.jpg", help="Path for the output image. Format is determined by extension (e.g., .jpg, .png, .tiff). Default: max.jpg")
+    parser.add_argument("-o", "--output", default="max.jpg", help="Path for the final combined output image. Format is determined by extension. Default: max.jpg")
     parser.add_argument("-s", "--start", type=float, default=0.0, help="Start position in seconds.")
     parser.add_argument("-t", "--duration", type=float, default=None, help="Total duration in seconds to stack.")
-    parser.add_argument("--denoise", action="store_true", help="Enable a denoising filter on the final image.")
+    parser.add_argument("--individual", action="store_true", help="Save a separate stacked image for each input file.")
+    parser.add_argument("--denoise", action="store_true", help="Enable a denoising filter on the final image(s).")
     parser.add_argument("--denoise-strength", type=float, default=10.0, help="Strength of the denoising filter (default: 10.0).")
     parser.add_argument("--quality", type=int, default=95, choices=range(1, 101), metavar="{1-100}", help="Quality for JPEG output (1-100, default: 95).")
     parser.add_argument("--raw", nargs=2, metavar=('W', 'H'), type=int, help="Process raw YUV420 from stdin with specified Width and Height.")
     parser.add_argument("--fps", type=float, default=25.0, help="FPS for raw stream timing (default: 25.0).")
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 1, help="Number of threads for parallel video decoding (default: all available cores).")
     args = parser.parse_args()
+
+    if args.raw and args.individual:
+        parser.error("The --raw and --individual options cannot be used together.")
 
     if args.raw:
         if args.start > 0 or args.duration is not None:
@@ -205,7 +212,7 @@ def main():
     else:
         if not args.video_files:
             parser.error("Missing input. Provide video file(s) or use the --raw option.")
-        stack_video_frames(args.video_files, args.output, args.start, args.duration, args.denoise, args.denoise_strength, args.quality, args.threads)
+        stack_video_frames(args.video_files, args.output, args.start, args.duration, args.denoise, args.denoise_strength, args.quality, args.threads, args.individual)
 
 if __name__ == "__main__":
     main()

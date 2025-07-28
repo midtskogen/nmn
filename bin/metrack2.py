@@ -274,7 +274,7 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     lat_span = abs(lat_top - lat_bot)
     zoom_level = int(np.log2(360 / (lat_span + 1)))
     zoom_level = max(6, min(zoom_level, 9))
-
+    
     try: ax.add_image(OSM(), zoom_level)
     except Exception: ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
     ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
@@ -588,7 +588,8 @@ def write_res_file(track_start, track_end, cross_pos, obs_data, in_name):
         for i in range(len(cross_pos)):
             cross_lon, cross_lat, cross_height = xyz2lonlat(cross_pos[i])
             site_lon, site_lat, site_name = obs_data['longitudes'][i], obs_data['latitudes'][i], obs_data['names'][i]
-            f.write(f'{site_lon:6.2f} {site_lat:6.2f} {cross_lon:8.4f} {cross_lat:8.4f} {cross_height:6.1f} {site_name}\n')
+            site_height_km = obs_data['heights_m'][i]
+            f.write(f'{site_lon:6.5f} {site_lat:6.5f} {cross_lon:8.5f} {cross_lat:8.5f} {cross_height:6.3f} {site_name} {site_height_km:6.3f}\n')
     print(f"Detailed results saved to {output_path}")
 
 def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborders=False, 

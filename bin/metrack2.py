@@ -292,7 +292,7 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     # Plot each unique station marker once
     for name, (lon, lat) in unique_stations.items():
         if station_is_inlier[name]:
-            ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label='Tellende stasjon')
+            ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label='Inkludert stasjon')
         else:
             ax.plot(lon, lat, 'ko', markersize=8, mfc='none', transform=ccrs.PlateCarree(), label='Avvikende stasjon')
         ax.text(lon + 0.05, lat + 0.05, name, color='black', transform=ccrs.PlateCarree())

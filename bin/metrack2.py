@@ -5,8 +5,9 @@
 Metrack: Atmospheric Meteor Trajectory Fitting Tool
 
 This script reads a data file describing a set of meteor observations, calculates
-the meteor's trajectory through the atmosphere, and outputs the results.
-It can be run as a standalone script or imported as a module in other tools.
+the meteor's trajectory through the atmosphere using a robust RANSAC-based
+fitting method, and outputs the results. It can be run as a standalone script
+or imported as a module in other tools.
 """
 
 import argparse
@@ -15,6 +16,8 @@ import datetime
 import os
 import sys
 import time
+import random
+import itertools
 from pathlib import Path
 from argparse import Namespace
 
@@ -84,6 +87,7 @@ class MetrackInfo:
         self.radiant_ecllong = 0.
         self.radiant_ecllat = 0.
         self.shower = 'N/A'
+        self.inlier_stations = []
 
 # --- Coordinate and Geometric Transformations ---
 def lonlat2xyz(lon_deg, lat_deg, height_km=0):
@@ -133,12 +137,15 @@ def haversine(lon1, lat1, lon2, lat2):
     return EARTH_RADIUS_KM * 2 * np.arcsin(np.sqrt(a))
 
 def dist_line_line(p1, u1, p2, u2):
+    """Calculates the shortest distance between two lines in 3D space."""
     a = np.array([[np.dot(u1, u1), -np.dot(u1, u2)], [np.dot(u2, u1), -np.dot(u2, u2)]])
     b = np.array([np.dot(u1, (p2 - p1)), np.dot(u2, (p2 - p1))])
     try:
+        # Solve for the parameters s and t that give the closest points
         s, t = np.linalg.solve(a, b)
         return np.linalg.norm((p1 + s * u1) - (p2 + t * u2))
     except np.linalg.LinAlgError:
+        # Lines are parallel, calculate distance from a point to the line
         return np.linalg.norm(np.cross(u1, p2 - p1))
 
 def closest_point(p1, p2, u1, u2, return_points=False):
@@ -182,26 +189,13 @@ def clean_svg(svg_path):
     try:
         from scour import scour
         
-        # Create a minimal options object mimicking argparse.Namespace
-        # This is compatible with modern Scour versions programmatically.
         options = Namespace(
-            remove_metadata=True,
-            strip_comments=True,
-            enable_viewboxing=True,
-            indent_type='none',
-            simple_colors=False,
-            style_to_xml=True,
-            group_collapse=True,
-            create_groups=True,
-            keep_editor_data=False,
-            keep_defs=False,
-            renderer_workaround=True,
-            strip_xml_prolog=False,
-            remove_titles=True,
-            remove_descriptions=True,
-            remove_ids='all',
-            protect_ids_noninkscape=False,
-            digits=5
+            remove_metadata=True, strip_comments=True, enable_viewboxing=True,
+            indent_type='none', simple_colors=False, style_to_xml=True,
+            group_collapse=True, create_groups=True, keep_editor_data=False,
+            keep_defs=False, renderer_workaround=True, strip_xml_prolog=False,
+            remove_titles=True, remove_descriptions=True, remove_ids='all',
+            protect_ids_noninkscape=False, digits=5
         )
         
         with open(svg_path, 'r+', encoding='utf-8') as f:
@@ -213,16 +207,17 @@ def clean_svg(svg_path):
     except Exception as e:
         print(f"An error occurred while cleaning SVG {svg_path}: {e}")
 
-def plot_height(track_start, track_end, cross_pos, obs_data, options):
-    """Shows the vertical path of a track and the corresponding observations."""
+def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, options):
+    """Shows the vertical path of a track, distinguishing inliers and outliers."""
     if 'matplotlib' not in AVAILABLE_LIBS: return
     
     n_steps = 100
-    site_names = obs_data['names']
+    n_obs = len(obs_data['names']) // 2
     start_lon, start_lat, _ = xyz2lonlat(track_start)
-    los_heights = [xyz2lonlat(p)[2] for p in cross_pos]
-    los_dists = [haversine(start_lon, start_lat, *xyz2lonlat(p)[:2]) for p in cross_pos]
-
+    
+    pylab.figure(figsize=(10, 8))
+    
+    # Plot the fitted track
     x_track = np.zeros(n_steps)
     y_track = np.zeros(n_steps)
     for i in range(n_steps):
@@ -230,14 +225,49 @@ def plot_height(track_start, track_end, cross_pos, obs_data, options):
         lon, lat, height = xyz2lonlat(track_pos)
         x_track[i] = haversine(start_lon, start_lat, lon, lat)
         y_track[i] = height
+    pylab.plot(x_track, y_track, 'g-', label='Estimert bane', zorder=1)
 
-    pylab.figure(figsize=(10, 8))
-    pylab.plot(los_dists, los_heights, 'ro')
-    pylab.plot(x_track, y_track, 'g-')
-    for i in range(len(site_names)):
-        pylab.text(los_dists[i], los_heights[i], site_names[i])
+    # Plot observation start and end points
+    for i in range(n_obs):
+        start_point = cross_pos[i]
+        end_point = cross_pos[i + n_obs]
+        
+        start_height = xyz2lonlat(start_point)[2]
+        start_dist = haversine(start_lon, start_lat, *xyz2lonlat(start_point)[:2])
+        
+        end_height = xyz2lonlat(end_point)[2]
+        end_dist = haversine(start_lon, start_lat, *xyz2lonlat(end_point)[:2])
+        
+        if i in inlier_indices:
+            color, marker, label, zorder = 'r', 'o', 'Tellende stasjon', 3
+            pylab.plot([start_dist, end_dist], [start_height, end_height], color=color, marker=marker, linestyle='None', label=label, zorder=zorder)
+        else:
+            color, marker, label, zorder = 'k', 'o', 'Avvikende stasjon', 2
+            pylab.plot([start_dist, end_dist], [start_height, end_height], color=color, marker=marker, mfc='none', linestyle='None', label=label, zorder=zorder)
+            
+    # After plotting all points, get the axis limits to calculate a dynamic offset
+    ymin, ymax = pylab.gca().get_ylim()
+    y_offset = (ymax - ymin) * 0.015 # 1.5% of the plot height
+
+    for i in range(n_obs):
+        start_point = cross_pos[i]
+        end_point = cross_pos[i + n_obs]
+        start_height = xyz2lonlat(start_point)[2]
+        start_dist = haversine(start_lon, start_lat, *xyz2lonlat(start_point)[:2])
+        end_height = xyz2lonlat(end_point)[2]
+        end_dist = haversine(start_lon, start_lat, *xyz2lonlat(end_point)[:2])
+
+        # Label both start and end points with the dynamic offset
+        pylab.text(start_dist, start_height + y_offset, obs_data['names'][i], ha='center', va='bottom', fontsize=8)
+        pylab.text(end_dist, end_height - y_offset, obs_data['names'][i], ha='center', va='top', fontsize=8)
+
     pylab.xlabel('Ground Distance (km)')
     pylab.ylabel('Height (km)')
+    
+    # Create a clean legend
+    handles, labels = pylab.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    pylab.legend(by_label.values(), by_label.keys())
     
     if 'save' in options.output:
         pylab.savefig('height.svg')
@@ -246,8 +276,8 @@ def plot_height(track_start, track_end, cross_pos, obs_data, options):
         pylab.show()
     pylab.close()
 
-def plot_map(track_start, track_end, cross_pos, obs_data, options):
-    """Shows a map of the track and lines of sight using Cartopy."""
+def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, options):
+    """Shows a map of the track and lines of sight, distinguishing inliers and outliers."""
     if 'cartopy' not in AVAILABLE_LIBS or 'matplotlib' not in AVAILABLE_LIBS:
         print("Cannot plot map, missing 'cartopy' or 'matplotlib'.")
         return
@@ -288,20 +318,45 @@ def plot_map(track_start, track_end, cross_pos, obs_data, options):
     arrowcol = 'blue'
     textcol = 'black'
 
+    # Determine inlier status for each unique station location
+    station_is_inlier = {}
+    unique_stations = {}
     for i in range(n_obs):
-        ax.plot(site_lons[i], site_lats[i], 'r*', markersize=10, transform=ccrs.PlateCarree())
-        ax.text(site_lons[i] + 0.05, site_lats[i] + 0.05, site_names[i], color=textcol, transform=ccrs.PlateCarree())
-        if not options.azonly and cross_pos:
+        name = site_names[i]
+        loc = (site_lons[i], site_lats[i])
+        unique_stations[name] = loc
+        if i in inlier_indices:
+            station_is_inlier[name] = True
+
+    # Plot each unique station marker once
+    for name, loc in unique_stations.items():
+        lon, lat = loc
+        if station_is_inlier.get(name, False):
+            ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label='Tellende stasjon')
+        else:
+            ax.plot(lon, lat, 'ko', markersize=8, mfc='none', transform=ccrs.PlateCarree(), label='Avvikende stasjon')
+        ax.text(lon + 0.05, lat + 0.05, name, color=textcol, transform=ccrs.PlateCarree())
+
+    # Plot lines of sight for all observations
+    if not options.azonly and cross_pos:
+        for i in range(n_obs):
             start_los_lon, start_los_lat, _ = xyz2lonlat(cross_pos[i])
             end_los_lon, end_los_lat, _ = xyz2lonlat(cross_pos[i + n_obs])
-            ax.plot([site_lons[i], start_los_lon], [site_lats[i], start_los_lat], color=startcol, transform=ccrs.PlateCarree())
-            ax.plot([site_lons[i], end_los_lon], [site_lats[i], end_los_lat], color=endcol, transform=ccrs.PlateCarree())
+            linestyle = '-' if i in inlier_indices else '--'
+            ax.plot([site_lons[i], start_los_lon], [site_lats[i], start_los_lat], color=startcol, transform=ccrs.PlateCarree(), linestyle=linestyle)
+            ax.plot([site_lons[i], end_los_lon], [site_lats[i], end_los_lat], color=endcol, transform=ccrs.PlateCarree(), linestyle=linestyle)
 
+    # Plot the final fitted track
     if not options.azonly and track_start is not None:
         start_lon, start_lat, _ = xyz2lonlat(track_start)
         end_lon, end_lat, _ = xyz2lonlat(track_end)
-        ax.plot([start_lon, end_lon], [start_lat, end_lat], color=arrowcol, linewidth=2, transform=ccrs.PlateCarree())
+        ax.plot([start_lon, end_lon], [start_lat, end_lat], color=arrowcol, linewidth=2, transform=ccrs.PlateCarree(), label='Estimert bane')
         ax.annotate('', xy=(end_lon, end_lat), xytext=(start_lon, start_lat), arrowprops=dict(facecolor=arrowcol, edgecolor=arrowcol, arrowstyle='->'), transform=ccrs.PlateCarree())
+
+    # Create a clean legend
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys())
 
     if 'save' in options.output:
         pylab.savefig('map.svg', bbox_inches='tight', dpi=150)
@@ -318,6 +373,17 @@ def chisq_of_fit(track_params, los_refs, los_vecs, weights):
 
 def fit_track(obs_data, optimize=True):
     n_obs = len(obs_data['longitudes']) // 2
+    if n_obs < 2:
+        return None, None, [], float('inf'), 0
+
+    # Ensure at least two unique observation locations for triangulation
+    unique_locations = set()
+    for i in range(n_obs):
+        loc = (obs_data['latitudes'][i], obs_data['longitudes'][i])
+        unique_locations.add(loc)
+    if len(unique_locations) < 2:
+        return None, None, [], float('inf'), 0 # Not enough unique locations
+
     pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m']) ]
     los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
     plane_normals = [np.cross(los_vectors[i], los_vectors[i + n_obs]) for i in range(n_obs)]
@@ -334,7 +400,6 @@ def fit_track(obs_data, optimize=True):
 
     fit_quality = sum(w for w in vec_weights if not np.isnan(w))
     if fit_quality < 0.02:
-        print("Warning: Small angle between observed directions. Disabling optimization.")
         optimize = False
 
     if optimize:
@@ -351,7 +416,11 @@ def fit_track(obs_data, optimize=True):
         start_coord, end_coord = np.mean(start_points, axis=0), np.mean(end_points, axis=0)
         best_fit_dir = end_coord - start_coord
     
-    best_fit_dir /= np.linalg.norm(best_fit_dir)
+    norm_dir = np.linalg.norm(best_fit_dir)
+    if norm_dir < 1e-9:
+        return None, None, [], float('inf'), fit_quality
+    best_fit_dir /= norm_dir
+    
     initial_params = np.concatenate([start_coord, best_fit_dir])
     
     if optimize and 'scipy' in AVAILABLE_LIBS:
@@ -362,7 +431,12 @@ def fit_track(obs_data, optimize=True):
 
     track_chi2 = chisq_of_fit(final_params, pos_vectors, los_vectors, obs_data['weights'])
     start_coord, best_fit_dir = final_params[:3], final_params[3:]
-    best_fit_dir /= np.linalg.norm(best_fit_dir)
+    
+    norm_final_dir = np.linalg.norm(best_fit_dir)
+    if norm_final_dir < 1e-9:
+        return None, None, [], float('inf'), fit_quality
+    best_fit_dir /= norm_final_dir
+
     if np.dot(initial_params[3:], best_fit_dir) < 0: best_fit_dir = -best_fit_dir
 
     cross_positions, dists = [], []
@@ -374,6 +448,189 @@ def fit_track(obs_data, optimize=True):
     track_start = start_coord + min(dists) * best_fit_dir
     track_end = start_coord + max(dists) * best_fit_dir
     return track_start, track_end, cross_positions, track_chi2, fit_quality
+
+def _create_subset_obs_data(full_obs_data, indices):
+    """Creates a new obs_data dictionary containing only data for the given station indices."""
+    subset = {}
+    n_full = len(full_obs_data['names']) // 2
+    
+    indices = list(indices)
+    all_indices = indices + [i + n_full for i in indices]
+    
+    for key, value in full_obs_data.items():
+        if isinstance(value, np.ndarray):
+            if key in ['durations']:
+                 subset[key] = value[indices]
+            else:
+                 subset[key] = value[all_indices]
+        elif isinstance(value, list):
+            subset[key] = [value[i] for i in all_indices]
+    return subset
+
+def robust_fit_with_ransac(obs_data, raw_data, options):
+    """
+    Performs a robust trajectory fit using a multi-run RANSAC approach.
+
+    This algorithm works in two main phases:
+    1.  **Candidate Generation:** It performs multiple independent RANSAC runs.
+        Each run iterates many times, randomly sampling minimal sets of
+        observations to generate a trial trajectory. It then finds the
+        "consensus set" (all observations consistent with this trial trajectory)
+        and keeps the largest, lowest-error set it finds in that run.
+        The best set from each run becomes a "candidate model".
+
+    2.  **Final Selection (Run-off):** After collecting unique candidate sets
+        from all the runs, it performs a final, high-quality *optimized* fit
+        on each one. It then selects the absolute best model based on a clear
+        hierarchy:
+            a. The model with the most inliers is preferred.
+            b. If multiple models have the same (maximum) number of inliers,
+               the one with the lowest final fit error is chosen.
+
+    This multi-run, two-phase approach is highly robust against local minima
+    and is much more likely to find the true global optimum solution than a
+    single RANSAC run.
+    """
+    random.seed(options.seed)
+    
+    num_iterations = options.ransac_iterations
+    min_sample_size = 2
+    inlier_threshold_km = options.ransac_threshold
+    
+    num_stations = len(raw_data['names'])
+    if num_stations < min_sample_size:
+        print("Not enough stations for RANSAC, falling back to simple fit.")
+        fit_results = fit_track(obs_data, optimize=options.optimize)
+        return fit_results, obs_data, list(range(num_stations))
+
+    pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
+    los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
+
+    if options.debug_ransac:
+        print("--- RANSAC Debugging Enabled ---")
+
+    candidate_sets = set()
+
+    # --- Phase 1: Candidate Generation via Multiple RANSAC Runs ---
+    for run in range(options.ransac_runs):
+        best_inlier_indices_this_run = set()
+        best_fit_error_this_run = float('inf')
+        
+        # Inner loop for a single RANSAC run
+        for i in range(num_iterations):
+            # Ensure the minimal sample is from two different locations
+            while True:
+                sample_indices = random.sample(range(num_stations), min_sample_size)
+                loc1 = (raw_data['latitudes'][sample_indices[0]], raw_data['longitudes'][sample_indices[0]])
+                loc2 = (raw_data['latitudes'][sample_indices[1]], raw_data['longitudes'][sample_indices[1]])
+                if loc1 != loc2:
+                    break
+            
+            # Fit a model to the minimal sample
+            candidate_start, candidate_end, _, _, _ = fit_track(_create_subset_obs_data(obs_data, sample_indices), optimize=False)
+            if candidate_start is None:
+                continue
+
+            # Find the consensus set for this model
+            current_inlier_indices = set(sample_indices)
+            track_ref = candidate_start
+            track_vec = candidate_end - candidate_start
+            track_vec /= np.linalg.norm(track_vec)
+            
+            for j in range(num_stations):
+                if j in sample_indices: continue
+                
+                dist1 = dist_line_line(track_ref, track_vec, pos_vectors[j], los_vectors[j])
+                dist2 = dist_line_line(track_ref, track_vec, pos_vectors[j + num_stations], los_vectors[j + num_stations])
+                
+                if (dist1 + dist2) / 2.0 < inlier_threshold_km:
+                    current_inlier_indices.add(j)
+            
+            num_current_inliers = len(current_inlier_indices)
+            num_best_inliers = len(best_inlier_indices_this_run)
+
+            # If this consensus set is potentially better, evaluate its non-optimized error
+            if num_current_inliers >= num_best_inliers:
+                temp_obs_data = _create_subset_obs_data(obs_data, current_inlier_indices)
+                _, _, _, current_chi2, _ = fit_track(temp_obs_data, optimize=False)
+
+                if not np.isfinite(current_chi2):
+                    continue
+
+                # A model is better if it has more inliers, or the same number with a lower error
+                if num_current_inliers > num_best_inliers or (num_current_inliers == num_best_inliers and current_chi2 < best_fit_error_this_run):
+                    best_fit_error_this_run = current_chi2
+                    best_inlier_indices_this_run = current_inlier_indices
+        
+        # At the end of a run, add the best found set to our candidates
+        if best_inlier_indices_this_run:
+            candidate_sets.add(frozenset(best_inlier_indices_this_run))
+
+    # --- Phase 2: Final Selection from Candidates ---
+    if options.debug_ransac:
+        print(f"\n--- RANSAC Final Run-off from {options.ransac_runs} runs ---")
+        print(f"Found {len(candidate_sets)} unique candidate sets to evaluate.")
+
+    best_final_model = None
+    # Score is (-num_inliers, final_score). We want to minimize this tuple.
+    best_final_model_score = (0, float('inf')) 
+
+    for k, indices_set in enumerate(candidate_sets):
+        if len(indices_set) < 2: continue
+        inlier_obs_data = _create_subset_obs_data(obs_data, indices_set)
+        # Perform the final, high-quality optimized fit on this candidate
+        fit_results = fit_track(inlier_obs_data, optimize=True)
+        final_error = fit_results[3]
+        final_quality = fit_results[4]
+        num_inliers = len(indices_set)
+        
+        # Calculate score, avoiding division by zero
+        final_score = (final_error + 1) / (final_quality + 1e-9)
+        current_score_tuple = (-num_inliers, final_score)
+
+        if options.debug_ransac:
+            inlier_names = sorted([raw_data['names'][i] for i in indices_set])
+            print(f"Candidate {k+1}: {num_inliers} inliers, final_err={final_error:.2f}, quality={final_quality:.2f}, score={final_score:.2f} -> {inlier_names}")
+
+        # If this model is better than the best we've seen, store it
+        if current_score_tuple < best_final_model_score:
+            best_final_model_score = current_score_tuple
+            best_final_model = (fit_results, inlier_obs_data, sorted(list(indices_set)))
+    
+    if best_final_model is None:
+        print("RANSAC failed to find any valid model. Falling back to simple fit on all data.")
+        fit_results = fit_track(obs_data, optimize=True)
+        return fit_results, obs_data, list(range(num_stations))
+
+    # --- Phase 3: "All-In" Sanity Check ---
+    # After finding the best RANSAC model, check if using ALL stations is better.
+    # This handles cases where RANSAC unnecessarily discarded a good station.
+    all_in_obs_data = _create_subset_obs_data(obs_data, range(num_stations))
+    all_in_fit_results = fit_track(all_in_obs_data, optimize=True)
+    all_in_error = all_in_fit_results[3]
+
+    if options.debug_ransac:
+        print(f"\n--- Final Sanity Check ---")
+        print(f"Best RANSAC result score: {best_final_model_score[1]:.2f} with {-best_final_model_score[0]} inliers.")
+        print(f"All-in fit error: {all_in_error:.2f} with {num_stations} inliers.")
+
+    # If the "all-in" fit is good enough (below the tolerance), use it instead.
+    if all_in_error < options.all_in_tolerance:
+        if options.debug_ransac:
+            print("All-in error is below tolerance. Using all stations.")
+        final_inlier_indices = list(range(num_stations))
+        final_obs_data = all_in_obs_data
+        final_fit_results = all_in_fit_results
+    else:
+        if options.debug_ransac:
+            print("All-in error is too high. Using best RANSAC result.")
+        final_fit_results, final_obs_data, final_inlier_indices = best_final_model
+
+    unique_inlier_names = {raw_data['names'][i] for i in final_inlier_indices}
+    print(f"Final solution uses {len(final_inlier_indices)} observations from {len(unique_inlier_names)} unique stations.")
+        
+    return final_fit_results, final_obs_data, final_inlier_indices
+
 
 def _parse_input_file(filepath):
     data = {'longitudes':[],'latitudes':[],'azimuth_start':[],'azimuth_end':[],'altitude_start':[],'altitude_end':[],'weights':[],'durations':[],'lengths':[],'colors':[],'names':[],'timestamps':[],'heights_m':[]}
@@ -409,7 +666,10 @@ def print_results(info):
     print(f"[Track] Start/End Height: {info.start_height:7.2f} / {info.end_height:7.2f} km")
     print(f"[Track] Ground Track:     {info.ground_track:7.2f} km")
     print(f"[Track] Course / Incidence: {info.course:7.2f} / {info.incidence:7.2f} deg")
-    if info.speed > 0: print(f"[Track] Avg. Speed:       {info.speed:6.1f} km/s")
+    if info.speed > 0: print(f"[Track] Avg. Speed:         {info.speed:6.1f} km/s")
+    unique_inlier_names = sorted(list(set(info.inlier_stations)))
+    print(f"[Fit]   Inliers:            {len(info.inlier_stations)} observations from {len(unique_inlier_names)} unique stations")
+    print(f"[Fit]   Inlier Stations:    {', '.join(unique_inlier_names)}")
     print(f"[Fit]   Error / Quality:    {info.error:7.2f} / {info.fit_quality:7.2f}")
     print(f"[Radiant] RA / Dec:         {info.radiant_ra:7.3f} / {info.radiant_dec:7.3f} deg")
     print(f"[Radiant] Ecl. Lon / Lat:   {info.radiant_ecllong:7.3f} / {info.radiant_ecllat:7.3f} deg")
@@ -420,8 +680,9 @@ def print_results(info):
 def write_stat_file(info, in_name):
     output_path = Path(in_name).with_suffix('.stat')
     config = configparser.ConfigParser()
-    config['track'] = {'startheight':f'{info.start_height:.1f} km','endheight':f'{info.end_height:.1f} km','groundtrack':f'{info.ground_track:.1f} km','course':f'{info.course:.1f} deg','incidence':f'{info.incidence:.1f} deg','speed':f'{info.speed:.1f} km/s'}
-    config['fit'] = {'error':f'{info.error:.1f}','quality':f'{info.fit_quality:.2f}'}
+    unique_inlier_names = sorted(list(set(info.inlier_stations)))
+    config['track'] = {'startheight':f'{info.start_height:.1f} km','endheight':f'{info.end_height:.1f} km','groundtrack':f'{info.ground_track:.1f} km','course':f'{info.course:.1f} deg','incidence':f'{info.incidence:.1f} deg', 'speed':f'{info.speed:.1f} km/s'}
+    config['fit'] = {'error':f'{info.error:.1f}','quality':f'{info.fit_quality:.2f}', 'inliers': ', '.join(unique_inlier_names)}
     config['radiant'] = {'ra':f'{info.radiant_ra:.2f} deg','dec':f'{info.radiant_dec:.2f} deg','ecl_long':f'{info.radiant_ecllong:.2f} deg','ecl_lat':f'{info.radiant_ecllat:.2f} deg','shower':info.shower}
     config['date'] = {'timestamp':f'{info.timestamp}','date':info.date}
     with open(output_path, 'w') as f: config.write(f)
@@ -443,37 +704,56 @@ def write_res_file(track_start, track_end, cross_pos, obs_data, in_name):
     print(f"Detailed results saved to {output_path}")
 
 def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborders=False, 
-            timestamp=None, optimize=True, writestat=False, **kwargs):
+            timestamp=None, optimize=True, writestat=False, use_ransac=True, ransac_threshold=1.0, 
+            ransac_iterations=10, ransac_runs=100, seed=0, debug_ransac=False, all_in_tolerance=1.0, **kwargs):
     """
     Main function to run the meteor track analysis.
     This is the primary entry point for both script and module usage.
-    `accept_err` is a deprecated argument kept for backward compatibility.
     """
     options = Namespace(
         input_file=inname, output=doplot, mapres=mapres, azonly=azonly,
         autoborders=autoborders, timestamp=timestamp, optimize=optimize,
-        writestat=writestat, borders=None
+        writestat=writestat, use_ransac=use_ransac, ransac_threshold=ransac_threshold,
+        ransac_iterations=ransac_iterations, ransac_runs=ransac_runs, seed=seed, 
+        debug_ransac=debug_ransac, all_in_tolerance=all_in_tolerance, borders=None
     )
     
     raw_data, borders = _parse_input_file(options.input_file)
     if borders and not options.autoborders:
         options.borders = borders
-    obs_data = _prepare_data_arrays(raw_data)
+    
+    full_obs_data = _prepare_data_arrays(raw_data)
     
     if options.azonly:
         print("Azimuth-only mode: Plotting observation azimuths without fitting.")
         if options.output:
-            plot_map(None, None, None, obs_data, options)
+            num_stations = len(raw_data['names'])
+            plot_map(None, None, None, full_obs_data, list(range(num_stations)), options)
         return MetrackInfo()
 
-    track_start, track_end, cross_pos, track_err, fit_quality = fit_track(obs_data, optimize=options.optimize)
+    if options.use_ransac:
+        (track_start, track_end, cross_pos_inliers, track_err, fit_quality), inlier_obs_data, inlier_indices = robust_fit_with_ransac(full_obs_data, raw_data, options)
+    else:
+        print("RANSAC disabled. Using standard fit on all data.")
+        (track_start, track_end, cross_pos_inliers, track_err, fit_quality) = fit_track(full_obs_data, optimize=options.optimize)
+        inlier_obs_data = full_obs_data
+        inlier_indices = list(range(len(raw_data['names'])))
+
+    if track_start is None:
+        print("Could not determine a valid track. Aborting.")
+        return MetrackInfo()
 
     info = MetrackInfo()
+    info.inlier_stations = [raw_data['names'][i] for i in inlier_indices]
     info.error, info.fit_quality = track_err, fit_quality
     start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
     end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
+    
     if info.end_height > info.start_height:
-        print("WARNING: Start height is lower than end height. Results might be inverted.")
+        track_start, track_end = track_end, track_start
+        start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
+        end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
+
     info.ground_track = haversine(start_lon, start_lat, end_lon, end_lat)
 
     dir_vec = track_end - track_start
@@ -492,9 +772,10 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
     info.radiant_ra, info.radiant_dec = np.degrees(float(ra)), np.degrees(float(dec))
     info.radiant_ecllong, info.radiant_ecllat = np.degrees(float(ecl_lon)), np.degrees(float(ecl_lat))
     
-    airspeeds = [np.linalg.norm(cross_pos[i + len(raw_data['durations'])] - cross_pos[i]) / d for i, d in enumerate(raw_data['durations']) if d > 0]
+    n_inliers = len(inlier_obs_data['durations'])
+    airspeeds = [np.linalg.norm(cross_pos_inliers[i + n_inliers] - cross_pos_inliers[i]) / d for i, d in enumerate(inlier_obs_data['durations']) if d > 0]
     if airspeeds: info.speed = np.mean(airspeeds)
-    
+
     if 'showerassoc' in AVAILABLE_LIBS:
         showerassoc = AVAILABLE_LIBS['showerassoc']
         info.shower, _ = showerassoc.showerassoc(info.radiant_ra, info.radiant_dec, info.speed,
@@ -503,11 +784,21 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
     if options.writestat:
         write_stat_file(info, options.input_file)
     
-    write_res_file(track_start, track_end, cross_pos, obs_data, options.input_file)
-
     if options.output:
-        plot_height(track_start, track_end, cross_pos, obs_data, options)
-        plot_map(track_start, track_end, cross_pos, obs_data, options)
+        cross_pos_all = []
+        all_pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data['longitudes'], full_obs_data['latitudes'], full_obs_data['heights_m'])]
+        all_los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data['altitudes'], full_obs_data['azimuths'], full_obs_data['longitudes'], full_obs_data['latitudes'])]
+        final_track_vec = (track_end - track_start)
+        final_track_vec /= np.linalg.norm(final_track_vec)
+
+        for i in range(len(full_obs_data['longitudes'])):
+            los_pos, _ = closest_point(all_pos_vectors[i], track_start, all_los_vectors[i], final_track_vec, return_points=True)
+            cross_pos_all.append(los_pos)
+
+        plot_height(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
+        plot_map(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
+        
+    write_res_file(track_start, track_end, cross_pos_inliers, inlier_obs_data, options.input_file)
 
     return info
 
@@ -520,12 +811,18 @@ def main():
     parser.add_argument('input_file', nargs='?', help='Name of input file with observation data.')
     parser.add_argument('-o', '--output', choices=['show', 'save', 'both'], default='', help='Graphics output mode.')
     parser.add_argument('-m', '--map', dest='mapres', default='i', choices=['c','l','i','h','f'], help='Map detail level.')
-    parser.add_argument('-e', '--err', dest='errlim', type=float, default=1.0, help='Deprecated option, kept for compatibility.')
     parser.add_argument('-a', '--azonly', action='store_true', help='Plot azimuths only; no fitting.')
     parser.add_argument('-b', '--borders-auto', dest='autoborders', action='store_true', help='Automatically determine map boundaries.')
     parser.add_argument('-t', '--timestamp', type=float, help="Force a specific Unix timestamp.")
     parser.add_argument('--no-opt', action='store_false', dest='optimize', default=True, help="Turn off optimization.")
     parser.add_argument('--no-write-stat', action='store_false', dest='writestat', default=True, help="Do not write a .stat file.")
+    parser.add_argument('--no-ransac', action='store_false', dest='use_ransac', default=True, help="Disable RANSAC robust fitting.")
+    parser.add_argument('--ransac-threshold', type=float, default=1.0, help="RANSAC inlier distance threshold in km.")
+    parser.add_argument('--ransac-iterations', type=int, default=10, help="Number of RANSAC iterations per run.")
+    parser.add_argument('--ransac-runs', type=int, default=100, help="Number of independent RANSAC runs.")
+    parser.add_argument('--all-in-tolerance', type=float, default=1.0, help="Error tolerance to accept a fit with all stations.")
+    parser.add_argument('--seed', type=int, default=0, help="Random seed for RANSAC.")
+    parser.add_argument('--debug-ransac', action='store_true', help="Enable RANSAC debug prints.")
     
     options = parser.parse_args()
 
@@ -540,13 +837,19 @@ def main():
     metrack(
         inname=options.input_file,
         doplot=options.output,
-        accept_err=options.errlim,
         mapres=options.mapres,
         azonly=options.azonly,
         autoborders=options.autoborders,
         timestamp=options.timestamp,
         optimize=options.optimize,
-        writestat=options.writestat
+        writestat=options.writestat,
+        use_ransac=options.use_ransac,
+        ransac_threshold=options.ransac_threshold,
+        ransac_iterations=options.ransac_iterations,
+        ransac_runs=options.ransac_runs,
+        seed=options.seed,
+        debug_ransac=options.debug_ransac,
+        all_in_tolerance=options.all_in_tolerance
     )
 
 if __name__ == "__main__":

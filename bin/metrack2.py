@@ -272,9 +272,9 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     
     resolution = {'c': '110m', 'l': '50m', 'i': '10m', 'h': '10m', 'f': '10m'}.get(options['mapres'], '10m')
     lat_span = abs(lat_top - lat_bot)
-    zoom_level = int(np.log2(360 / (lat_span + 1))) if lat_span > 0 else 6
-    zoom_level = max(5, min(zoom_level, 10))
-    
+    zoom_level = int(np.log2(360 / (lat_span + 1)))
+    zoom_level = max(6, min(zoom_level, 9))
+
     try: ax.add_image(OSM(), zoom_level)
     except Exception: ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
     ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))

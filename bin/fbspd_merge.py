@@ -363,41 +363,44 @@ def minimize_chainlength(all_time_arrays: List[np.ndarray], all_pos_arrays: List
 def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray,
                      track_vec_norm: np.ndarray) -> dict:
     """Projects one station's observations onto the meteor track."""
-    observations = {
-        "pos": [], "height": [], "dist_off_track": [], "sig": []
-    }
-
     site_lon, site_lat = cendat.site_info['lon'], cendat.site_info['lat']
 
-    for i in range(cendat.ndata):
-        # Line-of-sight vector from observer
-        los_vec = altaz2xyz(cendat.cenalt[i], cendat.cenaz[i], site_lon, site_lat)
+    # Call altaz2xyz for each observation and stack into an (N, 3) array.
+    los_vecs = np.array([
+        altaz2xyz(alt, az, site_lon, site_lat)
+        for alt, az in zip(cendat.cenalt, cendat.cenaz)
+    ])
 
-        # Find closest point on track to the line of sight
-        _, intersec_on_track = closest_point(
-            site_pos, track_p1, los_vec, track_vec_norm, return_points=True
-        )
+    # Vectorized geometry calculations
+    p21 = track_p1 - site_pos
+    m = np.cross(track_vec_norm, los_vecs)
+    m2 = np.einsum('ij,ij->i', m, m)
 
-        # Position along the track relative to the start point (p1)
-        track_pos = np.dot(intersec_on_track - track_p1, track_vec_norm)
-        observations["pos"].append(track_pos)
+    # Avoid division by zero for parallel lines
+    m2[m2 < 1e-9] = 1e-9
 
-        # Height of the point on the track
-        _, _, pos_height = xyz2lonlat(intersec_on_track)
-        observations["height"].append(pos_height)
+    R = np.cross(p21, m / m2[:, np.newaxis])
+    t1 = np.einsum('ij,j->i', R, track_vec_norm)
+    
+    # The subscript for los_vecs must be 'ij' to match its 2D shape.
+    t2 = np.einsum('ij,ij->i', R, los_vecs)
 
-        # Smallest distance between path and line of sight (for uncertainty)
-        dist = dist_line_line(site_pos, los_vec, track_p1, track_vec_norm)
-        observations["dist_off_track"].append(dist)
+    cross_points1 = site_pos + t1[:, np.newaxis] * los_vecs
+    cross_points2 = track_p1 + t2[:, np.newaxis] * track_vec_norm
 
-        # Estimate measurement uncertainty based on camera pixel scale
-        # NOTE: Assumes 0.25 deg/pix, which may not be valid for all cameras.
-        sitedist = np.linalg.norm(intersec_on_track - site_pos)
-        ang_err = np.radians(0.25 * cendat.censig[i])
-        pos_sig = sitedist * np.tan(ang_err) if ang_err > 0 else 1e-9
-        observations["sig"].append(pos_sig)
+    intersec_on_track = (cross_points1 + cross_points2) / 2.0
+    dist_off_track = np.linalg.norm(cross_points1 - cross_points2, axis=1)
 
-    return {key: np.array(val) for key, val in observations.items()}
+    # Calculate position, height, and uncertainty in a vectorized way
+    pos = np.einsum('ij,j->i', intersec_on_track - track_p1, track_vec_norm)
+    height = np.array([xyz2lonlat(v)[2] for v in intersec_on_track])
+
+    sitedist = np.linalg.norm(intersec_on_track - site_pos, axis=1)
+    ang_err = np.radians(0.25 * cendat.censig)
+    sig = sitedist * np.tan(ang_err)
+    sig[ang_err <= 0] = 1e-9 # Handle non-positive error values
+
+    return {"pos": pos, "height": height, "dist_off_track": dist_off_track, "sig": sig}
 
 
 def _fit_merged_data(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray,

@@ -15,7 +15,7 @@ external scripts.
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Tuple, Optional, Union, Dict, Sequence
+from typing import List, Tuple, Optional, Dict
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -33,15 +33,13 @@ E_SQUARED = 2 * FLATTENING - FLATTENING**2  # Eccentricity squared
 CAMERA_DEGREES_PER_PIXEL = 0.25  # Assumed angular resolution for error estimation
 
 # File format parameters
-DAT_STATION_NAME_START_COLUMN = 12 # Column where the station name starts in .dat files
+DAT_STATION_NAME_START_COLUMN = 12  # Column where the station name starts in .dat files
 
 # Fitting and model parameters
 TIME_OFFSET_SEARCH_RANGE = (-5.0, 5.0)  # Search range for time offsets in seconds
 TIME_OFFSET_SEARCH_STEP = 0.01          # Step size for the brute-force time offset search
-OUTLIER_SIGMA_THRESHOLD = 3.0           # Std. dev. for a point to be an outlier
-MIN_INLIERS_FOR_ROBUST_FIT = 5          # Min points required after outlier rejection
+MIN_INLIERS_FOR_ROBUST_FIT = 5          # Min points required for a fit to be attempted
 MIN_POINTS_FOR_EXP_FIT = 4              # Min points to attempt an exponential fit (must match # of params)
-ROBUST_LOSS_F_SCALE = 0.1               # Scale parameter for the 'soft_l1' robust loss function
 
 # Physical plausibility checks for fitting
 FIT_MAX_POS_ACCELERATION = 1e-3  # Allow for tiny positive acceleration from noise
@@ -237,38 +235,6 @@ def altaz2xyz(alt_deg: float, az_deg: float, obs_lon: float, obs_lat: float) -> 
     return R @ v_enu
 
 
-def closest_point(p1: np.ndarray, p2: np.ndarray, u1: np.ndarray, u2: np.ndarray,
-                  return_points: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-    """Finds the closest point(s) between two lines in 3D space."""
-    p21 = p2 - p1
-    m = np.cross(u2, u1)
-    m2 = np.dot(m, m)
-
-    if m2 < PARALLEL_LINES_TOLERANCE:  # Lines are parallel
-        closest_p2_on_line1 = p1 + np.dot(p21, u1) * u1
-        if return_points:
-            return closest_p2_on_line1, p2
-        return (closest_p2_on_line1 + p2) / 2.0
-
-    R = np.cross(p21, m / m2)
-    t1 = np.dot(R, u2)
-    t2 = np.dot(R, u1)
-
-    cross_1 = p1 + t1 * u1
-    cross_2 = p2 + t2 * u2
-
-    if return_points:
-        return cross_1, cross_2
-    return (cross_1 + cross_2) / 2.0
-
-
-def dist_line_line(p1: np.ndarray, u1: np.ndarray, p2: np.ndarray, u2: np.ndarray) -> float:
-    """Calculates the minimum distance between two lines."""
-    pq = closest_point(p1, p2, u1, u2, return_points=True)
-    dist_vec = pq[0] - pq[1]
-    return np.sqrt(np.dot(dist_vec, dist_vec))
-
-
 # --- Fitting Functions ---
 
 def linfunc(x: float, a: float, b: float) -> float:
@@ -297,8 +263,11 @@ def expfunc_2ndder(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.
 
 def try_expfit(x: np.ndarray, y: np.ndarray, weights: np.ndarray, guess: List[float]) -> Tuple[Optional[np.ndarray], bool]:
     """Tries to fit the exp-lin function with a given initial guess."""
+    # Bounds for parameters (a, b, c, d). Limits c (speed) and b (deceleration) to sane ranges.
+    bounds = ([0, 0, 5, -np.inf], [np.inf, 10, 100, np.inf])
     try:
-        params, _ = curve_fit(expfunc, x, y, p0=guess, sigma=1./weights)
+        # Add bounds and increase max iterations for better convergence
+        params, _ = curve_fit(expfunc, x, y, p0=guess, sigma=1./weights, bounds=bounds, maxfev=5000)
     except (RuntimeError, ValueError):
         return None, False
 
@@ -411,8 +380,7 @@ def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray
     cross_points2 = track_p1 + t2[:, np.newaxis] * track_vec_norm
 
     intersec_on_track = (cross_points1 + cross_points2) / 2.0
-    dist_off_track = np.linalg.norm(cross_points1 - cross_points2, axis=1)
-
+    
     # Calculate position, height, and uncertainty in a vectorized way
     pos = np.einsum('ij,j->i', intersec_on_track - track_p1, track_vec_norm)
     height = np.array([xyz2lonlat(v)[2] for v in intersec_on_track])
@@ -422,162 +390,173 @@ def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray
     sig = sitedist * np.tan(ang_err)
     sig[ang_err <= 0] = MIN_POSITIONAL_SIGMA # Handle non-positive error values
 
-    return {"pos": pos, "height": height, "dist_off_track": dist_off_track, "sig": sig}
+    return {"pos": pos, "height": height, "sig": sig}
 
 
 def _fit_merged_data(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray,
-                     debug: bool) -> Tuple[np.ndarray, int]:
+                     debug: bool, fscale: float) -> Tuple[Optional[np.ndarray], int, Optional[np.ndarray]]:
     """
-    Fits the merged data using a combined two-stage robust fitting process:
-    1. Iterative outlier rejection to remove egregious errors.
-    2. A robust loss function ('soft_l1') for the final fit on cleaned data.
+    Performs a single robust fit on all data points, relying on a robust
+    loss function to handle outliers, rather than iterative removal.
     """
-    # --- STAGE 1: Iterative Outlier Rejection ---
+    n_pts = len(reltime)
+    if n_pts < MIN_POINTS_FOR_EXP_FIT:
+        print("Error: Not enough data points to perform a fit.")
+        return None, 0, None
 
-    # Perform an initial baseline fit using all data
-    initial_params, _ = guess_expfit(reltime, pos, sig)
-    if initial_params is None:
-        try:
-            lin_params_initial, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig)
-            initial_params = np.array([0, 0, lin_params_initial[0], lin_params_initial[1]])
-        except RuntimeError:
-            print("Error: Initial baseline fit failed. Cannot perform outlier rejection.")
-            return np.array([0, 0, 0, 0]), 0
-    
-    # Calculate standardized residuals and identify inliers (non-outliers)
-    fit_values = expfunc(reltime, *initial_params)
-    residuals = (pos - fit_values) / sig
-    inlier_mask = np.abs(residuals) < OUTLIER_SIGMA_THRESHOLD
-    
-    num_outliers = np.sum(~inlier_mask)
-    if debug and num_outliers > 0:
-        print(f"Outlier rejection: Identified and removed {num_outliers} of {len(reltime)} points.")
-
-    if np.sum(inlier_mask) < MIN_INLIERS_FOR_ROBUST_FIT:
-        print("Warning: Outlier rejection left too few points. Fitting all data.")
-        inlier_mask = np.ones_like(reltime, dtype=bool)
-
-    reltime_inliers = reltime[inlier_mask]
-    pos_inliers = pos[inlier_mask]
-    sig_inliers = sig[inlier_mask]
-
-    # --- STAGE 2: Final Fit with Robust Loss Function ---
-
-    # Helper function to define the residual calculation for least_squares
     def residual_func(params, x, y, sig, model_func):
         return (y - model_func(x, *params)) / sig
 
-    # --- Robust Exponential Fit ---
-    exp_params_guess, _ = guess_expfit(reltime_inliers, pos_inliers, sig_inliers)
-    exp_params = None
+    def get_pcov(res, n, p):
+        if n <= p: return None
+        try:
+            mse = 2 * res.cost / (n - p)
+            return np.linalg.pinv(res.jac.T @ res.jac) * mse
+        except (np.linalg.LinAlgError, ZeroDivisionError):
+            return None
+
+    # Define physical bounds for the exponential fit parameters (a,b,c,d)
+    exp_bounds = ([0, 0, 5, -np.inf], [np.inf, 10, 100, np.inf])
+
+    # --- Attempt Exponential Fit on ALL data ---
+    exp_params_guess, _ = guess_expfit(reltime, pos, sig)
+    res_exp = None
     if exp_params_guess is not None:
         res_exp = least_squares(
-            residual_func,
-            exp_params_guess,
-            loss='soft_l1',
-            f_scale=ROBUST_LOSS_F_SCALE,
-            args=(reltime_inliers, pos_inliers, sig_inliers, expfunc)
+            residual_func, exp_params_guess, loss='soft_l1', f_scale=fscale,
+            args=(reltime, pos, sig, expfunc), bounds=exp_bounds, max_nfev=5000
         )
-        exp_params = res_exp.x
 
-    # --- Robust Linear Fit ---
-    lin_params_guess, _ = curve_fit(linfunc, reltime_inliers, pos_inliers, sigma=1./sig_inliers)
-    res_lin = least_squares(
-        residual_func,
-        lin_params_guess,
-        loss='soft_l1',
-        f_scale=ROBUST_LOSS_F_SCALE,
-        args=(reltime_inliers, pos_inliers, sig_inliers, linfunc)
-    )
-    lin_params = res_lin.x
+    # --- Attempt Linear Fit on ALL data ---
+    res_lin = None
+    try:
+        lin_params_guess, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig)
+        res_lin = least_squares(
+            residual_func, lin_params_guess, loss='soft_l1', f_scale=fscale,
+            args=(reltime, pos, sig, linfunc)
+        )
+    except (RuntimeError, ValueError):
+        if res_exp is None or not res_exp.success:
+            print("Error: Both exponential and linear fits failed.")
+            return None, 0, None
 
-    # --- Compare Models and Return Best Fit ---
-    if exp_params is not None:
-        # Compare chi-squared of the two robust fits to see which model is better
-        exp_fit_vals = expfunc(reltime_inliers, *exp_params)
-        lin_fit_vals = linfunc(reltime_inliers, *lin_params)
-        
-        chi2_exp = np.sum(((pos_inliers - exp_fit_vals) / sig_inliers)**2)
-        chi2_lin = np.sum(((pos_inliers - lin_fit_vals) / sig_inliers)**2)
-
-        if chi2_exp < chi2_lin:
-            if debug: print("Selected robust exponential model.")
-            return exp_params, len(reltime_inliers)
-
-    # Fallback to the robust linear fit if the exponential model failed or was worse
-    if debug: print("Selected robust linear model as fallback.")
-    return np.array([0, 0, lin_params[0], lin_params[1]]), len(reltime_inliers)
-
-
-def _generate_plots(data: dict, params: np.ndarray, n_ok: int, doplot: str, resname: str):
-    """Generates and saves/shows output plots."""
-    reltime, pos, sig = data['reltime'], data['pos'], data['sig']
+    # --- Compare Models and Select the Best One ---
+    # Choose exponential if its fit succeeded and its cost is lower than the linear fit's cost
+    if res_exp and res_exp.success and (res_lin is None or res_exp.cost < res_lin.cost):
+        if debug: print("Selected robust exponential model on all points.")
+        final_params = res_exp.x
+        final_pcov = get_pcov(res_exp, n_pts, len(final_params))
+        return final_params, n_pts, final_pcov
     
+    # Otherwise, fallback to the linear model
+    if res_lin and res_lin.success:
+        if debug: print("Selected robust linear model on all points as fallback.")
+        lin_params = res_lin.x
+        final_params = np.array([0, 0, lin_params[0], lin_params[1]])
+        lin_pcov = get_pcov(res_lin, n_pts, len(lin_params))
+        final_pcov = None
+        if lin_pcov is not None:
+            final_pcov = np.zeros((4, 4))
+            final_pcov[2:, 2:] = lin_pcov
+        return final_params, n_pts, final_pcov
+
+    # If we reach here, no fit was successful
+    print("Error: Could not find a successful fit for the data.")
+    return None, 0, None
+
+
+def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.ndarray], n_ok: int, doplot: str, resname: str, debug: bool = False, sigma_level: float = 1.0):
+    """Generates and saves/shows output plots with uncertainty bands."""
+    reltime, pos, sig = data['reltime'], data['pos'], data['sig']
+
     fit_pos = expfunc(reltime, *params)
     fit_dev = pos - fit_pos
     fit_speed = expfunc_1stder(reltime, *params)
     fit_accel = expfunc_2ndder(reltime, *params)
 
+    if debug:
+        print("\n--- Plotting Debug Info ---")
+        print(f"Final Parameters: {params}")
+
+    # --- Uncertainty Calculation ---
+    speed_std_scaled, accel_std_scaled = np.zeros_like(reltime), np.zeros_like(reltime)
+    if param_samples is not None:
+        # Use the pre-computed samples to find the uncertainty at each time point
+        speed_samples = np.array([expfunc_1stder(reltime, *p) for p in param_samples])
+        accel_samples = np.array([expfunc_2ndder(reltime, *p) for p in param_samples])
+
+        # Multiply standard deviation by the desired sigma level
+        speed_std_scaled = np.std(speed_samples, axis=0) * sigma_level
+        accel_std_scaled = np.std(accel_samples, axis=0) * sigma_level
+
+    # Use the stem of the .res file for the plot title, but not the filename
     site_code = Path(resname).stem
     
-    # Figure 1: Position vs. Time
+    # --- Figure 1: Position vs. Time ---
     plt.figure(1, figsize=(10, 8))
-    plt.suptitle(f"Trajectory Fit for {site_code}", fontsize=16)
+    plt.suptitle(f"Kurvetilpassing", fontsize=16)
 
     ax1 = plt.subplot(211)
-    ax1.errorbar(reltime, pos, yerr=sig, fmt='b.', label='Observations')
+    ax1.errorbar(reltime, pos, yerr=sig, fmt='b.', label='Observationer', elinewidth=1, alpha=0.6)
     if n_ok < len(reltime):
-        ax1.plot(reltime[n_ok:], pos[n_ok:], 'y.', label='Excluded')
+        ax1.plot(reltime[n_ok:], pos[n_ok:], 'y.', label='Ekskluderte')
     ax1.plot(reltime, fit_pos, 'r-', label='Fit')
-    ax1.set_ylabel('Position along track [km]')
-    ax1.set_xlabel('Time [s]')
-    ax1.set_title('Position vs. Time')
+    ax1.set_ylabel('Posisjon langs banen [km]')
+    ax1.set_xlabel('Tid [s]')
+    ax1.set_title('Posisjon vs. tid')
     ax1.legend()
     ax1.grid(True)
 
     ax2 = plt.subplot(212, sharex=ax1)
-    ax2.errorbar(reltime, fit_dev, yerr=sig, fmt='b.', label='Residuals')
+    ax2.errorbar(reltime, fit_dev, yerr=sig, fmt='b.', label='Residualer', elinewidth=1, alpha=0.6)
     if n_ok < len(reltime):
         ax2.plot(reltime[n_ok:], fit_dev[n_ok:], 'y.')
     ax2.axhline(0, color='r', linestyle='--')
-    ax2.set_ylabel('Residual [km]')
-    ax2.set_xlabel('Time [s]')
-    ax2.set_title('Fit Residuals')
+    ax2.set_ylabel('Residualer [km]')
+    ax2.set_xlabel('Tid [s]')
+    ax2.set_title('Residualer')
     ax2.grid(True)
-    
+
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     if doplot in ['save', 'both']:
-        plt.savefig(f"{site_code}_pos_fit.svg")
+        plt.savefig("posvstime.svg")
 
-    # Figure 2: Speed and Acceleration
+
+    # --- Figure 2: Speed and Acceleration ---
     plt.figure(2, figsize=(10, 8))
-    plt.suptitle(f"Derived Dynamics for {site_code}", fontsize=16)
+    plt.suptitle(f"Hastighetsanalyse", fontsize=16)
     
     ax3 = plt.subplot(211)
     ax3.plot(reltime, fit_speed, 'b-')
+    ax3.fill_between(reltime, fit_speed - speed_std_scaled, fit_speed + speed_std_scaled,
+                     color='blue', alpha=0.2, label=f'{sigma_level}-sigma usikkerhet')
     ax3.set_ylim(bottom=0)
     ax3.set_ylabel('Speed [km/s]')
     ax3.set_xlabel('Time [s]')
-    ax3.set_title('Speed Profile')
+    ax3.set_title('Hastighetsprofil')
+    ax3.legend()
     ax3.grid(True)
 
     ax4 = plt.subplot(212, sharex=ax3)
     ax4.plot(reltime, fit_accel, 'b-')
-    ax4.set_ylabel('Acceleration [km/s²]')
+    ax4.fill_between(reltime, fit_accel - accel_std_scaled, fit_accel + accel_std_scaled,
+                     color='blue', alpha=0.2, label=f'{sigma_level}-sigma usikkerhet')
+    ax4.set_ylabel('Aksellerasjon [km/s²]')
     ax4.set_xlabel('Time [s]')
-    ax4.set_title('Acceleration Profile')
+    ax4.set_title('Aksellerasjonsprofil')
+    ax4.legend()
     ax4.grid(True)
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     if doplot in ['save', 'both']:
-        plt.savefig(f"{site_code}_dyn_profile.svg")
+        plt.savefig("spd_acc.svg")
 
     if doplot in ['show', 'both']:
         plt.show()
 
 
 def fbspd(resname: str, cennames: List[str], datname: str,
-          doplot: str = '', posdata: bool = False, debug: bool = False) -> Tuple[bool, float]:
+          doplot: str = '', posdata: bool = False, debug: bool = False, fscale: float = 0.1, sigma_level: float = 1.0) -> Tuple[bool, float]:
     """
     Determines speed and acceleration profiles for meteors from trajectory
     parameters and merged multi-station centroid files.
@@ -588,19 +567,18 @@ def fbspd(resname: str, cennames: List[str], datname: str,
     # 1. Load input data
     resdat = readres(resname)
     all_sitedata = get_sitecoord_fromdat(datname) if datname else []
-    
+
     all_cendat = []
     for cen_file in cennames:
         try:
             all_cendat.append(readcen(cen_file))
         except FileNotFoundError:
             print(f"Warning: Centroid file not found, skipping: {cen_file}")
-            
+
     if not all_cendat:
         print("Error: No valid centroid data could be loaded.")
         return False, 0.0
 
-    # Sort centroid data by number of points (longest first)
     all_cendat.sort(key=lambda c: c.ndata, reverse=True)
 
     # 2. Define meteor trajectory from .res file
@@ -616,11 +594,11 @@ def fbspd(resname: str, cennames: List[str], datname: str,
         if not site_info:
             print(f"Warning: No site coords for {cendat.sitestr[0]}. Skipping.")
             continue
-        
+
         name, lon, lat, height = site_info
         cendat.site_info = {'lon': lon, 'lat': lat, 'height': height}
         site_pos = lonlat2xyz(lon, lat, height)
-        
+
         processed_data = _process_station(cendat, site_pos, path_p1, path_vec_norm)
         processed_data['reltime'] = cendat.reltime
         station_obs.append(processed_data)
@@ -632,16 +610,25 @@ def fbspd(resname: str, cennames: List[str], datname: str,
     # 4. Merge data from all stations
     all_pos_arrays = [obs['pos'] for obs in station_obs]
     all_time_arrays = [obs['reltime'] for obs in station_obs]
-    
+
     time_offsets = minimize_chainlength(all_time_arrays, all_pos_arrays)
     if debug: print(f"Determined time offsets: {time_offsets}")
 
-    merged_data = {
-        'reltime': np.concatenate([obs['reltime'] + offset for obs, offset in zip(station_obs, time_offsets)]),
-        'pos': np.concatenate([obs['pos'] for obs in station_obs]),
-        'height': np.concatenate([obs['height'] for obs in station_obs]),
-        'sig': np.concatenate([obs['sig'] for obs in station_obs]),
-    }
+    try:
+        merged_data = {
+            'reltime': np.concatenate([obs['reltime'] + offset for obs, offset in zip(station_obs, time_offsets)]),
+            'pos': np.concatenate([obs['pos'] for obs in station_obs]),
+            'height': np.concatenate([obs['height'] for obs in station_obs]),
+            'sig': np.concatenate([obs['sig'] for obs in station_obs]),
+        }
+        # Explicitly check for empty data, which would cause a crash later in curve_fit
+        if merged_data['reltime'].size == 0:
+            raise ValueError("All station data resulted in zero valid points after processing.")
+
+    except ValueError as e:
+        print(f"\nError: Could not merge station data. This can happen with inconsistent or empty input files.", file=sys.stderr)
+        print(f"Underlying Error: {e}", file=sys.stderr)
+        return False, 0.0
 
     # Sort merged data by time
     sort_idx = np.argsort(merged_data['reltime'])
@@ -649,7 +636,6 @@ def fbspd(resname: str, cennames: List[str], datname: str,
         merged_data[key] = merged_data[key][sort_idx]
 
     # 5. Fit the merged data
-    # First fit to find the time adjustment
     try:
         lin_params, _ = curve_fit(linfunc, merged_data['reltime'], merged_data['pos'], sigma=1./merged_data['sig'])
     except RuntimeError:
@@ -659,23 +645,44 @@ def fbspd(resname: str, cennames: List[str], datname: str,
     adjtime = -lin_params[1] / lin_params[0] if lin_params[0] != 0 else 0
     merged_data['reltime'] += adjtime
     if debug: print(f"Time axis adjusted by: {adjtime:.4f} s")
-    
+
     # Final fit on time-adjusted data
-    final_params, n_ok = _fit_merged_data(
-        merged_data['reltime'], merged_data['pos'], merged_data['sig'], debug
+    final_params, n_ok, pcov = _fit_merged_data(
+        merged_data['reltime'], merged_data['pos'], merged_data['sig'], debug, fscale
     )
-    
+
     if n_ok == 0:
         print("Error: Final fit failed for all data points.")
         return False, 0.0
 
+    # --- Uncertainty Simulation ---
+    param_samples = None
+    initial_speed_uncertainty = 0.0
+    if pcov is not None:
+        try:
+            # Ensure covariance matrix is positive semi-definite for sampling
+            eigenvalues = np.linalg.eigvalsh(pcov)
+            if np.min(eigenvalues) < 0:
+                jitter = abs(np.min(eigenvalues)) + 1e-9
+                pcov += np.eye(pcov.shape[0]) * jitter
+
+            param_samples = np.random.multivariate_normal(final_params, pcov, size=500)
+
+            # Calculate the distribution of initial speeds from the samples
+            initial_speed_samples = [expfunc_1stder(0.0, *p) for p in param_samples]
+            # Multiply standard deviation by the desired sigma level
+            initial_speed_uncertainty = np.std(initial_speed_samples) * sigma_level
+        except np.linalg.LinAlgError:
+            print("Warning: Could not estimate uncertainties due to numerical instability.")
+            
     # 6. Output results
     initial_speed = expfunc_1stder(0.0, *final_params)
-    print(f"Fit successful using {n_ok} of {len(merged_data['reltime'])} points.")
-    print(f"Initial speed (v_i): {initial_speed:.3f} km/s")
+    print(f"Fit successful using {n_ok} data points.")
+    # Update the print statement to be dynamic
+    print(f"Initial speed (v_i) [{sigma_level}-sigma]: {initial_speed:.3f} ± {initial_speed_uncertainty:.3f} km/s")
 
     if doplot:
-        _generate_plots(merged_data, final_params, n_ok, doplot, resname)
+        _generate_plots(merged_data, final_params, param_samples, n_ok, doplot, resname, debug, sigma_level)
 
     if posdata:
         print("\nTime [s]  Height [km]  Position [km]  Speed [km/s]")
@@ -718,6 +725,14 @@ if __name__ == "__main__":
         '-v', '--verbose', dest='debug', action="store_true",
         help='Provide additional debugging output.'
     )
+    parser.add_argument(
+        '--fscale', dest='fscale', type=float, default=0.1,
+        help='Robust loss function scale. Smaller is more robust. Default: 0.1'
+    )
+    parser.add_argument(
+        '--uncertainty-sigma', dest='sigma_level', type=float, default=1.0,
+        help='Sigma level for uncertainty reporting (e.g., 1.0, 3.0). Default: 1.0'
+    )
 
     args = parser.parse_args()
 
@@ -735,5 +750,7 @@ if __name__ == "__main__":
         datname=args.datname,
         doplot=args.output,
         posdata=args.posdata,
-        debug=args.debug
+        debug=args.debug,
+        fscale=args.fscale,
+        sigma_level=args.sigma_level
     )

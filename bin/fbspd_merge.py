@@ -20,7 +20,8 @@ from typing import List, Tuple, Optional, Union, Dict, Sequence
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.optimize import curve_fit, least_squares
+from scipy.optimize import curve_fit, least_squares, brute
+
 
 # WGS-84 Ellipsoid Parameters
 EARTH_RADIUS = 6371.0  # Mean radius in km
@@ -342,19 +343,22 @@ def minimize_chainlength(all_time_arrays: List[np.ndarray], all_pos_arrays: List
     best_offsets = np.zeros(n_series)
     # Anchor the first series and find best offset for each subsequent series
     for i in range(1, n_series):
-        best_cl = 1e10
-        best_offset_i = 0
-        for try_offset in np.arange(-5, 5, 0.01): # Search range for time offset
-            cl = _chainlength(
+        # Define the objective function to be minimized.
+        # brute passes a 1-element array, so we extract the float with offset[0].
+        def objective_func(offset: np.ndarray) -> float:
+            return _chainlength(
                 [all_time_arrays[0], all_time_arrays[i]],
                 [all_pos_arrays[0], all_pos_arrays[i]],
-                np.array([0, try_offset])
+                np.array([0, offset[0]])
             )
-            if cl < best_cl:
-                best_cl = cl
-                best_offset_i = try_offset
-        best_offsets[i] = best_offset_i
-        
+
+        # Use brute-force grid search, which is robust for this non-smooth function.
+        # The 'ranges' tuple defines the search space [start, stop, step-size].
+        # We explicitly disable a finishing step to ensure only grid points are tested.
+        ranges = (slice(-5, 5, 0.01),)
+        result = brute(objective_func, ranges, finish=None)
+        best_offsets[i] = result
+
     return best_offsets
 
 

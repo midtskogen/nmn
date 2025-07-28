@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Converted to Python 3
 
 def fb2kml(inname = ''):
     """

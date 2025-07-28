@@ -438,6 +438,7 @@ def plot_map(track_start, track_end, cross_pos, indata, lenarr, colarr, borders=
     # Import Cartopy modules
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
+    from cartopy.io.img_tiles import OSM
     from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
     try:
         from cartopy.io import shapereader
@@ -504,7 +505,7 @@ def plot_map(track_start, track_end, cross_pos, indata, lenarr, colarr, borders=
     # Add topography/bathymetry - equivalent to basemap's etopo()
     try:
         # Try to add shaded relief or topography
-        ax.stock_img()  # This adds a simple stock image with topography
+        ax.add_image(OSM(), 7)
     except:
         try:
             # Alternative: add land/ocean with topographic shading

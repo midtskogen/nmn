@@ -243,18 +243,14 @@ def linfunc(x: float, a: float, b: float) -> float:
 
 
 def expfunc(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
-    """
-    Exponential-linear function for fitting meteor dynamics.
-    The absolute values constrain the fit to a physically meaningful regime
-    (i.e., deceleration).
-    """
-    return -abs(a) * np.exp(abs(b) * x) + abs(a) * abs(b) * x + abs(a) + c * x + d
-
+    # This model represents position as an exponential deceleration from a linear velocity.
+    # The term "+ abs(a) * abs(b) * x" has been removed.
+    return -abs(a) * np.exp(abs(b) * x) + abs(a) + c * x + d
 
 def expfunc_1stder(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
-    """First derivative of expfunc (speed)."""
-    return -abs(a) * abs(b) * np.exp(abs(b) * x) + abs(a) * abs(b) + c
-
+    # The derivative of the corrected expfunc.
+    # The term "+ abs(a) * abs(b)" has been removed.
+    return -abs(a) * abs(b) * np.exp(abs(b) * x) + c
 
 def expfunc_2ndder(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
     """Second derivative of expfunc (acceleration)."""
@@ -469,29 +465,20 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
     """Generates and saves/shows output plots with uncertainty bands."""
     reltime, pos, sig = data['reltime'], data['pos'], data['sig']
 
+    # --- Main Calculations ---
     fit_pos = expfunc(reltime, *params)
     fit_dev = pos - fit_pos
     fit_speed = expfunc_1stder(reltime, *params)
     fit_accel = expfunc_2ndder(reltime, *params)
 
-    if debug:
-        print("\n--- Plotting Debug Info ---")
-        print(f"Final Parameters: {params}")
-
     # --- Uncertainty Calculation ---
     speed_std_scaled, accel_std_scaled = np.zeros_like(reltime), np.zeros_like(reltime)
     if param_samples is not None:
-        # Use the pre-computed samples to find the uncertainty at each time point
         speed_samples = np.array([expfunc_1stder(reltime, *p) for p in param_samples])
         accel_samples = np.array([expfunc_2ndder(reltime, *p) for p in param_samples])
-
-        # Multiply standard deviation by the desired sigma level
         speed_std_scaled = np.std(speed_samples, axis=0) * sigma_level
         accel_std_scaled = np.std(accel_samples, axis=0) * sigma_level
 
-    # Use the stem of the .res file for the plot title, but not the filename
-    site_code = Path(resname).stem
-    
     # --- Figure 1: Position vs. Time ---
     plt.figure(1, figsize=(10, 8))
     plt.suptitle(f"Kurvetilpassing", fontsize=16)
@@ -521,31 +508,35 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
     if doplot in ['save', 'both']:
         plt.savefig("posvstime.svg")
 
-
     # --- Figure 2: Speed and Acceleration ---
     plt.figure(2, figsize=(10, 8))
     plt.suptitle(f"Hastighetsanalyse", fontsize=16)
     
+    # Plot Speed Profile
     ax3 = plt.subplot(211)
     ax3.plot(reltime, fit_speed, 'b-')
-    ax3.fill_between(reltime, fit_speed - speed_std_scaled, fit_speed + speed_std_scaled,
-                     color='blue', alpha=0.2, label=f'{sigma_level}-sigma usikkerhet')
     ax3.set_ylim(bottom=0)
     ax3.set_ylabel('Speed [km/s]')
     ax3.set_xlabel('Time [s]')
     ax3.set_title('Hastighetsprofil')
-    ax3.legend()
     ax3.grid(True)
 
+    # Plot Acceleration Profile
     ax4 = plt.subplot(212, sharex=ax3)
     ax4.plot(reltime, fit_accel, 'b-')
-    ax4.fill_between(reltime, fit_accel - accel_std_scaled, fit_accel + accel_std_scaled,
-                     color='blue', alpha=0.2, label=f'{sigma_level}-sigma usikkerhet')
     ax4.set_ylabel('Aksellerasjon [km/s²]')
     ax4.set_xlabel('Time [s]')
     ax4.set_title('Aksellerasjonsprofil')
-    ax4.legend()
     ax4.grid(True)
+
+    # *** Conditionally add uncertainty band and legend ***
+    if param_samples is not None:
+        ax3.fill_between(reltime, fit_speed - speed_std_scaled, fit_speed + speed_std_scaled,
+                         color='blue', alpha=0.2, label=f'{sigma_level}-sigma usikkerhet')
+        ax4.fill_between(reltime, fit_accel - accel_std_scaled, fit_accel + accel_std_scaled,
+                         color='blue', alpha=0.2, label=f'{sigma_level}-sigma usikkerhet')
+        ax3.legend()
+        ax4.legend()
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     if doplot in ['save', 'both']:
@@ -621,7 +612,6 @@ def fbspd(resname: str, cennames: List[str], datname: str,
             'height': np.concatenate([obs['height'] for obs in station_obs]),
             'sig': np.concatenate([obs['sig'] for obs in station_obs]),
         }
-        # Explicitly check for empty data, which would cause a crash later in curve_fit
         if merged_data['reltime'].size == 0:
             raise ValueError("All station data resulted in zero valid points after processing.")
 
@@ -658,27 +648,35 @@ def fbspd(resname: str, cennames: List[str], datname: str,
     # --- Uncertainty Simulation ---
     param_samples = None
     initial_speed_uncertainty = 0.0
-    if pcov is not None:
+    if pcov is not None and not np.isnan(pcov).any(): # Check for valid covariance matrix
         try:
             # Ensure covariance matrix is positive semi-definite for sampling
             eigenvalues = np.linalg.eigvalsh(pcov)
-            if np.min(eigenvalues) < 0:
+            if np.min(eigenvalues) < -1e-12: # Allow for small negative noise
                 jitter = abs(np.min(eigenvalues)) + 1e-9
                 pcov += np.eye(pcov.shape[0]) * jitter
+            
+            # Check for non-finite values before sampling
+            if not np.isfinite(pcov).all():
+                raise np.linalg.LinAlgError("Covariance matrix contains non-finite values.")
 
             param_samples = np.random.multivariate_normal(final_params, pcov, size=500)
+            
+            # Check for bad samples
+            if not np.isfinite(param_samples).all():
+                print("Warning: Numerical instability in uncertainty sampling produced non-finite values. Disabling uncertainty bands.")
+                param_samples = None # Reset to disable plotting uncertainty
 
-            # Calculate the distribution of initial speeds from the samples
-            initial_speed_samples = [expfunc_1stder(0.0, *p) for p in param_samples]
-            # Multiply standard deviation by the desired sigma level
-            initial_speed_uncertainty = np.std(initial_speed_samples) * sigma_level
-        except np.linalg.LinAlgError:
-            print("Warning: Could not estimate uncertainties due to numerical instability.")
+            if param_samples is not None:
+                initial_speed_samples = [expfunc_1stder(0.0, *p) for p in param_samples]
+                initial_speed_uncertainty = np.std(initial_speed_samples) * sigma_level
+        except np.linalg.LinAlgError as e:
+            print(f"Warning: Could not estimate uncertainties due to numerical instability: {e}")
+            param_samples = None # Ensure it's None on failure
             
     # 6. Output results
     initial_speed = expfunc_1stder(0.0, *final_params)
     print(f"Fit successful using {n_ok} data points.")
-    # Update the print statement to be dynamic
     print(f"Initial speed (v_i) [{sigma_level}-sigma]: {initial_speed:.3f} ± {initial_speed_uncertainty:.3f} km/s")
 
     if doplot:

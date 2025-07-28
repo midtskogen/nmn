@@ -1,918 +1,714 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Converted to Python 3
+"""
+fbspd_merge.py: Fits speed and acceleration profiles to meteor centroid data.
 
-# 2040413: If a fit to merged data fails, result is replaced with best single station fit, if possible.
-# 20140418 Added site code in title string
-# 20150906 Added abs() to fitting function to force meaningful solution
+This script analyzes meteor trajectory data from multiple observation stations.
+It reads trajectory solutions (.res), station coordinates (.dat), and centroid
+observations (.cen) to compute a merged speed and acceleration profile for
+a meteor event.
 
+The main functions `readres` and `fbspd` are designed to be callable from
+external scripts.
+"""
 
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Tuple, Optional, Union, Dict, Sequence
+
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import curve_fit, least_squares
 
-earth_radius = 6371.0 # km
+# WGS-84 Ellipsoid Parameters
+EARTH_RADIUS = 6371.0  # Mean radius in km
+FLATTENING = 1.0 / 298.257223563  # Earth flattening factor (WGS-84)
+E_SQUARED = 2 * FLATTENING - FLATTENING**2  # Eccentricity squared
 
 
-def is_number(s):
-    try:
-        float(s)
-        return True
-    except (ValueError, TypeError):
-        return False
-
-def get_sitecoord_fromdat(inname):
-
-    import os
-
-    path, longname = os.path.split(inname)
-    (name, ext) = os.path.splitext(longname)
-
-    # Pre-declare data lists
-    longarr = []
-    latarr =  []
-    az1arr =  []
-    az2arr =  []
-    alt1arr=  []
-    alt2arr = []
-    weights = []
-    duration =[]
-    lenarr =  []
-    colarr =  []
-    namarr =  []
-    secarr =  []
-    obsheightarr = []
-
-    # Read in data
-    with open(os.path.join(path, name+ext), 'r') as f:
-        for line in f:
-            words=line.split()
-            if not words:
-                continue
-            if words[0] == 'borders':
-                borders = [float(words[1]), float(words[2]), float(words[3]), float(words[4]) ]
-                autoborders = False
-            elif line[0] != '#':
-                longarr.append(float(words[0]))
-                latarr.append(float(words[1]))
-                az1arr.append(float(words[2]))
-                az2arr.append(float(words[3]))
-                alt1arr.append(float(words[4]))
-                alt2arr.append(float(words[5]))
-                weights.append(float(words[6]))
-                duration.append(float(words[7]))
-                lenarr.append(float(words[8]))
-                colarr.append( (int(words[9]), int(words[10]), int(words[11])) )
-                nam=''
-                nam_nsegs=0
-                for n in words[12:]: 
-                    if not is_number(n):
-                        nam=nam+' '+n
-                        nam_nsegs += 1
-                nam=nam[1:]
-                namarr.append(nam)
-                try:
-                    secarr.append(float(words[12+nam_nsegs]))
-                except (IndexError, ValueError):
-                    # Will this have any use in the future?
-                    secarr.append(None)
-                try:
-                    obsheightarr.append(float(words[13+nam_nsegs])/1000.)
-                except (IndexError, ValueError):
-                    obsheightarr.append(0.)
-                
-    sitecoords = []
-    for i in range(len(longarr)):
-      sitecoords.append([namarr[i], longarr[i], latarr[i], obsheightarr[i]])
-    
-    return sitecoords
-
+# --- Data Structures ---
 
 class ResData:
-    '''
-    Container data type for .res file
-    '''
+    """Container for data from a .res file."""
     def __init__(self):
-        self.ndata  = 0.
-        self.long1  = np.array([])
-        self.lat1   = np.array([])
-        self.long2  = np.array([])
-        self.lat2   = np.array([])
-        self.height = np.array([])
-        self.desc   = np.array([])
-
-
-
-def readres(inname):
-    '''
-    Read in data from .res file and return them in data type
-    '''
-
-    import os
-
-    path, longname = os.path.split(inname)
-    (name, ext) = os.path.splitext(longname)
-
-    # Pre-declare data lists
-    long1  = []
-    lat1   = []
-    long2  = []
-    lat2   = []
-    height = []
-    desc   = []
-
-    # Read in data
-    with open(os.path.join(path, name+ext), 'r') as f:
-        for line in f:
-            if line and line[0] != '#':
-                words=line.split()
-                long1.append(float(words[0]))
-                lat1.append(float(words[1]))
-                long2.append(float(words[2]))
-                lat2.append(float(words[3]))
-                height.append(float(words[4]))
-                desc.append(words[5])
-
-    data = ResData()
-
-    data.ndata = len(long1)
-    data.long1 =  np.array(long1)
-    data.lat1   = np.array(lat1)
-    data.long2  = np.array(long2)
-    data.lat2   = np.array(lat2)
-    data.height = np.array(height)
-    data.desc   = np.array(desc)
-
-    return data
-
+        self.ndata: int = 0
+        self.long1: np.ndarray = np.array([])
+        self.lat1: np.ndarray = np.array([])
+        self.long2: np.ndarray = np.array([])
+        self.lat2: np.ndarray = np.array([])
+        self.height: np.ndarray = np.array([])
+        self.desc: np.ndarray = np.array([])
 
 
 class CenData:
-    '''
-    Container data type for centroid file
-    '''
+    """Container for data from a centroid file."""
     def __init__(self):
-        self.ndata   = 0.
-        self.seqid   = np.array([])
-        self.reltime = np.array([])
-        self.cenalt  = np.array([])
-        self.cenaz   = np.array([])
-        self.censig  = np.array([])
-        self.sitestr = np.array([])
-        self.datestr = np.array([])
-        self.timestr = np.array([])
+        self.ndata: int = 0
+        self.seqid: np.ndarray = np.array([])
+        self.reltime: np.ndarray = np.array([])
+        self.cenalt: np.ndarray = np.array([])
+        self.cenaz: np.ndarray = np.array([])
+        self.censig: np.ndarray = np.array([])
+        self.sitestr: np.ndarray = np.array([])
+        self.datestr: np.ndarray = np.array([])
+        self.timestr: np.ndarray = np.array([])
+        self.site_info: dict = {}
 
 
+# --- File Reading Functions ---
 
-def readcen(inname):
-    '''
-    Read in data from centroid file and return them in data type
-    '''
+def readres(inname: str) -> ResData:
+    """Reads data from a .res file and returns a ResData object."""
+    res_path = Path(inname)
+    data = {
+        "long1": [], "lat1": [], "long2": [], "lat2": [], "height": [], "desc": []
+    }
 
-    import os
-
-    path, longname = os.path.split(inname)
-    (name, ext) = os.path.splitext(longname)
-
-    # Pre-declare data lists
-    seqid   = []
-    reltime = []
-    cenalt  = []
-    cenaz   = []
-    censig  = []
-    sitestr = []
-    datestr = []
-    timestr = []
-
-    # Read in data
-    with open(os.path.join(path, name+ext), 'r') as f:
+    with res_path.open('r') as f:
         for line in f:
-            if line and line[0] != '#':
-                words=line.split()
-                seqid.append(int(words[0]))
-                reltime.append(float(words[1]))
-                cenalt.append(float(words[2]))
-                cenaz.append(float(words[3]))
-                censig.append(float(words[4]))
-                sitestr.append(words[5])
-                datestr.append(words[6])
-                timestr.append(words[7])
+            if not line.strip() or line.startswith('#'):
+                continue
+            words = line.split()
+            data["long1"].append(float(words[0]))
+            data["lat1"].append(float(words[1]))
+            data["long2"].append(float(words[2]))
+            data["lat2"].append(float(words[3]))
+            data["height"].append(float(words[4]))
+            data["desc"].append(words[5])
 
-    data = CenData()
-
-    data.ndata   = len(seqid)
-    data.seqid   = np.array(seqid)
-    data.reltime = np.array(reltime)
-    data.cenalt  = np.array(cenalt)
-    data.cenaz   = np.array(cenaz)
-    data.censig  = np.array(censig)
-    data.sitestr = np.array(sitestr)
-    data.datestr = np.array(datestr)
-    data.timestr = np.array(timestr)
-
-    return data
+    res = ResData()
+    res.ndata=len(data["long1"])
+    res.long1=np.array(data["long1"])
+    res.lat1=np.array(data["lat1"])
+    res.long2=np.array(data["long2"])
+    res.lat2=np.array(data["lat2"])
+    res.height=np.array(data["height"])
+    res.desc=np.array(data["desc"])
+    return res
 
 
-def lonlat2xyz(lon, lat, height = 0):
-    """
-    Convert geographic lon/lat/height on reference ellipse to cartesian coordiantes
-    """
+def readcen(inname: str) -> CenData:
+    """Reads data from a centroid file and returns a CenData object."""
+    cen_path = Path(inname)
+    data = {
+        "seqid": [], "reltime": [], "cenalt": [], "cenaz": [],
+        "censig": [], "sitestr": [], "datestr": [], "timestr": []
+    }
+
+    with cen_path.open('r') as f:
+        for line in f:
+            if not line.strip() or line.startswith('#'):
+                continue
+            words = line.split()
+            data["seqid"].append(int(words[0]))
+            data["reltime"].append(float(words[1]))
+            data["cenalt"].append(float(words[2]))
+            data["cenaz"].append(float(words[3]))
+            data["censig"].append(float(words[4]))
+            data["sitestr"].append(words[5])
+            data["datestr"].append(words[6])
+            data["timestr"].append(words[7])
+
+    cen = CenData()
+    cen.ndata = len(data["seqid"])
+    for k, v in data.items():
+        setattr(cen, k, np.array(v))
+    return cen
+
+
+def get_sitecoord_fromdat(inname: str) -> List[Tuple[str, float, float, float]]:
+    """Extracts site coordinates from a .dat file."""
+    dat_path = Path(inname)
+    sitecoords = []
     
-    # http://www.navipedia.net/index.php/Ellipsoidal_and_Cartesian_Coordinates_Conversion
-    #
-    f = 1.0/298.257223563 # Earth flattening factor WGS-84
-    e = np.sqrt(2*f - f*f)
-    N = earth_radius / np.sqrt(1 - e*e * np.sin(np.radians(lat))*np.sin(np.radians(lat)))
+    with dat_path.open('r') as f:
+        for line in f:
+            words = line.split()
+            if not words or words[0].startswith('#') or words[0] == 'borders':
+                continue
 
-    v = np.zeros(3)
-    v[0] = (N + height) * np.cos(np.radians(lon)) * np.cos(np.radians(lat))
-    v[1] = (N + height) * np.sin(np.radians(lon)) * np.cos(np.radians(lat))
-    v[2] = (N*(1 - e*e) + height)  * np.sin(np.radians(lat))
+            lon, lat = float(words[0]), float(words[1])
+            
+            # Find the station name, which can contain spaces
+            name_parts = []
+            first_numeric_idx = 12
+            for i, word in enumerate(words[12:]):
+                try:
+                    float(word)
+                    first_numeric_idx = 12 + i
+                    break
+                except ValueError:
+                    name_parts.append(word)
+            
+            name = " ".join(name_parts)
+            
+            # Observer height is optional, default to 0
+            try:
+                obs_height_m = float(words[first_numeric_idx + 1])
+                height_km = obs_height_m / 1000.0
+            except (IndexError, ValueError):
+                height_km = 0.0
+                
+            sitecoords.append((name, lon, lat, height_km))
+            
+    return sitecoords
 
-    return v
 
+# --- Coordinate and Vector Functions ---
 
-def lonlat2xyz_globe(lon, lat, height = 0):
-    """
-    Convert geographic lon/lat/height to cartesian coordiantes
-    """
+def lonlat2xyz(lon_deg: float, lat_deg: float, height_km: float = 0) -> np.ndarray:
+    """Converts geographic lon/lat/height (WGS-84) to cartesian ECEF coordinates."""
+    lat_rad, lon_rad = np.radians(lat_deg), np.radians(lon_deg)
+    sin_lat, cos_lat = np.sin(lat_rad), np.cos(lat_rad)
     
-    v = np.zeros(3)
-    v[0] = np.cos(np.radians(lon)) * np.cos(np.radians(lat))
-    v[1] = np.sin(np.radians(lon)) * np.cos(np.radians(lat))
-    v[2] = np.sin(np.radians(lat))
-    v = v * (earth_radius + height)
-
-    return v
-
-
-def xyz2lonlat(v):
-    """
-    Convert cartesian coordinates to geographical lon/lat/height on reference ellipse
-    """
-
-    # http://www.navipedia.net/index.php/Ellipsoidal_and_Cartesian_Coordinates_Conversion
-    #
-    f = 1.0/298.257223563 # Earth flattening factor WGS-84
-    e = np.sqrt(2*f - f*f)
-
-    lon    = np.degrees(np.arctan2(v[1], v[0]))
+    N = EARTH_RADIUS / np.sqrt(1 - E_SQUARED * sin_lat**2)
     
-    p = np.sqrt(v[0]*v[0] + v[1]*v[1])
-    lat_old = np.degrees(np.arctan2(v[2], (1.0 - e*e)*p))
-
-    diff = 1
-    nsteps = 0
-
-    while (diff > 1e-10):
-      nsteps = nsteps + 1
-      N = earth_radius / np.sqrt(1.0 - e*e*np.sin(np.radians(lat_old))*np.sin(np.radians(lat_old)))
-      height = p / np.cos(np.radians(lat_old)) - N
-      lat    = np.degrees(np.arctan2(v[2], p * (1.0 - e*e * N / (N + height))))
-      
-      diff = abs((lat - lat_old))
-      #print(diff, N, lon, lat, height)
-      
-      lat_old      = lat
-      
-      if (nsteps > 1000):
-        print(f"Warning - did not reach full convergence in xyz2lonlat: current diff is {diff}\n")
-        break
-
-    return lon, lat, height
-
-
-def xyz2lonlat_globe(v):
-    """
-    Convert cartesian coordinates to geographical lon/lat/height
-    """
-
-    lon    = np.degrees(np.arctan2(v[1], v[0]))
-    lat    = np.degrees(np.arctan2(v[2], np.sqrt(v[0]**2 + v[1]**2)))
-    height = np.sqrt(v[0]**2 + v[1]**2 + v[2]**2) - earth_radius
+    x = (N + height_km) * cos_lat * np.cos(lon_rad)
+    y = (N + height_km) * cos_lat * np.sin(lon_rad)
+    z = (N * (1 - E_SQUARED) + height_km) * sin_lat
     
-    return lon, lat, height
+    return np.array([x, y, z])
 
 
-def closest_point(p1, p2, u1, u2, return_points=False):
-    """
-    Find the point that is closest to two lines, where the lines are
-    defined by positions p1 and p2, with directional vectors u1 and u2
-    """
+def xyz2lonlat(v: np.ndarray) -> Tuple[float, float, float]:
+    """Converts cartesian ECEF coordinates to geographic lon/lat/height (WGS-84)."""
+    p = np.sqrt(v[0]**2 + v[1]**2)
+    lon_deg = np.degrees(np.arctan2(v[1], v[0]))
+    
+    # Iterative method to find latitude and height
+    lat_rad = np.arctan2(v[2], p * (1.0 - E_SQUARED))
+    
+    for _ in range(10): # Typically converges very quickly
+        sin_lat = np.sin(lat_rad)
+        N = EARTH_RADIUS / np.sqrt(1.0 - E_SQUARED * sin_lat**2)
+        height_km = p / np.cos(lat_rad) - N
+        lat_rad_new = np.arctan2(v[2], p * (1.0 - E_SQUARED * N / (N + height_km)))
+        if abs(lat_rad_new - lat_rad) < 1e-12:
+            break
+        lat_rad = lat_rad_new
+        
+    return lon_deg, np.degrees(lat_rad), height_km
 
+
+def altaz2xyz(alt_deg: float, az_deg: float, obs_lon: float, obs_lat: float) -> np.ndarray:
+    """Converts local alt/az to a unit vector in the ECEF frame."""
+    alt_rad, az_rad = np.radians(alt_deg), np.radians(az_deg)
+    lat_rad, lon_rad = np.radians(obs_lat), np.radians(obs_lon)
+
+    # Vector in local ENU (East-North-Up) frame
+    v_enu = np.array([
+        np.sin(az_rad) * np.cos(alt_rad),
+        np.cos(az_rad) * np.cos(alt_rad),
+        np.sin(alt_rad)
+    ])
+
+    # Rotation matrix to convert ENU vector to ECEF frame
+    sin_lat, cos_lat = np.sin(lat_rad), np.cos(lat_rad)
+    sin_lon, cos_lon = np.sin(lon_rad), np.cos(lon_rad)
+    
+    R = np.array([
+        [-sin_lon, -cos_lon * sin_lat, cos_lon * cos_lat],
+        [ cos_lon, -sin_lon * sin_lat, sin_lon * cos_lat],
+        [       0,           cos_lat,           sin_lat]
+    ])
+    
+    return R @ v_enu
+
+
+def closest_point(p1: np.ndarray, p2: np.ndarray, u1: np.ndarray, u2: np.ndarray,
+                  return_points: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    """Finds the closest point(s) between two lines in 3D space."""
     p21 = p2 - p1
-    m   = np.cross(u2, u1)
-    m2  = float(np.dot(m, m))
+    m = np.cross(u2, u1)
+    m2 = np.dot(m, m)
 
-    if m2 < 1e-9: # Lines are parallel
+    if m2 < 1e-9:  # Lines are parallel
+        closest_p2_on_line1 = p1 + np.dot(p21, u1) * u1
         if return_points:
-            return p1, p1 + np.dot(p21, u1) * u1
-        else:
-            return p1 + np.dot(p21, u1) * u1 / 2.0
+            return closest_p2_on_line1, p2
+        return (closest_p2_on_line1 + p2) / 2.0
 
-
-    R = np.cross(p21, m/m2)
+    R = np.cross(p21, m / m2)
     t1 = np.dot(R, u2)
     t2 = np.dot(R, u1)
 
-    cross_1 = p1 + t1*u1
-    cross_2 = p2 + t2*u2
+    cross_1 = p1 + t1 * u1
+    cross_2 = p2 + t2 * u2
 
-    if return_points: return cross_1, cross_2
+    if return_points:
+        return cross_1, cross_2
+    return (cross_1 + cross_2) / 2.0
 
-    return (cross_1 + cross_2)/2.0
+
+def dist_line_line(p1: np.ndarray, u1: np.ndarray, p2: np.ndarray, u2: np.ndarray) -> float:
+    """Calculates the minimum distance between two lines."""
+    pq = closest_point(p1, p2, u1, u2, return_points=True)
+    dist_vec = pq[0] - pq[1]
+    return np.sqrt(np.dot(dist_vec, dist_vec))
 
 
-def dist_line_line(p1, u1, p2, u2):
+# --- Fitting Functions ---
+
+def linfunc(x: float, a: float, b: float) -> float:
+    """Linear function for fitting."""
+    return a * x + b
+
+
+def expfunc(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
     """
-    Calculate the distance between two vectors. These are defined by
-    positions p1 and p2, with directional vectors u1 and u2
+    Exponential-linear function for fitting meteor dynamics.
+    The absolute values constrain the fit to a physically meaningful regime
+    (i.e., deceleration).
     """
+    return -abs(a) * np.exp(abs(b) * x) + abs(a) * abs(b) * x + abs(a) + c * x + d
 
-    # Setup an array of two equations based on the fact that
-    # the shortest line connecting both vectors must be perpendicular
-    # to both.
 
-    a = np.array( [[np.dot(u1, u1), -np.dot(u1, u2)],
-                   [np.dot(u2, u1), -np.dot(u2, u2)]] )
-    b = np.array(  [np.dot(u1, (p2 - p1)),
-                    np.dot(u2, (p2 - p1))] )
+def expfunc_1stder(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
+    """First derivative of expfunc (speed)."""
+    return -abs(a) * abs(b) * np.exp(abs(b) * x) + abs(a) * abs(b) + c
 
-    #print(p1, u1)
-    #print(p2, u2)
-    #print(a, b)
 
+def expfunc_2ndder(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
+    """Second derivative of expfunc (acceleration)."""
+    return -abs(a) * abs(b)**2 * np.exp(abs(b) * x)
+
+
+def try_expfit(x: np.ndarray, y: np.ndarray, weights: np.ndarray, guess: List[float]) -> Tuple[Optional[np.ndarray], bool]:
+    """Tries to fit the exp-lin function with a given initial guess."""
     try:
-        # Solve the set of two equations
-        [s, t] = np.linalg.solve(a, b)
-    except np.linalg.LinAlgError: # Singular matrix, lines are parallel
-        return np.sqrt(np.dot(p2-p1, p2-p1))
+        params, _ = curve_fit(expfunc, x, y, p0=guess, sigma=1./weights)
+    except (RuntimeError, ValueError):
+        return None, False
+
+    # Check for physically plausible results
+    speed = expfunc_1stder(x, *params)
+    accel = expfunc_2ndder(x, *params)
+
+    if np.min(speed) < -1 or np.max(accel) > 1e-3: # Allow for tiny positive accel
+        return None, False
+        
+    return params, True
 
 
-    # Then, the vector connecting both lines is    
-    pq = (p1 + s*u1) - (p2 + t*u2)
-
-    # The length of this vector is
-    dist = np.sqrt( np.dot(pq, pq) )
-    
-    return dist
-
-
-def intersec_line_plane(line_ref, line_vec, plane_ref, plane_vec):
-    '''
-    Determine the point where a line intersects a plane.
-    '''
-
-    # Line is defined by reference point and directional vector
-    # Plane is defined by reference point and normal vector
-    
-    dot_prod = np.dot(plane_vec, line_vec)
-    if abs(dot_prod) < 1e-9: # Line is parallel to the plane
-        return line_ref # No unique intersection
-
-    factor = -np.dot(plane_vec, line_ref - plane_ref) / dot_prod
-    vec_to_intersection = line_vec * factor
-    intersec_point = line_ref + vec_to_intersection
-    #print(intersec_vec)
-    #print("The following must be zero: %5.3f" % np.dot(intersec_point - plane_ref, plane_norm))
-    
-    return intersec_point
-
-
-def rotation_matrix(axis,theta):
-    # from http://stackoverflow.com/questions/6802577/python-rotation-of-3d-vector
-    axis = axis/np.sqrt(np.dot(axis,axis))
-    a = np.cos(theta/2)
-    b,c,d = -axis*np.sin(theta/2)
-    return np.array([[a*a+b*b-c*c-d*d, 2*(b*c-a*d), 2*(b*d+a*c)],
-                     [2*(b*c+a*d), a*a+c*c-b*b-d*d, 2*(c*d-a*b)],
-                     [2*(b*d-a*c), 2*(c*d+a*b), a*a+d*d-b*b-c*c]])
-
-def altaz2xyz(alt, az, lon, lat):
-    """
-    Convert alt/az to vector in cartesian space
-    """
-
-    v = np.array([-1,0,0]) # alt=0, az=0
-    # rotate alt
-    axis = np.array([0,1,0])
-    theta = -np.radians(alt) # alt
-    v = np.dot(rotation_matrix(axis,theta),v)
-
-    # rotate az
-    axis = np.array([0,0,1])
-    theta = np.radians(az) # az 
-    v = np.dot(rotation_matrix(axis,theta),v)
-
-    # rotate geographic latitude
-    axis = np.array([0,1,0])
-    theta = np.radians(lat-90) # latitude
-    v = np.dot(rotation_matrix(axis,theta),v)
-
-    # rotate geographic longitude
-    axis = np.array([0,0,1])
-    theta = -np.radians(lon) # longitude
-    v = np.dot(rotation_matrix(axis,theta),v)
-
-    return v
-
-
-
-def linfunc(x, a, b):
-    '''
-    Template for weighted fit using scipy.optimize.curve_fit
-    '''
-    return a*x + b
-
-
-
-def expfunc(x, a, b, c, d):
-    '''
-    Template for weighted fit using scipy.optimize.curve_fit
-    '''
-    # Use abs() to force solution to physically meningful regime
-    return -abs(a)*np.exp(abs(b)*x) + abs(a)*abs(b)*x + abs(a) + c*x + d
-
-
-def expfunc_1stder(x, a, b, c, d):
-    '''
-    First derivative of expfunc()
-    '''
-    # Use abs() to force solution to physically meningful regime
-    return -abs(a)*abs(b)*np.exp(abs(b)*x) + abs(a)*abs(b) + c
-
-
-def expfunc_2ndder(x, a, b, c, d):
-    '''
-    Second derivative of expfunc()
-    '''
-    # Use abs() to force solution to physically meningful regime
-    return -abs(a)*abs(b)*abs(b)*np.exp(abs(b)*x)
-
-
-
-def guess_expfit(x, y, weights):
-    '''
-    Try fitting with different initial guesses on parameters
-    Return on first success or when all fails
-    '''
-    guesslist = [ [0.1,  1.0, 20.0, 1.0],
-                  [0.1,  1.0, 20.0, 0.0],
-                  [0.1,  1.0, 20.0, -1.0],
-                  [1.0,  1.0, 25.0, 0.0],
-                  [1e-3, 1.0, 25.0, 0.0],
-                  [1e-6, 1.0, 25.0, 0.0],
-                  [0.1,  1.0, 10.0, 0.0],
-                  [0.1,  1.0, 20.0, 0.0],
-                  [0.1,  1.0, 30.0, 0.0],
-                  [0.1,  1.0, 40.0, 0.0],
-                  [0.1,  1.0, 50.0, 0.0],
-                  [0.1,  1.0, 60.0, 0.0],
-                ]
-
-    success = False
-    par = np.array([0, 0, 0, 0])
+def guess_expfit(x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> Tuple[Optional[np.ndarray], int]:
+    """Tries fitting with different initial guesses, returning the first success."""
+    guesslist = [
+        [0.1, 1.0, 20.0, 1.0], [0.1, 1.0, 20.0, 0.0], [1.0, 1.0, 25.0, 0.0],
+        [1e-3, 1.0, 25.0, 0.0], [0.1, 1.0, 10.0, 0.0], [0.1, 1.0, 30.0, 0.0],
+    ]
     
     current_x, current_y, current_weights = np.copy(x), np.copy(y), np.copy(weights)
 
-    while not success and len(current_x) > 4:
-        for g in guesslist:
-            par, success = try_expfit(current_x, current_y, current_weights, g)
+    # If fitting fails, iteratively remove the last point and retry
+    while len(current_x) > 4:
+        for guess in guesslist:
+            params, success = try_expfit(current_x, current_y, current_weights, guess)
             if success:
-                break
-        if not success:
-            # Try to eliminate strongly decelerated/afterglow part of track
-            current_x, current_y, current_weights = current_x[:-1], current_y[:-1], current_weights[:-1]
+                return params, len(current_x)
+        current_x, current_y, current_weights = current_x[:-1], current_y[:-1], current_weights[:-1]
 
-    return par, success, len(current_x)
-        
+    return None, 0
 
 
-def try_expfit(x, y, weights, guess=None):
-    '''
-    Tries to fit a lin-exp function to data.
-    Returns parameters and True if the fit was possible and the
-    result plausible.
-    '''
-    from scipy.optimize import curve_fit
+# --- Time Series Alignment ---
 
-    success = True
-    try:
-        exp_params, pcov = curve_fit(expfunc, x, y,  guess, weights)
-    except Exception:
-        success = False
-        #print("Failed to fit data")
-        exp_params=np.array([0,0,0,0])
-    if success:
-        exp_params[0] = -abs(exp_params[0])
-        exp_params[1] =  abs(exp_params[1])
-        # Allow slightly incorrect values:
-        if (exp_params[2] <0) or (exp_params[2] >300):
-
-            success = False
-            #print("Fit was not reasonable")
-            #print(exp_params)
-            exp_params=np.array([0,0,0,0])
-
-    if success:
-        exp_fitval = expfunc(x, exp_params[0], exp_params[1], exp_params[2], exp_params[3])
-        exp_speed  = expfunc_1stder(x, exp_params[0], exp_params[1], exp_params[2], exp_params[3])
-        #print("Min speed", min(exp_speed))
-        exp_accel  = expfunc_2ndder(x, exp_params[0], exp_params[1], exp_params[2], exp_params[3])
-        #print("Max accel", max(exp_accel))
-        if min(exp_speed) < -1 or max(exp_accel) > 0:
-            success = False
-            #print("Fit yielded unreasonable speed/accel")
-            #print(exp_params)
-            exp_params=np.array([0,0,0,0])
-
-    #if success:
-    #    print("try_expfit Success!")
-    return exp_params, success
-
-
-def chainlength(alltimearr, allposarr, offsets):
-
-    timearr = []
-    posarr = []
-
-    for j in range(len(alltimearr)):
-      for k in range(len(alltimearr[j])):
-         timearr.append(alltimearr[j][k] + offsets[j])
-         posarr.append(allposarr[j][k])
-    
-    timearr = np.array(timearr)
-    posarr = np.array(posarr)
-
-    sortidx = np.argsort(posarr)
-    sorted_timearr = timearr[sortidx]
-    sorted_posarr = posarr[sortidx]
-    if len(sorted_timearr) < 2:
+def _chainlength(time_series: List[np.ndarray], pos_series: List[np.ndarray], offsets: np.ndarray) -> float:
+    """Calculates squared distance of a time-sorted chain of points."""
+    if not any(len(ts) > 0 for ts in time_series):
         return 1e10
-    seglengths = (sorted_timearr[1:] - sorted_timearr[0:-1])**2 + (sorted_posarr[1:] - sorted_posarr[0:-1])**2
-    return seglengths.sum()
 
-
-def minimize_chainlength(alltimearr, allposarr):
-
-    # Use 1-d 'grid-search' to find minmimize chainlength in time domain
-
-    n_series = len(alltimearr)
-    offsets = np.zeros(n_series)
-    best_offsets = np.zeros(n_series)
-
-    if (n_series < 2): return best_offsets
+    timearr = np.concatenate([ts + offset for ts, offset in zip(time_series, offsets)])
+    posarr = np.concatenate(pos_series)
     
-    for i in range(1, n_series):
-      bestcl = 1e10
-      for try_offset in np.arange(-10, 10, 0.01):
-        thiscl = chainlength([alltimearr[0], alltimearr[i]], [allposarr[0], allposarr[i]], [0, try_offset])
-        if (thiscl < bestcl):
-          best_offsets[i] = try_offset
-          bestcl = thiscl
+    if len(timearr) < 2:
+        return 1e10
+        
+    sortidx = np.argsort(timearr)
+    sorted_time = timearr[sortidx]
+    sorted_pos = posarr[sortidx]
 
+    seglengths_sq = (sorted_time[1:] - sorted_time[:-1])**2 + (sorted_pos[1:] - sorted_pos[:-1])**2
+    return seglengths_sq.sum()
+
+
+def minimize_chainlength(all_time_arrays: List[np.ndarray], all_pos_arrays: List[np.ndarray]) -> np.ndarray:
+    """Finds time offsets between series by minimizing the chain length."""
+    n_series = len(all_time_arrays)
+    if n_series < 2:
+        return np.zeros(n_series)
+
+    best_offsets = np.zeros(n_series)
+    # Anchor the first series and find best offset for each subsequent series
+    for i in range(1, n_series):
+        best_cl = 1e10
+        best_offset_i = 0
+        for try_offset in np.arange(-5, 5, 0.01): # Search range for time offset
+            cl = _chainlength(
+                [all_time_arrays[0], all_time_arrays[i]],
+                [all_pos_arrays[0], all_pos_arrays[i]],
+                np.array([0, try_offset])
+            )
+            if cl < best_cl:
+                best_cl = cl
+                best_offset_i = try_offset
+        best_offsets[i] = best_offset_i
+        
     return best_offsets
 
 
-def fbspd(resname, cennames, datname, doplot='', posdata=False, debug=False):
-    '''
-    Determines speed and acceleration profiles for meteors from
-    trajectory parameters and centroid files.
-    A list of centroid files can be provided - a profile is fitted to each and
-    the centroid data are merged from all plausible fits and a final profile
-    fitted.
-    A boolean describing the success of creating a final fit is returned, also
-    the fitted initial speed is returned.
-    Speed/accel graphs can be optionally saved/displayed.
-    Created july 2013
-    Revised july 23, 2013
-    '''
+# --- Main Logic and Plotting ---
 
-    import matplotlib
-    if doplot == 'save':
-      if (matplotlib.get_backend() != 'agg'): matplotlib.use('agg')
-    import matplotlib.pyplot as plt
+def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray,
+                     track_vec_norm: np.ndarray) -> dict:
+    """Projects one station's observations onto the meteor track."""
+    observations = {
+        "pos": [], "height": [], "dist_off_track": [], "sig": []
+    }
 
-    import numpy.linalg
-    from scipy.optimize import curve_fit
+    site_lon, site_lat = cendat.site_info['lon'], cendat.site_info['lat']
 
-    resdat = readres(resname)
+    for i in range(cendat.ndata):
+        # Line-of-sight vector from observer
+        los_vec = altaz2xyz(cendat.cenalt[i], cendat.cenaz[i], site_lon, site_lat)
 
-    pathpos1 = lonlat2xyz(resdat.long1[0], resdat.lat1[0], resdat.height[0])
-    pathpos2 = lonlat2xyz(resdat.long1[1], resdat.lat1[1], resdat.height[1])
-    p1p2 = pathpos2 - pathpos1
-    p1p2norm = p1p2 / np.sqrt(np.dot(p1p2, p1p2))
+        # Find closest point on track to the line of sight
+        _, intersec_on_track = closest_point(
+            site_pos, track_p1, los_vec, track_vec_norm, return_points=True
+        )
 
-    sitedata = []
-    if (datname):
-       sitedata = get_sitecoord_fromdat(datname)
-    else:
-       # If no datfile given, do the best we can (no altitude info available though)
-       print("Warning: not .dat file given, so no height data available for sites. Assuming zero heights.")
-       for i in range(2, len(resdat.long1), 1):
-         sitedata.append([resdat.desc[i], resdat.long1[i], resdat.lat1[i], 0])
+        # Position along the track relative to the start point (p1)
+        track_pos = np.dot(intersec_on_track - track_p1, track_vec_norm)
+        observations["pos"].append(track_pos)
 
-    allcendat=[]
-    for cenname in cennames:
+        # Height of the point on the track
+        _, _, pos_height = xyz2lonlat(intersec_on_track)
+        observations["height"].append(pos_height)
+
+        # Smallest distance between path and line of sight (for uncertainty)
+        dist = dist_line_line(site_pos, los_vec, track_p1, track_vec_norm)
+        observations["dist_off_track"].append(dist)
+
+        # Estimate measurement uncertainty based on camera pixel scale
+        # NOTE: Assumes 0.25 deg/pix, which may not be valid for all cameras.
+        sitedist = np.linalg.norm(intersec_on_track - site_pos)
+        ang_err = np.radians(0.25 * cendat.censig[i])
+        pos_sig = sitedist * np.tan(ang_err) if ang_err > 0 else 1e-9
+        observations["sig"].append(pos_sig)
+
+    return {key: np.array(val) for key, val in observations.items()}
+
+
+def _fit_merged_data(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray,
+                     debug: bool) -> Tuple[np.ndarray, int]:
+    """
+    Fits the merged data using a combined two-stage robust fitting process:
+    1. Iterative outlier rejection to remove egregious errors.
+    2. A robust loss function ('soft_l1') for the final fit on cleaned data.
+    """
+    # --- STAGE 1: Iterative Outlier Rejection ---
+
+    # Perform an initial baseline fit using all data
+    initial_params, _ = guess_expfit(reltime, pos, sig)
+    if initial_params is None:
         try:
-            tmp = readcen(cenname)
-            allcendat.append(tmp)
-        except FileNotFoundError:
-            print(f"Warning: Centroid file not found: {cenname}")
-
-
-    allposarr = []
-    alltimearr = []
-    allheightarr = []
-    allsigarr = []
-    alldistarr = []
-    mergedposarr=[]
-    mergedheightarr=[]
-    mergedreltime=[]
-    mergedsigarr=[]
-    mergeddistarr=[]
-    mergednames = ""
-
-    reffit = None
-
-    if doplot != '':
-       plt.close('all')
-
-    if (debug and (doplot == 'show' or doplot == 'both')):
-       # For checking the timing offset
-       plt.figure(4)
-       plt.subplot(211)
-       plt.title('Individual tracks')
-       plt.ylabel('Position [km]')
-       syms=['g.','r.','b.','y.']
-
-    cendat_lenghts = []
-    for n in range(len(allcendat)): cendat_lenghts.append(allcendat[n].ndata)
-    sorted_cendat_index = sorted(range(len(cendat_lenghts)), key=lambda k: cendat_lenghts[k], reverse=True)
-
-    for nn in range(len(allcendat)):
-        allcenidx = sorted_cendat_index[nn]
-        cendat = allcendat[allcenidx]
-
-        site_lon, site_lat, site_height = (None, None, None)
-        for site in sitedata:
-          if (cendat.sitestr[0] == site[0]):
-            site_lon, site_lat, site_height = site[1], site[2], site[3]
-            break
-        
-        if site_lon is None:
-            print(f"Warning: Could not find site coordinates for {cendat.sitestr[0]}. Skipping this centroid file.")
-            continue
-
-
-        sitepos = lonlat2xyz(site_lon, site_lat, site_height)
-
-        # Alt : 0 @ horizon, 90 @ zenith
-        # Az : 0 @ north, 90 @ east
-
-        # Long: 0 @ Meridian, positive east
-        # Lat: 0 @ Equator, positive north
-
-        posarr = []
-        timearr = []
-        distarr = []
-        heightarr = []
-        sigarr = []
-
-        timearr = allcendat[allcenidx].reltime
-        
-        for i in range(cendat.ndata):
-
-            v = altaz2xyz(cendat.cenalt[i], cendat.cenaz[i], site_lon, site_lat)
-
-            coords = []
-            # Determine the point on the track that is closest to the observed line of sight
-            (intersec_on_los, intersec_on_track) = closest_point(sitepos, pathpos1, v, p1p2norm, return_points=True)
-
-            # Where is this point located along the track?
-            posarr.append(np.sqrt(np.sum(np.dot(intersec_on_track - pathpos1, intersec_on_track - pathpos1) / np.dot(p1p2norm, p1p2norm))) * np.sign(np.dot(intersec_on_track - pathpos1, p1p2norm)))
-            # And determine the height of this particular point
-            poslon, poslat, posheight = xyz2lonlat(intersec_on_track)
-            heightarr.append(posheight)
-
-            # Find smallest distance between path line and line of sight (for debugging purposes only)
-            pq = dist_line_line(sitepos, v, pathpos1, p1p2norm)
-            distarr.append(abs(pq))
-
-            # Rough estimate of measurement uncertainty
-            sitedist = np.sqrt(np.dot(intersec_on_los - sitepos, intersec_on_los - sitepos))
-            # Using pixel scale of 0.25 deg/pix:
-            # Not valid for all cameras!
-            possig = sitedist * np.tan(np.radians(0.25*cendat.censig[i]))
-            if (cendat.censig[i] == 0.00): possig = 1e-30
-            sigarr.append(possig)
-
-        measerr = np.array(sigarr)
-
-        # Now try fitting both with exponential and linear functions:
-        exp_params, success, n_ok = guess_expfit(cendat.reltime, np.array(posarr), measerr)
-        lin_params, pcov = curve_fit(linfunc, cendat.reltime, posarr, None, measerr)
-
-        allposarr.append(posarr)
-        alltimearr.append(timearr)
-        allheightarr.append(heightarr)
-        allsigarr.append(sigarr)
-        alldistarr.append(distarr)
-
-        if success:
-            chi2_exp = np.sum(((measerr*(np.array(posarr) - expfunc(cendat.reltime, exp_params[0], exp_params[1], exp_params[2], exp_params[3])))**2)[0:n_ok-1])
-            chi2_lin = np.sum(((measerr*(np.array(posarr) - linfunc(cendat.reltime, lin_params[0], lin_params[1])))**2)[0:n_ok-1])
-
-            if chi2_exp < chi2_lin:
-                linfit = [exp_params[2], exp_params[3]]
-                if (debug and (doplot == 'show' or doplot == 'both')):
-                  plt.plot(cendat.reltime, posarr, syms[nn % 4])
-                  plt.plot(cendat.reltime, linfunc(cendat.reltime, exp_params[2], exp_params[3]), 'y-')
-                  plt.plot(cendat.reltime, expfunc(cendat.reltime, exp_params[0], exp_params[1], exp_params[2], exp_params[3]), 'b-')
-            else:
-                linfit = [lin_params[0], lin_params[1]]
-                if debug: print("Fallback to linear fit!")
-                if (debug and (doplot == 'show' or doplot == 'both')):
-                  plt.plot(cendat.reltime, posarr, syms[nn % 4])
-                  plt.plot(cendat.reltime, linfunc(cendat.reltime, lin_params[0], lin_params[1]), 'b-')
-
-        else:
-            if debug: print("Fallback to linear fit!")
-            linfit = [lin_params[0], lin_params[1]]
-
-        if not reffit: reffit = linfit
-
-        mergednames = mergednames + " " + cendat.sitestr[0]
-
-    adjtimearr = minimize_chainlength(alltimearr, allposarr)
-    if debug: print(adjtimearr)
+            lin_params_initial, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig)
+            initial_params = np.array([0, 0, lin_params_initial[0], lin_params_initial[1]])
+        except RuntimeError:
+            print("Error: Initial baseline fit failed. Cannot perform outlier rejection.")
+            return np.array([0, 0, 0, 0]), 0
     
-    for i in range(len(allposarr)):
-        for j in range(len(allposarr[i])):
-            mergedposarr.append(allposarr[i][j])
-            mergedheightarr.append(allheightarr[i][j])
-            mergedreltime.append(alltimearr[i][j] + adjtimearr[i]) # With adjustment!
-            mergedsigarr.append(allsigarr[i][j])
-            mergeddistarr.append(alldistarr[i][j])
-
-    if not mergedreltime:
-        print("No valid centroid data to process.")
-        return False, 0
-
-    if (debug and (doplot == 'show' or doplot == 'both')):
-       plt.figure(4)
-       plt.subplot(211)
-       plt.title('Individual tracks')
-       plt.ylabel('Position [km]')
-       syms=['g.','r.','b.','y.']
-       for k in range(len(allcendat)):
-          plt.plot(alltimearr[sorted_cendat_index[k]], allposarr[sorted_cendat_index[k]], syms[k % 4])
+    # Calculate standardized residuals and identify inliers (non-outliers)
+    fit_values = expfunc(reltime, *initial_params)
+    residuals = (pos - fit_values) / sig
+    inlier_mask = np.abs(residuals) < 3.0
     
-    if (debug and (doplot == 'show' or doplot == 'both')):
-       plt.subplot(212)
-       plt.title('Merged tracks')
-       plt.ylabel('Position [km]')
-       plt.xlabel('Time [s]')
-       plt.plot(mergedreltime, mergedposarr, 'g.')
+    num_outliers = np.sum(~inlier_mask)
+    if debug and num_outliers > 0:
+        print(f"Outlier rejection: Identified and removed {num_outliers} of {len(reltime)} points.")
 
-    mergedreltime = np.array(mergedreltime)
-    mergedposarr=np.array(mergedposarr)
-    mergedheightarr=np.array(mergedheightarr)
-    mergedsigarr=np.array(mergedsigarr)
-    mergeddistarr=np.array(mergeddistarr)
+    if np.sum(inlier_mask) < 5:
+        print("Warning: Outlier rejection left too few points. Fitting all data.")
+        inlier_mask = np.ones_like(reltime, dtype=bool)
 
-    sortidx = np.argsort(mergedreltime)
-    mergedreltime = mergedreltime[sortidx]
-    mergedposarr = mergedposarr[sortidx]
-    mergedheightarr = mergedheightarr[sortidx]
-    mergedsigarr = mergedsigarr[sortidx]
-    mergeddistarr = mergeddistarr[sortidx]
+    reltime_inliers = reltime[inlier_mask]
+    pos_inliers = pos[inlier_mask]
+    sig_inliers = sig[inlier_mask]
 
-    measerr = mergedsigarr
+    # --- STAGE 2: Final Fit with Robust Loss Function ---
 
-    exp_params, success, n_ok = guess_expfit(mergedreltime, mergedposarr, measerr)
-    lin_params, pcov = curve_fit(linfunc, mergedreltime, mergedposarr, None, measerr)
+    # Helper function to define the residual calculation for least_squares
+    def residual_func(params, x, y, sig, model_func):
+        return (y - model_func(x, *params)) / sig
 
-    if success:
-        chi2_exp = np.sum(((measerr*(mergedposarr - expfunc(mergedreltime, exp_params[0], exp_params[1], exp_params[2], exp_params[3])))**2)[0:n_ok-1])
-        chi2_lin = np.sum(((measerr*(mergedposarr - linfunc(mergedreltime, lin_params[0], lin_params[1])))**2)[0:n_ok-1])
+    # --- Robust Exponential Fit ---
+    exp_params_guess, _ = guess_expfit(reltime_inliers, pos_inliers, sig_inliers)
+    exp_params = None
+    if exp_params_guess is not None:
+        res_exp = least_squares(
+            residual_func,
+            exp_params_guess,
+            loss='soft_l1',
+            f_scale=0.1,
+            args=(reltime_inliers, pos_inliers, sig_inliers, expfunc)
+        )
+        exp_params = res_exp.x
+
+    # --- Robust Linear Fit ---
+    lin_params_guess, _ = curve_fit(linfunc, reltime_inliers, pos_inliers, sigma=1./sig_inliers)
+    res_lin = least_squares(
+        residual_func,
+        lin_params_guess,
+        loss='soft_l1',
+        f_scale=0.1,
+        args=(reltime_inliers, pos_inliers, sig_inliers, linfunc)
+    )
+    lin_params = res_lin.x
+
+    # --- Compare Models and Return Best Fit ---
+    if exp_params is not None:
+        # Compare chi-squared of the two robust fits to see which model is better
+        exp_fit_vals = expfunc(reltime_inliers, *exp_params)
+        lin_fit_vals = linfunc(reltime_inliers, *lin_params)
+        
+        chi2_exp = np.sum(((pos_inliers - exp_fit_vals) / sig_inliers)**2)
+        chi2_lin = np.sum(((pos_inliers - lin_fit_vals) / sig_inliers)**2)
 
         if chi2_exp < chi2_lin:
-            linfit = [exp_params[2], exp_params[3]]
-        else:
-            linfit = [lin_params[0], lin_params[1]]
-            if debug: print("Fallback to linear fit!")
-    else:
-        if debug: print("Fallback to linear fit!")
-        linfit = [lin_params[0], lin_params[1]]
+            if debug: print("Selected robust exponential model.")
+            return exp_params, len(reltime_inliers)
 
-    adjtime = linfit[1]/linfit[0] if linfit[0] != 0 else 0
-    mergedreltime = mergedreltime + adjtime
-    if debug: print(linfit, adjtime)
+    # Fallback to the robust linear fit if the exponential model failed or was worse
+    if debug: print("Selected robust linear model as fallback.")
+    return np.array([0, 0, lin_params[0], lin_params[1]]), len(reltime_inliers)
+
+
+def _generate_plots(data: dict, params: np.ndarray, n_ok: int, doplot: str, resname: str):
+    """Generates and saves/shows output plots."""
+    reltime, pos, sig = data['reltime'], data['pos'], data['sig']
     
-    exp_params, success, n_ok = guess_expfit(mergedreltime, mergedposarr, measerr)
-    lin_params, pcov = curve_fit(linfunc, mergedreltime, mergedposarr, None, measerr)
+    fit_pos = expfunc(reltime, *params)
+    fit_dev = pos - fit_pos
+    fit_speed = expfunc_1stder(reltime, *params)
+    fit_accel = expfunc_2ndder(reltime, *params)
 
-    if success:
-        chi2_exp = np.sum(((measerr*(mergedposarr - expfunc(mergedreltime, exp_params[0], exp_params[1], exp_params[2], exp_params[3])))**2)[0:n_ok-1])
-        chi2_lin = np.sum(((measerr*(mergedposarr - linfunc(mergedreltime, lin_params[0], lin_params[1])))**2)[0:n_ok-1])
+    site_code = Path(resname).stem
+    
+    # Figure 1: Position vs. Time
+    plt.figure(1, figsize=(10, 8))
+    plt.suptitle(f"Trajectory Fit for {site_code}", fontsize=16)
 
-        if chi2_exp > chi2_lin:
-            exp_params = [0, 0, lin_params[0], lin_params[1]]
-            n_ok = len(mergedreltime)
-            if debug: print("Fallback to linear fit!")
-    else:
-        if debug: print("Fallback to linear fit!")
-        n_ok = len(mergedreltime)
-        exp_params = [0, 0, lin_params[0], lin_params[1]]
+    ax1 = plt.subplot(211)
+    ax1.errorbar(reltime, pos, yerr=sig, fmt='b.', label='Observations')
+    if n_ok < len(reltime):
+        ax1.plot(reltime[n_ok:], pos[n_ok:], 'y.', label='Excluded')
+    ax1.plot(reltime, fit_pos, 'r-', label='Fit')
+    ax1.set_ylabel('Position along track [km]')
+    ax1.set_xlabel('Time [s]')
+    ax1.set_title('Position vs. Time')
+    ax1.legend()
+    ax1.grid(True)
 
-    exp_fitval = expfunc(mergedreltime, exp_params[0], exp_params[1], exp_params[2], exp_params[3])
-    exp_fitdev = mergedposarr - exp_fitval
-    exp_speed  = expfunc_1stder(mergedreltime, exp_params[0], exp_params[1], exp_params[2], exp_params[3])
-    exp_accel  = expfunc_2ndder(mergedreltime, exp_params[0], exp_params[1], exp_params[2], exp_params[3])
+    ax2 = plt.subplot(212, sharex=ax1)
+    ax2.errorbar(reltime, fit_dev, yerr=sig, fmt='b.', label='Residuals')
+    if n_ok < len(reltime):
+        ax2.plot(reltime[n_ok:], fit_dev[n_ok:], 'y.')
+    ax2.axhline(0, color='r', linestyle='--')
+    ax2.set_ylabel('Residual [km]')
+    ax2.set_xlabel('Time [s]')
+    ax2.set_title('Fit Residuals')
+    ax2.grid(True)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    if doplot in ['save', 'both']:
+        plt.savefig(f"{site_code}_pos_fit.svg")
 
-    if doplot != '':
-        plt.figure(1, figsize=(10,7))
-        plt.subplot(211)
-        plt.title('Tilbakelagt strekning')
-        plt.errorbar(mergedreltime, mergedposarr, yerr=mergedsigarr, fmt='r.')
-        plt.plot(mergedreltime[n_ok:], mergedposarr[n_ok:], 'y.')
-        plt.ylabel('Posisjon [km]')
-        plt.xlabel('Tid [s]')
-        if debug: plt.plot(mergedreltime, linfunc(mergedreltime, exp_params[2], exp_params[3]), 'y-')
-        plt.plot(mergedreltime, exp_fitval, 'b-')
+    # Figure 2: Speed and Acceleration
+    plt.figure(2, figsize=(10, 8))
+    plt.suptitle(f"Derived Dynamics for {site_code}", fontsize=16)
+    
+    ax3 = plt.subplot(211)
+    ax3.plot(reltime, fit_speed, 'b-')
+    ax3.set_ylim(bottom=0)
+    ax3.set_ylabel('Speed [km/s]')
+    ax3.set_xlabel('Time [s]')
+    ax3.set_title('Speed Profile')
+    ax3.grid(True)
 
-        plt.subplot(212)
-        plt.plot(mergedreltime, exp_fitdev, 'b-')
-        plt.errorbar(mergedreltime, exp_fitdev, yerr=mergedsigarr, fmt='b.')
-        plt.plot(mergedreltime[n_ok:], exp_fitdev[n_ok:], 'y.')
-        plt.ylabel('Avvik [km]')
-        plt.xlabel('Tid [s]')
-        plt.plot(mergedreltime, np.zeros(len(mergedreltime)), 'r--')
-        plt.tight_layout()
+    ax4 = plt.subplot(212, sharex=ax3)
+    ax4.plot(reltime, fit_accel, 'b-')
+    ax4.set_ylabel('Acceleration [km/s²]')
+    ax4.set_xlabel('Time [s]')
+    ax4.set_title('Acceleration Profile')
+    ax4.grid(True)
 
-        if doplot == 'save' or doplot == 'both':
-            plt.savefig('posvstime.svg')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    if doplot in ['save', 'both']:
+        plt.savefig(f"{site_code}_dyn_profile.svg")
 
-        if debug: 
-            plt.figure(3)
-            plt.errorbar(mergeddistarr, mergedposarr, xerr=mergedsigarr, fmt='b.')
-            plt.plot(np.zeros(len(mergedposarr)), mergedposarr, 'r--')
-            plt.ylabel('Position [km]')
-            plt.xlabel('Path deviation [km]')
+    if doplot in ['show', 'both']:
+        plt.show()
 
-        plt.figure(2, figsize=(10,7))
-        plt.subplot(211)
-        plt.ylim(max([0., min(exp_speed)*0.95]), max(exp_speed)*1.05)
-        plt.plot(mergedreltime, exp_speed, 'b-')
-        plt.ylabel('Hastighet [km/s]')
-        plt.xlabel('Tid [s]')
 
-        plt.subplot(212)
-        plt.ylim(min([-0.1, min(exp_accel)*0.95]), max([0.1, max(exp_accel)*1.05]))
-        plt.plot(mergedreltime, exp_accel, 'b-')
-        plt.ylabel(u'Aksellerasjon [km/s²]')
-        plt.xlabel('Tid [s]')
-        plt.tight_layout()
+def fbspd(resname: str, cennames: List[str], datname: str,
+          doplot: str = '', posdata: bool = False, debug: bool = False) -> Tuple[bool, float]:
+    """
+    Determines speed and acceleration profiles for meteors from trajectory
+    parameters and merged multi-station centroid files.
+    """
+    if doplot == 'save' and matplotlib.get_backend() != 'agg':
+        matplotlib.use('agg')
 
-        if doplot == 'save' or doplot == 'both':
-            print(f"Entry speed {exp_params[2]:.2f} km/s")
-            plt.savefig('spd_acc.svg')
+    # 1. Load input data
+    resdat = readres(resname)
+    all_sitedata = get_sitecoord_fromdat(datname) if datname else []
+    
+    all_cendat = []
+    for cen_file in cennames:
+        try:
+            all_cendat.append(readcen(cen_file))
+        except FileNotFoundError:
+            print(f"Warning: Centroid file not found, skipping: {cen_file}")
+            
+    if not all_cendat:
+        print("Error: No valid centroid data could be loaded.")
+        return False, 0.0
 
-        if doplot == 'show' or doplot == 'both':
-            plt.show()
-            print(f"Entry speed {exp_params[2]:.2f} km/s")
-            if (posdata):
-              npoints = len(mergedreltime)
-              for i in range(npoints):
-                print(f"{mergedreltime[i]:f3} {mergedheightarr[i]:f3} {mergedposarr[i]:f3} {exp_speed[i]:f3}")
+    # Sort centroid data by number of points (longest first)
+    all_cendat.sort(key=lambda c: c.ndata, reverse=True)
 
-    return success, lin_params[0]
+    # 2. Define meteor trajectory from .res file
+    path_p1 = lonlat2xyz(resdat.long1[0], resdat.lat1[0], resdat.height[0])
+    path_p2 = lonlat2xyz(resdat.long1[1], resdat.lat1[1], resdat.height[1])
+    path_vec = path_p2 - path_p1
+    path_vec_norm = path_vec / np.linalg.norm(path_vec)
 
+    # 3. Process each station's data
+    station_obs = []
+    for cendat in all_cendat:
+        site_info = next((s for s in all_sitedata if s[0] == cendat.sitestr[0]), None)
+        if not site_info:
+            print(f"Warning: No site coords for {cendat.sitestr[0]}. Skipping.")
+            continue
+        
+        name, lon, lat, height = site_info
+        cendat.site_info = {'lon': lon, 'lat': lat, 'height': height}
+        site_pos = lonlat2xyz(lon, lat, height)
+        
+        processed_data = _process_station(cendat, site_pos, path_p1, path_vec_norm)
+        processed_data['reltime'] = cendat.reltime
+        station_obs.append(processed_data)
+
+    if not station_obs:
+        print("Error: Could not process any station data.")
+        return False, 0.0
+
+    # 4. Merge data from all stations
+    all_pos_arrays = [obs['pos'] for obs in station_obs]
+    all_time_arrays = [obs['reltime'] for obs in station_obs]
+    
+    time_offsets = minimize_chainlength(all_time_arrays, all_pos_arrays)
+    if debug: print(f"Determined time offsets: {time_offsets}")
+
+    merged_data = {
+        'reltime': np.concatenate([obs['reltime'] + offset for obs, offset in zip(station_obs, time_offsets)]),
+        'pos': np.concatenate([obs['pos'] for obs in station_obs]),
+        'height': np.concatenate([obs['height'] for obs in station_obs]),
+        'sig': np.concatenate([obs['sig'] for obs in station_obs]),
+    }
+
+    # Sort merged data by time
+    sort_idx = np.argsort(merged_data['reltime'])
+    for key in merged_data:
+        merged_data[key] = merged_data[key][sort_idx]
+
+    # 5. Fit the merged data
+    # First fit to find the time adjustment
+    try:
+        lin_params, _ = curve_fit(linfunc, merged_data['reltime'], merged_data['pos'], sigma=1./merged_data['sig'])
+    except RuntimeError:
+        print("Error: Initial linear fit for time adjustment failed. Cannot proceed.")
+        return False, 0.0
+
+    adjtime = -lin_params[1] / lin_params[0] if lin_params[0] != 0 else 0
+    merged_data['reltime'] += adjtime
+    if debug: print(f"Time axis adjusted by: {adjtime:.4f} s")
+    
+    # Final fit on time-adjusted data
+    final_params, n_ok = _fit_merged_data(
+        merged_data['reltime'], merged_data['pos'], merged_data['sig'], debug
+    )
+    
+    if n_ok == 0:
+        print("Error: Final fit failed for all data points.")
+        return False, 0.0
+
+    # 6. Output results
+    initial_speed = expfunc_1stder(0.0, *final_params)
+    print(f"Fit successful using {n_ok} of {len(merged_data['reltime'])} points.")
+    print(f"Initial speed (v_i): {initial_speed:.3f} km/s")
+
+    if doplot:
+        _generate_plots(merged_data, final_params, n_ok, doplot, resname)
+
+    if posdata:
+        print("\nTime [s]  Height [km]  Position [km]  Speed [km/s]")
+        speeds = expfunc_1stder(merged_data['reltime'], *final_params)
+        for i in range(len(merged_data['reltime'])):
+            print(f"{merged_data['reltime'][i]:>8.3f}  "
+                  f"{merged_data['height'][i]:>10.3f}  "
+                  f"{merged_data['pos'][i]:>12.3f}  "
+                  f"{speeds[i]:>11.3f}")
+
+    return True, initial_speed
 
 
 if __name__ == "__main__":
-    import sys
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Fit speed and acceleration profiles to meteor centroid data.',
-        epilog="Example: fbspd_merge.py -r meteor.res -d meteor.dat -c cen1.txt,cen2.txt -o show")
-    parser.add_argument('-r', '--res', dest='resname', default='',
-        help='Name of input file with .res extension.')
-    parser.add_argument('-d', '--dat', dest='datname', default='',
-        help='Name of input file with .dat extension.')
-    parser.add_argument('-c', '--cen', dest='cennames', default=[], type=lambda s: s.split(','),
-        help='Comma-separated list of input files with centroid data.')
-    parser.add_argument('-p', '--posdata', dest='posdata', default=False, action='store_true',
-        help='Provide additional positional data.')
-    parser.add_argument('-o', '--output', dest='output', default='', choices=['','show','save','both'],
-        help='show: Display graphics, save: save graphics to SVG, both: Display and save. Default is no output.')
-    parser.add_argument('-v', '--verbose', dest='debug', default=False, action="store_true",
-        help='Provide a little more output and plots.')
-
+    parser = argparse.ArgumentParser(
+        description='Fit speed and acceleration profiles to meteor centroid data.',
+        epilog="Example: fbspd_merge.py -r meteor.res -d meteor.dat -c cen1.txt,cen2.txt -o show"
+    )
+    parser.add_argument(
+        '-r', '--res', dest='resname', required=True,
+        help='Name of input file with .res extension.'
+    )
+    parser.add_argument(
+        '-d', '--dat', dest='datname', default='',
+        help='Name of input file with .dat extension.'
+    )
+    parser.add_argument(
+        '-c', '--cen', dest='cennames', required=True, type=lambda s: s.split(','),
+        help='Comma-separated list of input files with centroid data.'
+    )
+    parser.add_argument(
+        '-p', '--posdata', dest='posdata', action='store_true',
+        help='Output final time, height, position, and speed data to console.'
+    )
+    parser.add_argument(
+        '-o', '--output', dest='output', default='', choices=['', 'show', 'save', 'both'],
+        help='show: Display graphics, save: save graphics to SVG, both: Display and save.'
+    )
+    parser.add_argument(
+        '-v', '--verbose', dest='debug', action="store_true",
+        help='Provide additional debugging output.'
+    )
 
     args = parser.parse_args()
+
+    # Handle the leading comma from the command format: "-c,file1,file2"
+    if args.cennames and not args.cennames[0]:
+        args.cennames.pop(0)
 
     if not args.resname or not args.cennames:
         parser.print_help()
         sys.exit(1)
 
-    fbspd(args.resname, args.cennames, args.datname, doplot=args.output, posdata=args.posdata, debug=args.debug)
+    fbspd(
+        resname=args.resname,
+        cennames=args.cennames,
+        datname=args.datname,
+        doplot=args.output,
+        posdata=args.posdata,
+        debug=args.debug
+    )

@@ -275,7 +275,9 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     zoom_level = int(np.log2(360 / (lat_span + 1)))
     zoom_level = max(6, min(zoom_level, 9))
     
-    try: ax.add_image(OSM(), zoom_level)
+    try:
+        ax.add_image(OSM(), zoom_level)
+        ax.add_feature(cfeature.LAKES, edgecolor='royalblue', linewidth=0.5, facecolor='none')
     except Exception: ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
     ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
     gl = ax.gridlines(draw_labels=True, color='gray', alpha=0.5, linestyle='--')

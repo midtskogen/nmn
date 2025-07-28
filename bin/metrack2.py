@@ -505,6 +505,9 @@ def plot_map(track_start, track_end, cross_pos, indata, lenarr, colarr, borders=
     # Add topography/bathymetry - equivalent to basemap's etopo()
     try:
         # Try to add shaded relief or topography
+        lat_span = abs(lat_top - lat_bot)
+        zoom_level = int(np.log2(360 / (lat_span + 1)))
+        zoom_level = max(6, min(zoom_level, 9))
         ax.add_image(OSM(), 6)
     except:
         try:

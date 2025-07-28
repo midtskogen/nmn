@@ -22,11 +22,35 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import curve_fit, least_squares, brute
 
-
 # WGS-84 Ellipsoid Parameters
 EARTH_RADIUS = 6371.0  # Mean radius in km
 FLATTENING = 1.0 / 298.257223563  # Earth flattening factor (WGS-84)
 E_SQUARED = 2 * FLATTENING - FLATTENING**2  # Eccentricity squared
+
+# --- Configuration Constants ---
+
+# Hardware and observation parameters
+CAMERA_DEGREES_PER_PIXEL = 0.25  # Assumed angular resolution for error estimation
+
+# File format parameters
+DAT_STATION_NAME_START_COLUMN = 12 # Column where the station name starts in .dat files
+
+# Fitting and model parameters
+TIME_OFFSET_SEARCH_RANGE = (-5.0, 5.0)  # Search range for time offsets in seconds
+TIME_OFFSET_SEARCH_STEP = 0.01          # Step size for the brute-force time offset search
+OUTLIER_SIGMA_THRESHOLD = 3.0           # Std. dev. for a point to be an outlier
+MIN_INLIERS_FOR_ROBUST_FIT = 5          # Min points required after outlier rejection
+MIN_POINTS_FOR_EXP_FIT = 4              # Min points to attempt an exponential fit (must match # of params)
+ROBUST_LOSS_F_SCALE = 0.1               # Scale parameter for the 'soft_l1' robust loss function
+
+# Physical plausibility checks for fitting
+FIT_MAX_POS_ACCELERATION = 1e-3  # Allow for tiny positive acceleration from noise
+FIT_MIN_REASONABLE_SPEED = -1.0  # Allow for small negative speed from noise
+
+# Numerical tolerance parameters
+XYZ_CONVERGENCE_TOLERANCE = 1e-12   # For iterative xyz2lonlat conversion
+PARALLEL_LINES_TOLERANCE = 1e-9     # For geometry checks to avoid division by zero
+MIN_POSITIONAL_SIGMA = 1e-9         # A small floor value for position uncertainty
 
 
 # --- Data Structures ---
@@ -123,7 +147,7 @@ def get_sitecoord_fromdat(inname: str) -> List[Tuple[str, float, float, float]]:
     """Extracts site coordinates from a .dat file."""
     dat_path = Path(inname)
     sitecoords = []
-    
+
     with dat_path.open('r') as f:
         for line in f:
             words = line.split()
@@ -131,29 +155,24 @@ def get_sitecoord_fromdat(inname: str) -> List[Tuple[str, float, float, float]]:
                 continue
 
             lon, lat = float(words[0]), float(words[1])
-            
-            # Find the station name, which can contain spaces
-            name_parts = []
-            first_numeric_idx = 12
-            for i, word in enumerate(words[12:]):
-                try:
-                    float(word)
-                    first_numeric_idx = 12 + i
-                    break
-                except ValueError:
-                    name_parts.append(word)
-            
-            name = " ".join(name_parts)
-            
-            # Observer height is optional, default to 0
+
+            # Parse from the end of the line, which is more predictable
+            height_km = 0.0
+            last_name_idx = len(words)
+
             try:
-                obs_height_m = float(words[first_numeric_idx + 1])
+                # Check if the last word is the optional observer height
+                obs_height_m = float(words[-1])
                 height_km = obs_height_m / 1000.0
-            except (IndexError, ValueError):
-                height_km = 0.0
-                
+                last_name_idx = -2 # Name ends before the last two numbers
+            except (ValueError, IndexError):
+                last_name_idx = -1 # Name ends before the last number
+
+            # The station name is between the start column and the first number from the end
+            name = " ".join(words[DAT_STATION_NAME_START_COLUMN:last_name_idx])
+
             sitecoords.append((name, lon, lat, height_km))
-            
+
     return sitecoords
 
 
@@ -186,7 +205,7 @@ def xyz2lonlat(v: np.ndarray) -> Tuple[float, float, float]:
         N = EARTH_RADIUS / np.sqrt(1.0 - E_SQUARED * sin_lat**2)
         height_km = p / np.cos(lat_rad) - N
         lat_rad_new = np.arctan2(v[2], p * (1.0 - E_SQUARED * N / (N + height_km)))
-        if abs(lat_rad_new - lat_rad) < 1e-12:
+        if abs(lat_rad_new - lat_rad) < XYZ_CONVERGENCE_TOLERANCE:
             break
         lat_rad = lat_rad_new
         
@@ -225,7 +244,7 @@ def closest_point(p1: np.ndarray, p2: np.ndarray, u1: np.ndarray, u2: np.ndarray
     m = np.cross(u2, u1)
     m2 = np.dot(m, m)
 
-    if m2 < 1e-9:  # Lines are parallel
+    if m2 < PARALLEL_LINES_TOLERANCE:  # Lines are parallel
         closest_p2_on_line1 = p1 + np.dot(p21, u1) * u1
         if return_points:
             return closest_p2_on_line1, p2
@@ -287,7 +306,7 @@ def try_expfit(x: np.ndarray, y: np.ndarray, weights: np.ndarray, guess: List[fl
     speed = expfunc_1stder(x, *params)
     accel = expfunc_2ndder(x, *params)
 
-    if np.min(speed) < -1 or np.max(accel) > 1e-3: # Allow for tiny positive accel
+    if np.min(speed) < FIT_MIN_REASONABLE_SPEED or np.max(accel) > FIT_MAX_POS_ACCELERATION:
         return None, False
         
     return params, True
@@ -303,7 +322,7 @@ def guess_expfit(x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> Tuple[Opt
     current_x, current_y, current_weights = np.copy(x), np.copy(y), np.copy(weights)
 
     # If fitting fails, iteratively remove the last point and retry
-    while len(current_x) > 4:
+    while len(current_x) > MIN_POINTS_FOR_EXP_FIT:
         for guess in guesslist:
             params, success = try_expfit(current_x, current_y, current_weights, guess)
             if success:
@@ -355,7 +374,8 @@ def minimize_chainlength(all_time_arrays: List[np.ndarray], all_pos_arrays: List
         # Use brute-force grid search, which is robust for this non-smooth function.
         # The 'ranges' tuple defines the search space [start, stop, step-size].
         # We explicitly disable a finishing step to ensure only grid points are tested.
-        ranges = (slice(-5, 5, 0.01),)
+        search_start, search_end = TIME_OFFSET_SEARCH_RANGE
+        ranges = (slice(search_start, search_end, TIME_OFFSET_SEARCH_STEP),)
         result = brute(objective_func, ranges, finish=None)
         best_offsets[i] = result
 
@@ -381,12 +401,10 @@ def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray
     m2 = np.einsum('ij,ij->i', m, m)
 
     # Avoid division by zero for parallel lines
-    m2[m2 < 1e-9] = 1e-9
+    m2[m2 < PARALLEL_LINES_TOLERANCE] = PARALLEL_LINES_TOLERANCE
 
     R = np.cross(p21, m / m2[:, np.newaxis])
     t1 = np.einsum('ij,j->i', R, track_vec_norm)
-    
-    # The subscript for los_vecs must be 'ij' to match its 2D shape.
     t2 = np.einsum('ij,ij->i', R, los_vecs)
 
     cross_points1 = site_pos + t1[:, np.newaxis] * los_vecs
@@ -400,9 +418,9 @@ def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray
     height = np.array([xyz2lonlat(v)[2] for v in intersec_on_track])
 
     sitedist = np.linalg.norm(intersec_on_track - site_pos, axis=1)
-    ang_err = np.radians(0.25 * cendat.censig)
+    ang_err = np.radians(CAMERA_DEGREES_PER_PIXEL * cendat.censig)
     sig = sitedist * np.tan(ang_err)
-    sig[ang_err <= 0] = 1e-9 # Handle non-positive error values
+    sig[ang_err <= 0] = MIN_POSITIONAL_SIGMA # Handle non-positive error values
 
     return {"pos": pos, "height": height, "dist_off_track": dist_off_track, "sig": sig}
 
@@ -429,13 +447,13 @@ def _fit_merged_data(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray,
     # Calculate standardized residuals and identify inliers (non-outliers)
     fit_values = expfunc(reltime, *initial_params)
     residuals = (pos - fit_values) / sig
-    inlier_mask = np.abs(residuals) < 3.0
+    inlier_mask = np.abs(residuals) < OUTLIER_SIGMA_THRESHOLD
     
     num_outliers = np.sum(~inlier_mask)
     if debug and num_outliers > 0:
         print(f"Outlier rejection: Identified and removed {num_outliers} of {len(reltime)} points.")
 
-    if np.sum(inlier_mask) < 5:
+    if np.sum(inlier_mask) < MIN_INLIERS_FOR_ROBUST_FIT:
         print("Warning: Outlier rejection left too few points. Fitting all data.")
         inlier_mask = np.ones_like(reltime, dtype=bool)
 
@@ -457,7 +475,7 @@ def _fit_merged_data(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray,
             residual_func,
             exp_params_guess,
             loss='soft_l1',
-            f_scale=0.1,
+            f_scale=ROBUST_LOSS_F_SCALE,
             args=(reltime_inliers, pos_inliers, sig_inliers, expfunc)
         )
         exp_params = res_exp.x
@@ -468,7 +486,7 @@ def _fit_merged_data(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray,
         residual_func,
         lin_params_guess,
         loss='soft_l1',
-        f_scale=0.1,
+        f_scale=ROBUST_LOSS_F_SCALE,
         args=(reltime_inliers, pos_inliers, sig_inliers, linfunc)
     )
     lin_params = res_lin.x

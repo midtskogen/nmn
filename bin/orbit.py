@@ -168,7 +168,7 @@ def _plot_orbit(et, meteor_elements, doplot):
     ax.set_ylim(mid_points[1] - max_range / 2, mid_points[1] + max_range / 2)
     ax.set_zlim(mid_points[2] - max_range / 2, mid_points[2] + max_range / 2)
     
-    ax.set_title('Meteoroidens heliosentriske bane', fontsize=16, y=1)
+    ax.set_title('Meteoroidens heliosentriske bane', fontsize=16, y=1, fontstyle="oblique")
     for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
         axis.set_label_text('')
 

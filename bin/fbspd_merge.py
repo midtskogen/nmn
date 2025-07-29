@@ -510,22 +510,16 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
     fit_accel = expfunc_2ndder(t_fit, *params)
     residuals = pos - expfunc(reltime, *params)
 
-    # --- NEW: Smooth the Observational Uncertainty for Plotting ---
-    # Define the time window for smoothing
+    # --- Smooth the Observational Uncertainty for Plotting ---
     smoothing_window_sec = 0.15
-    # Calculate the average time step between points
     avg_time_step = np.mean(np.diff(reltime))
-    # Convert time window to an odd number of data points
     window_size = int(smoothing_window_sec / avg_time_step)
     if window_size % 2 == 0:
         window_size += 1
-    # Ensure window size is at least 3 for smoothing to work
     window_size = max(3, window_size)
     
-    # Apply the moving average filter
     kernel = np.ones(window_size) / window_size
     sig_smoothed = np.convolve(sig, kernel, mode='same')
-    # --- END NEW ---
 
     # --- Figure 1: Position vs. Time ---
     plt.style.use('seaborn-v0_8-whitegrid')
@@ -556,7 +550,7 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
     if doplot in ['save', 'both']:
         plt.savefig("posvstime.svg", bbox_inches='tight', pad_inches=0.05)
 
-    # --- Figure 2: Speed and Acceleration (code is unchanged) ---
+    # --- Figure 2: Speed and Acceleration ---
     fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, constrained_layout=True)
     fig2.suptitle(f"     Dynamisk analyse", fontsize=16, fontstyle="oblique")
     
@@ -575,10 +569,32 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
         accel_samples = np.array([expfunc_2ndder(t_fit, *p) for p in param_samples])
         speed_std = np.std(speed_samples, axis=0) * sigma_level
         accel_std = np.std(accel_samples, axis=0) * sigma_level
+        
+        t0_index = np.argmin(np.abs(t_fit))
 
-        ax3.fill_between(t_fit, fit_speed - speed_std, fit_speed + speed_std, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
-        upper_accel_bound = np.minimum(fit_accel + accel_std, 0)
-        ax4.fill_between(t_fit, fit_accel - accel_std, upper_accel_bound, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
+        # --- Constrain initial uncertainty for both plots ---
+        for std_arr in [speed_std, accel_std]:
+            std_at_t0 = std_arr[t0_index]
+            pre_t0_std = std_arr[:t0_index]
+            if len(pre_t0_std) > 0:
+                capped_pre_t0 = np.minimum.accumulate(pre_t0_std[::-1])[::-1]
+                capped_pre_t0[capped_pre_t0 > std_at_t0] = std_at_t0
+                std_arr[:t0_index] = capped_pre_t0
+        
+        # --- Logic for Speed Plot ---
+        lower_speed_bound = fit_speed - speed_std
+        upper_speed_bound = fit_speed + speed_std
+        # Enforce that the upper bound is non-increasing
+        final_upper_bound = np.minimum.accumulate(upper_speed_bound)
+        ax3.fill_between(t_fit, lower_speed_bound, final_upper_bound, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
+        
+        # --- Logic for Acceleration Plot ---
+        lower_accel_bound = fit_accel - accel_std
+        upper_accel_bound = fit_accel + accel_std
+        # Enforce the single most important constraint: acceleration cannot be positive.
+        final_upper_accel_bound = np.minimum(upper_accel_bound, 0)
+        ax4.fill_between(t_fit, lower_accel_bound, final_upper_accel_bound, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
+        
         ax3.legend()
         ax4.legend()
 
@@ -588,7 +604,7 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
     if doplot in ['show', 'both']:
         plt.show()
 
-
+        
 def fbspd(resname: str, cennames: List[str], datname: str,
           doplot: str = '', posdata: bool = False, debug: bool = False,
           fscale: float = 0.1, sigma_level: float = 1.0,

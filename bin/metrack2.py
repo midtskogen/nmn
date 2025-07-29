@@ -223,7 +223,7 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
         is_inlier = i in inlier_indices
         color, zorder = ('r', 3) if is_inlier else ('k', 2)
         mfc = color if is_inlier else 'none'
-        label = 'Inkludert stasjon' if is_inlier else 'Avvikende stasjon'
+        label = 'Inkludert observasjon' if is_inlier else 'Avvikende observasjon'
         pylab.plot(dists, heights, color=color, marker='o', mfc=mfc, linestyle='None', label=label, zorder=zorder)
     
     # After plotting all points, get axis limits for dynamic text offset
@@ -238,7 +238,7 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
         pylab.text(start_dist, start_height + y_offset, obs_data['names'][i], ha='center', va='bottom', fontsize=8)
         pylab.text(end_dist, end_height - y_offset, obs_data['names'][i], ha='center', va='top', fontsize=8)
 
-    pylab.xlabel('Ground Distance (km)'); pylab.ylabel('Height (km)')
+    pylab.xlabel('Avstand langs bakken (km)'); pylab.ylabel('Høgde (km)')
     handles, labels = pylab.gca().get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     pylab.legend(by_label.values(), by_label.keys())
@@ -292,9 +292,9 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     # Plot each unique station marker once
     for name, (lon, lat) in unique_stations.items():
         if station_is_inlier[name]:
-            ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label='Inkludert stasjon')
+            ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label='Inkludert observasjon')
         else:
-            ax.plot(lon, lat, 'ko', markersize=8, mfc='none', transform=ccrs.PlateCarree(), label='Avvikende stasjon')
+            ax.plot(lon, lat, 'ko', markersize=8, mfc='none', transform=ccrs.PlateCarree(), label='Avvikende observasjon')
         ax.text(lon + 0.05, lat + 0.05, name, color='black', transform=ccrs.PlateCarree())
 
     # Plot lines of sight for all observations

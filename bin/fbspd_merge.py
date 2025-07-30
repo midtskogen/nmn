@@ -270,46 +270,6 @@ def expfunc_2ndder(t: np.ndarray, v0: float, accel0: float, k: float, p0: float)
     return accel0 * np.exp(k * t)
 
 
-def try_expfit(x: np.ndarray, y: np.ndarray, weights: np.ndarray, guess: List[float]) -> Tuple[Optional[np.ndarray], bool]:
-    """Tries to fit the exp-lin function with a given initial guess."""
-    # Bounds for parameters (a, b, c, d). Limits c (speed) and b (deceleration) to sane ranges.
-    bounds = ([0, 0, 5, -np.inf], [np.inf, 10, 100, np.inf])
-    try:
-        # Add bounds and increase max iterations for better convergence
-        params, _ = curve_fit(expfunc, x, y, p0=guess, sigma=1./weights, bounds=bounds, maxfev=5000)
-    except (RuntimeError, ValueError):
-        return None, False
-
-    # Check for physically plausible results
-    speed = expfunc_1stder(x, *params)
-    accel = expfunc_2ndder(x, *params)
-
-    if np.min(speed) < FIT_MIN_REASONABLE_SPEED or np.max(accel) > FIT_MAX_POS_ACCELERATION:
-        return None, False
-        
-    return params, True
-
-
-def guess_expfit(x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> Tuple[Optional[np.ndarray], int]:
-    """Tries fitting with different initial guesses, returning the first success."""
-    guesslist = [
-        [0.1, 1.0, 20.0, 1.0], [0.1, 1.0, 20.0, 0.0], [1.0, 1.0, 25.0, 0.0],
-        [1e-3, 1.0, 25.0, 0.0], [0.1, 1.0, 10.0, 0.0], [0.1, 1.0, 30.0, 0.0],
-    ]
-    
-    current_x, current_y, current_weights = np.copy(x), np.copy(y), np.copy(weights)
-
-    # If fitting fails, iteratively remove the last point and retry
-    while len(current_x) > MIN_POINTS_FOR_EXP_FIT:
-        for guess in guesslist:
-            params, success = try_expfit(current_x, current_y, current_weights, guess)
-            if success:
-                return params, len(current_x)
-        current_x, current_y, current_weights = current_x[:-1], current_y[:-1], current_weights[:-1]
-
-    return None, 0
-
-
 # --- Time Series Alignment ---
 
 def _chainlength(time_series: List[np.ndarray], pos_series: List[np.ndarray], offsets: np.ndarray) -> float:
@@ -554,7 +514,6 @@ def _generate_plots(data: dict, params: np.ndarray,
     ax3.set_ylabel('Hastighet [km/s]')
     ax3.set_title('Hastighetsprofil')
     
-    # --- FIX: Added the missing label to this line ---
     ax4.plot(t_fit, fit_accel, 'b-', zorder=10, label='Beste estimat')
     ax4.set_ylabel('Akselerasjon [km/s²]')
     ax4.set_xlabel('Tid [s]')
@@ -716,7 +675,6 @@ def fbspd(resname: str, cennames: List[str], datname: str,
                 upper_bound_params = np.copy(final_params)
                 upper_bound_params[0] += std_v0 * sigma_level
                 
-                # --- FIX: Ensure the upper bound acceleration is never positive ---
                 potential_upper_accel0 = final_params[1] + std_accel0 * sigma_level
                 upper_bound_params[1] = min(potential_upper_accel0, 0.0)
 

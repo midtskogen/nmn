@@ -21,6 +21,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import curve_fit, least_squares, brute
+from scipy.stats import norm
 
 # WGS-84 Ellipsoid Parameters
 EARTH_RADIUS = 6371.0  # Mean radius in km
@@ -497,56 +498,50 @@ def _fit_merged_data(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray,
     return None, 0, None
 
 
-def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.ndarray], n_ok: int, doplot: str, resname: str, debug: bool = False, sigma_level: float = 1.0):
+def _generate_plots(data: dict, params: np.ndarray, 
+                    lower_params: Optional[np.ndarray], upper_params: Optional[np.ndarray], 
+                    n_ok: int, doplot: str, resname: str, debug: bool = False, sigma_level: float = 1.0):
     """
-    Generates plots with a smoothed, solid, light blue residual plot region.
+    Generates plots using pre-calculated parameter sets for the mean,
+    lower, and upper uncertainty bounds.
     """
     reltime, pos, sig = data['reltime'], data['pos'], data['sig']
 
     # --- Main Calculations ---
     t_fit = np.linspace(reltime.min(), reltime.max(), 300)
-    fit_pos = expfunc(t_fit, *params)
+    
+    # Generate curves from the three parameter sets
     fit_speed = expfunc_1stder(t_fit, *params)
     fit_accel = expfunc_2ndder(t_fit, *params)
-    residuals = pos - expfunc(reltime, *params)
-
-    # --- Smooth the Observational Uncertainty for Plotting ---
-    smoothing_window_sec = 0.15
-    avg_time_step = np.mean(np.diff(reltime))
-    window_size = int(smoothing_window_sec / avg_time_step)
-    if window_size % 2 == 0:
-        window_size += 1
-    window_size = max(3, window_size)
     
-    kernel = np.ones(window_size) / window_size
-    sig_smoothed = np.convolve(sig, kernel, mode='same')
+    # --- Figure 1: Position vs. Time (Residuals) ---
+    fit_pos = expfunc(t_fit, *params)
+    residuals = pos - expfunc(reltime, *params)
+    try:
+        avg_time_step = np.mean(np.diff(reltime))
+        window_size = min(max(3, int(0.15 / avg_time_step)), len(reltime) - 1)
+        if window_size % 2 == 0: window_size += 1
+        sig_smoothed = np.convolve(sig, np.ones(window_size)/window_size, mode='same')
+    except (ValueError, IndexError):
+        sig_smoothed = sig
 
-    # --- Figure 1: Position vs. Time ---
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True,
-                                    gridspec_kw={'height_ratios': [3, 1]})
+    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
     fig1.suptitle(f"Atmosfærisk bane", fontsize=16, fontstyle="oblique")
-
     sc = ax1.scatter(reltime, pos, c=reltime, cmap='viridis', s=10, label='Enkeltobservasjoner')
     ax1.plot(t_fit, fit_pos, 'r-', label='Estimert bane', linewidth=2)
-    
     ax1.set_ylabel('Posisjonen langs banen [km]')
     ax1.legend()
-    
     fig1.subplots_adjust(right=0.85, top=0.92)
     cbar_ax = fig1.add_axes([0.88, 0.11, 0.03, 0.77])
     cbar = fig1.colorbar(sc, cax=cbar_ax)
     cbar.set_label('Tid [s]')
-
-    
     ax2.axhline(0, color='r', linestyle='--', linewidth=1.5, zorder=4)
     ax2.scatter(reltime, residuals, c=reltime, cmap='viridis', s=10, zorder=5)
     ax2.fill_between(reltime, -sig_smoothed * sigma_level, sig_smoothed * sigma_level, color='blue', alpha=0.3, label=f'±{sigma_level:.0f}σ usikkerhet')
-    
     ax2.set_ylabel('Residualer [km]')
     ax2.set_xlabel('Tid [s]')
     ax2.legend(loc='upper right')
-
     if doplot in ['save', 'both']:
         plt.savefig("posvstime.svg", bbox_inches='tight', pad_inches=0.05)
 
@@ -554,46 +549,28 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
     fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, constrained_layout=True)
     fig2.suptitle(f"     Dynamisk analyse", fontsize=16, fontstyle="oblique")
     
-    ax3.plot(t_fit, fit_speed, 'b-')
+    ax3.plot(t_fit, fit_speed, 'b-', zorder=10, label='Beste estimat')
     ax3.set_ylim(bottom=0)
     ax3.set_ylabel('Hastighet [km/s]')
     ax3.set_title('Hastighetsprofil')
-
-    ax4.plot(t_fit, fit_accel, 'b-')
-    ax4.set_ylabel('Aksellerasjon [km/s²]')
+    
+    # --- FIX: Added the missing label to this line ---
+    ax4.plot(t_fit, fit_accel, 'b-', zorder=10, label='Beste estimat')
+    ax4.set_ylabel('Akselerasjon [km/s²]')
     ax4.set_xlabel('Tid [s]')
-    ax4.set_title('Aksellerasjonsprofil')
+    ax4.set_title('Akselerasjonsprofil')
 
-    if param_samples is not None:
-        speed_samples = np.array([expfunc_1stder(t_fit, *p) for p in param_samples])
-        accel_samples = np.array([expfunc_2ndder(t_fit, *p) for p in param_samples])
-        speed_std = np.std(speed_samples, axis=0) * sigma_level
-        accel_std = np.std(accel_samples, axis=0) * sigma_level
-        
-        t0_index = np.argmin(np.abs(t_fit))
+    # Generate and plot uncertainty bands if boundary parameters were calculated
+    if lower_params is not None and upper_params is not None:
+        lower_speed_curve = expfunc_1stder(t_fit, *lower_params)
+        upper_speed_curve = expfunc_1stder(t_fit, *upper_params)
+        lower_accel_curve = expfunc_2ndder(t_fit, *lower_params)
+        upper_accel_curve = expfunc_2ndder(t_fit, *upper_params)
 
-        # --- Constrain initial uncertainty for both plots ---
-        for std_arr in [speed_std, accel_std]:
-            std_at_t0 = std_arr[t0_index]
-            pre_t0_std = std_arr[:t0_index]
-            if len(pre_t0_std) > 0:
-                capped_pre_t0 = np.minimum.accumulate(pre_t0_std[::-1])[::-1]
-                capped_pre_t0[capped_pre_t0 > std_at_t0] = std_at_t0
-                std_arr[:t0_index] = capped_pre_t0
+        ax3.fill_between(t_fit, lower_speed_curve, upper_speed_curve, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
         
-        # --- Logic for Speed Plot ---
-        lower_speed_bound = fit_speed - speed_std
-        upper_speed_bound = fit_speed + speed_std
-        # Enforce that the upper bound is non-increasing
-        final_upper_bound = np.minimum.accumulate(upper_speed_bound)
-        ax3.fill_between(t_fit, lower_speed_bound, final_upper_bound, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
-        
-        # --- Logic for Acceleration Plot ---
-        lower_accel_bound = fit_accel - accel_std
-        upper_accel_bound = fit_accel + accel_std
-        # Enforce the single most important constraint: acceleration cannot be positive.
-        final_upper_accel_bound = np.minimum(upper_accel_bound, 0)
-        ax4.fill_between(t_fit, lower_accel_bound, final_upper_accel_bound, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
+        final_upper_accel_curve = np.minimum(upper_accel_curve, 0)
+        ax4.fill_between(t_fit, lower_accel_curve, final_upper_accel_curve, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
         
         ax3.legend()
         ax4.legend()
@@ -604,23 +581,22 @@ def _generate_plots(data: dict, params: np.ndarray, param_samples: Optional[np.n
     if doplot in ['show', 'both']:
         plt.show()
 
-        
 def fbspd(resname: str, cennames: List[str], datname: str,
           doplot: str = '', posdata: bool = False, debug: bool = False,
           fscale: float = 0.1, sigma_level: float = 1.0,
           seed: Optional[int] = None,
-          num_simulations: int = 500) -> Tuple[bool, float]:
+          num_simulations: int = 1000) -> Tuple[bool, float]:
     """
     Determines speed and acceleration profiles for meteors from trajectory
     parameters and merged multi-station centroid files.
     """
-
     if seed is not None:
         np.random.seed(seed)
     
     if doplot == 'save' and matplotlib.get_backend() != 'agg':
         matplotlib.use('agg')
 
+    # ... (Sections 1-4: Loading, Trajectory, Processing, Merging - are unchanged) ...
     # 1. Load input data
     resdat = readres(resname)
     all_sitedata = get_sitecoord_fromdat(datname) if datname else []
@@ -686,7 +662,6 @@ def fbspd(resname: str, cennames: List[str], datname: str,
         print(f"Underlying Error: {e}", file=sys.stderr)
         return False, 0.0
 
-    # Sort merged data by time
     sort_idx = np.argsort(merged_data['reltime'])
     for key in merged_data:
         merged_data[key] = merged_data[key][sort_idx]
@@ -702,7 +677,6 @@ def fbspd(resname: str, cennames: List[str], datname: str,
     merged_data['reltime'] += adjtime
     if debug: print(f"Time axis adjusted by: {adjtime:.4f} s")
 
-    # Final fit on time-adjusted data
     final_params, n_ok, pcov = _fit_merged_data(
         merged_data['reltime'], merged_data['pos'], merged_data['sig'], debug, fscale
     )
@@ -711,52 +685,54 @@ def fbspd(resname: str, cennames: List[str], datname: str,
         print("Error: Final fit failed for all data points.")
         return False, 0.0
 
-    # --- Uncertainty Simulation ---
-    param_samples = None
-    initial_speed_uncertainty = 0.0
-    if pcov is not None and not np.isnan(pcov).any(): # Check for valid covariance matrix
-        try:
-            # Ensure covariance matrix is positive semi-definite for sampling
-            eigenvalues = np.linalg.eigvalsh(pcov)
-            if np.min(eigenvalues) < -1e-12: # Allow for small negative noise
-                jitter = abs(np.min(eigenvalues)) + 1e-9
-                pcov += np.eye(pcov.shape[0]) * jitter
-            
-            # Check for non-finite values before sampling
-            if not np.isfinite(pcov).all():
-                raise np.linalg.LinAlgError("Covariance matrix contains non-finite values.")
-
-            param_samples = np.random.multivariate_normal(final_params, pcov, size=num_simulations)
-
-            # Keep only samples where accel0 (the second parameter, index 1) is negative.
-            valid_samples = param_samples[param_samples[:, 1] <= 0]
-
-            # Check if any valid samples remain
-            if len(valid_samples) < 10: # Use a threshold to ensure enough samples for a stable estimate
-                print("Warning: Too few valid samples for uncertainty estimate. Disabling bands.")
-                param_samples = None
-            else:
-                param_samples = valid_samples
-            
-            # Check for bad samples
-            if not np.isfinite(param_samples).all():
-                print("Warning: Numerical instability in uncertainty sampling produced non-finite values. Disabling uncertainty bands.")
-                param_samples = None # Reset to disable plotting uncertainty
-
-            if param_samples is not None:
-                initial_speed_samples = [expfunc_1stder(0.0, *p) for p in param_samples]
-                initial_speed_uncertainty = np.std(initial_speed_samples) * sigma_level
-        except np.linalg.LinAlgError as e:
-            print(f"Warning: Could not estimate uncertainties due to numerical instability: {e}")
-            param_samples = None # Ensure it's None on failure
-            
-    # 6. Output results
+    # --- Simplified Uncertainty Calculation ---
+    lower_bound_params = None
+    upper_bound_params = None
     initial_speed = expfunc_1stder(0.0, *final_params)
-    print(f"Fit successful using {n_ok} data points.")
+    initial_speed_uncertainty = 0.0
+
+    if pcov is not None and not np.isnan(pcov).any():
+        try:
+            # Ensure covariance matrix is positive semi-definite
+            eigenvalues = np.linalg.eigvalsh(pcov)
+            if np.min(eigenvalues) < -1e-12:
+                pcov += np.eye(pcov.shape[0]) * (abs(np.min(eigenvalues)) + 1e-9)
+
+            # 1. Run Monte Carlo simulation to get statistics
+            param_samples = np.random.multivariate_normal(final_params, pcov, size=num_simulations)
+            param_samples = param_samples[param_samples[:, 1] <= 0] 
+
+            if len(param_samples) > 10:
+                # 2. Get std dev for initial speed (v0) and acceleration (accel0)
+                std_v0 = np.std(param_samples[:, 0])
+                std_accel0 = np.std(param_samples[:, 1])
+                initial_speed_uncertainty = std_v0 * sigma_level
+
+                # 3. Construct the boundary parameter sets
+                lower_bound_params = np.copy(final_params)
+                lower_bound_params[0] -= std_v0 * sigma_level
+                lower_bound_params[1] -= std_accel0 * sigma_level
+                
+                upper_bound_params = np.copy(final_params)
+                upper_bound_params[0] += std_v0 * sigma_level
+                
+                # --- FIX: Ensure the upper bound acceleration is never positive ---
+                potential_upper_accel0 = final_params[1] + std_accel0 * sigma_level
+                upper_bound_params[1] = min(potential_upper_accel0, 0.0)
+
+        except (np.linalg.LinAlgError, ValueError) as e:
+            print(f"Warning: Could not perform uncertainty simulation: {e}")
+
+    # 6. Output results
+    print(f"\nFit successful using {n_ok} data points.")
     print(f"Initial speed (v_i) [{sigma_level}-sigma]: {initial_speed:.3f} ± {initial_speed_uncertainty:.3f} km/s")
 
     if doplot:
-        _generate_plots(merged_data, final_params, param_samples, n_ok, doplot, resname, debug, sigma_level)
+        _generate_plots(merged_data, params=final_params, 
+                        lower_params=lower_bound_params, 
+                        upper_params=upper_bound_params,
+                        n_ok=n_ok, doplot=doplot, resname=resname, 
+                        debug=debug, sigma_level=sigma_level)
 
     if posdata:
         print("\nTime [s]  Height [km]  Position [km]  Speed [km/s]")

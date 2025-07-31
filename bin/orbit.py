@@ -92,21 +92,44 @@ def _plot_orbit(et, meteor_elements, doplot):
     
     km_per_au = convrt(1.0, "AU", "KM")
 
-    planet_params = {
+    # A comprehensive dictionary of planets for plotting
+    all_planets = {
+        "MERCURY": {"name": "Mercury", "color": "#B7A9A3"},
         "Venus": {"name": "Venus", "color": "#C77C00"},
         "Earth": {"name": "Jorda", "color": "#0077BE"},
         "MARS BARYCENTER": {"name": "Mars", "color": "#D73A00"},
-        "Jupiter barycenter": {"name": "Jupiter", "color": "#A0522D"}
+        "Jupiter barycenter": {"name": "Jupiter", "color": "#A0522D"},
+        "Saturn barycenter": {"name": "Saturn", "color": "#C19A6B"},
+        "Uranus barycenter": {"name": "Uranus", "color": "#94D2E2"}
+    }
+
+    # Start with a default set of planets to plot
+    planets_to_plot = {
+        "Venus": all_planets["Venus"],
+        "Earth": all_planets["Earth"],
+        "MARS BARYCENTER": all_planets["MARS BARYCENTER"],
+        "Jupiter barycenter": all_planets["Jupiter barycenter"]
     }
 
     q_km, e = meteor_elements[0], meteor_elements[1]
-    if e < 1:
-        aphelion_au = (q_km / km_per_au) / (1 - e) * (1 + e)
-        if aphelion_au > 6.0:
-            planet_params["Saturn barycenter"] = {"name": "Saturn", "color": "#C19A6B"}
+    if e < 1:  # Check conditions only for elliptical orbits
+        # Aphelion distance in AU
+        aphelion_au = (q_km / km_per_au) * (1 + e) / (1 - e)
+
+        # Plot Mercury if aphelion is inside the orbit of Mars (aphelion ~1.67 AU)
+        if aphelion_au < 1.67:
+            planets_to_plot["MERCURY"] = all_planets["MERCURY"]
+
+        # Plot Uranus if aphelion is beyond Saturn (aphelion ~10.12 AU)
+        if aphelion_au > 10.12:
+            planets_to_plot["Saturn barycenter"] = all_planets["Saturn barycenter"]
+            planets_to_plot["Uranus barycenter"] = all_planets["Uranus barycenter"]
+        # Preserve original logic to add Saturn for intermediate orbits
+        elif aphelion_au > 6.0:
+            planets_to_plot["Saturn barycenter"] = all_planets["Saturn barycenter"]
 
     legend_handles = []
-    for planet_id, params in planet_params.items():
+    for planet_id, params in planets_to_plot.items():
         state, _ = spkezr(planet_id, et, REF_FRAME_ECLIPTIC, ABERRATION_CORRECTION, SOLAR_SYSTEM_BARYCENTER)
         
         pos_au = state[:3] / km_per_au
@@ -149,11 +172,58 @@ def _plot_orbit(et, meteor_elements, doplot):
     lc = Line3DCollection(segments, colors=colors, linewidths=2)
     ax.add_collection(lc)
 
-    # --- RESTORED: Plot droplines for the meteoroid ---
+    # --- MODIFICATION START ---
+    # Calculate and plot aphelion for elliptical orbits
+    if e < 1:
+        # Time of perihelion passage is elements[6]
+        tp_et = meteor_elements[6]
+        
+        # Semi-major axis (a) in km from perifocal distance (q_km)
+        a_km = q_km / (1.0 - e)
+        
+        # Orbital period in seconds
+        period_sec = 2 * np.pi * np.sqrt(a_km**3 / gm_sun)
+        
+        # Time of aphelion passage is half a period after perihelion
+        et_aphelion = tp_et + period_sec / 2.0
+        
+        # Get the state vector at aphelion
+        aphelion_state_km = conics(meteor_elements, et_aphelion)
+        
+        # Convert position to AU
+        aphelion_pos_au = aphelion_state_km[:3] / km_per_au
+        
+        # Mark the aphelion point on the ecliptic plane
+        ax.plot(
+            [aphelion_pos_au[0]], [aphelion_pos_au[1]], [0], 
+            'x', color='darkviolet', markersize=7, zorder=10
+        )
+        
+        # Add a dropline from the orbit path to the ecliptic plane
+        ax.plot(
+            [aphelion_pos_au[0], aphelion_pos_au[0]],
+            [aphelion_pos_au[1], aphelion_pos_au[1]],
+            [aphelion_pos_au[2], 0],
+            color='darkviolet',
+            linestyle='--',
+            linewidth=1
+        )
+
+        # Mark the actual aphelion point on the orbit path for clarity
+        ax.plot(
+            [aphelion_pos_au[0]], [aphelion_pos_au[1]], [aphelion_pos_au[2]], 
+            'D', color='darkviolet', markersize=6, label='Aphelium', zorder=10
+        )
+        
+        # Add the aphelion marker to the legend
+        legend_handles.append(
+            Line2D([0], [0], marker='D', color='w', label='Aphelium', 
+                   markerfacecolor='darkviolet', markersize=7)
+        )
+    # --- MODIFICATION END ---
+
     step = max(1, len(x) // 50)
-    # Plot "shadow" dots on the ecliptic plane
     ax.plot(x[::step], y[::step], 0, '.', color='gray', markersize=1, alpha=0.5)
-    # Plot the vertical droplines
     for i in range(0, len(x), step):
         ax.plot([x[i], x[i]], [y[i], y[i]], [z[i], 0], '-', color='gray', linewidth=0.5, alpha=0.4)
 

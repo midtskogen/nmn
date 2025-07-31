@@ -223,7 +223,7 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
         is_inlier = i in inlier_indices
         color, zorder = ('r', 3) if is_inlier else ('k', 2)
         mfc = color if is_inlier else 'none'
-        label = 'Inkludert observasjon' if is_inlier else 'Avvikende observasjon'
+        label = 'Observasjoner' if is_inlier else 'Avvikende observasjoner'
         pylab.plot(dists, heights, color=color, marker='o', mfc=mfc, linestyle='None', label=label, zorder=zorder)
     
     # After plotting all points, get axis limits for dynamic text offset

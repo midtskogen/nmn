@@ -220,6 +220,10 @@ def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False
             s_i, s_j, s_k = station_obs[idx_i], station_obs[idx_j], station_obs[idx_k]
             def get_range(s_ref, s_off): return slice(s_ref['reltime'].min()-s_off['reltime'].max(), s_ref['reltime'].max()-s_off['reltime'].min(), TIME_OFFSET_BRUTE_STEP)
             range_j, range_k = get_range(s_i, s_j), get_range(s_i, s_k)
+            if range_j.start >= range_j.stop or range_k.start >= range_k.stop:
+                if debug:
+                    print(f"  -> Skipping triplet ({s_i['site_info']['name']}, {s_j['site_info']['name']}, {s_k['site_info']['name']}) due to insufficient data for overlap.")
+                    continue
             offsets = brute(lambda p: _calculate_quadratic_fit_error(p, [s_i, s_j, s_k]), (range_j, range_k), finish=None)
             for offset, s_idx_off in [(offsets[0], idx_j), (offsets[1], idx_k)]:
                 row = np.zeros(num_unknowns)
@@ -378,29 +382,34 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
         v0_guess, p0_guess = lin_params_guess[0], lin_params_guess[1]
     except RuntimeError: v0_guess, p0_guess = 40.0, pos[0] if len(pos) > 0 else 0
     
-    # --- Start of Fix ---
     exp_bounds = ([8.0, -500.0, 1e-6, -np.inf], [73.0, -1e-9, 10.0, np.inf])
     
-    # Clip the initial velocity guess to ensure it is within the hard bounds
     v0_guess_clipped = np.clip(v0_guess, exp_bounds[0][0], exp_bounds[1][0])
 
     if debug and v0_guess_clipped != v0_guess:
         print(f"  -> Debug: Initial velocity guess {v0_guess:.2f} was outside bounds and clipped to {v0_guess_clipped:.2f}.")
 
-    # Use the clipped guess for the exponential fit
     exp_params_guess = [v0_guess_clipped, -10.0, 1.0, p0_guess]
-    # --- End of Fix ---
+    
+    # --- Start of Change ---
+    try:
+        res_exp = least_squares(residual_func, exp_params_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, expfunc), bounds=exp_bounds, max_nfev=5000)
+    except ValueError:
+        if debug:
+            print("  -> Warning: Exponential fit failed with a ValueError (likely overflow). Falling back to linear fit.")
+        res_exp = None # Mark the exponential fit as failed
+    # --- End of Change ---
 
-    res_exp = least_squares(residual_func, exp_params_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, expfunc), bounds=exp_bounds, max_nfev=5000)
     res_lin = None
     try:
         lin_params_initial_guess, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig)
         res_lin = least_squares(residual_func, lin_params_initial_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, linfunc))
     except (RuntimeError, ValueError):
-        if not res_exp.success:
+        if not (res_exp and res_exp.success):
             print("Error: Both exponential and linear fits failed.")
             return None, 0, None, np.inf
-    if res_exp.success and (res_lin is None or not res_lin.success or res_exp.cost < res_lin.cost):
+    
+    if res_exp and res_exp.success and (res_lin is None or not res_lin.success or res_exp.cost < res_lin.cost):
         if debug: print("Selected robust exponential model.")
         params, pcov, cost = res_exp.x, get_pcov(res_exp, n_pts, len(res_exp.x)), res_exp.cost
         return params, n_pts, pcov, cost
@@ -469,16 +478,16 @@ def fbspd(resname: str, cennames: List[str], datname: str, doplot: str = '', pos
     path_vec_norm = (path_p2 - path_p1) / np.linalg.norm(path_p2 - path_p1)
     station_obs = []
     for cendat in all_cendat:
+        if cendat.ndata == 0:
+            print(f"Warning: Skipping a centroid file because it contains no valid data points.")
+            continue  # Skips to the next file in the loop
+    
         # --- Start of Debug Block 2 ---
         station_name_from_cen = cendat.sitestr[0].strip()
         if debug:
             print(f"--- Debug: Attempting to match station from .cen file: '{station_name_from_cen}'")
         # --- End of Debug Block 2 ---
 
-        if cendat.ndata == 0:
-            print(f"Warning: Skipping a centroid file because it contains no valid data points.")
-            continue  # Skips to the next file in the loop
-    
         # Logic to find the matching site_info from the .dat file data
         site_info = next((s for s in all_sitedata if s[0].strip() == station_name_from_cen), None)
 

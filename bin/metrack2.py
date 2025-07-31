@@ -477,8 +477,33 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         if len(indices_set) < 2: continue
         inlier_obs_data = _create_subset_obs_data(obs_data, indices_set)
         fit_results = fit_track(inlier_obs_data, optimize=True)
-        final_error, final_quality = fit_results[3], fit_results[4]
-        current_score = (-len(indices_set), (final_error + 1) / (final_quality + 1e-9))
+    
+        # Unpack fit results to get the track geometry
+        track_start, track_end, cross_pos, final_error, final_quality = fit_results
+    
+        # Physical Plausibility Check
+        penalty = 0
+        if track_start is not None:
+            # Check if the track is physically improbable
+            _, _, start_h = xyz2lonlat(track_start)
+            _, _, end_h = xyz2lonlat(track_end)
+            if min(start_h, end_h) < 5.0 or max(start_h, end_h) > 150.0:
+                penalty = 1e9 # Add a massive penalty for bad solutions
+
+            durations = inlier_obs_data['durations']
+            if any(d > 0 for d in durations):
+                num_inliers = len(durations)
+                airspeeds = [np.linalg.norm(cross_pos[i + num_inliers] - cross_pos[i]) / d for i, d in enumerate(durations) if d > 0]
+                if airspeeds:
+                    calculated_speed = np.mean(airspeeds)
+                    if calculated_speed < 8.0 or calculated_speed > 100.0:
+                        penalty += 1e9 
+
+            # Combine all metrics into a final score
+            # 1. Prioritize more inliers (negative sign)
+            # 2. Add penalty for physically impossible tracks
+            # 3. Use final error as the ultimate tie-breaker
+            current_score = (-len(indices_set), (penalty + final_error + 1) / (final_quality + 1e-9))
 
         if options['debug_ransac']:
             inlier_names = sorted([raw_data['names'][i] for i in indices_set])
@@ -594,6 +619,43 @@ def write_res_file(track_start, track_end, cross_pos, obs_data, in_name):
             f.write(f'{site_lon:6.5f} {site_lat:6.5f} {cross_lon:8.5f} {cross_lat:8.5f} {cross_height:6.3f} {site_name} {site_height_km:6.3f}\n')
     print(f"Detailed results saved to {output_path}")
 
+def _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options):
+    """Populates the MetrackInfo object from a set of fit results."""
+    track_start, track_end, cross_pos_inliers, track_err, fit_quality = fit_results
+
+    # This code is moved directly from the metrack function
+    info.inlier_stations = [raw_data['names'][i] for i in inlier_indices]
+    info.error, info.fit_quality = track_err, fit_quality
+    start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
+    end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
+    
+    if info.end_height > info.start_height:
+        track_start, track_end = track_end, track_start
+        start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
+        end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
+
+    info.ground_track = haversine(start_lon, start_lat, end_lon, end_lat)
+
+    dir_vec = track_end - track_start
+    dir_vec_rot_lon = np.dot(rotation_matrix(np.array([0,0,1]), np.radians(start_lon)), dir_vec)
+    dir_vec_local = np.dot(rotation_matrix(np.array([0,1,0]), np.radians(90 - start_lat)), dir_vec_rot_lon)
+
+    info.course = np.degrees(np.arctan2(dir_vec_local[1], -dir_vec_local[0])) % 360
+    info.incidence = -np.degrees(np.arctan2(dir_vec_local[2], np.hypot(dir_vec_local[0], dir_vec_local[1])))
+
+    valid_times = [t for t in raw_data['timestamp'] if t]
+    info.timestamp = options.get('timestamp') if options.get('timestamp') is not None else np.mean(valid_times) if valid_times else time.time()
+    info.date = time.asctime(time.gmtime(info.timestamp))
+    
+    ra, dec = altaz_to_radec(start_lon, start_lat, -info.incidence, (info.course + 180) % 360, info.timestamp)
+    info.radiant_ra, info.radiant_dec = np.degrees(float(ra)), np.degrees(float(dec))
+    info.radiant_ecllong, info.radiant_ecllat = radec_to_ecliptic(ra, dec)
+    
+    airspeeds = [np.linalg.norm(cross_pos_inliers[i + len(inlier_obs_data['durations'])] - cross_pos_inliers[i]) / d for i, d in enumerate(inlier_obs_data['durations']) if d > 0]
+    info.speed = np.mean(airspeeds) if airspeeds else 0.0
+    
+    return info, track_start, track_end, cross_pos_inliers
+
 def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborders=False, 
             timestamp=None, optimize=True, writestat=True, use_ransac=True, ransac_threshold=1.0, 
             ransac_iterations=10, ransac_runs=100, seed=0, debug_ransac=False, all_in_tolerance=1.0, **kwargs):
@@ -617,47 +679,39 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
         if doplot: plot_map(None, None, None, full_obs_data, list(range(len(raw_data['names']))), options)
         return MetrackInfo()
 
+    # --- Primary Fit Attempt (RANSAC by default) ---
     if use_ransac:
-        (track_start, track_end, cross_pos_inliers, track_err, fit_quality), inlier_obs_data, inlier_indices = robust_fit_with_ransac(full_obs_data, raw_data, options)
+        fit_results, inlier_obs_data, inlier_indices = robust_fit_with_ransac(full_obs_data, raw_data, options)
     else:
         print("RANSAC disabled. Using standard fit on all data.")
-        (track_start, track_end, cross_pos_inliers, track_err, fit_quality) = fit_track(full_obs_data, optimize=optimize)
+        fit_results = fit_track(full_obs_data, optimize=optimize)
         inlier_obs_data, inlier_indices = full_obs_data, list(range(len(raw_data['names'])))
 
-    if track_start is None:
+    if fit_results[0] is None:
         print("Could not determine a valid track. Aborting.")
         return MetrackInfo()
 
+    # Populate info object with primary fit results
     info = MetrackInfo()
-    info.inlier_stations = [raw_data['names'][i] for i in inlier_indices]
-    info.error, info.fit_quality = track_err, fit_quality
-    start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
-    end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
-    
-    if info.end_height > info.start_height:
-        track_start, track_end = track_end, track_start
-        start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
-        end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
+    info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
 
-    info.ground_track = haversine(start_lon, start_lat, end_lon, end_lat)
+    # --- Sanity Check and Fallback Logic ---
+    is_plausible = not (max(info.start_height, info.end_height) < 10.0 or info.speed < 8.0 or info.speed > 100.0)
 
-    dir_vec = track_end - track_start
-    dir_vec_rot_lon = np.dot(rotation_matrix(np.array([0,0,1]), np.radians(start_lon)), dir_vec)
-    dir_vec_local = np.dot(rotation_matrix(np.array([0,1,0]), np.radians(90 - start_lat)), dir_vec_rot_lon)
+    if not is_plausible and use_ransac:
+        print("\nWarning: RANSAC solution is physically implausible. Attempting fallback...")
+        # The fallback is a simple, non-optimized fit on ALL data
+        fit_results = fit_track(full_obs_data, optimize=False)
+        
+        if fit_results[0] is None:
+            print("Fallback fit also failed. Aborting.")
+            return MetrackInfo()
 
-    info.course = np.degrees(np.arctan2(dir_vec_local[1], -dir_vec_local[0])) % 360
-    info.incidence = -np.degrees(np.arctan2(dir_vec_local[2], np.hypot(dir_vec_local[0], dir_vec_local[1])))
+        # Repopulate info with the new, hopefully better, results
+        inlier_obs_data = full_obs_data
+        inlier_indices = list(range(len(raw_data['names'])))
+        info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
 
-    valid_times = [t for t in raw_data['timestamp'] if t]
-    info.timestamp = timestamp if timestamp is not None else np.mean(valid_times) if valid_times else time.time()
-    info.date = time.asctime(time.gmtime(info.timestamp))
-    
-    ra, dec = altaz_to_radec(start_lon, start_lat, -info.incidence, (info.course + 180) % 360, info.timestamp)
-    info.radiant_ra, info.radiant_dec = np.degrees(float(ra)), np.degrees(float(dec))
-    info.radiant_ecllong, info.radiant_ecllat = radec_to_ecliptic(ra, dec)
-    
-    airspeeds = [np.linalg.norm(cross_pos_inliers[i + len(inlier_obs_data['durations'])] - cross_pos_inliers[i]) / d for i, d in enumerate(inlier_obs_data['durations']) if d > 0]
-    if airspeeds: info.speed = np.mean(airspeeds)
 
     if 'showerassoc' in AVAILABLE_LIBS:
         info.shower, _ = AVAILABLE_LIBS['showerassoc'].showerassoc(info.radiant_ra, info.radiant_dec, info.speed, time.strftime("%Y-%m-%d", time.localtime(info.timestamp)))

@@ -92,16 +92,19 @@ def _plot_orbit(et, meteor_elements, doplot):
     
     km_per_au = convrt(1.0, "AU", "KM")
 
+    # --- MODIFICATION START ---
     # A comprehensive dictionary of planets for plotting
     all_planets = {
-        "MERCURY": {"name": "Mercury", "color": "#B7A9A3"},
+        "MERCURY": {"name": "Merkur", "color": "#B7A9A3"},
         "Venus": {"name": "Venus", "color": "#C77C00"},
         "Earth": {"name": "Jorda", "color": "#0077BE"},
         "MARS BARYCENTER": {"name": "Mars", "color": "#D73A00"},
         "Jupiter barycenter": {"name": "Jupiter", "color": "#A0522D"},
         "Saturn barycenter": {"name": "Saturn", "color": "#C19A6B"},
-        "Uranus barycenter": {"name": "Uranus", "color": "#94D2E2"}
+        "Uranus barycenter": {"name": "Uranus", "color": "#94D2E2"},
+        "Neptune barycenter": {"name": "Neptune", "color": "#3F54B5"}
     }
+    # --- MODIFICATION END ---
 
     # Start with a default set of planets to plot
     planets_to_plot = {
@@ -120,14 +123,21 @@ def _plot_orbit(et, meteor_elements, doplot):
         if aphelion_au < 1.67:
             planets_to_plot["MERCURY"] = all_planets["MERCURY"]
 
-        # Plot Uranus if aphelion is beyond Saturn (aphelion ~10.12 AU)
+        # Plot outer planets based on aphelion distance.
+        # Aphelion values: Jupiter ~5.5 AU, Saturn ~10.1 AU, Uranus ~20.1 AU
+        if aphelion_au > 6.0:
+            planets_to_plot["Saturn barycenter"] = all_planets["Saturn barycenter"]
+        
         if aphelion_au > 10.12:
-            planets_to_plot["Saturn barycenter"] = all_planets["Saturn barycenter"]
             planets_to_plot["Uranus barycenter"] = all_planets["Uranus barycenter"]
-        # Preserve original logic to add Saturn for intermediate orbits
-        elif aphelion_au > 6.0:
-            planets_to_plot["Saturn barycenter"] = all_planets["Saturn barycenter"]
+            # If aphelion is beyond Saturn, don't show Venus
+            if "Venus" in planets_to_plot:
+                del planets_to_plot["Venus"]
 
+        # If aphelion is beyond Uranus, also show the orbit of Neptune.
+        if aphelion_au > 20.1:
+            planets_to_plot["Neptune barycenter"] = all_planets["Neptune barycenter"]
+            
     legend_handles = []
     for planet_id, params in planets_to_plot.items():
         state, _ = spkezr(planet_id, et, REF_FRAME_ECLIPTIC, ABERRATION_CORRECTION, SOLAR_SYSTEM_BARYCENTER)
@@ -172,7 +182,6 @@ def _plot_orbit(et, meteor_elements, doplot):
     lc = Line3DCollection(segments, colors=colors, linewidths=2)
     ax.add_collection(lc)
 
-    # --- MODIFICATION START ---
     # Calculate and plot aphelion, plus ecliptic reference grid for elliptical orbits
     if e < 1:
         # Aphelion distance in AU (Q = q * (1+e)/(1-e))
@@ -181,15 +190,19 @@ def _plot_orbit(et, meteor_elements, doplot):
         # --- Draw concentric circles and radial lines in the ecliptic plane ---
         max_radius = int(np.ceil(aphelion_au))
         
-        # Draw concentric circles with 1 AU spacing
-        theta_circle = np.linspace(0, 2 * np.pi, 200)
-        for r in range(1, max_radius + 1):
-            x_circle = r * np.cos(theta_circle)
-            y_circle = r * np.sin(theta_circle)
-            ax.plot(x_circle, y_circle, 0, color='blue', linestyle='--', linewidth=0.75, alpha=0.6)
-
-        # Draw 12 radial lines to divide the circles into sections
         if max_radius > 0:
+            # Determine the interval for the circles to keep the total count at 10 or less.
+            # The interval must be an integer AU value.
+            circle_interval = max(1, int(np.ceil(max_radius / 10.0)))
+        
+            # Draw concentric circles with the calculated interval
+            theta_circle = np.linspace(0, 2 * np.pi, 200)
+            for r in range(circle_interval, max_radius + 1, circle_interval):
+                x_circle = r * np.cos(theta_circle)
+                y_circle = r * np.sin(theta_circle)
+                ax.plot(x_circle, y_circle, 0, color='blue', linestyle='--', linewidth=0.75, alpha=0.6)
+
+            # Draw 12 radial lines to divide the circles into sections
             for i in range(12):
                 angle = i * (2 * np.pi / 12)
                 x_line = [0, max_radius * np.cos(angle)]
@@ -242,7 +255,6 @@ def _plot_orbit(et, meteor_elements, doplot):
             Line2D([0], [0], marker='D', color='w', label='Aphelium', 
                    markerfacecolor='darkviolet', markersize=7)
         )
-    # --- MODIFICATION END ---
 
     step = max(1, len(x) // 50)
     ax.plot(x[::step], y[::step], 0, '.', color='gray', markersize=1, alpha=0.5)
@@ -265,7 +277,7 @@ def _plot_orbit(et, meteor_elements, doplot):
         axis.set_label_text('')
 
     ax.view_init(elev=30., azim=30)
-    ax.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1, 0.92))
+    ax.legend(handles=legend_handles, loc='lower left')
 
     if doplot == 'save' or doplot == 'both':
         plt.savefig('orbit.svg', bbox_inches='tight', pad_inches=0.2)

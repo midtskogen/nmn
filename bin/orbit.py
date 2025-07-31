@@ -173,8 +173,30 @@ def _plot_orbit(et, meteor_elements, doplot):
     ax.add_collection(lc)
 
     # --- MODIFICATION START ---
-    # Calculate and plot aphelion for elliptical orbits
+    # Calculate and plot aphelion, plus ecliptic reference grid for elliptical orbits
     if e < 1:
+        # Aphelion distance in AU (Q = q * (1+e)/(1-e))
+        aphelion_au = (q_km / km_per_au) * (1 + e) / (1 - e)
+        
+        # --- Draw concentric circles and radial lines in the ecliptic plane ---
+        max_radius = int(np.ceil(aphelion_au))
+        
+        # Draw concentric circles with 1 AU spacing
+        theta_circle = np.linspace(0, 2 * np.pi, 200)
+        for r in range(1, max_radius + 1):
+            x_circle = r * np.cos(theta_circle)
+            y_circle = r * np.sin(theta_circle)
+            ax.plot(x_circle, y_circle, 0, color='blue', linestyle='--', linewidth=0.75, alpha=0.6)
+
+        # Draw 12 radial lines to divide the circles into sections
+        if max_radius > 0:
+            for i in range(12):
+                angle = i * (2 * np.pi / 12)
+                x_line = [0, max_radius * np.cos(angle)]
+                y_line = [0, max_radius * np.sin(angle)]
+                ax.plot(x_line, y_line, [0, 0], color='blue', linestyle='--', linewidth=0.75, alpha=0.6)
+            
+        # --- Plot aphelion marker ---
         # Time of perihelion passage is elements[6]
         tp_et = meteor_elements[6]
         
@@ -228,8 +250,8 @@ def _plot_orbit(et, meteor_elements, doplot):
         ax.plot([x[i], x[i]], [y[i], y[i]], [z[i], 0], '-', color='gray', linewidth=0.5, alpha=0.4)
 
     legend_handles.extend([
-        Line2D([0], [0], color='green', lw=1.5, label='Meteoroidbane (over ekliptikken)'),
-        Line2D([0], [0], color='red', lw=1.5, label='Meteoroidbane (under ekliptikken)')
+        Line2D([0], [0], color='green', lw=1.5, label='Meteoroidebane (over ekliptikken)'),
+        Line2D([0], [0], color='red', lw=1.5, label='Meteoroidebane (under ekliptikken)')
     ])
 
     max_range = np.max(np.ptp(orbit_au, axis=0)) * 1.1

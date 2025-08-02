@@ -444,7 +444,73 @@ def _plot_orbit_interactive(et, meteor_elements):
     
     fig = go.Figure(data=traces, layout=layout, frames=frames)
     fig.write_html("orbit.html", include_plotlyjs='cdn')
-    print("\nInteractive plot with autorotation saved to orbit.html")
+
+    # Append interaction listener to pause animation on click
+    with open("orbit.html", "a", encoding="utf-8") as f:
+        f.write("""
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const plot = document.querySelector("div.js-plotly-plot");
+    let animationPaused = false;
+
+    function pauseAnimation() {
+        animationPaused = true;
+        console.log("Pausing animation");
+        Plotly.animate(plot, null, {
+            mode: 'immediate',
+            frame: { duration: 0, redraw: false },
+            transition: { duration: 0 }
+        }).catch((err) => {
+            console.warn("Pause failed:", err);
+        });
+    }
+
+    function resumeAnimation() {
+        animationPaused = false;
+        console.log("Resuming animation");
+        Plotly.animate(plot, null, {
+            frame: { duration: 50, redraw: true },
+            transition: { duration: 0 },
+            mode: "next",
+            fromcurrent: true
+        }).catch((err) => {
+            console.warn("Resume failed:", err);
+        });
+    }
+
+    function toggleAnimation(e) {
+        e.preventDefault(); // prevent context menu
+        if (animationPaused) {
+            resumeAnimation();
+        } else {
+            pauseAnimation();
+        }
+    }
+
+    plot.addEventListener('plotly_animated', () => {
+        console.log("Animation started — resetting paused flag");
+        animationPaused = false;
+    });
+
+    if (plot) {
+        // Right-click = toggle animation
+        plot.addEventListener("contextmenu", toggleAnimation);
+
+        // Hook the "Spill" button to resume and reset state
+        const playButton = [...document.querySelectorAll("button")].find(btn =>
+            btn.textContent.includes("Spill") || btn.textContent.includes("Play")
+        );
+
+        if (playButton) {
+            playButton.addEventListener("click", () => {
+                animationPaused = false;
+            });
+        }
+    }
+});
+</script>
+""")
+        print("\nInteractive plot with autorotation saved to orbit.html")
 
 
 def calc_azalt(lat1, lon1, alt1, lat2, lon2, alt2):

@@ -13,6 +13,7 @@ or imported as a module in other tools.
 import argparse
 import configparser
 import datetime
+import io
 import os
 import sys
 import time
@@ -283,7 +284,7 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
         ax.add_feature(cfeature.LAKES, edgecolor='royalblue', linewidth=0.5, facecolor='none')
     except Exception: ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
     ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
-    gl = ax.gridlines(draw_labels=True, color='gray', alpha=0.5, linestyle='--')
+    gl = ax.gridlines(draw_labels=True, color='gray', alpha=0.5, linestyle='--', linewidth=0.5)
     gl.top_labels = gl.right_labels = False
     gl.xformatter, gl.yformatter = LongitudeFormatter(), LatitudeFormatter()
 
@@ -445,9 +446,12 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     except Exception as e:
         print(f"Warning: Could not fetch OSM map tiles. Plot will have a plain background. Error: {e}")
     x_min_m, x_max_m, y_min_m, y_max_m = ax_map.get_extent()
-    map_image_path = "background_map.png"
-    fig_map.savefig(map_image_path, dpi=200, bbox_inches='tight', pad_inches=0, transparent=False)
+    
+    # Render the map to an in-memory buffer instead of a file
+    buf = io.BytesIO()
+    fig_map.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0, transparent=False)
     pylab.close(fig_map)
+    buf.seek(0)
 
     # --- 3. Prepare Plotly Traces ---
     traces = []
@@ -456,9 +460,9 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         return points_m[:, 0] / 1000.0, points_m[:, 1] / 1000.0
 
     # --- Use smoothed color quantization for a high-quality, small map ---
-    img = Image.open(map_image_path).convert('RGB')
+    img = Image.open(buf).convert('RGB')
     
-    max_dim = 768
+    max_dim = 384 # Lower value for smoother animation, higher for better map quality
     if max(img.size) > max_dim:
         img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
         print(f"Map image downsampled to {img.size} for better performance.")
@@ -559,11 +563,11 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
                 marker=dict(color='rgba(0,0,0,0)', size=10), # Invisible but hoverable
                 customdata=np.array(custom_data),
                 hovertemplate=(
-                    '<b>Tid</b>: %{customdata[0]:.2f} s<br>'
-                    '<b>Lengdegrad</b>: %{customdata[3]:.4f}<br>'
-                    '<b>Breddegrad</b>: %{customdata[4]:.4f}<br>'
-                    '<b>Høgde</b>: %{customdata[1]:.2f} km<br>'
-                    '<b>Strekning</b>: %{customdata[2]:.2f} km'
+                    '<b>Time</b>: %{customdata[0]:.2f} s<br>'
+                    '<b>Height</b>: %{customdata[1]:.2f} km<br>'
+                    '<b>Ground Dist</b>: %{customdata[2]:.2f} km<br>'
+                    '<b>Latitude</b>: %{customdata[3]:.4f}<br>'
+                    '<b>Longitude</b>: %{customdata[4]:.4f}'
                     '<extra></extra>'
                 ),
                 name='Track Info',
@@ -623,7 +627,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     )
 
     # Part D: Calculate camera eye position in the final normalized space
-    camera_distance_norm = 2.0
+    camera_distance_norm = 1.3
     
     initial_eye = dict(
         x=camera_center['x'] + camera_distance_norm * np.cos(np.radians(0)),
@@ -648,7 +652,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             )))
         ))
 
-# Part F: Create the final layout
+    # Part F: Create the final layout
     layout = go.Layout(
         title='Meteorens atmosfæriske bane', title_x=0.5, title_y=0.92,
         scene=dict(
@@ -656,18 +660,18 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
                 title='Øst-vest avstand (km)',
                 range=[x_min_km, x_max_km],
                 showspikes=True,
-                spikethickness=0.5
+                spikethickness=1
             ),
             yaxis=dict(
                 title='Nord-sør avstand (km)',
                 range=[y_min_km, y_max_km],
                 showspikes=True,
-                spikethickness=0.5
+                spikethickness=1
             ),
             zaxis=dict(
                 title='Høgde (km)',
-                showspikes=True,
-                spikethickness=0.5
+                showspikes=False, # This will remove the crosshair on the map surface
+                spikethickness=1
             ),
             aspectmode='data',
             dragmode='turntable',
@@ -684,7 +688,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             font=dict(size=10),
             bgcolor='rgba(255, 255, 255, 0.5)',
             buttons=[
-                dict(label='▶ Spill',
+                dict(label='▶ Play',
                      method='animate',
                      args=[None, dict(frame=dict(duration=50, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
                 dict(label='⏸ Pause',
@@ -698,12 +702,74 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     
     fig = go.Figure(data=traces, layout=layout, frames=frames)
     fig.write_html("map.html", include_plotlyjs='cdn')
-    print("Interactive 3D plot saved to map.html")
 
-    try:
-        os.remove(map_image_path)
-    except OSError as e:
-        print(f"Error removing temporary map file: {e}")
+    # Append interaction listener to pause animation on click
+    with open("map.html", "a", encoding="utf-8") as f:
+        f.write("""
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const plot = document.querySelector("div.js-plotly-plot");
+    let animationPaused = false;
+
+    function pauseAnimation() {
+        animationPaused = true;
+        console.log("Pausing animation");
+        Plotly.animate(plot, null, {
+            mode: 'immediate',
+            frame: { duration: 0, redraw: false },
+            transition: { duration: 0 }
+        }).catch((err) => {
+            console.warn("Pause failed:", err);
+        });
+    }
+
+    function resumeAnimation() {
+        animationPaused = false;
+        console.log("Resuming animation");
+        Plotly.animate(plot, null, {
+            frame: { duration: 50, redraw: true },
+            transition: { duration: 0 },
+            mode: "next",
+            fromcurrent: true
+        }).catch((err) => {
+            console.warn("Resume failed:", err);
+        });
+    }
+
+    function toggleAnimation(e) {
+        e.preventDefault(); // prevent context menu
+        if (animationPaused) {
+            resumeAnimation();
+        } else {
+            pauseAnimation();
+        }
+    }
+
+    plot.addEventListener('plotly_animated', () => {
+        console.log("Animation started — resetting paused flag");
+        animationPaused = false;
+    });
+
+    if (plot) {
+        // Right-click = toggle animation
+        plot.addEventListener("contextmenu", toggleAnimation);
+
+        // Hook the "Spill" button to resume and reset state
+        const playButton = [...document.querySelectorAll("button")].find(btn =>
+            btn.textContent.includes("Spill") || btn.textContent.includes("Play")
+        );
+
+        if (playButton) {
+            playButton.addEventListener("click", () => {
+                animationPaused = false;
+            });
+        }
+    }
+});
+</script>
+""")
+
+    print("Interactive 3D plot saved to map.html")
 
 
 def chisq_of_fit(track_params, los_refs, los_vecs, weights):

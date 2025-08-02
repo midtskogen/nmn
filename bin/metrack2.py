@@ -32,7 +32,7 @@ def _check_and_import_dependencies():
     deps = {
         'cairosvg': 'cairosvg', 'cartopy': 'cartopy', 'ephem': 'ephem',
         'matplotlib': 'matplotlib', 'Pillow': 'PIL', 'scipy': 'scipy',
-        'scour': 'scour', 'showerassoc': 'showerassoc',
+        'scour': 'scour', 'showerassoc': 'showerassoc', 'plotly': 'plotly'
     }
     available = {}
     missing = []
@@ -63,6 +63,12 @@ if 'matplotlib' in AVAILABLE_LIBS:
     from matplotlib import pylab
 if 'scipy' in AVAILABLE_LIBS:
     from scipy.optimize import fmin_powell
+    from scipy.spatial import cKDTree
+if 'plotly' in AVAILABLE_LIBS:
+    import plotly.graph_objects as go
+if 'Pillow' in AVAILABLE_LIBS:
+    from PIL import Image, ImageOps, ImageEnhance
+
 
 # --- Constants ---
 EARTH_RADIUS_KM = 6371.0
@@ -141,11 +147,9 @@ def dist_line_line(p1, u1, p2, u2):
     a = np.array([[np.dot(u1, u1), -np.dot(u1, u2)], [np.dot(u2, u1), -np.dot(u2, u2)]])
     b = np.array([np.dot(u1, (p2 - p1)), np.dot(u2, (p2 - p1))])
     try:
-        # Solve for the parameters s and t that give the closest points
         s, t = np.linalg.solve(a, b)
         return np.linalg.norm((p1 + s * u1) - (p2 + t * u2))
     except np.linalg.LinAlgError:
-        # Lines are parallel, calculate distance from a point to the line
         return np.linalg.norm(np.cross(u1, p2 - p1))
 
 def closest_point(p1, p2, u1, u2, return_points=False):
@@ -226,9 +230,8 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
         label = 'Observasjoner' if is_inlier else 'Avvikende observasjoner'
         pylab.plot(dists, heights, color=color, marker='o', mfc=mfc, linestyle='None', label=label, zorder=zorder)
     
-    # After plotting all points, get axis limits for dynamic text offset
     ymin, ymax = pylab.gca().get_ylim()
-    y_offset = (ymax - ymin) * 0.015  # 1.5% of the plot height
+    y_offset = (ymax - ymin) * 0.015
 
     for i in range(n_obs):
         start_dist = haversine(start_lon, start_lat, *xyz2lonlat(cross_pos[i])[:2])
@@ -284,12 +287,10 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     gl.top_labels = gl.right_labels = False
     gl.xformatter, gl.yformatter = LongitudeFormatter(), LatitudeFormatter()
 
-    # Determine unique stations and their inlier status
     unique_stations = {obs_data['names'][i]: (site_lons[i], site_lats[i]) for i in range(n_obs)}
     station_is_inlier = {name: False for name in unique_stations}
     for i in inlier_indices: station_is_inlier[obs_data['names'][i]] = True
 
-    # Plot each unique station marker once
     for name, (lon, lat) in unique_stations.items():
         if station_is_inlier[name]:
             ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label='Inkludert observasjon')
@@ -297,7 +298,6 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
             ax.plot(lon, lat, 'ko', markersize=8, mfc='none', transform=ccrs.PlateCarree(), label='Avvikende observasjon')
         ax.text(lon + 0.05, lat + 0.05, name, color='black', transform=ccrs.PlateCarree())
 
-    # Plot lines of sight for all observations
     if not options['azonly'] and cross_pos:
         for i in range(n_obs):
             start_los_lon, start_los_lat, _ = xyz2lonlat(cross_pos[i])
@@ -306,7 +306,6 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
             ax.plot([site_lons[i], start_los_lon], [site_lats[i], start_los_lat], color='#5499c7', transform=ccrs.PlateCarree(), linestyle=linestyle)
             ax.plot([site_lons[i], end_los_lon], [site_lats[i], end_los_lat], color='#1a5276', transform=ccrs.PlateCarree(), linestyle=linestyle)
 
-    # Plot the final fitted track
     if not options['azonly'] and track_start is not None:
         start_lon, start_lat, _ = xyz2lonlat(track_start)
         end_lon, end_lat, _ = xyz2lonlat(track_end)
@@ -321,6 +320,248 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     if 'show' in options['doplot']: pylab.show()
     pylab.close()
 
+from PIL import Image
+import numpy as np
+
+def darken_blacks(img, black_point=64):
+    """
+    Applies a custom curve to an image, darkening neutral/gray colors more
+    aggressively than saturated colors.
+
+    Args:
+        img (PIL.Image.Image): The input image object.
+        black_point (int): The brightness level (0-254) to map to pure black.
+    """
+    if not 0 <= black_point < 255:
+        raise ValueError("black_point must be an integer between 0 and 254.")
+
+    # 1. Convert the image to YCbCr to separate brightness (Y) from color (Cb, Cr)
+    rgb_img = img.convert('RGB')
+    ycbcr_img = rgb_img.convert('YCbCr')
+
+    # 2. Split into channels and convert to numpy arrays for calculations
+    y_ch, cb_ch, cr_ch = ycbcr_img.split()
+    y_data = np.array(y_ch, dtype=np.float32)
+    cb_data = np.array(cb_ch, dtype=np.float32)
+    cr_data = np.array(cr_ch, dtype=np.float32)
+
+    # 3. Create the darkening lookup table (LUT) for the brightness channel
+    stretch_factor = 255 / (255 - black_point)
+    lut = np.array([int(round(max(0, i - black_point) * stretch_factor)) for i in range(256)], dtype=np.uint8)
+    
+    # Apply the darkening effect to the entire brightness channel
+    darkened_y_data = lut[y_data.astype(np.uint8)]
+
+    # 4. Calculate a "grayness" weight for each pixel
+    # Chrominance distance from the center (128) determines saturation
+    # A small distance means the color is close to gray.
+    chroma_dist = ((cb_data - 128)**2 + (cr_data - 128)**2)
+    
+    # Normalize distance to 0-1 range (max possible distance is ~180)
+    # and invert it to get a weight (1.0 for gray, 0.0 for saturated)
+    grayness_weight = 1.0 - np.clip(chroma_dist / 180.0, 0, 1)
+
+    # 5. Blend the original brightness with the darkened brightness using the weight
+    # Pixels with a high grayness_weight will be darkened more.
+    final_y_data = y_data * (1 - grayness_weight) + darkened_y_data * grayness_weight
+    final_y_data = np.clip(final_y_data, 0, 255).astype(np.uint8)
+
+    # 6. Create a new image from the adjusted Y channel and original Cb, Cr channels
+    final_y_ch = Image.fromarray(final_y_data)
+    merged_ycbcr = Image.merge('YCbCr', (final_y_ch, cb_ch, cr_ch))
+
+    # 7. Convert back to RGB
+    return merged_ycbcr.convert('RGB')
+
+
+
+def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_indices, options):
+    """
+    Generates an interactive 3D plot of the meteor trajectory and sight lines,
+    with a projected map on the XY plane for accurate scaling and context.
+    """
+    # --- Helper functions for color sorting and image generation ---
+    def rgb_to_lab(rgb):
+        r, g, b = [x / 255.0 for x in rgb]
+        r = ((r + 0.055) / 1.055)**2.4 if r > 0.04045 else r / 12.92
+        g = ((g + 0.055) / 1.055)**2.4 if g > 0.04045 else g / 12.92
+        b = ((b + 0.055) / 1.055)**2.4 if b > 0.04045 else b / 12.92
+        r, g, b = r * 100, g * 100, b * 100
+        x = r * 0.4124 + g * 0.3576 + b * 0.1805
+        y = r * 0.2126 + g * 0.7152 + b * 0.0722
+        z = r * 0.0193 + g * 0.1192 + b * 0.9505
+        ref_x, ref_y, ref_z = 95.047, 100.0, 108.883
+        x /= ref_x; y /= ref_y; z /= ref_z
+        x = x**(1/3) if x > 0.008856 else (7.787 * x) + (16/116)
+        y = y**(1/3) if y > 0.008856 else (7.787 * y) + (16/116)
+        z = z**(1/3) if z > 0.008856 else (7.787 * z) + (16/116)
+        return (116 * y) - 16, 500 * (x - y), 200 * (y - z)
+
+    def sort_palette_by_luminance(palette_rgb):
+        if not palette_rgb: return [], {}
+        luminance_map = [(rgb_to_lab(c)[0], i) for i, c in enumerate(palette_rgb)]
+        luminance_map.sort()
+        sorted_indices = [i for lum, i in luminance_map]
+        sorted_palette = [palette_rgb[i] for i in sorted_indices]
+        old_to_new_map = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_indices)}
+        return sorted_palette, old_to_new_map
+    
+    def save_colorscale_image(palette, filename):
+        num_colors = len(palette)
+        height = 50
+        gradient_data = np.array(palette, dtype=np.uint8).reshape(1, num_colors, 3)
+        gradient_data = np.repeat(gradient_data, height, axis=0)
+        img = Image.fromarray(gradient_data, 'RGB')
+        img.save(filename)
+        print(f"Debug colorscale image saved to {filename}")
+
+
+    # --- Check for required libraries ---
+    if 'plotly' not in AVAILABLE_LIBS or 'cartopy' not in AVAILABLE_LIBS or 'matplotlib' not in AVAILABLE_LIBS or 'Pillow' not in AVAILABLE_LIBS:
+        print("Cannot plot interactive map, missing required libraries.")
+        return
+
+    # --- 1. Define Projection and Data Bounds ---
+    site_lons, site_lats = obs_data['longitudes'], obs_data['latitudes']
+    n_obs = len(site_lons) // 2
+    all_lons = list(site_lons); all_lats = list(site_lats)
+    if not options['azonly'] and track_start is not None:
+        start_lon, start_lat, _ = xyz2lonlat(track_start)
+        end_lon, end_lat, _ = xyz2lonlat(track_end)
+        all_lons.extend([start_lon, end_lon]); all_lats.extend([start_lat, end_lat])
+    center_lon = np.mean(all_lons); center_lat = np.mean(all_lats)
+    proj = ccrs.Gnomonic(central_longitude=center_lon, central_latitude=center_lat)
+
+    # --- 2. Generate and Save Background Map Image ---
+    lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1
+    lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
+    fig_map, ax_map = pylab.subplots(figsize=(10, 10), subplot_kw={'projection': proj})
+    ax_map.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree())
+    lat_span = abs(lat_top - lat_bot)
+    zoom_level = int(np.log2(360 / (lat_span + 1.5)))
+    zoom_level = max(6, min(zoom_level, 10))
+    try:
+        ax_map.add_image(OSM(), zoom_level)
+    except Exception as e:
+        print(f"Warning: Could not fetch OSM map tiles. Plot will have a plain background. Error: {e}")
+    x_min_m, x_max_m, y_min_m, y_max_m = ax_map.get_extent()
+    map_image_path = "background_map.png"
+    fig_map.savefig(map_image_path, dpi=200, bbox_inches='tight', pad_inches=0, transparent=False)
+    pylab.close(fig_map)
+
+    # --- 3. Prepare Plotly Traces ---
+    traces = []
+    def project_points(lons, lats):
+        points_m = proj.transform_points(ccrs.PlateCarree(), np.array(lons), np.array(lats))
+        return points_m[:, 0] / 1000.0, points_m[:, 1] / 1000.0
+
+    # --- Use smoothed color quantization for a high-quality, small map ---
+    img = Image.open(map_image_path).convert('RGB')
+    
+    max_dim = 768
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        print(f"Map image downsampled to {img.size} for better performance.")
+    
+    img = darken_blacks(img, 112)
+    
+    quant_16 = img.quantize(colors=16, method=Image.Quantize.MEDIANCUT)
+    raw_palette_16 = quant_16.getpalette()
+    palette_16_rgb = [tuple(raw_palette_16[i:i+3]) for i in range(0, len(raw_palette_16), 3)]
+    
+    sorted_palette_16, _ = sort_palette_by_luminance(palette_16_rgb)
+    
+    r_ch, g_ch, b_ch = zip(*sorted_palette_16)
+    x_old = np.linspace(0, 1, len(sorted_palette_16))
+    x_new = np.linspace(0, 1, 256)
+    r_new = np.interp(x_new, x_old, r_ch)
+    g_new = np.interp(x_new, x_old, g_ch)
+    b_new = np.interp(x_new, x_old, b_ch)
+    smoothed_palette_256 = list(zip(np.round(r_new).astype(np.uint8), np.round(g_new).astype(np.uint8), np.round(b_new).astype(np.uint8)))
+
+    save_colorscale_image(smoothed_palette_256, "colorscale_debug.png")
+
+    if 'scipy' in AVAILABLE_LIBS:
+        palette_lab = np.array([rgb_to_lab(c) for c in smoothed_palette_256])
+        image_pixels = np.array(img)
+        h, w, _ = image_pixels.shape
+        pixels_flat = image_pixels.reshape(-1, 3)
+        pixels_lab = np.array([rgb_to_lab(p) for p in pixels_flat])
+        
+        tree = cKDTree(palette_lab)
+        _, indices = tree.query(pixels_lab)
+        
+        remapped_indexed_array = indices.reshape(h, w)
+    else:
+        print("Warning: Scipy not found. Falling back to simpler color mapping. Run 'pip install scipy' for best results.")
+        quant_256 = img.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+        remapped_indexed_array = np.array(quant_256)
+        raw_palette_256 = quant_256.getpalette()
+        smoothed_palette_256 = [tuple(raw_palette_256[i:i+3]) for i in range(0, len(raw_palette_256), 3)]
+
+    remapped_indexed_array = np.flipud(remapped_indexed_array)
+    
+    custom_colorscale = []
+    for i, (r,g,b) in enumerate(smoothed_palette_256):
+        norm_val = i / 255.0
+        custom_colorscale.append([norm_val, f'rgb({r},{g},{b})'])
+    
+    height, width = remapped_indexed_array.shape
+    traces.append(go.Surface(
+        x=np.linspace(x_min_m / 1000.0, x_max_m / 1000.0, width),
+        y=np.linspace(y_min_m / 1000.0, y_max_m / 1000.0, height),
+        z=np.zeros((height, width)),
+        surfacecolor=remapped_indexed_array,
+        cmin=0, cmax=255,
+        colorscale=custom_colorscale,
+        showscale=False, hoverinfo='none'
+    ))
+    
+    # --- Add other plot elements ---
+    if not options['azonly'] and track_start is not None:
+        start_lon, start_lat, start_h = xyz2lonlat(track_start)
+        end_lon, end_lat, end_h = xyz2lonlat(track_end)
+        [start_x, end_x], [start_y, end_y] = project_points([start_lon, end_lon], [start_lat, end_lat])
+        traces.extend([
+            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[start_h, end_h], mode='lines', line=dict(color='blue', width=7), name='Estimert bane', showlegend=False),
+            go.Cone(x=[end_x], y=[end_y], z=[end_h], u=[end_x - start_x], v=[end_y - start_y], w=[end_h - start_h], sizemode="absolute", sizeref=5, anchor="tip", showscale=False, colorscale=[[0, 'blue'], [1, 'blue']]),
+            go.Scatter3d(x=[start_x, start_x], y=[start_y, start_y], z=[start_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'),
+            go.Scatter3d(x=[end_x, end_x], y=[end_y, end_y], z=[end_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'),
+            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[0, 0], mode='lines+markers', line=dict(color='blue', width=2), marker=dict(symbol='circle', color='blue', size=2), name='Bakkebane', hoverinfo='none', showlegend=False)
+        ])
+
+    unique_stations = {obs_data['names'][i]: (site_lons[i], site_lats[i]) for i in range(n_obs)}
+    station_is_inlier = {name: False for name in unique_stations}
+    for i in inlier_indices: station_is_inlier[obs_data['names'][i]] = True
+
+    for name, (lon, lat) in unique_stations.items():
+        x, y = project_points([lon], [lat])
+
+    if not options['azonly'] and cross_pos:
+        for i in range(n_obs):
+            station_x, station_y = project_points([site_lons[i]], [site_lats[i]])
+            start_los_lon, start_los_lat, start_los_h = xyz2lonlat(cross_pos[i])
+            start_los_x, start_los_y = project_points([start_los_lon], [start_los_lat])
+            end_los_lon, end_los_lat, end_los_h = xyz2lonlat(cross_pos[i + n_obs])
+            end_los_x, end_los_y = project_points([end_los_lon], [end_los_lat])
+            linestyle = 'solid' if i in inlier_indices else 'dash'
+            traces.extend([
+                go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), name=f"Siktelinje start ({obs_data['names'][i]})", showlegend=False),
+                go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), name=f"Siktelinje slutt ({obs_data['names'][i]})", showlegend=False)
+            ])
+
+    # --- 4. Define Layout and Save Figure ---
+    layout = go.Layout(title='Meteorens atmosfæriske bane', title_x=0.5, title_y=0.92, scene=dict(xaxis_title='Øst-vest avstand (km)', yaxis_title='Nord-sør avstand (km)', zaxis_title='Høgde (km)', xaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1), yaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1), zaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1), xaxis_range=[x_min_m / 1000.0, x_max_m / 1000.0], yaxis_range=[y_min_m / 1000.0, y_max_m / 1000.0], aspectmode='data'), margin=dict(l=0, r=0, b=0, t=40))
+    fig = go.Figure(data=traces, layout=layout)
+    fig.write_html("map.html", include_plotlyjs='cdn')
+    print("Interactive 3D plot saved to map.html")
+
+    try:
+        os.remove(map_image_path)
+    except OSError as e:
+        print(f"Error removing temporary map file: {e}")
+
+
 def chisq_of_fit(track_params, los_refs, los_vecs, weights):
     track_ref, track_vec = track_params[:3], track_params[3:]
     n_obs = len(weights)
@@ -334,7 +575,6 @@ def fit_track(obs_data, optimize=True):
     pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
     los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
     
-    # --- Initial Guess for Track Vector ---
     plane_normals = [np.cross(los_vectors[i], los_vectors[i + n_obs]) for i in range(n_obs)]
     plane_normals = [n / np.linalg.norm(n) if np.linalg.norm(n) > 0 else n for n in plane_normals]
     
@@ -349,7 +589,6 @@ def fit_track(obs_data, optimize=True):
     fit_quality = sum(w for w in vec_weights if not np.isnan(w))
     if fit_quality < 0.02: optimize = False
 
-    # --- Initial Guess for Track Position and Direction ---
     if optimize:
         start_coords = [p for i, j in itertools.combinations(range(n_obs), 2) for p in (intersec_line_plane(pos_vectors[i], los_vectors[i], pos_vectors[j], plane_normals[j]), intersec_line_plane(pos_vectors[j], los_vectors[j], pos_vectors[i], plane_normals[i])) if p is not None]
         end_coords = [p for i, j in itertools.combinations(range(n_obs), 2) for p in (intersec_line_plane(pos_vectors[i+n_obs], los_vectors[i+n_obs], pos_vectors[j], plane_normals[j]), intersec_line_plane(pos_vectors[j+n_obs], los_vectors[j+n_obs], pos_vectors[i], plane_normals[i])) if p is not None]
@@ -367,7 +606,6 @@ def fit_track(obs_data, optimize=True):
     if np.linalg.norm(best_fit_dir) < 1e-9: return None, None, [], float('inf'), fit_quality
     best_fit_dir /= np.linalg.norm(best_fit_dir)
     
-    # --- Optimization ---
     initial_params = np.concatenate([start_coord, best_fit_dir])
     if optimize and 'scipy' in AVAILABLE_LIBS:
         final_params, _, _, _, _, flag = fmin_powell(chisq_of_fit, initial_params, args=(pos_vectors, los_vectors, obs_data['weights']), disp=False, full_output=True)
@@ -381,7 +619,6 @@ def fit_track(obs_data, optimize=True):
     best_fit_dir /= np.linalg.norm(best_fit_dir)
     if np.dot(initial_params[3:], best_fit_dir) < 0: best_fit_dir = -best_fit_dir
 
-    # --- Finalize Track Geometry ---
     cross_positions, dists = [], []
     for i in range(len(obs_data['longitudes'])):
         los_pos, track_pos = closest_point(pos_vectors[i], start_coord, los_vectors[i], best_fit_dir, return_points=True)
@@ -403,26 +640,6 @@ def _create_subset_obs_data(full_obs_data, indices):
 def robust_fit_with_ransac(obs_data, raw_data, options):
     """
     Performs a robust trajectory fit using a multi-run RANSAC approach.
-
-    This algorithm works in two main phases:
-    1.  **Candidate Generation:** It performs multiple independent RANSAC runs.
-        Each run iterates many times, randomly sampling minimal sets of
-        observations to generate a trial trajectory. It then finds the
-        "consensus set" (all observations consistent with this trial trajectory)
-        and keeps the largest, lowest-error set it finds in that run.
-        The best set from each run becomes a "candidate model".
-
-    2.  **Final Selection (Run-off):** After collecting unique candidate sets
-        from all the runs, it performs a final, high-quality *optimized* fit
-        on each one. It then selects the absolute best model based on a clear
-        hierarchy:
-            a. The model with the most inliers is preferred.
-            b. If multiple models have the same (maximum) number of inliers,
-               the one with the lowest final fit error is chosen.
-
-    This multi-run, two-phase approach is highly robust against local minima
-    and is much more likely to find the true global optimum solution than a
-    single RANSAC run.
     """
     random.seed(options['seed'])
     num_stations = len(raw_data['names'])
@@ -436,11 +653,9 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     if options['debug_ransac']: print("--- RANSAC Debugging Enabled ---")
     candidate_sets = set()
 
-    # --- Phase 1: Candidate Generation via Multiple RANSAC Runs ---
     for run in range(options['ransac_runs']):
         best_inlier_indices_this_run, best_fit_error_this_run = set(), float('inf')
         for i in range(options['ransac_iterations']):
-            # Ensure the minimal sample is from two different locations
             while True:
                 sample_indices = random.sample(range(num_stations), 2)
                 loc1 = (raw_data['latitudes'][sample_indices[0]], raw_data['longitudes'][sample_indices[0]])
@@ -453,14 +668,12 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
             track_ref, track_vec = candidate_start, (candidate_end - candidate_start)
             track_vec /= np.linalg.norm(track_vec)
             
-            # Find consensus set
             current_inlier_indices = set(sample_indices)
             for j in range(num_stations):
                 if j in sample_indices: continue
                 dist = (dist_line_line(track_ref, track_vec, pos_vectors[j], los_vectors[j]) + dist_line_line(track_ref, track_vec, pos_vectors[j + num_stations], los_vectors[j + num_stations])) / 2.0
                 if dist < options['ransac_threshold']: current_inlier_indices.add(j)
             
-            # If this model is potentially better, check its non-optimized error
             if len(current_inlier_indices) >= len(best_inlier_indices_this_run):
                 _, _, _, current_chi2, _ = fit_track(_create_subset_obs_data(obs_data, current_inlier_indices), optimize=False)
                 if np.isfinite(current_chi2) and (len(current_inlier_indices) > len(best_inlier_indices_this_run) or current_chi2 < best_fit_error_this_run):
@@ -469,7 +682,6 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         
         if best_inlier_indices_this_run: candidate_sets.add(frozenset(best_inlier_indices_this_run))
 
-    # --- Phase 2: Final Selection from Candidates ---
     if options['debug_ransac']: print(f"\n--- RANSAC Final Run-off from {options['ransac_runs']} runs ---\nFound {len(candidate_sets)} unique candidate sets to evaluate.")
     
     best_final_model, best_final_model_score = None, (0, float('inf'))
@@ -478,17 +690,14 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         inlier_obs_data = _create_subset_obs_data(obs_data, indices_set)
         fit_results = fit_track(inlier_obs_data, optimize=True)
     
-        # Unpack fit results to get the track geometry
         track_start, track_end, cross_pos, final_error, final_quality = fit_results
     
-        # Physical Plausibility Check
         penalty = 0
         if track_start is not None:
-            # Check if the track is physically improbable
             _, _, start_h = xyz2lonlat(track_start)
             _, _, end_h = xyz2lonlat(track_end)
             if min(start_h, end_h) < 5.0 or max(start_h, end_h) > 150.0:
-                penalty = 1e9 # Add a massive penalty for bad solutions
+                penalty = 1e9
 
             durations = inlier_obs_data['durations']
             if any(d > 0 for d in durations):
@@ -499,10 +708,6 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
                     if calculated_speed < 8.0 or calculated_speed > 100.0:
                         penalty += 1e9 
 
-            # Combine all metrics into a final score
-            # 1. Prioritize more inliers (negative sign)
-            # 2. Add penalty for physically impossible tracks
-            # 3. Use final error as the ultimate tie-breaker
             current_score = (-len(indices_set), (penalty + final_error + 1) / (final_quality + 1e-9))
 
         if options['debug_ransac']:
@@ -517,7 +722,6 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         print("RANSAC failed to find a valid model. Falling back to simple fit on all data.")
         return fit_track(obs_data, optimize=True), obs_data, list(range(num_stations))
 
-    # --- Phase 3: "All-In" Sanity Check ---
     all_in_fit_results = fit_track(obs_data, optimize=True)
     all_in_error = all_in_fit_results[3]
     if options['debug_ransac']:
@@ -562,7 +766,7 @@ def _load_and_prepare_data(filepath):
                 'height_m': float(words[idx+1]) / 1000.0 if idx+1 < len(words) else 0.0
             })
 
-    if not station_data_list: # Handle empty input file
+    if not station_data_list:
         return {}, {}, None
 
     raw_data = {key: [s[key] for s in station_data_list] for key in station_data_list[0]}
@@ -623,7 +827,6 @@ def _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier
     """Populates the MetrackInfo object from a set of fit results."""
     track_start, track_end, cross_pos_inliers, track_err, fit_quality = fit_results
 
-    # This code is moved directly from the metrack function
     info.inlier_stations = [raw_data['names'][i] for i in inlier_indices]
     info.error, info.fit_quality = track_err, fit_quality
     start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
@@ -658,12 +861,13 @@ def _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier
 
 def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborders=False, 
             timestamp=None, optimize=True, writestat=True, use_ransac=True, ransac_threshold=1.0, 
-            ransac_iterations=10, ransac_runs=100, seed=0, debug_ransac=False, all_in_tolerance=1.0, **kwargs):
+            ransac_iterations=10, ransac_runs=100, seed=0, debug_ransac=False, all_in_tolerance=1.0, 
+            interactive=False, **kwargs):
     """
     Main function to run the meteor track analysis.
     This is the primary entry point for both script and module usage.
     """
-    options = locals().copy() # Capture all arguments in a dictionary
+    options = locals().copy()
     options.pop('kwargs', None); options.pop('accept_err', None)
     
     raw_data, full_obs_data, borders = _load_and_prepare_data(inname)
@@ -679,7 +883,6 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
         if doplot: plot_map(None, None, None, full_obs_data, list(range(len(raw_data['names']))), options)
         return MetrackInfo()
 
-    # --- Primary Fit Attempt (RANSAC by default) ---
     if use_ransac:
         fit_results, inlier_obs_data, inlier_indices = robust_fit_with_ransac(full_obs_data, raw_data, options)
     else:
@@ -691,27 +894,22 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
         print("Could not determine a valid track. Aborting.")
         return MetrackInfo()
 
-    # Populate info object with primary fit results
     info = MetrackInfo()
     info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
 
-    # --- Sanity Check and Fallback Logic ---
-    is_plausible = not (max(info.start_height, info.end_height) < 10.0 or info.speed < 8.0 or info.speed > 100.0)
+    is_plausible = not (max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < 8.0 or info.speed > 100.0)))
 
     if not is_plausible and use_ransac:
         print("\nWarning: RANSAC solution is physically implausible. Attempting fallback...")
-        # The fallback is a simple, non-optimized fit on ALL data
         fit_results = fit_track(full_obs_data, optimize=False)
         
         if fit_results[0] is None:
             print("Fallback fit also failed. Aborting.")
             return MetrackInfo()
 
-        # Repopulate info with the new, hopefully better, results
         inlier_obs_data = full_obs_data
         inlier_indices = list(range(len(raw_data['names'])))
         info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
-
 
     if 'showerassoc' in AVAILABLE_LIBS:
         info.shower, _ = AVAILABLE_LIBS['showerassoc'].showerassoc(info.radiant_ra, info.radiant_dec, info.speed, time.strftime("%Y-%m-%d", time.localtime(info.timestamp)))
@@ -729,18 +927,21 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
 
         plot_height(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
         plot_map(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
+        if interactive:
+            plot_map_interactive(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
 
     return info
 
 def main():
     """Parses command-line arguments and runs the analysis."""
-    parser = argparse.ArgumentParser(description='Atmospheric meteor trajectory fitting.', epilog='Example: ./metrack.py obs_20120403.dat -o both -m i --borders-auto')
+    parser = argparse.ArgumentParser(description='Atmospheric meteor trajectory fitting.', epilog='Example: ./metrack2.py obs_20120403.dat -o both --interactive')
     parser.add_argument('inname', nargs='?', default=None, help='Name of input file with observation data.')
     parser.add_argument('-o', '--output', choices=['show', 'save', 'both'], default='', dest='doplot', help='Graphics output mode.')
     parser.add_argument('-m', '--map', dest='mapres', default='i', choices=['c','l','i','h','f'], help='Map detail level.')
     parser.add_argument('-a', '--azonly', action='store_true', help='Plot azimuths only; no fitting.')
     parser.add_argument('-b', '--borders-auto', dest='autoborders', action='store_true', help='Automatically determine map boundaries.')
     parser.add_argument('-t', '--timestamp', type=float, help="Force a specific Unix timestamp.")
+    parser.add_argument('--interactive', action='store_true', help="Generate an interactive 3D plot (map.html).")
     parser.add_argument('--no-opt', action='store_false', dest='optimize', default=True, help="Turn off optimization.")
     parser.add_argument('--no-write-stat', action='store_false', dest='writestat', default=True, help="Do not write a .stat file.")
     parser.add_argument('--no-ransac', action='store_false', dest='use_ransac', default=True, help="Disable RANSAC robust fitting.")

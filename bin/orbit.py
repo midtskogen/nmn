@@ -430,7 +430,7 @@ def _plot_orbit_interactive(et, meteor_elements):
             font=dict(size=10), 
             bgcolor='rgba(255, 255, 255, 0.5)',
             buttons=[
-                dict(label='▶ Play',
+                dict(label='▶ Spill',
                      method='animate',
                      args=[None, dict(frame=dict(duration=20, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
                 dict(label='⏸ Pause',

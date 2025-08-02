@@ -375,7 +375,7 @@ def darken_blacks(img, black_point=64):
 
 
 
-def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_indices, options):
+def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_indices, options, speed_km_s=0):
     """
     Generates an interactive 3D plot of the meteor trajectory and sight lines,
     with a projected map on the XY plane for accurate scaling and context.
@@ -479,8 +479,6 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     b_new = np.interp(x_new, x_old, b_ch)
     smoothed_palette_256 = list(zip(np.round(r_new).astype(np.uint8), np.round(g_new).astype(np.uint8), np.round(b_new).astype(np.uint8)))
 
-    save_colorscale_image(smoothed_palette_256, "colorscale_debug.png")
-
     if 'scipy' in AVAILABLE_LIBS:
         palette_lab = np.array([rgb_to_lab(c) for c in smoothed_palette_256])
         image_pixels = np.array(img)
@@ -523,12 +521,54 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         end_lon, end_lat, end_h = xyz2lonlat(track_end)
         [start_x, end_x], [start_y, end_y] = project_points([start_lon, end_lon], [start_lat, end_lat])
         traces.extend([
-            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[start_h, end_h], mode='lines', line=dict(color='blue', width=7), name='Estimert bane', showlegend=False),
-            go.Cone(x=[end_x], y=[end_y], z=[end_h], u=[end_x - start_x], v=[end_y - start_y], w=[end_h - start_h], sizemode="absolute", sizeref=5, anchor="tip", showscale=False, colorscale=[[0, 'blue'], [1, 'blue']]),
+            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[start_h, end_h], mode='lines', line=dict(color='blue', width=7), name='Estimert bane', showlegend=False, hoverinfo='none'),
+            go.Cone(x=[end_x], y=[end_y], z=[end_h], u=[end_x - start_x], v=[end_y - start_y], w=[end_h - start_h], sizemode="absolute", sizeref=5, anchor="tip", showscale=False, colorscale=[[0, 'blue'], [1, 'blue']], hoverinfo='none'),
             go.Scatter3d(x=[start_x, start_x], y=[start_y, start_y], z=[start_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'),
             go.Scatter3d(x=[end_x, end_x], y=[end_y, end_y], z=[end_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'),
             go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[0, 0], mode='lines+markers', line=dict(color='blue', width=2), marker=dict(symbol='circle', color='blue', size=2), name='Bakkebane', hoverinfo='none', showlegend=False)
         ])
+
+        # Add invisible hover points along the track
+        if speed_km_s > 0:
+            num_hover_points = 100
+            track_vec = track_end - track_start
+            total_track_length_km = np.linalg.norm(track_vec)
+            total_duration_s = total_track_length_km / speed_km_s
+            
+            start_lon_rad, start_lat_rad = np.radians(start_lon), np.radians(start_lat)
+    
+            hover_x, hover_y, hover_z = [], [], []
+            custom_data = [] # Store [time, height, ground_dist, lat, lon]
+    
+            for t in np.linspace(0, 1, num_hover_points):
+                point_xyz = track_start + t * track_vec
+                lon, lat, height_km = xyz2lonlat(point_xyz)
+                proj_x, proj_y = project_points([lon], [lat])
+                
+                hover_x.append(proj_x[0])
+                hover_y.append(proj_y[0])
+                hover_z.append(height_km)
+                
+                ground_dist_km = haversine(start_lon, start_lat, lon, lat)
+                time_s = t * total_duration_s
+                custom_data.append([time_s, height_km, ground_dist_km, lat, lon])
+                
+            traces.append(go.Scatter3d(
+                x=hover_x, y=hover_y, z=hover_z,
+                mode='markers',
+                marker=dict(color='rgba(0,0,0,0)', size=10), # Invisible but hoverable
+                customdata=np.array(custom_data),
+                hovertemplate=(
+                    '<b>Tid</b>: %{customdata[0]:.2f} s<br>'
+                    '<b>Lengdegrad</b>: %{customdata[3]:.4f}<br>'
+                    '<b>Breddegrad</b>: %{customdata[4]:.4f}<br>'
+                    '<b>Høgde</b>: %{customdata[1]:.2f} km<br>'
+                    '<b>Strekning</b>: %{customdata[2]:.2f} km'
+                    '<extra></extra>'
+                ),
+                name='Track Info',
+                showlegend=False
+            ))
 
     unique_stations = {obs_data['names'][i]: (site_lons[i], site_lats[i]) for i in range(n_obs)}
     station_is_inlier = {name: False for name in unique_stations}
@@ -546,13 +586,117 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             end_los_x, end_los_y = project_points([end_los_lon], [end_los_lat])
             linestyle = 'solid' if i in inlier_indices else 'dash'
             traces.extend([
-                go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), name=f"Siktelinje start ({obs_data['names'][i]})", showlegend=False),
-                go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), name=f"Siktelinje slutt ({obs_data['names'][i]})", showlegend=False)
+                go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), name=f"Siktelinje start ({obs_data['names'][i]})", showlegend=False, hoverinfo='none'),
+                go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), name=f"Siktelinje slutt ({obs_data['names'][i]})", showlegend=False, hoverinfo='none')
             ])
 
-    # --- 4. Define Layout and Save Figure ---
-    layout = go.Layout(title='Meteorens atmosfæriske bane', title_x=0.5, title_y=0.92, scene=dict(xaxis_title='Øst-vest avstand (km)', yaxis_title='Nord-sør avstand (km)', zaxis_title='Høgde (km)', xaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1), yaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1), zaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1), xaxis_range=[x_min_m / 1000.0, x_max_m / 1000.0], yaxis_range=[y_min_m / 1000.0, y_max_m / 1000.0], aspectmode='data'), margin=dict(l=0, r=0, b=0, t=40))
-    fig = go.Figure(data=traces, layout=layout)
+    # --- 4. Define Scene Layout and Camera ---
+    
+    # Part A: Define the center of the visible grid in kilometers
+    x_min_km = x_min_m / 1000.0
+    x_max_km = x_max_m / 1000.0
+    y_min_km = y_min_m / 1000.0
+    y_max_km = y_max_m / 1000.0
+
+    grid_center_km = {
+        'x': (x_min_km + x_max_km) / 2.0,
+        'y': (y_min_km + y_max_km) / 2.0
+    }
+
+    # Part B: Use the empirically discovered constant for normalization
+    # This value appears to be a fixed scaling factor in Plotly's camera system.
+    norm_factor = 245.0
+
+    # Part C: Calculate the final camera center using the two-step process
+    end_lon, end_lat, _ = xyz2lonlat(track_end)
+    end_x_km, end_y_km = project_points([end_lon], [end_lat])
+    
+    # 1. Translate the coordinates relative to the grid center
+    translated_x = end_x_km[0] - grid_center_km['x']
+    translated_y = end_y_km[0] - grid_center_km['y']
+    
+    # 2. Scale the translated coordinates using the constant to normalize them
+    camera_center = dict(
+        x=translated_x / norm_factor,
+        y=translated_y / norm_factor,
+        z=0
+    )
+
+    # Part D: Calculate camera eye position in the final normalized space
+    camera_distance_norm = 2.0
+    
+    initial_eye = dict(
+        x=camera_center['x'] + camera_distance_norm * np.cos(np.radians(0)),
+        y=camera_center['y'] + camera_distance_norm * np.sin(np.radians(0)),
+        z=camera_center['z'] + camera_distance_norm * np.tan(np.radians(35))
+    )
+
+    # Part E: Generate frames for the autorotation animation
+    frames = []
+    num_frames = 180 # Number of frames for a full 360-degree rotation
+
+    for k in range(num_frames):
+        theta = (k / num_frames) * 2 * np.pi
+        eye_x = camera_center['x'] + camera_distance_norm * np.cos(theta)
+        eye_y = camera_center['y'] + camera_distance_norm * np.sin(theta)
+
+        frames.append(go.Frame(
+            layout=dict(scene=dict(camera=dict(
+                up=dict(x=0, y=0, z=1),
+                center=camera_center,
+                eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']) # Keep Z constant
+            )))
+        ))
+
+# Part F: Create the final layout
+    layout = go.Layout(
+        title='Meteorens atmosfæriske bane', title_x=0.5, title_y=0.92,
+        scene=dict(
+            xaxis=dict(
+                title='Øst-vest avstand (km)',
+                range=[x_min_km, x_max_km],
+                showspikes=True,
+                spikethickness=0.5
+            ),
+            yaxis=dict(
+                title='Nord-sør avstand (km)',
+                range=[y_min_km, y_max_km],
+                showspikes=True,
+                spikethickness=0.5
+            ),
+            zaxis=dict(
+                title='Høgde (km)',
+                showspikes=True,
+                spikethickness=0.5
+            ),
+            aspectmode='data',
+            dragmode='turntable',
+            camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=initial_eye)
+        ),
+        margin=dict(l=0, r=0, b=0, t=40),
+        updatemenus=[dict(
+            type='buttons',
+            active=0,
+            showactive=True,
+            y=0.95, x=0.05,
+            xanchor='left', yanchor='top',
+            pad=dict(t=0, r=10),
+            font=dict(size=10),
+            bgcolor='rgba(255, 255, 255, 0.5)',
+            buttons=[
+                dict(label='▶ Spill',
+                     method='animate',
+                     args=[None, dict(frame=dict(duration=50, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
+                dict(label='⏸ Pause',
+                     method='animate',
+                     args=[[None], dict(frame=dict(duration=0, redraw=False),
+                                        mode='immediate',
+                                        transition=dict(duration=0))])
+            ]
+        )]
+    )
+    
+    fig = go.Figure(data=traces, layout=layout, frames=frames)
     fig.write_html("map.html", include_plotlyjs='cdn')
     print("Interactive 3D plot saved to map.html")
 
@@ -928,7 +1072,7 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
         plot_height(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
         plot_map(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
         if interactive:
-            plot_map_interactive(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
+            plot_map_interactive(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options, speed_km_s=info.speed)
 
     return info
 

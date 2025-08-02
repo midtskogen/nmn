@@ -100,9 +100,18 @@ def main():
     midaz, midalt, arc = midpoint(args.pos[0], args.pos[1], args.endpos[0], args.endpos[1])
     hfov = max(args.fov, arc * 1.4 * max(1, float(args.width) / args.height))
 
+    # --- Main Reprojection ---
+    try:
+        # Use pto_mapper to parse the file
+        global_options, images = pto_mapper.parse_pto_file(args.infile)
+    except (ValueError, FileNotFoundError) as e:
+        print(f"❌ Error: Could not read or parse PTO file. {e}")
+        return
+
     # --- Grid File Generation (Optional) ---
     if args.gridfile:
         # Define the full set of parameters in the desired order to match the original output
+        global_options['_type'] = 'p'
         grid_img = OrderedDict([
             ('_type', 'i'), ('w', args.width), ('h', args.height), ('f', 0), ('v', hfov),
             ('Ra', 0), ('Rb', 0), ('Rc', 0), ('Rd', 0), ('Re', 0),
@@ -113,17 +122,8 @@ def main():
             ('Va', 1), ('Vb', 0), ('Vc', 0), ('Vd', 0), ('Vx', 0), ('Vy', 0), ('Vm', 5),
             ('n', "dummy.jpg")
         ])
-        # A grid file typically doesn't need a 'p' line, but you could add one if needed
-        write_pto(args.gridfile, global_options=None, images=[grid_img])
+        write_pto(args.gridfile, global_options=global_options, images=[grid_img])
         print(f"✅ Grid file written to {args.gridfile}")
-
-    # --- Main Reprojection ---
-    try:
-        # Use pto_mapper to parse the file
-        global_options, images = pto_mapper.parse_pto_file(args.infile)
-    except (ValueError, FileNotFoundError) as e:
-        print(f"❌ Error: Could not read or parse PTO file. {e}")
-        return
 
     # Create the combined rotation matrix
     T_yaw = euler_to_matrix(yaw_deg=180 - midaz, pitch_deg=0, roll_deg=0)

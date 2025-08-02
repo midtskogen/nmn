@@ -169,4 +169,4 @@ if __name__ == '__main__':
     results = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects, map_to_source_image=True, include_img_idx=False)
     for res_line in results:
         sx, sy, az, alt, name, mag = res_line
-        print(f'{sx} {sy} {az} {alt} "{name}" {mag}')
+        print(f'{sx} {sy} {az} {alt} \'{name}\' {mag}')

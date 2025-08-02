@@ -22,14 +22,7 @@ except ImportError:
     print("Please ensure pto_mapper.py is in the same directory as this script.", file=sys.stderr)
     sys.exit(1)
 
-# Import get_timestamp directly from the timestamp.py file
-try:
-    from timestamp import get_timestamp
-except ImportError:
-    print("Error: The 'timestamp.py' module was not found.", file=sys.stderr)
-    print("Please ensure timestamp.py is in the same directory as this script.", file=sys.stderr)
-    sys.exit(1)
-
+# The timestamp import is now deferred to the video processing function where it is needed.
 
 try:
     import av
@@ -664,6 +657,14 @@ def _extract_timestamps_from_file(args):
     Worker function for ThreadPoolExecutor. Extracts all timestamps from a single video file.
     This function is executed in a separate thread for each video file.
     """
+    # Defer the import of the timestamp module until it's actually needed.
+    try:
+        from timestamp import get_timestamp
+    except ImportError:
+        # Re-raise the ImportError. The main thread will catch this exception
+        # from the ThreadPoolExecutor and handle the user message and exit.
+        raise
+        
     i, video_file, model = args
     # Ensure the absolute full path is printed for clarity.
     full_path = os.path.abspath(video_file)
@@ -841,8 +842,13 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             print(f"Loaded {len(synchronized_frame_groups)} synchronized frame groups.")
         else:
             print("Starting Pass 1: Timestamp analysis (utilizing all available cores)...")
-            with ThreadPoolExecutor(max_workers=num_cores) as executor:
-                raw_ts_data_unordered = list(executor.map(_extract_timestamps_from_file, [(i, f, model) for i, f in enumerate(input_files)]))
+            try:
+                with ThreadPoolExecutor(max_workers=num_cores) as executor:
+                    raw_ts_data_unordered = list(executor.map(_extract_timestamps_from_file, [(i, f, model) for i, f in enumerate(input_files)]))
+            except ImportError:
+                print("\nError: The 'timestamp.py' module is required for the --sync feature but was not found.", file=sys.stderr)
+                print("Please ensure timestamp.py is in the same directory as this script.", file=sys.stderr)
+                sys.exit(1)
             
             raw_ts_data = [d for _, d in sorted(raw_ts_data_unordered)]
 

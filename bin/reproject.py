@@ -140,7 +140,7 @@ def main():
     
     # Update image and panorama parameters
     img_to_process.update({'y': y_new, 'p': p_new, 'r': r_new})
-    global_options.update({'f': 0, 'v': hfov, 'w': args.width, 'h': args.height, 'y': 0, 'p': 0, 'r': 0})
+    global_options.update({'_type': 'p', 'f': 0, 'v': hfov, 'w': args.width, 'h': args.height, 'y': 0, 'p': 0, 'r': 0})
     
     write_pto(args.output, global_options, images=[img_to_process])
     print(f"✅ Reprojected PTO file written to {args.output}")

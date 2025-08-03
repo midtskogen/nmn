@@ -948,7 +948,16 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             frame_count += 1
             status_message = f"Processing frame group: {frame_count}"
             if use_sync: status_message += f" / {len(synchronized_frame_groups)}"
-            sys.stdout.write('\r' + status_message.ljust(os.get_terminal_size().columns - 1))
+            
+            # *** FIX: Robust progress bar for non-interactive environments ***
+            try:
+                # Try to get terminal size
+                terminal_width = os.get_terminal_size().columns
+            except OSError:
+                # Fallback to a default width if not in a real terminal
+                terminal_width = 80
+            
+            sys.stdout.write('\r' + status_message.ljust(terminal_width - 1))
             sys.stdout.flush()
 
             is_leveling_frame = (use_seam and num_images > 1 and (frame_count == 1 or (frame_count - 1) % level_freq == 0))

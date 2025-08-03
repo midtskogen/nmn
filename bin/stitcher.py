@@ -112,6 +112,45 @@ def _apply_offset_numba(plane_stack, offset_arr):
                     elif new_val < 0: new_val = 0
                     plane_stack[i, r, c] = new_val
 
+@numba.njit(parallel=True, fastmath=True, cache=True)
+def _blur_padded_area_numba(plane, pad, blur_kernel_size):
+    """Applies a 1D blur to padded regions, opposite to the extension direction."""
+    h, w = plane.shape
+    if pad <= 0 or blur_kernel_size <= 1:
+        return plane.astype(np.uint8)
+
+    blurred_plane = plane.copy()
+
+    # Top blur (downwards)
+    for c in prange(w):
+        for r in range(pad):
+            acc = 0.0
+            for k in range(blur_kernel_size):
+                y = min(r + k, h - 1)
+                acc += plane[y, c]
+            blurred_plane[r, c] = acc / blur_kernel_size
+
+    # Left blur (rightwards)
+    for r in prange(h):
+        for c in range(pad):
+            acc = 0.0
+            for k in range(blur_kernel_size):
+                x = min(c + k, w - 1)
+                acc += plane[r, x]
+            blurred_plane[r, c] = acc / blur_kernel_size
+
+    # Right blur (leftwards)
+    for r in prange(h):
+        for c in range(w - pad, w):
+            acc = 0.0
+            for k in range(blur_kernel_size):
+                x = max(c - k, 0)
+                acc += plane[r, x]
+            blurred_plane[r, c] = acc / blur_kernel_size
+
+    return np.clip(blurred_plane, 0, 255).astype(np.uint8)
+
+
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
 def reproject_y(py, dw, dh, sw, map_y_idx, c01, c23, out_y):
     for yi in prange(dh):
@@ -245,6 +284,24 @@ def build_mappings(pto_file, pad, num_workers):
 
     return all_mappings, global_options
 
+def _apply_padding_blur(padded_y, padded_u, padded_v, pad):
+    """Applies a 1D blur to the padded areas of YUV planes."""
+    blur_size = 64
+    if blur_size <= 1:
+        return padded_y, padded_u, padded_v
+
+    y_blurred = _blur_padded_area_numba(padded_y.astype(np.float32), pad, blur_size)
+
+    pad_uv = pad // 2
+    blur_size_uv = blur_size // 2
+    if pad_uv > 0 and blur_size_uv > 0:
+        u_blurred = _blur_padded_area_numba(padded_u.astype(np.float32), pad_uv, blur_size_uv)
+        v_blurred = _blur_padded_area_numba(padded_v.astype(np.float32), pad_uv, blur_size_uv)
+    else:
+        u_blurred, v_blurred = padded_u, padded_v
+
+    return y_blurred, u_blurred, v_blurred
+
 def load_image_to_yuv(image_path, pad):
     # Add a compatibility check for different Pillow versions
     try:
@@ -259,12 +316,18 @@ def load_image_to_yuv(image_path, pad):
     # Use the determined resampling filter
     u_resized = u.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     v_resized = v.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
+    
     padded_y = np.pad(np.array(y, np.uint8), pad, mode='edge')
     padded_u = np.pad(np.array(u_resized, np.uint8), pad // 2, mode='edge')
     padded_v = np.pad(np.array(v_resized, np.uint8), pad // 2, mode='edge')
+
+    # Apply blur to padded regions
+    padded_y, padded_u, padded_v = _apply_padding_blur(padded_y, padded_u, padded_v, pad)
+
     target_h_y = img_pil.height + pad
     target_h_uv = img_pil.height // 2 + pad // 2
     return (padded_y[:target_h_y, :], padded_u[:target_h_uv, :], padded_v[:target_h_uv, :], img_pil.width, img_pil.height)
+
 
 def save_image_yuv420(y_plane, u_plane, v_plane, output_path):
     # Add a compatibility check for different Pillow versions
@@ -530,6 +593,7 @@ def _precompile_numba_functions():
     # Call each function once to compile it
     _ = create_blend_weight_map(dw, dh)
     _ = create_corner_penalty_map(dw, dh)
+    _ = _blur_padded_area_numba(np.zeros((32, 32), dtype=np.float32), 8, 16)
     reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y)
     reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v)
     reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float)
@@ -622,6 +686,10 @@ def worker_for_video_frame(args):
     py_src_all = np.pad(py_src_orig, pad, mode='edge')
     pu_src_all = np.pad(pu_src_orig, pad // 2, mode='edge')
     pv_src_all = np.pad(pv_src_orig, pad // 2, mode='edge')
+
+    # Apply blur to padded regions
+    py_src_all, pu_src_all, pv_src_all = _apply_padding_blur(py_src_all, pu_src_all, pv_src_all, pad)
+
     target_h_y, target_h_uv = sh_orig + pad, sh_orig // 2 + pad // 2
     py_src, pu_src, pv_src = py_src_all[:target_h_y, :], pu_src_all[:target_h_uv, :], pv_src_all[:target_h_uv, :]
 

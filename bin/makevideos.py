@@ -3,8 +3,8 @@
 
 """
 Processes meteor observation videos to create stacked images, grid overlays,
-and gnomonic projections. This script uses Python libraries to handle tasks
-internally, minimizing external dependencies.
+and gnomonic projections. This script uses Python libraries and a
+ThreadPoolExecutor to handle tasks in parallel, maximizing CPU utilization.
 """
 
 import argparse
@@ -17,6 +17,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 
 # Assuming user-provided scripts are in the same directory or python path.
 try:
@@ -44,7 +45,8 @@ BIN_DIR = Path(__file__).parent.resolve()
 
 def modify_pto_canvas(input_path, output_path, width, height, verbose=False):
     """Modifies the canvas size (w, h) in a PTO project file."""
-    print(f"-> Modifying PTO for video canvas: {Path(output_path).name}...")
+    description = f"Modifying PTO for video canvas: {Path(output_path).name}"
+    print(f"-> {description}...")
     if verbose:
         print(f"   Input: {input_path}, New Canvas: {width}x{height}")
 
@@ -54,7 +56,6 @@ def modify_pto_canvas(input_path, output_path, width, height, verbose=False):
         with open(input_path, 'r') as f_in:
             for line in f_in:
                 if line.strip().startswith('p '):
-                    # Use regex to safely replace width and height values
                     line = re.sub(r'\bw\d+\b', f'w{width}', line)
                     line = re.sub(r'\bh\d+\b', f'h{height}', line)
                     found_p_line = True
@@ -69,11 +70,13 @@ def modify_pto_canvas(input_path, output_path, width, height, verbose=False):
     except IOError as e:
         print(f"Error modifying PTO file: {e}", file=sys.stderr)
         sys.exit(1)
-    print("   ...Done.")
+    print(f"   ...Done: {description}.")
+    return output_path
 
 def composite_logos(base_image_path, output_path, nmn_logo_path, sbsdnb_logo_path, verbose=False):
     """Composites logos onto a base image using Pillow."""
-    print(f"-> Adding logos to {base_image_path}...")
+    description = f"Adding logos to {Path(base_image_path).name}"
+    print(f"-> {description}...")
     if verbose:
         print(f"   Base: {base_image_path}, NMN: {nmn_logo_path}, SBSDNB: {sbsdnb_logo_path}")
 
@@ -85,11 +88,13 @@ def composite_logos(base_image_path, output_path, nmn_logo_path, sbsdnb_logo_pat
         sbsdnb_x = base_img.width - sbsdnb_logo.width - 16
         base_img.paste(sbsdnb_logo, (sbsdnb_x, 16), sbsdnb_logo)
         base_img.convert("RGB").save(output_path)
-    print("   ...Done.")
+    print(f"   ...Done: {description}.")
+    return output_path
 
 def draw_text_on_image(image_path, text, output_path, verbose=False):
     """Draws a multi-line label on the bottom-left of an image."""
-    print("-> Adding label to corrected grid...")
+    description = "Adding label to corrected grid"
+    print(f"-> {description}...")
     if verbose:
         print(f"   Image: {image_path}, Text: '{text.replace('\n', ' ')}'")
 
@@ -110,11 +115,13 @@ def draw_text_on_image(image_path, text, output_path, verbose=False):
         position = (16, img.height - text_height - 16)
         draw.text(position, text, font=font, fill="white", stroke_width=1, stroke_fill="black")
         img.save(output_path)
-    print("   ...Done.")
+    print(f"   ...Done: {description}.")
+    return output_path
 
 def set_image_opacity(input_path, output_path, opacity, verbose=False):
     """Creates a new image with adjusted opacity in its alpha channel."""
-    print(f"-> Setting image opacity to {opacity*100:.0f}%: {Path(output_path).name}...")
+    description = f"Setting image opacity to {opacity*100:.0f}%: {Path(output_path).name}"
+    print(f"-> {description}...")
     if verbose:
         print(f"   Input: {input_path}")
     with Image.open(input_path).convert("RGBA") as img:
@@ -122,11 +129,13 @@ def set_image_opacity(input_path, output_path, opacity, verbose=False):
         new_alpha = alpha.point(lambda i: int(i * opacity))
         img.putalpha(new_alpha)
         img.save(output_path)
-    print("   ...Done.")
+    print(f"   ...Done: {description}.")
+    return output_path
 
 def alpha_composite_images(base_path, overlay_path, output_path, verbose=False):
     """Composites a pre-processed overlay onto a base image."""
-    print(f"-> Creating composite image with grid: {Path(output_path).name}...")
+    description = f"Creating composite image with grid: {Path(output_path).name}"
+    print(f"-> {description}...")
     if verbose:
         print(f"   Base: {base_path}, Overlay: {overlay_path}")
 
@@ -137,21 +146,25 @@ def alpha_composite_images(base_path, overlay_path, output_path, verbose=False):
         
         composited = Image.alpha_composite(base, overlay)
         composited.convert("RGB").save(output_path)
-    print("   ...Done.")
+    print(f"   ...Done: {description}.")
+    return output_path
 
 def crop_image(input_path, output_path, crop_box, verbose=False):
     """Crops an image while preserving its mode (e.g., RGBA)."""
-    print(f"-> Cropping grid image: {Path(output_path).name}...")
+    description = f"Cropping grid image: {Path(output_path).name}"
+    print(f"-> {description}...")
     if verbose:
         print(f"   Input: {input_path}, CropBox: {crop_box}")
     with Image.open(input_path) as img:
         cropped = img.crop(crop_box)
         cropped.save(output_path)
-    print("   ...Done.")
+    print(f"   ...Done: {description}.")
+    return output_path
 
 def overlay_video_with_image(video_path, overlay_path, output_path, verbose=False):
     """Overlays an image on a video using the ffmpeg-python library."""
-    print(f"-> Creating video with grid overlay: {Path(output_path).name}...")
+    description = f"Creating video with grid overlay: {Path(output_path).name}"
+    print(f"-> {description}...")
     if verbose:
         print(f"   Video Input: {video_path}, Overlay Input: {overlay_path}")
     
@@ -166,11 +179,12 @@ def overlay_video_with_image(video_path, overlay_path, output_path, verbose=Fals
             .overwrite_output()
             .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
         )
-        print("   ...Done.")
+        print(f"   ...Done: {description}.")
     except ffmpeg.Error as e:
         print("\n--- ERROR during ffmpeg-python execution ---", file=sys.stderr)
         print(f"FFmpeg stderr:\n{e.stderr.decode('utf8')}", file=sys.stderr)
         sys.exit(1)
+    return output_path
 
 
 # --- Core Script Logic ---
@@ -241,7 +255,7 @@ def run_command(command, description, verbose=False):
                 sys.stderr.write(f"--- stderr ---\n{result.stderr.strip()}\n")
             print(f"{'='*70}\n")
         else:
-            print(f"   ...Done.")
+            print(f"   ...Done: {description}.")
         return result
     except subprocess.CalledProcessError as e:
         print(f"\n--- ERROR executing external command ---\nCommand failed: {command}", file=sys.stderr)
@@ -249,82 +263,128 @@ def run_command(command, description, verbose=False):
         if e.stderr: print(f"Stderr:\n{e.stderr}", file=sys.stderr)
         sys.exit(1)
 
-def process_gnomonic_view(event_data, filenames, tmpdir, verbose=False):
-    """Handles all processing related to the gnomonic projection."""
+def process_full_view(event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg: Future):
+    """Handles all processing for the full view, using an executor for parallel tasks."""
+    print("\n--- Processing Full View ---")
+    ts2 = event_data['timestamp'] + event_data['duration'] // 2
+    
+    # --- Submit initial, independent tasks ---
+    grid_labels_path = f"{tmpdir}/grid-labels.png"
+    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
+    future_grid_png = executor.submit(run_command, drawgrid_cmd, "Generating full view grid", verbose)
+
+    # --- Process grid transparency (depends on grid generation) ---
+    grid_labels_transparent_path = f"{tmpdir}/grid-labels-transparent.png"
+    future_grid_png.result() # Wait for grid generation to complete
+    future_transparent_grid = executor.submit(set_image_opacity, grid_labels_path, grid_labels_transparent_path, OVERLAY_OPACITY, verbose)
+    
+    # --- Create final full view images and videos (dependencies on above tasks) ---
+    print("-> Submitting final full view image and video tasks...")
+    
+    # Composite JPG with grid (depends on stacked JPG and transparent grid)
+    future_stacked_jpg.result()
+    future_transparent_grid.result()
+    future_jpg_grid = executor.submit(alpha_composite_images, filenames['jpg'], grid_labels_transparent_path, filenames['jpggrid'], verbose)
+    
+    # Overlay video with grid (depends on transparent grid)
+    future_mp4_grid = executor.submit(overlay_video_with_image, filenames['full'], grid_labels_transparent_path, filenames['mp4grid'], verbose)
+
+    # Wait for all full-view tasks to complete before returning
+    for future in as_completed([future_jpg_grid, future_mp4_grid]):
+        future.result()
+
+def process_gnomonic_view(event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg: Future):
+    """Handles all processing related to the gnomonic projection, using an executor for parallel tasks."""
     print("\n--- Processing Gnomonic View ---")
     azalt_start, azalt_end = event_data.get('start_azalt'), event_data.get('end_azalt')
     if not azalt_start or not azalt_end:
         print("Skipping gnomonic view: 'coordinates' not found in event.txt.")
         return
 
-    # 1. Reproject for gnomonic view
+    # 1. Reproject for gnomonic view (initial task)
     reproject_cmd = (
-        f"{sys.executable} {BIN_DIR}/reproject.py "
-        f"-f 45 --width 1920 --height 2560 "
-        f"-o {filenames['gnomonic_pto']} "
-        f"-g {filenames['gnomonic_grid_pto']} "
+        f"{sys.executable} {BIN_DIR}/reproject.py -f 45 --width 1920 --height 2560 "
+        f"-o {filenames['gnomonic_pto']} -g {filenames['gnomonic_grid_pto']} "
         f"-e {azalt_end} {filenames['lens_pto']} {azalt_start}"
     )
-    run_command(reproject_cmd, "Reprojecting for gnomonic view", verbose)
-
-    # 2. Stitch JPG and add logos
+    future_reproject = executor.submit(run_command, reproject_cmd, "Reprojecting for gnomonic view", verbose)
+    
+    # --- Gnomonic Image Pipeline (depends on reprojection and stacked JPG) ---
+    future_reproject.result() # Wait for reprojection to finish
+    
+    # 2. Stitch JPG (This is the critical step that depends on the external JPG)
+    future_stacked_jpg.result() # WAIT for the stacked JPG to be created by the other pipeline.
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
-    stitcher_cmd_jpg = (
-        f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 "
-        f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}"
-    )
-    run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
-    composite_logos(tmp_gnomonic_jpg, filenames['gnomonic'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
+    stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 "
+                        f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
+    future_stitched_gnomonic_jpg = executor.submit(run_command, stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
 
-    # 3. Recalibrate if necessary
+    # 3. Modify PTO for MP4 (can run in parallel with JPG stitching)
+    future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
+                                          filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
+
+    # Add logos to stitched JPG (depends on stitching)
+    future_stitched_gnomonic_jpg.result()
+    future_gnomonic_with_logos = executor.submit(composite_logos, tmp_gnomonic_jpg, filenames['gnomonic'], 
+                                                 f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
+    
+    # 4. Recalibrate (depends on logos being added)
+    future_gnomonic_with_logos.result()
     if event_data.get('recalibrate', False):
-        recalibrate_cmd = (
-            f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
-            f"{event_data['timestamp'] + event_data['duration'] // 2} "
-            f"{filenames['gnomonic_grid_pto']} {filenames['gnomonic']} "
-            f"{filenames['gnomonic_corr_grid_pto']}"
-        )
-        run_command(recalibrate_cmd, "Recalibrating gnomonic view", verbose)
+        recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
+                           f"{event_data['timestamp'] + event_data['duration'] // 2} "
+                           f"{filenames['gnomonic_grid_pto']} {filenames['gnomonic']} {filenames['gnomonic_corr_grid_pto']}")
+        future_recalibrated = executor.submit(run_command, recalibrate_cmd, "Recalibrating gnomonic view", verbose)
     else:
         shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
-
-    # 4. Prepare gnomonic grid overlay
+        future_recalibrated = executor.submit(lambda: True) # Dummy future
+    
+    # --- Gnomonic Grid Overlay Pipeline (depends on recalibration) ---
+    future_recalibrated.result()
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
     drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['gnomonic_corr_grid_pto']} {filenames['gnomonic_corr_grid_png']}"
-    run_command(drawgrid_cmd, "Generating gnomonic grid", verbose)
+    run_command(drawgrid_cmd, "Generating gnomonic grid", verbose) # This chain is sequential
     draw_text_on_image(filenames['gnomonic_corr_grid_png'], event_data['label'], filenames['gnomonic_corr_grid_png'], verbose=verbose)
-    
     gnomonic_grid_transparent = f"{tmpdir}/gnomonic_grid_transparent.png"
     set_image_opacity(filenames['gnomonic_corr_grid_png'], gnomonic_grid_transparent, OVERLAY_OPACITY, verbose=verbose)
-    
     cropped_gnomonic_grid = f"{tmpdir}/gnomonic_grid_cropped.png"
-    crop_image(gnomonic_grid_transparent, cropped_gnomonic_grid, crop_box=(0, 740, 1920, 740 + 1080), verbose=verbose)
+    future_cropped_grid = executor.submit(crop_image, gnomonic_grid_transparent, cropped_gnomonic_grid, 
+                                          crop_box=(0, 740, 1920, 740 + 1080), verbose=verbose)
 
-    # 5. Create final gnomonic images and videos
-    print("-> Creating final gnomonic images and videos...")
-    modify_pto_canvas(
-        input_path=filenames['gnomonic_pto'],
-        output_path=filenames['gnomonic_mp4_pto'],
-        width=1920, height=1080, verbose=verbose
-    )
+    # --- Gnomonic Video Pipeline (depends on various earlier steps) ---
+    future_modified_pto.result()
     stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {filenames['gnomonicmp4']}"
-    run_command(stitch_cmd_mp4, "Creating gnomonic video", verbose)
-    
-    alpha_composite_images(filenames['gnomonic'], gnomonic_grid_transparent, filenames['gnomonicgrid'], verbose=verbose)
-    overlay_video_with_image(filenames['gnomonicmp4'], cropped_gnomonic_grid, filenames['gnomonicgridmp4'], verbose=verbose)
+    future_gnomonic_mp4 = executor.submit(run_command, stitch_cmd_mp4, "Creating gnomonic video", verbose)
 
-def main(file_prefix, verbose=False):
+    # --- Final Assembly (Submit final tasks and wait for completion) ---
+    print("-> Submitting final gnomonic image and video tasks...")
+    
+    # Composite final gnomonic image with grid
+    future_gnomonic_grid = executor.submit(alpha_composite_images, filenames['gnomonic'], 
+                                           gnomonic_grid_transparent, filenames['gnomonicgrid'], verbose)
+    
+    # Overlay final gnomonic video with cropped grid
+    future_gnomonic_mp4.result()
+    future_cropped_grid.result()
+    future_gnomonic_grid_mp4 = executor.submit(overlay_video_with_image, filenames['gnomonicmp4'], 
+                                               cropped_gnomonic_grid, filenames['gnomonicgridmp4'], verbose)
+    
+    for future in as_completed([future_gnomonic_grid, future_gnomonic_grid_mp4]):
+        future.result()
+
+def main(file_prefix, verbose=False, nothreads=False):
     """Main function to orchestrate the video processing pipeline."""
     print(f"--- Initializing Video Pipeline ---")
     if verbose:
         print("--- Verbose mode enabled ---")
+    if nothreads:
+        print("--- Multithreading disabled ---")
     
     with tempfile.TemporaryDirectory() as tmpdir:
         # Prepare logos
         with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
         with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
 
-        # Load event data and define filenames
         event_data = get_event_data('event.txt')
         name = file_prefix
         
@@ -340,34 +400,96 @@ def main(file_prefix, verbose=False):
         event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
         pos_label = f"{event_data.get('latitude', 0):.4f}N {event_data.get('longitude', 0):.4f}E"
         event_data['label'] = f"{event_data.get('clock', '')}\n{pos_label}"
-
-        # --- Full View Processing ---
-        print("\n--- Processing Full View ---")
-        stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
-        run_command(stack_cmd, "Stacking video frames to create JPG", verbose)
-
-        ts2 = event_data['timestamp'] + event_data['duration'] // 2
-        grid_labels_path = f"{tmpdir}/grid-labels.png"
-        drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
-        run_command(drawgrid_cmd, "Generating full view grid", verbose)
-
-        grid_labels_transparent_path = f"{tmpdir}/grid-labels-transparent.png"
-        set_image_opacity(grid_labels_path, grid_labels_transparent_path, OVERLAY_OPACITY, verbose=verbose)
         
-        print("-> Creating final full view images and videos...")
-        alpha_composite_images(filenames['jpg'], grid_labels_transparent_path, filenames['jpggrid'], verbose=verbose)
-        overlay_video_with_image(filenames['full'], grid_labels_transparent_path, filenames['mp4grid'], verbose=verbose)
+        gnomonic_enabled = 'begin' in event_data and 'start_azalt' in event_data
 
-        # --- Gnomonic View Processing ---
-        if 'begin' in event_data and 'start_azalt' in event_data:
-            process_gnomonic_view(event_data, filenames, tmpdir, verbose)
+        if nothreads:
+            # --- Sequential (Original) Execution ---
+            print("\n--- Processing Full View (Sequential) ---")
+            stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
+            run_command(stack_cmd, "Stacking video frames to create JPG", verbose)
+            ts2 = event_data['timestamp'] + event_data['duration'] // 2
+            grid_labels_path = f"{tmpdir}/grid-labels.png"
+            drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
+            run_command(drawgrid_cmd, "Generating full view grid", verbose)
+            grid_labels_transparent_path = f"{tmpdir}/grid-labels-transparent.png"
+            set_image_opacity(grid_labels_path, grid_labels_transparent_path, OVERLAY_OPACITY, verbose=verbose)
+            print("-> Creating final full view images and videos...")
+            alpha_composite_images(filenames['jpg'], grid_labels_transparent_path, filenames['jpggrid'], verbose=verbose)
+            overlay_video_with_image(filenames['full'], grid_labels_transparent_path, filenames['mp4grid'], verbose=verbose)
+            if gnomonic_enabled:
+                process_gnomonic_view_sequential(event_data, filenames, tmpdir, verbose) # Call sequential version
+            else:
+                print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
         else:
-            print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
+            # --- Parallel Execution ---
+            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+                # Start the one task that has a cross-pipeline dependency
+                stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
+                future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", verbose)
 
-        # --- Final Touches ---
+                # Submit the two main pipelines, passing the future for the stacked JPG to both
+                future_full_view = executor.submit(process_full_view, event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg)
+                
+                future_gnomonic_view = None
+                if gnomonic_enabled:
+                    future_gnomonic_view = executor.submit(process_gnomonic_view, event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg)
+                else:
+                    print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
+
+                # Wait for both pipelines to complete
+                future_full_view.result()
+                if future_gnomonic_view:
+                    future_gnomonic_view.result()
+
+        # --- Final Touches (runs after all processing is complete) ---
         composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
 
     print("\n--- Pipeline Finished ---")
+
+def process_gnomonic_view_sequential(event_data, filenames, tmpdir, verbose):
+    """The original sequential version of gnomonic processing for --nothreads mode."""
+    print("\n--- Processing Gnomonic View (Sequential) ---")
+    azalt_start, azalt_end = event_data.get('start_azalt'), event_data.get('end_azalt')
+    
+    reproject_cmd = (f"{sys.executable} {BIN_DIR}/reproject.py -f 45 --width 1920 --height 2560 "
+                     f"-o {filenames['gnomonic_pto']} -g {filenames['gnomonic_grid_pto']} "
+                     f"-e {azalt_end} {filenames['lens_pto']} {azalt_start}")
+    run_command(reproject_cmd, "Reprojecting for gnomonic view", verbose)
+
+    tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
+    stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 "
+                        f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
+    run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
+    composite_logos(tmp_gnomonic_jpg, filenames['gnomonic'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
+
+    if event_data.get('recalibrate', False):
+        recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
+                           f"{event_data['timestamp'] + event_data['duration'] // 2} "
+                           f"{filenames['gnomonic_grid_pto']} {filenames['gnomonic']} "
+                           f"{filenames['gnomonic_corr_grid_pto']}")
+        run_command(recalibrate_cmd, "Recalibrating gnomonic view", verbose)
+    else:
+        shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
+
+    ts2 = event_data['timestamp'] + event_data['duration'] // 2
+    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['gnomonic_corr_grid_pto']} {filenames['gnomonic_corr_grid_png']}"
+    run_command(drawgrid_cmd, "Generating gnomonic grid", verbose)
+    draw_text_on_image(filenames['gnomonic_corr_grid_png'], event_data['label'], filenames['gnomonic_corr_grid_png'], verbose=verbose)
+    
+    gnomonic_grid_transparent = f"{tmpdir}/gnomonic_grid_transparent.png"
+    set_image_opacity(filenames['gnomonic_corr_grid_png'], gnomonic_grid_transparent, OVERLAY_OPACITY, verbose=verbose)
+    
+    cropped_gnomonic_grid = f"{tmpdir}/gnomonic_grid_cropped.png"
+    crop_image(gnomonic_grid_transparent, cropped_gnomonic_grid, crop_box=(0, 740, 1920, 740 + 1080), verbose=verbose)
+
+    print("-> Creating final gnomonic images and videos...")
+    modify_pto_canvas(filenames['gnomonic_pto'], filenames['gnomonic_mp4_pto'], 1920, 1080, verbose=verbose)
+    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {filenames['gnomonicmp4']}"
+    run_command(stitch_cmd_mp4, "Creating gnomonic video", verbose)
+    
+    alpha_composite_images(filenames['gnomonic'], gnomonic_grid_transparent, filenames['gnomonicgrid'], verbose=verbose)
+    overlay_video_with_image(filenames['gnomonicmp4'], cropped_gnomonic_grid, filenames['gnomonicgridmp4'], verbose=verbose)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -376,6 +498,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("file_prefix", help="The base name for input/output files (e.g., 'event_20250101_123456').")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed information about commands being run.")
+    parser.add_argument("--nothreads", action="store_true", help="Disable multithreading and run all tasks sequentially.")
     args = parser.parse_args()
 
     os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
@@ -386,7 +509,7 @@ if __name__ == "__main__":
     
     try:
         lockfile.touch()
-        main(args.file_prefix, verbose=args.verbose)
+        main(args.file_prefix, verbose=args.verbose, nothreads=args.nothreads)
     except Exception as e:
         print(f"\n--- An unexpected error occurred: {e} ---", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)

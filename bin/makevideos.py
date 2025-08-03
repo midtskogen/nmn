@@ -308,69 +308,63 @@ def process_gnomonic_view(event_data, filenames, tmpdir, verbose, executor, futu
         f"-e {azalt_end} {filenames['lens_pto']} {azalt_start}"
     )
     future_reproject = executor.submit(run_command, reproject_cmd, "Reprojecting for gnomonic view", verbose)
-    
-    # --- Gnomonic Image Pipeline (depends on reprojection and stacked JPG) ---
-    future_reproject.result() # Wait for reprojection to finish
-    
-    # 2. Stitch JPG (This is the critical step that depends on the external JPG)
-    future_stacked_jpg.result() # WAIT for the stacked JPG to be created by the other pipeline.
+    future_reproject.result() # BLOCK: Both pipelines below depend on this.
+
+    # 2. START GNOMONIC VIDEO PIPELINE (long-running)
+    # This pipeline creates the raw gnomonic video and can run in parallel with the image/grid pipeline.
+    future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
+                                          filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
+    future_modified_pto.result() # Wait for the PTO modification to complete
+    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {filenames['gnomonicmp4']}"
+    future_gnomonic_mp4 = executor.submit(run_command, stitch_cmd_mp4, "Creating gnomonic video", verbose)
+
+    # 3. START GNOMONIC IMAGE/GRID PIPELINE (runs in parallel with video stitching)
+    future_stacked_jpg.result() # WAIT for the main stacked JPG before starting this pipeline.
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
     stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 "
                         f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
     future_stitched_gnomonic_jpg = executor.submit(run_command, stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
-
-    # 3. Modify PTO for MP4 (can run in parallel with JPG stitching)
-    future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
-                                          filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
-
-    # Add logos to stitched JPG (depends on stitching)
     future_stitched_gnomonic_jpg.result()
+    
     future_gnomonic_with_logos = executor.submit(composite_logos, tmp_gnomonic_jpg, filenames['gnomonic'], 
                                                  f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
-    
-    # 4. Recalibrate (depends on logos being added)
     future_gnomonic_with_logos.result()
+
     if event_data.get('recalibrate', False):
         recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
                            f"{event_data['timestamp'] + event_data['duration'] // 2} "
                            f"{filenames['gnomonic_grid_pto']} {filenames['gnomonic']} {filenames['gnomonic_corr_grid_pto']}")
-        future_recalibrated = executor.submit(run_command, recalibrate_cmd, "Recalibrating gnomonic view", verbose)
+        run_command(recalibrate_cmd, "Recalibrating gnomonic view", verbose)
     else:
         shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
-        future_recalibrated = executor.submit(lambda: True) # Dummy future
-    
-    # --- Gnomonic Grid Overlay Pipeline (depends on recalibration) ---
-    future_recalibrated.result()
+
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
     drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['gnomonic_corr_grid_pto']} {filenames['gnomonic_corr_grid_png']}"
-    run_command(drawgrid_cmd, "Generating gnomonic grid", verbose) # This chain is sequential
+    run_command(drawgrid_cmd, "Generating gnomonic grid", verbose)
     draw_text_on_image(filenames['gnomonic_corr_grid_png'], event_data['label'], filenames['gnomonic_corr_grid_png'], verbose=verbose)
+    
     gnomonic_grid_transparent = f"{tmpdir}/gnomonic_grid_transparent.png"
     set_image_opacity(filenames['gnomonic_corr_grid_png'], gnomonic_grid_transparent, OVERLAY_OPACITY, verbose=verbose)
+    
     cropped_gnomonic_grid = f"{tmpdir}/gnomonic_grid_cropped.png"
     future_cropped_grid = executor.submit(crop_image, gnomonic_grid_transparent, cropped_gnomonic_grid, 
                                           crop_box=(0, 740, 1920, 740 + 1080), verbose=verbose)
 
-    # --- Gnomonic Video Pipeline (depends on various earlier steps) ---
-    future_modified_pto.result()
-    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {filenames['gnomonicmp4']}"
-    future_gnomonic_mp4 = executor.submit(run_command, stitch_cmd_mp4, "Creating gnomonic video", verbose)
-
-    # --- Final Assembly (Submit final tasks and wait for completion) ---
-    print("-> Submitting final gnomonic image and video tasks...")
+    # 4. FINAL ASSEMBLY
+    # Create the final static gnomonic image with grid
+    future_gnomonic_grid_img = executor.submit(alpha_composite_images, filenames['gnomonic'], 
+                                               gnomonic_grid_transparent, filenames['gnomonicgrid'], verbose)
     
-    # Composite final gnomonic image with grid
-    future_gnomonic_grid = executor.submit(alpha_composite_images, filenames['gnomonic'], 
-                                           gnomonic_grid_transparent, filenames['gnomonicgrid'], verbose)
-    
-    # Overlay final gnomonic video with cropped grid
+    # Wait for the video and the cropped grid, then overlay them
     future_gnomonic_mp4.result()
     future_cropped_grid.result()
     future_gnomonic_grid_mp4 = executor.submit(overlay_video_with_image, filenames['gnomonicmp4'], 
                                                cropped_gnomonic_grid, filenames['gnomonicgridmp4'], verbose)
     
-    for future in as_completed([future_gnomonic_grid, future_gnomonic_grid_mp4]):
-        future.result()
+    # Wait for the final image and video tasks to complete
+    future_gnomonic_grid_img.result()
+    future_gnomonic_grid_mp4.result()
+
 
 def main(file_prefix, verbose=False, nothreads=False):
     """Main function to orchestrate the video processing pipeline."""

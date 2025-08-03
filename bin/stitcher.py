@@ -286,7 +286,7 @@ def build_mappings(pto_file, pad, num_workers):
 
 def _apply_padding_blur(padded_y, padded_u, padded_v, pad):
     """Applies a 1D blur to the padded areas of YUV planes."""
-    blur_size = 64
+    blur_size = 128
     if blur_size <= 1:
         return padded_y, padded_u, padded_v
 

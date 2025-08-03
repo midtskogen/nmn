@@ -20,6 +20,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import math
 import pto_mapper
+import errno
 
 
 # Assuming user-provided scripts are in the same directory or python path.
@@ -84,6 +85,61 @@ def draw_marker_crosses(image_path, pixel_coords, verbose=False):
     print(f"   ...Done: {description}.")
     return image_path
 
+# --- Refined Endpoint Calculation Helpers ---
+
+def _get_initial_gnomonic_pixels(event_data, lens_pto_data, gnomonic_pto_data):
+    """Maps initial fisheye pixel coordinates to the gnomonic image plane."""
+    # Step 1: Get initial pixel coordinates from event.txt
+    start_px, start_py = map(float, event_data['begin'].split(','))
+    end_px, end_py = map(float, event_data['end'].split(','))
+
+    # Step 2: Map fisheye pixel coords -> equirectangular pano coords
+    start_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, start_px, start_py)
+    end_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, end_px, end_py)
+    if not (start_pano and end_pano): return None
+    
+    start_az2, start_alt2 = start_pano
+    end_az2, end_alt2 = end_pano
+
+    # Step 3: Map equirectangular pano coords -> gnomonic image coords
+    start_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, start_az2, start_alt2)
+    end_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, end_az2, end_alt2)
+    if not (start_res and end_res): return None
+
+    _, gnomonic_startx, gnomonic_starty = start_res
+    _, gnomonic_endx, gnomonic_endy = end_res
+    return gnomonic_startx, gnomonic_starty, gnomonic_endx, gnomonic_endy
+
+def _refine_gnomonic_track(initial_pixels, gnomonic_image_path):
+    """Runs refinetrack.py to get more precise start/end points."""
+    gnomonic_startx, gnomonic_starty, gnomonic_endx, gnomonic_endy = initial_pixels
+    refine_cmd = [
+        sys.executable, str(BIN_DIR / "refinetrack.py"),
+        gnomonic_image_path,
+        f"{gnomonic_startx},{gnomonic_starty}",
+        f"{gnomonic_endx},{gnomonic_endy}"
+    ]
+    result = subprocess.run(refine_cmd, capture_output=True, text=True, check=True)
+    points_str = result.stdout.strip()
+    point_coords = re.split(r'[,\s]+', points_str)
+    return tuple(map(float, point_coords))
+
+def _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale):
+    """Maps refined gnomonic pixel coordinates back to az/alt values."""
+    refined_start_x, refined_start_y, refined_end_x, refined_end_y = refined_pixels
+    
+    # Map refined gnomonic image points back to pano coordinates
+    start_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_start_x, refined_start_y)
+    end_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_end_x, refined_end_y)
+    if not (start_pano_coords and end_pano_coords): return None
+
+    # Convert pano coordinates to az/alt and apply refraction
+    corr_startaz = round(start_pano_coords[0] / scale, 2)
+    corr_startalt = refraction(90 - (start_pano_coords[1] / scale))
+    corr_endaz = round(end_pano_coords[0] / scale, 2)
+    corr_endalt = refraction(90 - (end_pano_coords[1] / scale))
+    return corr_startaz, corr_startalt, corr_endaz, corr_endalt
+
 def calculate_refined_endpoints(event_data, filenames, verbose=False):
     """
     Calculates the refined start/end points of the meteor trail.
@@ -91,66 +147,25 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
     """
     try:
         print("-> Calculating refined endpoints...")
-        # 1. Parse PTO files
         lens_pto_data = pto_mapper.parse_pto_file(filenames['lens_pto'])
         gnomonic_pto_data = pto_mapper.parse_pto_file(filenames['gnomonic_corr_grid_pto'])
         scale = lens_pto_data[0]['w'] / 360.0
 
-        # 2. Get initial pixel coordinates from event.txt
-        start_px, start_py = map(float, event_data['begin'].split(','))
-        end_px, end_py = map(float, event_data['end'].split(','))
+        initial_gnomonic_pixels = _get_initial_gnomonic_pixels(event_data, lens_pto_data, gnomonic_pto_data)
+        if not initial_gnomonic_pixels: return None
 
-        # 3. Map fisheye pixel coords -> equirectangular pano coords
-        start_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, start_px, start_py)
-        end_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, end_px, end_py)
-        if not (start_pano and end_pano): return None
-        
-        start_az2, start_alt2 = start_pano
-        end_az2, end_alt2 = end_pano
-
-        # 4. Map equirectangular pano coords -> gnomonic image coords
-        start_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, start_az2, start_alt2)
-        end_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, end_az2, end_alt2)
-        if not (start_res and end_res): return None
-
-        _, gnomonic_startx, gnomonic_starty = start_res
-        _, gnomonic_endx, gnomonic_endy = end_res
-
-        # 5. Refine track using refinetrack.py
         gnomonic_image_path = filenames['gnomonic']
-        gnomonic_mask_path = f"{filenames['name']}-gnomonic-mask.jpg"
-        if Path(gnomonic_mask_path).exists():
-            gnomonic_image_path = gnomonic_mask_path
+        if Path(f"{filenames['name']}-gnomonic-mask.jpg").exists():
+            gnomonic_image_path = f"{filenames['name']}-gnomonic-mask.jpg"
         
-        refine_cmd = [
-            sys.executable, str(BIN_DIR / "refinetrack.py"),
-            gnomonic_image_path,
-            f"{gnomonic_startx},{gnomonic_starty}",
-            f"{gnomonic_endx},{gnomonic_endy}"
-        ]
-        result = subprocess.run(refine_cmd, capture_output=True, text=True, check=True)
-        points_str = result.stdout.strip()
-        
-        # 6. Map refined gnomonic image points back to pano coordinates
-        point_coords = re.split(r'[,\s]+', points_str)
-        refined_start_x, refined_start_y = float(point_coords[0]), float(point_coords[1])
-        refined_end_x, refined_end_y = float(point_coords[2]), float(point_coords[3])
+        refined_pixels = _refine_gnomonic_track(initial_gnomonic_pixels, gnomonic_image_path)
+        if not refined_pixels: return None
 
-        start_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_start_x, refined_start_y)
-        end_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_end_x, refined_end_y)
-        if not (start_pano_coords and end_pano_coords): return None
-
-        # 7. Convert pano coordinates to az/alt and apply refraction
-        corr_startaz = round(start_pano_coords[0] / scale, 2)
-        corr_startalt = refraction(90 - (start_pano_coords[1] / scale))
-        corr_endaz = round(end_pano_coords[0] / scale, 2)
-        corr_endalt = refraction(90 - (end_pano_coords[1] / scale))
+        azalt = _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale)
+        if not azalt: return None
 
         print("   ...Done: Calculating refined endpoints.")
-        return {
-            'gnomonic_pixels': (refined_start_x, refined_start_y, refined_end_x, refined_end_y),
-            'azalt': (corr_startaz, corr_startalt, corr_endaz, corr_endalt)
-        }
+        return {'gnomonic_pixels': refined_pixels, 'azalt': azalt}
 
     except Exception as e:
         print(f"Warning: Could not calculate refined endpoints: {e}", file=sys.stderr)
@@ -413,21 +428,21 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, verbose, executor,
     for future in as_completed([future_jpg_grid, future_mp4_grid]):
         future.result()
 
-def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose):
-    """
-    Synchronous helper function that creates the gnomonic grid and final composite image.
-    This entire function is intended to be run as a single task in a thread pool.
-    """
-    # 1. Stitch gnomonic JPG and add logos
+# --- Gnomonic View Processing Helpers ---
+
+def _stitch_and_recalibrate_gnomonic(event_data, filenames, tmpdir, verbose):
+    """Stitches the gnomonic JPG, adds logos, and recalibrates the PTO file."""
+    # Stitch gnomonic JPG
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
     stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 "
                         f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
     run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
     
+    # Add logos
     composite_logos(tmp_gnomonic_jpg, filenames['gnomonic'], 
                     f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
     
-    # 2. Recalibrate if necessary
+    # Recalibrate if necessary
     if event_data.get('recalibrate', False):
         recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
                            f"{event_data['timestamp'] + event_data['duration'] // 2} "
@@ -436,30 +451,48 @@ def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose):
         run_command(recalibrate_cmd, "Recalibrating gnomonic view", verbose)
     else:
         shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
-    
-    # 3. Calculate refined endpoints before generating the grid
-    refined_data = calculate_refined_endpoints(event_data, filenames, verbose)
-    if refined_data:
-        event_data['refined_coords'] = refined_data['azalt']
 
-    # 4. Generate and prepare grid overlay
+def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
+    """Generates the grid, and draws labels and marker crosses."""
+    grid_path = filenames['gnomonic_corr_grid_png']
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
-    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['gnomonic_corr_grid_pto']} {filenames['gnomonic_corr_grid_png']}"
+    
+    # Generate base grid
+    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['gnomonic_corr_grid_pto']} {grid_path}"
     run_command(drawgrid_cmd, "Generating gnomonic grid", verbose)
     
     # Draw marker crosses on the grid image
     if refined_data and 'gnomonic_pixels' in refined_data:
-        draw_marker_crosses(filenames['gnomonic_corr_grid_png'], refined_data['gnomonic_pixels'], verbose=verbose)
+        draw_marker_crosses(grid_path, refined_data['gnomonic_pixels'], verbose=verbose)
 
-    draw_text_on_image(filenames['gnomonic_corr_grid_png'], event_data['label'], filenames['gnomonic_corr_grid_png'], verbose=verbose)
+    # Draw text label
+    draw_text_on_image(grid_path, event_data['label'], grid_path, verbose=verbose)
+    return grid_path
+
+def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose):
+    """
+    Creates the gnomonic grid, decorates it, and produces the final composite image.
+    This is a synchronous, single-threaded function.
+    """
+    # 1. Stitch base image and recalibrate PTO file.
+    _stitch_and_recalibrate_gnomonic(event_data, filenames, tmpdir, verbose)
     
+    # 2. Calculate refined endpoints using the newly created/recalibrated files.
+    refined_data = calculate_refined_endpoints(event_data, filenames, verbose)
+    if refined_data:
+        event_data['refined_coords'] = refined_data['azalt']
+
+    # 3. Generate the grid and draw decorations (crosses, text).
+    grid_path = _generate_decorated_grid(event_data, filenames, refined_data, verbose)
+    
+    # 4. Prepare the grid for compositing (set opacity, crop for video).
     gnomonic_grid_transparent = f"{tmpdir}/gnomonic_grid_transparent.png"
-    set_image_opacity(filenames['gnomonic_corr_grid_png'], gnomonic_grid_transparent, OVERLAY_OPACITY, verbose=verbose)
+    set_image_opacity(grid_path, gnomonic_grid_transparent, OVERLAY_OPACITY, verbose=verbose)
     
     cropped_gnomonic_grid = f"{tmpdir}/gnomonic_grid_cropped.png"
     crop_image(gnomonic_grid_transparent, cropped_gnomonic_grid, crop_box=(0, 740, 1920, 740 + 1080), verbose=verbose)
 
-    # 5. Create final composite static image
+    # 5. Create final composite static image.
     alpha_composite_images(filenames['gnomonic'], gnomonic_grid_transparent, filenames['gnomonicgrid'], verbose=verbose)
 
     return {"cropped_grid": cropped_gnomonic_grid}
@@ -578,6 +611,18 @@ def main(file_prefix, verbose=False, nothreads=False):
         s_az, s_alt, e_az, e_alt = event_data['refined_coords']
         print(f"Start: {s_az:.2f} {s_alt:.2f}  End: {e_az:.2f} {e_alt:.2f}")
 
+def check_pid(pid):
+    """Check For the existence of a unix pid."""
+    try:
+        os.kill(pid, 0)
+    except OSError as err:
+        if err.errno == errno.ESRCH:
+            return False # No such process
+        elif err.errno == errno.EPERM:
+            return True # Process exists, but we don't have permission
+        else:
+            raise # Other OS error
+    return True # Process exists
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -591,16 +636,30 @@ if __name__ == "__main__":
 
     os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
     lockfile = Path("processing.lock")
+
     if lockfile.exists():
-        print("Error: Lockfile 'processing.lock' exists. Another instance may be running.", file=sys.stderr)
-        sys.exit(1)
-    
+        try:
+            # Check if the process holding the lock is still alive
+            pid = int(lockfile.read_text())
+            if check_pid(pid):
+                print(f"Error: Lockfile '{lockfile}' exists and process {pid} is still running.", file=sys.stderr)
+                sys.exit(1)
+            else:
+                print(f"Warning: Removing stale lockfile for dead process {pid}.", file=sys.stderr)
+                lockfile.unlink()
+        except (ValueError, FileNotFoundError):
+            # Lockfile is empty or was removed between check and read
+            print(f"Warning: Removing corrupt or empty lockfile.", file=sys.stderr)
+            lockfile.unlink(missing_ok=True)
+
     try:
-        lockfile.touch()
+        # Create a new lockfile with the current process's PID
+        lockfile.write_text(str(os.getpid()))
         main(args.file_prefix, verbose=args.verbose, nothreads=args.nothreads)
     except Exception as e:
         print(f"\n--- An unexpected error occurred: {e} ---", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
     finally:
+        # Clean up the lockfile on exit
         if lockfile.exists():
             lockfile.unlink()

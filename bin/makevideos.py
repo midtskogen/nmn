@@ -18,6 +18,9 @@ import tempfile
 import traceback
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+import math
+import pto_mapper
+
 
 # Assuming user-provided scripts are in the same directory or python path.
 try:
@@ -40,6 +43,24 @@ except ImportError as e:
 # --- Script Constants ---
 OVERLAY_OPACITY = 0.6
 BIN_DIR = Path(__file__).parent.resolve()
+
+# --- Helper Functions ---
+def refraction(alt):
+    """
+    Applies atmospheric refraction correction to an altitude in degrees.
+    This is a Python implementation of the formula from makevideos.sh.
+    """
+    # Avoid division by zero errors for edge cases
+    if alt + 4.4 == 0: return alt
+    
+    tan_arg = math.radians(alt + (7.31 / (alt + 4.4)))
+    
+    # Avoid division by zero if tan(arg) is zero
+    if abs(math.tan(tan_arg)) < 1e-9: return alt
+    
+    # The formula from the shell script
+    corrected_alt = alt - 0.006 / math.tan(tan_arg)
+    return round(corrected_alt, 2)
 
 # --- Image, Video, & File Manipulation Functions ---
 
@@ -446,7 +467,85 @@ def main(file_prefix, verbose=False, nothreads=False):
 
         composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
 
+        # --- Calculate and store refined coordinates for final printout ---
+        if gnomonic_enabled and Path(filenames['gnomonic_corr_grid_pto']).exists():
+            try:
+                print("\n--- Calculating Refined Endpoints ---")
+                # 1. Parse PTO files
+                lens_pto_data = pto_mapper.parse_pto_file(filenames['lens_pto'])
+                gnomonic_pto_data = pto_mapper.parse_pto_file(filenames['gnomonic_corr_grid_pto'])
+
+                # 2. Get scale from lens.pto (used for az/alt conversion)
+                scale = lens_pto_data[0]['w'] / 360.0
+
+                # 3. Get initial pixel coordinates from event.txt
+                start_px, start_py = map(float, event_data['begin'].split(','))
+                end_px, end_py = map(float, event_data['end'].split(','))
+
+                # 4. Map fisheye pixel coords to equirectangular pano coords using lens.pto
+                start_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, start_px, start_py)
+                end_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, end_px, end_py)
+
+                if start_pano and end_pano:
+                    start_az2, start_alt2 = start_pano
+                    end_az2, end_alt2 = end_pano
+
+                    # 5. Map equirectangular pano coords to gnomonic image coords
+                    start_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, start_az2, start_alt2)
+                    end_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, end_az2, end_alt2)
+
+                    if start_res and end_res:
+                        _, gnomonic_startx, gnomonic_starty = start_res
+                        _, gnomonic_endx, gnomonic_endy = end_res
+
+                        # 6. Refine track using refinetrack.py
+                        gnomonic_image_path = filenames['gnomonic']
+                        gnomonic_mask_path = f"{filenames['name']}-gnomonic-mask.jpg"
+                        if Path(gnomonic_mask_path).exists():
+                            gnomonic_image_path = gnomonic_mask_path
+                        
+                        refine_cmd = [
+                            sys.executable, str(BIN_DIR / "refinetrack.py"),
+                            gnomonic_image_path,
+                            f"{gnomonic_startx},{gnomonic_starty}",
+                            f"{gnomonic_endx},{gnomonic_endy}"
+                        ]
+                        result = subprocess.run(refine_cmd, capture_output=True, text=True, check=True)
+                        points_str = result.stdout.strip()
+                        
+                        # 7. Map refined gnomonic image points back to pano coordinates
+                        point_coords = re.split(r'[,\s]+', points_str)
+                        refined_start_x, refined_start_y = float(point_coords[0]), float(point_coords[1])
+                        refined_end_x, refined_end_y = float(point_coords[2]), float(point_coords[3])
+
+                        start_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_start_x, refined_start_y)
+                        end_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_end_x, refined_end_y)
+
+                        if start_pano_coords and end_pano_coords:
+                            # 8. Convert pano coordinates to az/alt and apply refraction
+                            corr_startaz = round(start_pano_coords[0] / scale, 2)
+                            corr_startalt = 90 - (start_pano_coords[1] / scale)
+                            corr_startalt = refraction(corr_startalt)
+
+                            corr_endaz = round(end_pano_coords[0] / scale, 2)
+                            corr_endalt = 90 - (end_pano_coords[1] / scale)
+                            corr_endalt = refraction(corr_endalt)
+
+                            # Store for printing after "Pipeline Finished"
+                            event_data['refined_coords'] = (corr_startaz, corr_startalt, corr_endaz, corr_endalt)
+
+            except Exception as e:
+                print(f"Warning: Could not calculate refined endpoints: {e}", file=sys.stderr)
+                if verbose:
+                    traceback.print_exc(file=sys.stderr)
+
     print("\n--- Pipeline Finished ---")
+
+    # Print the refined coordinates if they were calculated successfully
+    if event_data.get('refined_coords'):
+        s_az, s_alt, e_az, e_alt = event_data['refined_coords']
+        print(f"Start: {s_az:.2f} {s_alt:.2f}  End: {e_az:.2f} {e_alt:.2f}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

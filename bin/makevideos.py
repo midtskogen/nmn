@@ -392,7 +392,8 @@ def run_command(command, description, verbose=False):
         print(f"\n--- ERROR executing external command ---\nCommand failed: {command}", file=sys.stderr)
         if e.stdout: print(f"Stdout:\n{e.stdout}", file=sys.stderr)
         if e.stderr: print(f"Stderr:\n{e.stderr}", file=sys.stderr)
-        sys.exit(1)
+        # Re-raise the exception to be handled by the caller
+        raise
 
 def _run_full_view_sequentially(event_data, filenames, tmpdir, verbose):
     """Runs the full view processing pipeline sequentially."""
@@ -442,15 +443,22 @@ def _stitch_and_recalibrate_gnomonic(event_data, filenames, tmpdir, verbose):
     composite_logos(tmp_gnomonic_jpg, filenames['gnomonic'], 
                     f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
     
-    # Recalibrate if necessary
+    # Recalibrate if necessary, with fallback on failure
     if event_data.get('recalibrate', False):
-        recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
-                           f"{event_data['timestamp'] + event_data['duration'] // 2} "
-                           f"{filenames['gnomonic_grid_pto']} {filenames['gnomonic']} "
-                           f"{filenames['gnomonic_corr_grid_pto']}")
-        run_command(recalibrate_cmd, "Recalibrating gnomonic view", verbose)
+        try:
+            recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
+                               f"{event_data['timestamp'] + event_data['duration'] // 2} "
+                               f"{filenames['gnomonic_grid_pto']} {filenames['gnomonic']} "
+                               f"{filenames['gnomonic_corr_grid_pto']}")
+            run_command(recalibrate_cmd, "Recalibrating gnomonic view", verbose)
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: recalibrate.py failed. Using uncorrected grid PTO.", file=sys.stderr)
+            if verbose:
+                print(f"Stderr from recalibrate.py:\n{e.stderr}", file=sys.stderr)
+            shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
     else:
         shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
+
 
 def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
     """Generates the grid, and draws labels and marker crosses."""
@@ -661,5 +669,5 @@ if __name__ == "__main__":
         traceback.print_exc(file=sys.stderr)
     finally:
         # Clean up the lockfile on exit
-        if lockfile.exists():
+        if lockfile.exists() and lockfile.read_text() == str(os.getpid()):
             lockfile.unlink()

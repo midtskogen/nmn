@@ -143,6 +143,7 @@ def _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale):
 def calculate_refined_endpoints(event_data, filenames, verbose=False):
     """
     Calculates the refined start/end points of the meteor trail.
+    If the 'manual' flag is set or 'sunalt' is high, it skips refinement.
     Returns a dictionary with gnomonic pixel coordinates and az/alt coordinates.
     """
     try:
@@ -157,8 +158,21 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
         gnomonic_image_path = filenames['gnomonic']
         if Path(f"{filenames['name']}-gnomonic-mask.jpg").exists():
             gnomonic_image_path = f"{filenames['name']}-gnomonic-mask.jpg"
+
+        # Check conditions to decide whether to run track refinement.
+        is_manual = event_data.get('manual', 0) == 1
+        sun_is_high = event_data.get('sunalt', -99) > -12  # Default to a low sunalt
+
+        if is_manual or sun_is_high:
+            if is_manual:
+                print("   -> Skipping track refinement: 'manual' flag is set.")
+            if sun_is_high:
+                print(f"   -> Skipping track refinement: sun altitude ({event_data.get('sunalt')}°) is > -12°.")
+            refined_pixels = initial_gnomonic_pixels
+        else:
+            print("   -> Running track refinement for greater precision.")
+            refined_pixels = _refine_gnomonic_track(initial_gnomonic_pixels, gnomonic_image_path)
         
-        refined_pixels = _refine_gnomonic_track(initial_gnomonic_pixels, gnomonic_image_path)
         if not refined_pixels: return None
 
         azalt = _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale)

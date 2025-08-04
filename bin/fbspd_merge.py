@@ -426,6 +426,9 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
     return None, 0, None, np.inf
 
 def _generate_plots(data: dict, params: np.ndarray, lower_params: Optional[np.ndarray], upper_params: Optional[np.ndarray], n_ok: int, doplot: str, sigma_level: float = 1.0, station_id_array: Optional[np.ndarray] = None, exclude_station_idx: Optional[int] = None):
+    if data['reltime'].size == 0:
+        print("Warning: Cannot generate plots because there is no data.")
+        return
     plot_mask = np.full(len(data['reltime']), True)
     if exclude_station_idx is not None and station_id_array is not None: plot_mask = (station_id_array != exclude_station_idx)
     reltime_plot, pos_plot, color_time_plot, sig_plot = data['reltime'][plot_mask], data['pos'][plot_mask], data['color_time'][plot_mask], data['sig'][plot_mask]
@@ -445,6 +448,8 @@ def _generate_plots(data: dict, params: np.ndarray, lower_params: Optional[np.nd
     ax2.axhline(0, color='r', linestyle='--', linewidth=1.5, zorder=4); ax2.scatter(reltime_plot, residuals_plot, c=color_time_plot, cmap='viridis', s=10, zorder=5); ax2.fill_between(reltime_plot, -sig_smoothed*sigma_level, sig_smoothed*sigma_level, color='blue', alpha=0.3, label=f'±{sigma_level:.0f}σ usikkerhet'); ax2.set_ylabel('Residualer [km]'); ax2.set_xlabel('Tid [s]'); ax2.legend(loc='upper right')
     if doplot in ['save', 'both']: plt.savefig("posvstime.svg", bbox_inches='tight', pad_inches=0.05)
     fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, constrained_layout=True); fig2.suptitle("     Dynamisk analyse", fontsize=16, fontstyle="oblique")
+    if fit_speed.size > 0:
+        ax3.set_ylim(bottom=0, top=np.max(fit_speed) * 1.10)
     ax3.plot(t_fit, fit_speed, 'b-', zorder=10, label='Beste estimat'); ax3.set_ylim(bottom=0); ax3.set_ylabel('Hastighet [km/s]'); ax3.set_title('Hastighetsprofil')
     ax4.plot(t_fit, fit_accel, 'b-', zorder=10, label='Beste estimat'); ax4.set_ylabel('Akselerasjon [km/s²]'); ax4.set_xlabel('Tid [s]'); ax4.set_title('Akselerasjonsprofil')
     if lower_params is not None and upper_params is not None:

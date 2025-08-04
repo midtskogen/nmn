@@ -657,13 +657,13 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         title='Meteorens atmosfæriske bane', title_x=0.5, title_y=0.92,
         scene=dict(
             xaxis=dict(
-                title='Øst-vest avstand (km)',
+                title='Øst/vest-avstand (km)',
                 range=[x_min_km, x_max_km],
                 showspikes=True,
                 spikethickness=1
             ),
             yaxis=dict(
-                title='Nord-sør avstand (km)',
+                title='Nord/sør-avstand (km)',
                 range=[y_min_km, y_max_km],
                 showspikes=True,
                 spikethickness=1

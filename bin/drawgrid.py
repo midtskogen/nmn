@@ -460,7 +460,7 @@ def main():
         if pos.date and pos.lat and pos.long and args.timestamp:
             stars = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects)
             draw.stroke_color = wand.color.Color('white')
-            draw.stroke_width = 1
+            draw.stroke_opacity = 1
             draw.fill_color = wand.color.Color('transparent')
             for s in stars:
                 x, y = s[0] * args.xscale, s[1] * args.yscale

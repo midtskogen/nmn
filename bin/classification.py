@@ -35,8 +35,8 @@ except ImportError:
 
 # --- Default Configuration ---
 CONFIG = {
-    "DEFAULT_IMG_HEIGHT": 128,
-    "DEFAULT_IMG_WIDTH": 128,
+    "DEFAULT_IMG_HEIGHT": 64,
+    "DEFAULT_IMG_WIDTH": 96,
     "DEFAULT_MODEL_NAME": 'meteor_model.keras',
     "PARAMS_FILE": 'best_params.json'
 }

@@ -447,16 +447,40 @@ def _generate_plots(data: dict, params: np.ndarray, lower_params: Optional[np.nd
     fig1.subplots_adjust(right=0.85, top=0.92); cbar_ax = fig1.add_axes([0.88, 0.11, 0.03, 0.77]); cbar = fig1.colorbar(sc, cax=cbar_ax); cbar.set_label('Tid [s]')
     ax2.axhline(0, color='r', linestyle='--', linewidth=1.5, zorder=4); ax2.scatter(reltime_plot, residuals_plot, c=color_time_plot, cmap='viridis', s=10, zorder=5); ax2.fill_between(reltime_plot, -sig_smoothed*sigma_level, sig_smoothed*sigma_level, color='blue', alpha=0.3, label=f'±{sigma_level:.0f}σ usikkerhet'); ax2.set_ylabel('Residualer [km]'); ax2.set_xlabel('Tid [s]'); ax2.legend(loc='upper right')
     if doplot in ['save', 'both']: plt.savefig("posvstime.svg", bbox_inches='tight', pad_inches=0.05)
+    
     fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, constrained_layout=True); fig2.suptitle("     Dynamisk analyse", fontsize=16, fontstyle="oblique")
-    if fit_speed.size > 0:
-        ax3.set_ylim(bottom=0, top=np.max(fit_speed) * 1.10)
-    ax3.plot(t_fit, fit_speed, 'b-', zorder=10, label='Beste estimat'); ax3.set_ylim(bottom=0); ax3.set_ylabel('Hastighet [km/s]'); ax3.set_title('Hastighetsprofil')
-    ax4.plot(t_fit, fit_accel, 'b-', zorder=10, label='Beste estimat'); ax4.set_ylabel('Akselerasjon [km/s²]'); ax4.set_xlabel('Tid [s]'); ax4.set_title('Akselerasjonsprofil')
+    
+    # --- Start of Change ---
+    
+    # Plot primary data first
+    ax3.plot(t_fit, fit_speed, 'b-', zorder=10, label='Beste estimat')
+    ax3.set_ylabel('Hastighet [km/s]'); ax3.set_title('Hastighetsprofil')
+    ax4.plot(t_fit, fit_accel, 'b-', zorder=10, label='Beste estimat')
+    ax4.set_ylabel('Akselerasjon [km/s²]'); ax4.set_xlabel('Tid [s]'); ax4.set_title('Akselerasjonsprofil')
+    
+    # Check if uncertainty bounds are available
     if lower_params is not None and upper_params is not None:
         lower_speed, upper_speed = expfunc_1stder(t_fit, *lower_params), expfunc_1stder(t_fit, *upper_params)
         lower_accel, upper_accel = expfunc_2ndder(t_fit, *lower_params), expfunc_2ndder(t_fit, *upper_params)
+        
+        # Set y-limit to include the full uncertainty range with a 5% buffer
+        if upper_speed.size > 0:
+            ax3.set_ylim(bottom=0, top=np.max(upper_speed) * 1.05)
+        else:
+            ax3.set_ylim(bottom=0) # Fallback if array is empty
+
+        # Plot the uncertainty bands
         ax3.fill_between(t_fit, lower_speed, upper_speed, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
         ax4.fill_between(t_fit, lower_accel, np.minimum(upper_accel, 0), color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
+    else:
+        # If no uncertainty data, use the original scaling on the main fit
+        if fit_speed.size > 0:
+            ax3.set_ylim(bottom=0, top=np.max(fit_speed) * 1.10)
+        else:
+            ax3.set_ylim(bottom=0)
+
+    # --- End of Change ---
+            
     ax3.legend(); ax4.legend()
     if doplot in ['save', 'both']: plt.savefig("spd_acc.svg", bbox_inches='tight', pad_inches=0.05)
     if doplot in ['show', 'both']: plt.show()

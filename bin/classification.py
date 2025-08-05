@@ -124,7 +124,6 @@ def tune_model(args: argparse.Namespace):
     _run_tuning(args.positive_dir, args.negative_dir, (args.img_height, args.img_width),
                 args.batch_size, args.epochs, os.getcwd(), params_path, args.balance)
     
-    # MODIFIED: Add helpful next-step message
     script_name = os.path.basename(sys.argv[0])
     print("\n" + "="*20 + " Next Step " + "="*20)
     print(f"Tuning complete. Best parameters saved to '{params_path}'")
@@ -157,7 +156,8 @@ def _run_tuning(positive_dir, negative_dir, image_size, batch_size, epochs, outp
             model = models.Sequential([
                 layers.Rescaling(1./255, input_shape=(img_height, img_width, 3)),
                 layers.RandomFlip("horizontal_and_vertical"),
-                layers.RandomRotation(0.2)])
+                layers.RandomRotation(0.2)
+            ])
             for i in range(hp.Int('num_conv_layers', 2, 4)):
                 model.add(layers.Conv2D(filters=hp.Int(f'conv_{i}_filters', min_value=32, max_value=128, step=32),
                                        kernel_size=(3, 3), padding='same', activation='relu'))
@@ -426,7 +426,6 @@ def run_pipeline(args: argparse.Namespace):
     for result in all_results:
         print(f"| {result['resolution']:<10} | {result['f1_score']:.4f}     | {result['precision']:.2%}     | {result['recall']:.2%}   | {result['threshold']:.4f}               |")
     
-    # MODIFIED: Add helpful final message with location of best model and params
     best_res_dir = os.path.join(pipeline_dir, best_result['resolution'])
     print("\n" + "="*20 + " Best Model Location " + "="*20)
     print(f"The best model and its parameters are located in:")

@@ -66,6 +66,12 @@ def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
         print(f"   Az/Alt Coords: {azalt_coords}")
 
     sx, sy, ex, ey = pixel_coords
+
+    # Check if azalt_coords has enough values before unpacking
+    if len(azalt_coords) < 4:
+        print("Warning: Insufficient az/alt coordinates provided to draw_marker_crosses.", file=sys.stderr)
+        return image_path
+
     start_az, start_alt, end_az, end_alt = azalt_coords
 
     with Image.open(image_path) as img:
@@ -133,8 +139,11 @@ def _get_initial_gnomonic_pixels(event_data, lens_pto_data, gnomonic_pto_data):
     _, gnomonic_endx, gnomonic_endy = end_res
     return gnomonic_startx, gnomonic_starty, gnomonic_endx, gnomonic_endy
 
-def _refine_gnomonic_track(initial_pixels, gnomonic_image_path):
-    """Runs refinetrack.py to get more precise start/end points."""
+def _refine_gnomonic_track(initial_pixels, gnomonic_image_path, frames_count=None):
+    """
+    Runs refinetrack.py to get more precise start/end points and optional brightness data.
+    Returns a tuple: (refined_pixels, brightness_values).
+    """
     gnomonic_startx, gnomonic_starty, gnomonic_endx, gnomonic_endy = initial_pixels
     refine_cmd = [
         sys.executable, str(BIN_DIR / "refinetrack.py"),
@@ -142,10 +151,25 @@ def _refine_gnomonic_track(initial_pixels, gnomonic_image_path):
         f"{gnomonic_startx},{gnomonic_starty}",
         f"{gnomonic_endx},{gnomonic_endy}"
     ]
+    # Add the --frames argument if provided
+    if frames_count and frames_count > 0:
+        refine_cmd.append(f"--frames={frames_count}")
+
+    print(f"Executing: {' '.join(refine_cmd)}")
     result = subprocess.run(refine_cmd, capture_output=True, text=True, check=True)
-    points_str = result.stdout.strip()
-    point_coords = re.split(r'[,\s]+', points_str)
-    return tuple(map(float, point_coords))
+    
+    # Parse the output, which may contain coordinates and brightness values
+    output_parts = result.stdout.strip().split()
+    coord_str = " ".join(output_parts[:2])
+    
+    # The first 4 numbers are coordinates, the rest are brightness values
+    point_coords = re.split(r'[,\s]+', coord_str)
+    refined_pixels = tuple(map(float, point_coords[:4]))
+    
+    brightness_values = output_parts[2:] if len(output_parts) > 2 else []
+
+    return refined_pixels, brightness_values
+
 
 def _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale):
     """Maps refined gnomonic pixel coordinates back to az/alt values."""
@@ -167,7 +191,7 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
     """
     Calculates the refined start/end points of the meteor trail.
     If the 'manual' flag is set or 'sunalt' is high, it skips refinement.
-    Returns a dictionary with gnomonic pixel coordinates and az/alt coordinates.
+    Returns a dictionary with gnomonic pixel coordinates, az/alt coordinates, and brightness.
     """
     try:
         print("-> Calculating refined endpoints...")
@@ -182,10 +206,21 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
         if Path(f"{filenames['name']}-gnomonic-mask.jpg").exists():
             gnomonic_image_path = f"{filenames['name']}-gnomonic-mask.jpg"
 
-        # Check conditions to decide whether to run track refinement.
-        is_manual = event_data.get('manual', 0) == 1
-        sun_is_high = event_data.get('sunalt', -99) > -8  # Default to a low sunalt
+        # Check conditions for running coordinate and brightness refinement.
+        is_manual = event_data.get('manual', 0) != 0
+        sun_is_high = event_data.get('sunalt', -99) > -8
+        frames_count = event_data.get('frames')
 
+        # Determine if brightness estimation should be run.
+        should_estimate_brightness = False
+        if frames_count and not is_manual:
+            existing_brightness = event_data.get('brightness_values')
+            if not existing_brightness or all(v == 0 for v in existing_brightness):
+                should_estimate_brightness = True
+        
+        frames_to_pass = frames_count if should_estimate_brightness else None
+        
+        refined_pixels, brightness_values = None, []
         if is_manual or sun_is_high:
             if is_manual:
                 print("   -> Skipping track refinement: 'manual' flag is set.")
@@ -194,15 +229,26 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
             refined_pixels = initial_gnomonic_pixels
         else:
             print("   -> Running track refinement for greater precision.")
-            refined_pixels = _refine_gnomonic_track(initial_gnomonic_pixels, gnomonic_image_path)
+            refined_pixels, brightness_values = _refine_gnomonic_track(
+                initial_gnomonic_pixels, gnomonic_image_path, frames_to_pass
+            )
         
         if not refined_pixels: return None
 
         azalt = _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale)
         if not azalt: return None
 
+        result_data = {'gnomonic_pixels': refined_pixels, 'azalt': azalt}
+
+        # Validate brightness data before including it
+        if frames_to_pass and brightness_values:
+            if len(brightness_values) == frames_to_pass:
+                result_data['brightness'] = brightness_values
+            else:
+                print(f"Warning: Brightness update skipped. Expected {frames_to_pass} values, but got {len(brightness_values)}.", file=sys.stderr)
+
         print("   ...Done: Calculating refined endpoints.")
-        return {'gnomonic_pixels': refined_pixels, 'azalt': azalt}
+        return result_data
 
     except Exception as e:
         print(f"Warning: Could not calculate refined endpoints: {e}", file=sys.stderr)
@@ -360,13 +406,36 @@ def overlay_video_with_image(video_path, overlay_path, output_path, verbose=Fals
 def get_event_data(event_file):
     """Parses the event.txt file to extract key information."""
     data = {}
+    in_trail_section = False
     try:
         with open(event_file, 'r') as f:
             for line in f:
+                if line.strip() == '[trail]':
+                    in_trail_section = True
+                    continue
+                elif line.strip().startswith('['):
+                    in_trail_section = False
+
                 if '=' not in line:
                     continue
+                
                 key, value = (part.strip() for part in line.strip().split('=', 1))
                 parts = value.split()
+                
+                if in_trail_section:
+                    if key == 'duration':
+                        data['duration'] = int(float(value) + 0.5)
+                    elif key == 'positions':
+                        data['begin'], data['end'] = parts[0], parts[-1]
+                    elif key == 'coordinates':
+                        data['start_azalt'], data['end_azalt'] = parts[0], parts[-1]
+                    elif key == 'frames':
+                        data['frames'] = int(value)
+                    elif key == 'brightness':
+                        data['brightness_values'] = [float(b) for b in value.split()]
+
+                
+                # General section keys
                 if key == 'start':
                     timestamp = None
                     for part in parts:
@@ -381,16 +450,11 @@ def get_event_data(event_file):
                         raise ValueError("Could not find a valid Unix timestamp in 'start' line.")
                     data['timestamp'] = timestamp
                     data['clock'] = f"{parts[0]} {parts[1].split('.')[0]}"
-                elif key == 'duration':
-                    data['duration'] = int(float(value) + 0.5)
-                elif key == 'positions':
-                    data['begin'], data['end'] = parts[0], parts[-1]
-                elif key == 'coordinates':
-                    data['start_azalt'], data['end_azalt'] = parts[0], parts[-1]
                 elif key in ('sunalt', 'manual'):
                     data[key] = int(float(value))
                 elif key in ('latitude', 'longitude'):
                     data[key] = float(value)
+
     except FileNotFoundError:
         print(f"Error: Event file '{event_file}' not found.", file=sys.stderr)
         sys.exit(1)
@@ -398,6 +462,46 @@ def get_event_data(event_file):
         print(f"Error parsing '{event_file}': {e}", file=sys.stderr)
         sys.exit(1)
     return data
+
+def update_event_file(event_data, filepath="event.txt"):
+    """Updates event.txt with refined brightness data."""
+    # Only proceed if there is valid brightness data to write.
+    if 'brightness' not in event_data or not event_data['brightness']:
+        return
+
+    print("-> Updating event.txt with refined brightness data...")
+    try:
+        lines = Path(filepath).read_text().splitlines()
+        new_lines = []
+        in_trail_section = False
+        was_updated = False
+
+        for line in lines:
+            if line.strip() == '[trail]':
+                in_trail_section = True
+            elif line.strip().startswith('['):
+                in_trail_section = False
+
+            key = line.split('=')[0].strip() if '=' in line else None
+            
+            if in_trail_section and key == 'brightness':
+                brightness_str = " ".join(event_data['brightness'])
+                new_lines.append(f"brightness = {brightness_str}")
+                was_updated = True
+            else:
+                new_lines.append(line)
+
+        if not was_updated:
+             print(f"Warning: 'brightness' key not found in [trail] section of {filepath}. File not updated.", file=sys.stderr)
+             return
+
+        Path(filepath).write_text("\n".join(new_lines) + "\n")
+        print(f"   ...Done: Updated brightness in {filepath}.")
+
+    except FileNotFoundError:
+        print(f"Error: Could not find {filepath} to update.", file=sys.stderr)
+    except Exception as e:
+        print(f"Error updating {filepath}: {e}", file=sys.stderr)
 
 def run_command(command, description, verbose=False):
     """Executes a shell command with progress indication and error handling."""
@@ -525,7 +629,9 @@ def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose):
     # 2. Calculate refined endpoints using the newly created/recalibrated files.
     refined_data = calculate_refined_endpoints(event_data, filenames, verbose)
     if refined_data:
-        event_data['refined_coords'] = refined_data['azalt']
+        event_data['refined_coords'] = refined_data.get('azalt')
+        if refined_data.get('brightness'):
+            event_data['brightness'] = refined_data['brightness']
 
     # 3. Generate the grid and draw decorations (crosses, text).
     grid_path = _generate_decorated_grid(event_data, filenames, refined_data, verbose)
@@ -649,12 +755,16 @@ def main(file_prefix, verbose=False, nothreads=False):
 
         composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
 
+    # Update event.txt before finishing
+    update_event_file(event_data)
+
     print("\n--- Pipeline Finished ---")
 
-    # Print the refined coordinates if they were calculated successfully
+    # Print the refined coordinates as the final output
     if event_data.get('refined_coords'):
         s_az, s_alt, e_az, e_alt = event_data['refined_coords']
         print(f"Start: {s_az:.2f} {s_alt:.2f}  End: {e_az:.2f} {e_alt:.2f}")
+
 
 def check_pid(pid):
     """Check For the existence of a unix pid."""

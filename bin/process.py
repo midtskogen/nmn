@@ -413,16 +413,22 @@ def write_output_files(event_config, station_config, event_dir: Path):
 def main():
     """Main execution flow of the script."""
     args = get_args()
+    # 1. Initial load
     event_config, station_config, event_dir = load_configs(args.event_file)
 
     if should_discard_event(event_config, station_config):
         cleanup_directory_and_exit(event_dir)
 
-    # Acquire a processing slot and ensure it's released on exit
     semaphore = acquire_processing_slot(args.timeout)
 
     try:
+        # 2. Run the external process that might change the file
         proc_results = run_video_processing(event_config, station_config, event_dir)
+
+        # 3. Reload the file to get any changes made by the external script
+        event_config, station_config, event_dir = load_configs(args.event_file)
+
+        # 4. Now, continue with the updated data
         update_event_summary(event_config, station_config, proc_results)
         run_classification(event_config, event_dir)
 
@@ -430,16 +436,15 @@ def main():
         with args.event_file.open('w', encoding='utf-8') as f:
             event_config.write(f)
 
+        # This function will now use the correct, updated brightness data
         write_output_files(event_config, station_config, event_dir)
 
     finally:
-        # Release the semaphore so another waiting process can run
         if semaphore:
             semaphore.release()
             semaphore.close()
             print(f"Process {os.getpid()} released its processing slot.")
 
-    # The original script exits with 1 on success, so we preserve that.
     sys.exit(1)
 
 

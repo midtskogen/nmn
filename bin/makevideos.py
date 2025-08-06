@@ -5,6 +5,9 @@
 Processes meteor observation videos to create stacked images, grid overlays,
 and gnomonic projections. This script uses Python libraries and a
 ThreadPoolExecutor to handle tasks in parallel, maximizing CPU utilization.
+
+It also includes a '--client' mode, which prepares the initial event video
+from raw camera footage.
 """
 
 import argparse
@@ -21,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import math
 import pto_mapper
 import errno
+import datetime
 
 
 # Assuming user-provided scripts are in the same directory or python path.
@@ -49,7 +53,6 @@ BIN_DIR = Path(__file__).parent.resolve()
 def refraction(alt):
     """
     Applies atmospheric refraction correction to an altitude in degrees.
-    This is a Python implementation of the formula from makevideos.sh.
     """
     if alt + 4.4 == 0: return alt
     tan_arg = math.radians(alt + (7.31 / (alt + 4.4)))
@@ -485,7 +488,7 @@ def update_event_file(event_data, filepath="event.txt"):
             key = line.split('=')[0].strip() if '=' in line else None
             
             if in_trail_section and key == 'brightness':
-                brightness_str = " ".join(event_data['brightness'])
+                brightness_str = " ".join(map(str, event_data['brightness']))
                 new_lines.append(f"brightness = {brightness_str}")
                 was_updated = True
             else:
@@ -631,7 +634,7 @@ def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose):
     if refined_data:
         event_data['refined_coords'] = refined_data.get('azalt')
         if refined_data.get('brightness'):
-            event_data['brightness'] = refined_data['brightness']
+            event_data['brightness'] = refined_data.get('brightness')
 
     # 3. Generate the grid and draw decorations (crosses, text).
     grid_path = _generate_decorated_grid(event_data, filenames, refined_data, verbose)
@@ -705,18 +708,193 @@ def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, verbose):
     
     overlay_video_with_image(filenames['gnomonicmp4'], grid_assets["cropped_grid"], filenames['gnomonicgridmp4'], verbose=verbose)
 
-def main(file_prefix, verbose=False, nothreads=False):
+# --- Client Mode Functions ---
+
+def search_for_videos(video_dir, start_unix):
+    """
+    Searches for three consecutive one-minute video files around the start time
+    based on the expected camera directory structure.
+    Returns a list of 3 Path objects (or None if not found) from earliest to latest.
+    """
+    found_files = []
+    # Search for files for t-1, t, and t+1 minute relative to the event start.
+    for i in [-1, 0, 1]:
+        found_file = None
+        base_time = start_unix + (i * 60)
+        # Check the minute before and after if the exact minute isn't found.
+        for offset in [0, -60, 60]:
+            search_time = base_time + offset
+            dt_obj = datetime.datetime.fromtimestamp(search_time, tz=datetime.timezone.utc)
+            # Path format is expected to be: YYYYMMDD/HH/full_MM.mp4
+            file_path = Path(video_dir) / dt_obj.strftime('%Y%m%d/%H') / f"full_{dt_obj.strftime('%M')}.mp4"
+            if file_path.exists():
+                found_file = file_path
+                break
+        found_files.append(found_file)
+    return found_files
+
+def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
+    """
+    Runs the script in client mode: finds source videos, concatenates them
+    into the event video, copies relevant conf/grid files, and prints event
+    coordinates before exiting.
+    """
+    print("--- Running in Client Mode ---")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        print(f"Using temporary directory {tmpdir}")
+
+        # --- Copy configuration files ---
+        dest_conf = Path("metdetect.conf")
+        if not dest_conf.exists():
+            src_conf = Path(video_dir) / "metdetect.conf"
+            if src_conf.exists():
+                try:
+                    shutil.copy(src_conf, dest_conf)
+                    print(f"Copied {src_conf} to current directory.")
+                except shutil.SameFileError:
+                    pass # File is already here, which is fine.
+                except shutil.Error as e:
+                    print(f"Error copying metdetect.conf: {e}", file=sys.stderr)
+            else:
+                 print("Warning: metdetect.conf not found in current directory or in --video-dir.", file=sys.stderr)
+
+        meteor_cfg_src = Path("/etc/meteor.cfg")
+        if meteor_cfg_src.exists():
+            shutil.copy(meteor_cfg_src, ".")
+        else:
+             print("Warning: /etc/meteor.cfg not found.", file=sys.stderr)
+
+        # --- Find and prepare video files ---
+        full1, full2, full3 = search_for_videos(video_dir, start_unix)
+        video_files = [full1, full2, full3]
+        
+        if not all(video_files):
+            print("Error: One or more source videos not found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Found source videos:\n- {full1}\n- {full2}\n- {full3}")
+        
+        # --- Get metadata from first video (timestamp and frame rate) ---
+        ts = 0
+        try:
+            probe = ffmpeg.probe(str(full1))
+            rate_str = next((s['r_frame_rate'] for s in probe['streams'] if s['codec_type'] == 'video'), None)
+            if rate_str is None: raise ValueError("No video stream found")
+            rate = eval(rate_str)
+
+            creation_time_str = probe.get('format', {}).get('tags', {}).get('creation_time')
+            if creation_time_str:
+                dt_obj = datetime.datetime.fromisoformat(creation_time_str.replace('Z', '+00:00'))
+                ts = int(dt_obj.timestamp())
+        except (ffmpeg.Error, ValueError) as e:
+            print(f"Could not probe {full1} for metadata: {e}", file=sys.stderr)
+
+        if ts == 0:
+            print("Warning: Could not get timestamp from video metadata, falling back to filename parsing.")
+            match = re.search(r'/(\d{8})/(\d{2})/full_(\d{2})\.mp4', str(full1))
+            if match:
+                date_str = f"{match.group(1)} {match.group(2)}:{match.group(3)}:00"
+                dt_obj = datetime.datetime.strptime(date_str, "%Y%m%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                ts = int(dt_obj.timestamp())
+            else:
+                print("Error: Could not determine timestamp for first video file. Exiting.", file=sys.stderr)
+                sys.exit(1)
+        
+        # --- Calculate FFmpeg skip and length ---
+        skip_sec = start_unix - ts - 10
+        len_padded = length_sec + 14
+        
+        if skip_sec < 0:
+            print(f"Warning: Calculated skip time is negative ({skip_sec}s). This may clip the event start.", file=sys.stderr)
+            skip_sec = max(0, skip_sec)
+
+        # --- Concatenate videos with FFmpeg and report final clip time ---
+        full_mp4 = f"{output_name}.mp4"
+        
+        # Calculate the start and end time of the final clip to be generated
+        ts_clip_start = ts + skip_sec
+        ts_clip_end = ts_clip_start + len_padded
+        start_hms = datetime.datetime.fromtimestamp(ts_clip_start, tz=datetime.timezone.utc).strftime('%H:%M:%S')
+        end_hms = datetime.datetime.fromtimestamp(ts_clip_end, tz=datetime.timezone.utc).strftime('%H:%M:%S')
+        
+        print(f"Generating {full_mp4} ... {start_hms} - {end_hms} ... ", end="", flush=True)
+        
+        filelist_path = Path(tmpdir) / "filelist.txt"
+        with open(filelist_path, "w") as f:
+            for vfile in video_files:
+                f.write(f"file '{vfile.resolve()}'\n")
+
+        try:
+            (
+                ffmpeg
+                .input(str(filelist_path), format='concat', safe=0)
+                .output(full_mp4, c='copy', ss=skip_sec, t=len_padded)
+                .overwrite_output()
+                .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
+            )
+            print("done")
+        except ffmpeg.Error as e:
+            print("\n--- ERROR during ffmpeg-python execution ---", file=sys.stderr)
+            print(f"FFmpeg stderr:\n{e.stderr.decode('utf8')}", file=sys.stderr)
+            sys.exit(1)
+        
+        # --- Copy grid, lens, and mask files ---
+        day_str = datetime.datetime.fromtimestamp(start_unix, tz=datetime.timezone.utc).strftime('%Y%m%d')
+        
+        def find_and_copy_latest_file(pattern, dest_name, event_day_str):
+            base_dir = Path(video_dir)
+            # Default to a non-dated file in the video dir
+            latest_file_to_copy = base_dir / dest_name
+            
+            # Find the most recent dated file that is on or before the event day
+            files = sorted(base_dir.glob(pattern))
+            for f in files:
+                match = re.search(r'-(\d{8})\.', f.name)
+                if match and match.group(1) <= event_day_str:
+                    latest_file_to_copy = f
+                else:
+                    break # List is sorted, no more candidates
+            
+            if latest_file_to_copy.exists():
+                shutil.copy(latest_file_to_copy, dest_name)
+                return latest_file_to_copy
+            return None
+
+        grid_f = find_and_copy_latest_file("grid-*.png", "grid.png", day_str)
+        lens_f = find_and_copy_latest_file("lens-*.pto", "lens.pto", day_str)
+        mask_f = find_and_copy_latest_file("mask-*.jpg", "mask.jpg", day_str)
+        print(f"Using grid: {grid_f}, lens: {lens_f}, mask: {mask_f}")
+
+        # --- Read event.txt for coordinates ---
+        try:
+            event_data = get_event_data("event.txt")
+            start_coords = event_data.get('start_azalt', 'N/A,N/A').replace(',', ' ')
+            end_coords = event_data.get('end_azalt', 'N/A,N/A').replace(',', ' ')
+            print(f"Start: {start_coords}  End: {end_coords}")
+        except SystemExit: # get_event_data calls sys.exit on failure
+            print("Could not read event.txt to report coordinates.")
+
+def main(args):
     """Main function to orchestrate the video processing pipeline."""
-    print(f"--- Initializing Video Pipeline ---")
-    if verbose: print("--- Verbose mode enabled ---")
-    if nothreads: print("--- Multithreading disabled ---")
+    if args.client:
+        # In client mode, we only perform the actions to create the event video
+        run_client_mode(args.file_prefix, args.video_dir, args.start, args.length, args.verbose)
+        return
+        
+    # Check for unused arguments in full pipeline mode
+    if args.video_dir or args.start is not None or args.length is not None:
+        print("Warning: --video-dir, --start, and --length are only used with the --client flag. They will be ignored.", file=sys.stderr)
+
+    print(f"--- Initializing Full Video Pipeline ---")
+    if args.verbose: print("--- Verbose mode enabled ---")
+    if args.nothreads: print("--- Multithreading disabled ---")
     
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
         with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
 
         event_data = get_event_data('event.txt')
-        name = file_prefix
+        name = args.file_prefix
         
         filenames = {
             'name': name, 'full': f"{name}.mp4", 'jpg': f"{name}.jpg", 'jpggrid': f"{name}-grid.jpg",
@@ -732,28 +910,28 @@ def main(file_prefix, verbose=False, nothreads=False):
         event_data['label'] = f"{event_data.get('clock', '')}\n{pos_label}"
         gnomonic_enabled = 'begin' in event_data and 'start_azalt' in event_data
 
-        if nothreads:
+        if args.nothreads:
             stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
-            run_command(stack_cmd, "Stacking video frames to create JPG", verbose)
-            _run_full_view_sequentially(event_data, filenames, tmpdir, verbose)
+            run_command(stack_cmd, "Stacking video frames to create JPG", args.verbose)
+            _run_full_view_sequentially(event_data, filenames, tmpdir, args.verbose)
             if gnomonic_enabled:
-                _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, verbose)
+                _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, args.verbose)
         else:
             with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
                 stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
-                future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", verbose)
+                future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", args.verbose)
 
-                future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg)
+                future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, args.verbose, executor, future_stacked_jpg)
                 
                 if gnomonic_enabled:
-                    future_gnomonic = executor.submit(_run_gnomonic_view_in_parallel, event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg)
+                    future_gnomonic = executor.submit(_run_gnomonic_view_in_parallel, event_data, filenames, tmpdir, args.verbose, executor, future_stacked_jpg)
                     future_gnomonic.result() # Wait for gnomonic pipeline to finish
                 else:
                     print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
 
                 future_full_view.result() # Wait for full view pipeline to finish
 
-        composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
+        composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=args.verbose)
 
     # Update event.txt before finishing
     update_event_file(event_data)
@@ -781,20 +959,39 @@ def check_pid(pid):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Processes meteor observation videos using Python libraries.",
+        description=(
+            "Processes meteor observation videos using Python libraries.\n"
+            "Default mode creates advanced products like gnomonic projections.\n"
+            "'--client' mode creates the initial event video from raw footage."
+        ),
         formatter_class=argparse.RawTextHelpFormatter
     )
+    # --- Arguments for all modes ---
     parser.add_argument("file_prefix", help="The base name for input/output files (e.g., 'event_20250101_123456').")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed information about commands being run.")
-    parser.add_argument("--nothreads", action="store_true", help="Disable multithreading and run all tasks sequentially.")
+    
+    # --- Arguments for client mode ---
+    client_group = parser.add_argument_group('Client Mode')
+    client_group.add_argument("--client", action="store_true", help="Run in client mode to generate the initial event video.")
+    client_group.add_argument("--video-dir", help="[Client mode] Directory containing source video files (e.g., '~/RPIws/').")
+    client_group.add_argument("--start", type=int, help="[Client mode] Event start time as a Unix timestamp.")
+    client_group.add_argument("--length", type=int, help="[Client mode] Event duration in seconds.")
+
+    # --- Arguments for full pipeline ---
+    full_group = parser.add_argument_group('Full Pipeline Mode (default)')
+    full_group.add_argument("--nothreads", action="store_true", help="Disable multithreading and run all tasks sequentially.")
+
     args = parser.parse_args()
+
+    # Validate arguments for client mode
+    if args.client and (args.video_dir is None or args.start is None or args.length is None):
+        parser.error("--client mode requires --video-dir, --start, and --length arguments.")
 
     os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
     lockfile = Path("processing.lock")
 
     if lockfile.exists():
         try:
-            # Check if the process holding the lock is still alive
             pid = int(lockfile.read_text())
             if check_pid(pid):
                 print(f"Error: Lockfile '{lockfile}' exists and process {pid} is still running.", file=sys.stderr)
@@ -803,18 +1000,15 @@ if __name__ == "__main__":
                 print(f"Warning: Removing stale lockfile for dead process {pid}.", file=sys.stderr)
                 lockfile.unlink()
         except (ValueError, FileNotFoundError):
-            # Lockfile is empty or was removed between check and read
             print(f"Warning: Removing corrupt or empty lockfile.", file=sys.stderr)
             lockfile.unlink(missing_ok=True)
 
     try:
-        # Create a new lockfile with the current process's PID
         lockfile.write_text(str(os.getpid()))
-        main(args.file_prefix, verbose=args.verbose, nothreads=args.nothreads)
+        main(args)
     except Exception as e:
         print(f"\n--- An unexpected error occurred: {e} ---", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
     finally:
-        # Clean up the lockfile on exit
         if lockfile.exists() and lockfile.read_text() == str(os.getpid()):
             lockfile.unlink()

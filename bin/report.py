@@ -124,7 +124,7 @@ pos=positions[-1].split(',')
 xpos2=float(pos[0])
 ypos2=float(pos[1])
 
-command = [os.path.expanduser('~/bin/makevideos.sh'), dir, str(int(round(start))), str(int(float(math.ceil(duration)))), name, str(xpos1) + ',' + str(ypos1), str(xpos2) + ',' + str(ypos2), "0" if sunalt > -10 else "1", videostart + '\n' + config2.get('station', 'name').title() + ', ' + config2.get('astronomy', 'latitude') + 'N ' + config2.get('astronomy', 'longitude') + 'E ' + str(int(float(config2.get('astronomy', 'elevation')))) + ' m.a.s.l.']
+command = [os.path.expanduser('~/bin/makevideos.py'), "--client", "--video-dir", dir, "--start", str(int(round(start))), "--length", str(int(float(math.ceil(duration)))), name]
 
 print(' '.join(command))
 

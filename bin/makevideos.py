@@ -57,29 +57,52 @@ def refraction(alt):
     corrected_alt = alt - 0.006 / math.tan(tan_arg)
     return round(corrected_alt, 2)
 
-def draw_marker_crosses(image_path, pixel_coords, verbose=False):
-    """Draws marker crosses on an image at specified coordinates."""
-    description = f"Drawing marker crosses on {Path(image_path).name}"
+def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
+    """Draws marker crosses and az/alt labels on an image at specified coordinates."""
+    description = f"Drawing marker crosses and labels on {Path(image_path).name}"
     print(f"-> {description}...")
     if verbose:
-        print(f"   Coordinates: {pixel_coords}")
+        print(f"   Pixel Coords: {pixel_coords}")
+        print(f"   Az/Alt Coords: {azalt_coords}")
 
     sx, sy, ex, ey = pixel_coords
-    
+    start_az, start_alt, end_az, end_alt = azalt_coords
+
     with Image.open(image_path) as img:
         draw = ImageDraw.Draw(img)
-        
-        # Draw start cross
+
+        # Load font
+        font = None
+        for font_name in ["Helvetica.ttf", "Arial.ttf", "DejaVuSans.ttf", "Verdana.ttf"]:
+            try:
+                font = ImageFont.truetype(font_name, 14)
+                break
+            except IOError:
+                continue
+        if not font:
+            font = ImageFont.load_default()
+
+        # Format text labels, e.g., [211.13, 14.00]
+        start_label = f"({start_az:.2f}, {start_alt:.2f})"
+        end_label = f"({end_az:.2f}, {end_alt:.2f})"
+
+        # Position text to the right of the cross, vertically centered
+        start_text_pos = (sx + 20, sy - 8)
+        end_text_pos = (ex + 20, ey - 8)
+
+        # Draw start cross and label
         draw.line((sx-16, sy-16, sx-4, sy-4), fill="white", width=2)
         draw.line((sx+4, sy+4, sx+16, sy+16), fill="white", width=2)
         draw.line((sx+16, sy-16, sx+4, sy-4), fill="white", width=2)
         draw.line((sx-4, sy+4, sx-16, sy+16), fill="white", width=2)
-        
-        # Draw end cross
+        draw.text(start_text_pos, start_label, font=font, fill="yellow", stroke_width=1, stroke_fill="black")
+
+        # Draw end cross and label
         draw.line((ex-16, ey-16, ex-4, ey-4), fill="white", width=2)
         draw.line((ex+4, ey+4, ex+16, ey+16), fill="white", width=2)
         draw.line((ex+16, ey-16, ex+4, ey-4), fill="white", width=2)
         draw.line((ex-4, ey+4, ex-16, ey+16), fill="white", width=2)
+        draw.text(end_text_pos, end_label, font=font, fill="yellow", stroke_width=1, stroke_fill="black")
 
         img.save(image_path)
     print(f"   ...Done: {description}.")
@@ -161,13 +184,13 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
 
         # Check conditions to decide whether to run track refinement.
         is_manual = event_data.get('manual', 0) == 1
-        sun_is_high = event_data.get('sunalt', -99) > -12  # Default to a low sunalt
+        sun_is_high = event_data.get('sunalt', -99) > -8  # Default to a low sunalt
 
         if is_manual or sun_is_high:
             if is_manual:
                 print("   -> Skipping track refinement: 'manual' flag is set.")
             if sun_is_high:
-                print(f"   -> Skipping track refinement: sun altitude ({event_data.get('sunalt')}°) is > -12°.")
+                print(f"   -> Skipping track refinement: sun altitude ({event_data.get('sunalt')}°) is > -8°.")
             refined_pixels = initial_gnomonic_pixels
         else:
             print("   -> Running track refinement for greater precision.")
@@ -483,9 +506,9 @@ def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
     drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['gnomonic_corr_grid_pto']} {grid_path}"
     run_command(drawgrid_cmd, "Generating gnomonic grid", verbose)
     
-    # Draw marker crosses on the grid image
-    if refined_data and 'gnomonic_pixels' in refined_data:
-        draw_marker_crosses(grid_path, refined_data['gnomonic_pixels'], verbose=verbose)
+    # Draw marker crosses and az/alt labels on the grid image
+    if refined_data and 'gnomonic_pixels' in refined_data and 'azalt' in refined_data:
+        draw_marker_crosses(grid_path, refined_data['gnomonic_pixels'], refined_data['azalt'], verbose=verbose)
 
     # Draw text label
     draw_text_on_image(grid_path, event_data['label'], grid_path, verbose=verbose)

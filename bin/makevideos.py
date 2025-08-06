@@ -594,8 +594,8 @@ def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked
 
     # 2. Stitch gnomonic JPG
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
-    stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 "
-                        f"{filenames['gnomonic_pto']} {stacked_jpg_path} {tmp_gnomonic_jpg}")
+    stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 256 "
+                        f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
     run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
     
     # 3. Add logos

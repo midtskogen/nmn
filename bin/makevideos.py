@@ -7,7 +7,8 @@ and gnomonic projections. This script uses Python libraries and a
 ThreadPoolExecutor to handle tasks in parallel, maximizing CPU utilization.
 
 It also includes a '--client' mode, which prepares the initial event video
-from raw camera footage.
+from raw camera footage and then generates the initial gnomonic projection
+and cropped 'fireball.jpg'.
 """
 
 import argparse
@@ -575,19 +576,37 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, verbose, executor,
 
 # --- Gnomonic View Processing Helpers ---
 
-def _stitch_and_recalibrate_gnomonic(event_data, filenames, tmpdir, verbose):
-    """Stitches the gnomonic JPG, adds logos, and recalibrates the PTO file."""
-    # Stitch gnomonic JPG
+def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked_jpg_path):
+    """Generates the base gnomonic projection image from a stacked JPG."""
+    azalt_start = event_data.get('start_azalt')
+    azalt_end = event_data.get('end_azalt')
+    if not azalt_start or not azalt_end:
+        print("Warning: Skipping gnomonic projection generation: 'coordinates' not found in event.txt.", file=sys.stderr)
+        return None
+
+    # 1. Reproject for gnomonic view
+    reproject_cmd = (
+        f"{sys.executable} {BIN_DIR}/reproject.py -f 45 --width 1920 --height 2560 "
+        f"-o {filenames['gnomonic_pto']} -g {filenames['gnomonic_grid_pto']} "
+        f"-e {azalt_end} {filenames['lens_pto']} {azalt_start}"
+    )
+    run_command(reproject_cmd, "Reprojecting for gnomonic view", verbose)
+
+    # 2. Stitch gnomonic JPG
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
     stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 "
-                        f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
+                        f"{filenames['gnomonic_pto']} {stacked_jpg_path} {tmp_gnomonic_jpg}")
     run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
     
-    # Add logos
+    # 3. Add logos
     composite_logos(tmp_gnomonic_jpg, filenames['gnomonic'], 
                     f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
     
-    # Recalibrate if necessary, with fallback on failure
+    print(f"   ...Done: Generated base gnomonic image '{filenames['gnomonic']}'.")
+    return filenames['gnomonic']
+
+def recalibrate_gnomonic_view(event_data, filenames, verbose):
+    """Recalibrates the gnomonic view if necessary, with a fallback."""
     if event_data.get('recalibrate', False):
         try:
             recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
@@ -602,7 +621,6 @@ def _stitch_and_recalibrate_gnomonic(event_data, filenames, tmpdir, verbose):
             shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
     else:
         shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
-
 
 def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
     """Generates the grid, and draws labels and marker crosses."""
@@ -624,10 +642,10 @@ def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
 def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose):
     """
     Creates the gnomonic grid, decorates it, and produces the final composite image.
-    This is a synchronous, single-threaded function.
+    Assumes the base gnomonic image and PTO files already exist.
     """
-    # 1. Stitch base image and recalibrate PTO file.
-    _stitch_and_recalibrate_gnomonic(event_data, filenames, tmpdir, verbose)
+    # 1. Recalibrate PTO file. The base gnomonic image is now created earlier.
+    recalibrate_gnomonic_view(event_data, filenames, verbose)
     
     # 2. Calculate refined endpoints using the newly created/recalibrated files.
     refined_data = calculate_refined_endpoints(event_data, filenames, verbose)
@@ -660,14 +678,13 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, verbose, execu
         print("Skipping gnomonic view: 'coordinates' not found in event.txt.")
         return
 
-    # 1. Reproject for gnomonic view (initial task, required by both sub-pipelines)
-    reproject_cmd = (
-        f"{sys.executable} {BIN_DIR}/reproject.py -f 45 --width 1920 --height 2560 "
-        f"-o {filenames['gnomonic_pto']} -g {filenames['gnomonic_grid_pto']} "
-        f"-e {azalt_end} {filenames['lens_pto']} {azalt_start}"
-    )
-    future_reproject = executor.submit(run_command, reproject_cmd, "Reprojecting for gnomonic view", verbose)
-    future_reproject.result()
+    # 1. Generate the base gnomonic projection image. This replaces the old reproject task.
+    #    It must wait for the stacked JPG to be created.
+    stacked_jpg_path = future_stacked_jpg.result() and filenames['jpg']
+    future_gnomonic_base_image = executor.submit(generate_gnomonic_projection, 
+                                                 event_data, filenames, tmpdir, verbose, stacked_jpg_path)
+    future_gnomonic_base_image.result() # This must complete before the next steps.
+
 
     # 2. GNOMONIC VIDEO PIPELINE (long-running)
     # Starts the creation of the raw gnomonic video, which runs in parallel with the grid creation.
@@ -677,8 +694,7 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, verbose, execu
     future_gnomonic_mp4 = executor.submit(lambda: run_command(future_modified_pto.result() and stitch_cmd_mp4, "Creating gnomonic video", verbose))
 
     # 3. GNOMONIC IMAGE/GRID PIPELINE (long-running)
-    # Starts the creation of all grid assets. This task runs in parallel with the video pipeline.
-    future_stacked_jpg.result() # Must wait for the main stacked JPG before starting.
+    # This task now depends on the base gnomonic image being created.
     future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, verbose)
 
     # 4. FINAL ASSEMBLY
@@ -694,13 +710,13 @@ def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, verbose):
     azalt_start, azalt_end = event_data.get('start_azalt'), event_data.get('end_azalt')
     if not azalt_start or not azalt_end: return
 
-    reproject_cmd = (f"{sys.executable} {BIN_DIR}/reproject.py -f 45 --width 1920 --height 2560 "
-                     f"-o {filenames['gnomonic_pto']} -g {filenames['gnomonic_grid_pto']} "
-                     f"-e {azalt_end} {filenames['lens_pto']} {azalt_start}")
-    run_command(reproject_cmd, "Reprojecting for gnomonic view", verbose)
+    # 1. Generate base gnomonic image. Requires the stacked JPG which was created just before this function call.
+    generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, filenames['jpg'])
 
+    # 2. Create the decorated grid and get assets for the video overlay
     grid_assets = _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose)
 
+    # 3. Create final gnomonic video
     print("-> Creating final gnomonic video...")
     modify_pto_canvas(filenames['gnomonic_pto'], filenames['gnomonic_mp4_pto'], 1920, 1080, verbose=verbose)
     stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {filenames['gnomonicmp4']}"
@@ -864,6 +880,42 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
         lens_f = find_and_copy_latest_file("lens-*.pto", "lens.pto", day_str)
         mask_f = find_and_copy_latest_file("mask-*.jpg", "mask.jpg", day_str)
         print(f"Using grid: {grid_f}, lens: {lens_f}, mask: {mask_f}")
+
+        # --- Generate stacked and gnomonic images for meteorcrop ---
+        print("\n--- Generating images for cropping ---")
+        
+        filenames = {
+            'name': output_name, 'full': f"{output_name}.mp4", 'jpg': f"{output_name}.jpg",
+            'gnomonic': f"{output_name}-gnomonic.jpg", 'gnomonic_pto': 'gnomonic.pto',
+            'gnomonic_grid_pto': 'gnomonic_grid.pto', 'lens_pto': 'lens.pto',
+            'gnomonic_corr_grid_pto': 'gnomonic_corr_grid.pto'
+        }
+        
+        with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
+        with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
+
+        # Stack the video to create the JPG
+        stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
+        run_command(stack_cmd, "Stacking video frames to create JPG", verbose)
+        
+        event_data = get_event_data("event.txt")
+
+        # Determine if recalibration should run, same logic as full pipeline
+        event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
+        if verbose:
+            print(f"Recalibration check: manual={event_data.get('manual', 0)}, sunalt={event_data.get('sunalt', 0)} -> Recalibrate: {event_data['recalibrate']}")
+
+        # Generate the base gnomonic image needed for meteorcrop
+        gnomonic_image_path = generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, filenames['jpg'])
+
+        if gnomonic_image_path:
+            # Run recalibration step to create gnomonic_corr_grid.pto
+            recalibrate_gnomonic_view(event_data, filenames, verbose)
+            
+            # Run meteorcrop.py on the current directory
+            meteorcrop_cmd = f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} ."
+            run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg", verbose)
+
 
         # --- Read event.txt for coordinates ---
         try:

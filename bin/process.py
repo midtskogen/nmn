@@ -56,7 +56,7 @@ class Settings:
     """Configuration constants for the script."""
     # Path to the script that processes video files
     MAKEVIDEOS_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/makevideos.py')
-    CLASSIFY_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/classify.py')
+    CROP_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/meteorcrop.py')
     METEOR_TEST_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/meteor_test.sh')
 
     # --- NEW: Semaphore-based concurrency limiting settings ---
@@ -327,16 +327,21 @@ def update_event_summary(event_config, station_config, proc_results: tuple):
 
 def run_classification(event_config, event_dir: Path):
     """
-    Runs classification scripts and cleans up the directory if the event
-    is likely not a meteor.
+    Crop meteor and cleans up the directory if the event is likely not a meteor.
     """
+    # Define the path to the fireball.jpg file.
+    fireball_jpg = event_dir.resolve() / 'fireball.jpg'
 
-    run_command([sys.executable, Settings.CLASSIFY_SCRIPT, str(event_dir.resolve())], cwd=event_dir)
+    # If fireball.jpg does not exist, run the classification script to create it.
+    if not fireball_jpg.exists():
+        print(f"'{fireball_jpg.name}' not found. Running classification script...")
+        run_command([sys.executable, Settings.CROP_SCRIPT, str(event_dir.resolve())], cwd=event_dir)
+    else:
+        print(f"Skipping generation: '{fireball_jpg.name}' already exists.")
 
     if event_config.has_option('summary', 'meteor_probability'):
         return
 
-    fireball_jpg = event_dir.resolve() / 'fireball.jpg'
     proc = run_command([Settings.METEOR_TEST_SCRIPT, fireball_jpg], cwd=event_dir)
     probability = float(proc.stdout.strip())
 

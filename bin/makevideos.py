@@ -219,7 +219,8 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
         should_estimate_brightness = False
         if frames_count and not is_manual:
             existing_brightness = event_data.get('brightness_values')
-            if not existing_brightness or all(v == 0 for v in existing_brightness):
+            # Check if brightness values are missing or if all values are the same.
+            if not existing_brightness or len(set(existing_brightness)) == 1:
                 should_estimate_brightness = True
         
         frames_to_pass = frames_count if should_estimate_brightness else None

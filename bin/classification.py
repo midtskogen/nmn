@@ -330,14 +330,24 @@ def run_pipeline(args: argparse.Namespace):
     resolutions_to_test = sorted([(w, h) for w in widths for h in heights if w >= h])
     
     pipeline_dir = "pipeline_results"
-    os.makedirs(pipeline_dir, exist_ok=True)
     summary_file_path = os.path.join(pipeline_dir, "summary.json")
     
     all_results = []
     completed_resolutions = set()
 
-    if args.resume:
-        logging.info(f"Attempting to resume pipeline from '{pipeline_dir}'...")
+    # A fresh run deletes old results. This happens only if neither --resume nor --preliminary is given.
+    is_fresh_run = not args.resume and not args.preliminary
+
+    if is_fresh_run:
+        if os.path.exists(pipeline_dir):
+            logging.info(f"Starting new pipeline. Removing existing results in '{pipeline_dir}'...")
+            shutil.rmtree(pipeline_dir)
+        os.makedirs(pipeline_dir, exist_ok=True)
+        logging.info(f"Starting new pipeline. Results will be stored in '{pipeline_dir}'")
+    else:
+        # Load existing results for a resume or a preliminary report.
+        os.makedirs(pipeline_dir, exist_ok=True)
+        logging.info(f"Attempting to load existing results from '{pipeline_dir}'...")
         if os.path.exists(summary_file_path):
             try:
                 with open(summary_file_path, 'r') as f:
@@ -345,7 +355,7 @@ def run_pipeline(args: argparse.Namespace):
                 for result in all_results:
                     completed_resolutions.add(result['resolution'])
                 if completed_resolutions:
-                    logging.info(f"Resumed {len(completed_resolutions)} completed resolutions from summary.json: {', '.join(sorted(completed_resolutions))}")
+                    logging.info(f"Loaded {len(completed_resolutions)} completed resolutions from summary.json.")
             except (json.JSONDecodeError, IOError) as e:
                 logging.warning(f"Could not read summary file at '{summary_file_path}'. Will check for individual result files. Error: {e}")
                 all_results = []
@@ -374,13 +384,31 @@ def run_pipeline(args: argparse.Namespace):
         if all_results:
             with open(summary_file_path, 'w') as f:
                 json.dump(all_results, f, indent=4)
-    else:
-        if os.path.exists(pipeline_dir):
-            logging.info(f"Starting new pipeline. Removing existing results in '{pipeline_dir}'...")
-            shutil.rmtree(pipeline_dir)
-        os.makedirs(pipeline_dir, exist_ok=True)
-        logging.info(f"Starting new pipeline. Results will be stored in '{pipeline_dir}'")
     
+    # If --preliminary is used without --resume, just print the report and exit.
+    if args.preliminary and not args.resume:
+        if not all_results:
+            logging.warning(f"No results found in '{pipeline_dir}' to report on.")
+            return
+
+        all_results.sort(key=lambda x: x['f1_score'], reverse=True)
+        best_result = all_results[0]
+        
+        logging.info("\n" + "="*50 + "\n--- Pipeline Status Report ---\n" + "="*50)
+        print(f"Best overall performance found for resolution {best_result['resolution']}\n")
+        print(f"| {'Resolution':<10} | {'F1-Score':<10} | {'Precision':<10} | {'Recall':<10} | {'Optimal Threshold':<20} |")
+        print(f"|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*22}|")
+        for result in all_results:
+            print(f"| {result['resolution']:<10} | {result['f1_score']:.4f}     | {result['precision']:.2%}     | {result['recall']:.2%}   | {result['threshold']:.4f}               |")
+        
+        best_res_dir = os.path.join(pipeline_dir, best_result['resolution'])
+        print("\n" + "="*20 + " Best Model Location " + "="*20)
+        print(f"The best model and its parameters are located in:")
+        print(f"  Model:       {os.path.join(best_res_dir, CONFIG['DEFAULT_MODEL_NAME'])}")
+        print(f"  Parameters:  {os.path.join(best_res_dir, CONFIG['PARAMS_FILE'])}")
+        print("\nTo continue the pipeline run, use the --resume flag.")
+        return
+
     for width, height in resolutions_to_test:
         res_str = f"{width}x{height}"
         if res_str in completed_resolutions:
@@ -406,6 +434,19 @@ def run_pipeline(args: argparse.Namespace):
                 with open(summary_file_path, 'w') as f:
                     json.dump(all_results, f, indent=4)
                 logging.info(f"Successfully completed and saved results for {res_str}")
+
+                if args.preliminary:
+                    temp_results = sorted(all_results, key=lambda x: x['f1_score'], reverse=True)
+                    best_prelim_result = temp_results[0]
+                    
+                    logging.info("\n" + "="*50 + "\n--- Preliminary Pipeline Report (Tuning ongoing) ---\n" + "="*50)
+                    print(f"Best performance so far for resolution {best_prelim_result['resolution']}\n")
+                    print(f"| {'Resolution':<10} | {'F1-Score':<10} | {'Precision':<10} | {'Recall':<10} | {'Optimal Threshold':<20} |")
+                    print(f"|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*22}|")
+                    for result in temp_results:
+                        print(f"| {result['resolution']:<10} | {result['f1_score']:.4f}     | {result['precision']:.2%}     | {result['recall']:.2%}   | {result['threshold']:.4f}               |")
+                    print("\n" + "="*20 + " Continuing to next resolution " + "="*20)
+
 
         except Exception as e:
             logging.error(f"Pipeline failed for resolution {width}x{height}: {e}")
@@ -461,6 +502,7 @@ def main():
     parser_pipeline.add_argument('--train-epochs', type=int, default=100, help="Max epochs for the final training stage.")
     parser_pipeline.add_argument('--batch-size', type=int, default=32, help="Batch size used throughout the pipeline.")
     parser_pipeline.add_argument('--resume', action='store_true', help="Resume a previously stopped pipeline run.")
+    parser_pipeline.add_argument('--preliminary', action='store_true', help="Print a report of existing results and exit. If used with --resume, prints intermediate reports during the run.")
 
     # --- Tune Parser ---
     parser_tune = subparsers.add_parser('tune', help="Find the best model hyperparameters.", parents=[parent_parser, balance_parent_parser, dir_parent_parser],

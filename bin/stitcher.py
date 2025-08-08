@@ -401,9 +401,13 @@ def load_image_to_yuv(image_path, pad):
     u_resized = u.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     v_resized = v.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     
-    padded_y = np.pad(y_unpadded, pad, mode='edge')
-    padded_u = np.pad(np.array(u_resized, np.uint8), pad // 2, mode='edge')
-    padded_v = np.pad(np.array(v_resized, np.uint8), pad // 2, mode='edge')
+    # Correctly pad only top, left, and right sides
+    pad_y_width = ((pad, 0), (pad, pad)) # ((top, bottom), (left, right))
+    pad_uv_width = ((pad // 2, 0), (pad // 2, pad // 2))
+
+    padded_y = np.pad(np.array(y, np.uint8), pad_y_width, mode='edge')
+    padded_u = np.pad(np.array(u_resized, np.uint8), pad_uv_width, mode='edge')
+    padded_v = np.pad(np.array(v_resized, np.uint8), pad_uv_width, mode='edge')
 
     # Apply blur to padded regions, passing in the estimated noise level
     padded_y, padded_u, padded_v = _apply_padding_blur(padded_y, padded_u, padded_v, pad, noise_level)
@@ -769,9 +773,13 @@ def worker_for_video_frame(args):
     
     noise_level = estimate_noise(py_src_orig)
 
-    py_src_all = np.pad(py_src_orig, pad, mode='edge')
-    pu_src_all = np.pad(pu_src_orig, pad // 2, mode='edge')
-    pv_src_all = np.pad(pv_src_orig, pad // 2, mode='edge')
+    # Correctly pad only top, left, and right sides
+    pad_y_width = ((pad, 0), (pad, pad)) # ((top, bottom), (left, right))
+    pad_uv_width = ((pad // 2, 0), (pad // 2, pad // 2))
+    
+    py_src_all = np.pad(py_src_orig, pad_y_width, mode='edge')
+    pu_src_all = np.pad(pu_src_orig, pad_uv_width, mode='edge')
+    pv_src_all = np.pad(pv_src_orig, pad_uv_width, mode='edge')
 
     # Apply blur to padded regions
     py_src_all, pu_src_all, pv_src_all = _apply_padding_blur(py_src_all, pu_src_all, pv_src_all, pad, noise_level)

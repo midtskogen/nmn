@@ -43,7 +43,7 @@ def parse_pto_file(pto_file):
                 if key == 'S':
                     try:
                         coords = [int(c) for c in value_str.split(',')]
-                        if len(coords) == 4: params[key] = (coords[0], coords[2], coords[1], coords[3])
+                        if len(coords) == 4: params[key] = (coords[0], coords[1], coords[2], coords[3])
                     except (ValueError, IndexError): print(f"Warning: Malformed crop 'S' parameter: {value_str}")
                     continue
                 try:

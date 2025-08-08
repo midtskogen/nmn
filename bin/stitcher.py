@@ -368,7 +368,7 @@ def estimate_noise(image_plane):
 
 def _apply_padding_blur(padded_y, padded_u, padded_v, pad, noise_amplitude):
     """Applies a 2-pass blur and noise to the padded areas of YUV planes."""
-    blur_size = 128
+    blur_size = 96
 
     y_blurred = _blur_padded_area_numba(padded_y.astype(np.float32), pad, blur_size, noise_amplitude)
 

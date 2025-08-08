@@ -21,7 +21,7 @@ import pathlib
 import tempfile
 import shutil
 import contextlib
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import numpy as np
 import random
 from PIL import Image
@@ -38,7 +38,8 @@ CONFIG = {
     "DEFAULT_IMG_HEIGHT": 96,
     "DEFAULT_IMG_WIDTH": 192,
     "DEFAULT_MODEL_NAME": 'meteor_model.keras',
-    "PARAMS_FILE": 'best_params.json'
+    "PARAMS_FILE": 'best_params.json',
+    "INDEX_FILE": 'class_indices.txt'
 }
 
 # --- Utility Functions ---
@@ -61,6 +62,32 @@ def suppress_stderr():
         os.dup2(saved_stderr_fd, stderr_fd)
         os.close(saved_stderr_fd)
         if 'devnull_fd' in locals(): os.close(devnull_fd)
+
+def _get_meteor_index(cli_index: Optional[int], model_path: str) -> int:
+    """
+    Determines the meteor class index with tiered logic:
+    1. Use the command-line argument if provided.
+    2. Fall back to the 'class_indices.txt' file next to the model.
+    3. Default to 0 if neither is found.
+    """
+    if cli_index is not None:
+        logging.info(f"Using user-provided command-line index: {cli_index}")
+        return cli_index
+
+    index_file_path = os.path.join(os.path.dirname(model_path), CONFIG["INDEX_FILE"])
+    if os.path.exists(index_file_path):
+        try:
+            with open(index_file_path, 'r') as f:
+                index = int(f.read().strip())
+                logging.info(f"Found and using index from '{index_file_path}': {index}")
+                return index
+        except (ValueError, TypeError):
+            logging.warning(f"Could not parse index from '{index_file_path}'.")
+    
+    logging.warning(f"No index provided and '{index_file_path}' not found. Defaulting to 0.")
+    logging.warning("This may lead to incorrect predictions if 'meteor' was not class 0 during training.")
+    return 0
+
 
 def _apply_wobble(input_path: str, output_path: str, amplitude: float, frequency: float):
     """Internal function to apply a vertical wobble effect to an image."""
@@ -242,16 +269,22 @@ def _run_training(positive_dir, negative_dir, image_size, batch_size, epochs, pa
         callbacks = [EarlyStopping(monitor='val_loss', patience=8, verbose=1, restore_best_weights=True),
                      ModelCheckpoint(model_path, monitor='val_loss', save_best_only=True)]
         model.fit(train_dataset, validation_data=validation_dataset, epochs=epochs, callbacks=callbacks)
+    
+    # Save the determined index in a file next to the model.
+    index_file_path = os.path.join(os.path.dirname(model_path), CONFIG["INDEX_FILE"])
+    with open(index_file_path, 'w') as f:
+        f.write(str(meteor_class_index))
+        
     logging.info(f"Training complete. Best model saved to '{model_path}'")
-    with open('class_indices.txt', 'w') as f: f.write(str(meteor_class_index))
+    logging.info(f"Meteor class index ({meteor_class_index}) saved to '{index_file_path}'")
     return model_path
 
 def evaluate_model(args: argparse.Namespace):
     """Public-facing wrapper for the evaluation logic."""
     _run_evaluation(args.positive_dir, args.negative_dir, (args.img_height, args.img_width),
-                    args.batch_size, args.model_file)
+                    args.batch_size, args.model_file, cli_meteor_index=args.meteor_class_index)
 
-def _run_evaluation(positive_dir, negative_dir, image_size, batch_size, model_path):
+def _run_evaluation(positive_dir, negative_dir, image_size, batch_size, model_path, cli_meteor_index: Optional[int] = None):
     import tensorflow as tf
     from sklearn.metrics import precision_recall_curve, confusion_matrix
     from tensorflow.keras.utils import image_dataset_from_directory
@@ -260,6 +293,9 @@ def _run_evaluation(positive_dir, negative_dir, image_size, batch_size, model_pa
     logging.info(f"--- Starting Model Evaluation for {img_width}x{img_height} ---")
     if not os.path.isfile(model_path):
         logging.error(f"Model file not found at '{model_path}'"); return None
+
+    # Tiered logic to determine the class index for meteors.
+    meteor_class_index = _get_meteor_index(cli_meteor_index, model_path)
 
     model = tf.keras.models.load_model(model_path)
     results = {}
@@ -271,10 +307,7 @@ def _run_evaluation(positive_dir, negative_dir, image_size, batch_size, model_pa
         logging.info("Extracting true labels and predicting probabilities...")
         y_true = np.concatenate([y for x, y in validation_dataset], axis=0).flatten()
         y_pred_probs = model.predict(validation_dataset).flatten()
-        try:
-            with open('class_indices.txt', 'r') as f: meteor_class_index = int(f.read())
-        except FileNotFoundError:
-            logging.warning("class_indices.txt not found."); meteor_class_index = -1
+
         if meteor_class_index == 0:
             logging.info("Keras labeled 'meteor' as class 0. Inverting probabilities and labels for evaluation.")
             y_pred_probs = 1 - y_pred_probs
@@ -303,15 +336,17 @@ def predict_image(args: argparse.Namespace):
     import tensorflow as tf
     if not os.path.isfile(args.model_file):
         logging.error(f"Model file not found at '{args.model_file}'"); sys.exit(1)
+        
     logging.info(f"Loading model: {args.model_file}")
     model = tf.keras.models.load_model(args.model_file)
-    try:
-        with open('class_indices.txt', 'r') as f: meteor_class_index = int(f.read())
-    except FileNotFoundError:
-        logging.error("Error: class_indices.txt not found."); sys.exit(1)
+    
+    # Tiered logic to determine the class index for meteors.
+    meteor_class_index = _get_meteor_index(args.meteor_class_index, args.model_file)
+
     model_input_shape = model.input_shape
     img_height, img_width = model_input_shape[1], model_input_shape[2]
     logging.info(f"Model expects input resolution: {img_width}x{img_height}")
+    
     for image_path in args.image_files:
         if not os.path.isfile(image_path):
             logging.warning(f"Skipping '{image_path}': file not found."); continue
@@ -372,8 +407,9 @@ def run_pipeline(args: argparse.Namespace):
             if os.path.exists(model_path):
                 logging.info(f"Found existing model for {res_str}. Re-running evaluation to recover results.")
                 try:
+                    # The CLI index is None, so _run_evaluation will use the file-based method.
                     eval_results = _run_evaluation(args.positive_dir, args.negative_dir, (height, width),
-                                                   args.batch_size, model_path)
+                                                   args.batch_size, model_path, cli_meteor_index=None)
                     if eval_results:
                         all_results.append(eval_results)
                         completed_resolutions.add(res_str)
@@ -427,8 +463,9 @@ def run_pipeline(args: argparse.Namespace):
                         args.batch_size, args.tune_epochs, res_dir, params_path, args.balance)
             _run_training(args.positive_dir, args.negative_dir, (height, width),
                           args.batch_size, args.train_epochs, params_path, model_path, args.balance)
+            # The CLI index is None, forcing _run_evaluation to use the file created by _run_training
             eval_results = _run_evaluation(args.positive_dir, args.negative_dir, (height, width),
-                                           args.batch_size, model_path)
+                                           args.batch_size, model_path, cli_meteor_index=None)
             if eval_results:
                 all_results.append(eval_results)
                 with open(summary_file_path, 'w') as f:
@@ -449,7 +486,7 @@ def run_pipeline(args: argparse.Namespace):
 
 
         except Exception as e:
-            logging.error(f"Pipeline failed for resolution {width}x{height}: {e}")
+            logging.error(f"Pipeline failed for resolution {width}x{height}: {e}", exc_info=args.verbose)
             logging.info("Continuing to next resolution...")
             continue
 
@@ -493,6 +530,12 @@ def main():
     dir_parent_parser.add_argument('positive_dir', help="Directory with positive meteor images.")
     dir_parent_parser.add_argument('negative_dir', help="Directory with negative (non-meteor) images.")
 
+    # NEW: Parent parser for the meteor class index argument
+    meteor_index_parser = argparse.ArgumentParser(add_help=False)
+    meteor_index_parser.add_argument('--meteor-class-index', type=int, default=None, choices=[0, 1],
+                                     help="Override the class index for 'meteor'. If not provided, it's inferred\n"
+                                          "from the '" + CONFIG["INDEX_FILE"] + "' file or defaults to 0.")
+
     # --- Pipeline Parser ---
     parser_pipeline = subparsers.add_parser('pipeline', help="Run the full tune->train->evaluate workflow.",
                                             parents=[dir_parent_parser, balance_parent_parser],
@@ -519,14 +562,14 @@ def main():
     parser_train.add_argument('-o', '--output', default=CONFIG["DEFAULT_MODEL_NAME"], help="Output filename for the model.")
     
     # --- Evaluate Parser ---
-    parser_evaluate = subparsers.add_parser('evaluate', help="Find the optimal classification threshold.", parents=[parent_parser, dir_parent_parser],
+    parser_evaluate = subparsers.add_parser('evaluate', help="Find the optimal classification threshold.", parents=[parent_parser, dir_parent_parser, meteor_index_parser],
                                             formatter_class=argparse.RawTextHelpFormatter,
-                                            epilog="""example:\n  python %(prog)s ./pos/ ./neg/ -m model.keras""")
+                                            epilog="""example:\n  python %(prog)s ./pos/ ./neg/ -m model.keras\n  python %(prog)s ./pos/ ./neg/ -m m.keras --meteor-class-index 1""")
     parser_evaluate.add_argument('-m', '--model-file', default=CONFIG["DEFAULT_MODEL_NAME"], help="Path to the trained model file.")
     
     # --- Predict Parser ---
-    parser_predict = subparsers.add_parser('predict', help="Classify one or more images.", formatter_class=argparse.RawTextHelpFormatter,
-                                           epilog="""examples:\n  python %(prog)s image1.jpg\n  python %(prog)s ./folder/*.jpg -m model.keras""")
+    parser_predict = subparsers.add_parser('predict', help="Classify one or more images.", parents=[meteor_index_parser], formatter_class=argparse.RawTextHelpFormatter,
+                                           epilog="""examples:\n  python %(prog)s image1.jpg\n  python %(prog)s i.jpg -m m.keras --meteor-class-index 1""")
     parser_predict.add_argument('image_files', nargs='+', help="One or more image file paths to classify.")
     parser_predict.add_argument('-m', '--model-file', default=CONFIG["DEFAULT_MODEL_NAME"], help="Path to the trained model file.")
 

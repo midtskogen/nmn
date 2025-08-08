@@ -33,7 +33,7 @@ except ImportError:
 try:
     import scipy.ndimage as ndimage
 except ImportError:
-    print("Warning: 'scipy' not found. Seam finding and leveling will be unavailable. Run 'pip install scipy'")
+    print("Warning: 'scipy' not found. Seam finding, noise estimation, and leveling will be unavailable. Run 'pip install scipy'")
     ndimage = None
 
 try:
@@ -113,41 +113,105 @@ def _apply_offset_numba(plane_stack, offset_arr):
                     plane_stack[i, r, c] = new_val
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
-def _blur_padded_area_numba(plane, pad, blur_kernel_size):
-    """Applies a 1D blur to padded regions, opposite to the extension direction."""
+def _blur_padded_area_numba(plane, pad, blur_kernel_size, noise_amplitude):
+    """Applies a 2-pass blur and a final noise pass for a natural, textured effect."""
     h, w = plane.shape
-    if pad <= 0 or blur_kernel_size <= 1:
+    if pad <= 0:
         return plane.astype(np.uint8)
 
-    blurred_plane = plane.copy()
+    # The first pass kernel is capped at a maximum of 16 pixels.
+    pass1_kernel_size = min(blur_kernel_size, 16)
+    if pass1_kernel_size < 1: pass1_kernel_size = 1
 
-    # Top blur (downwards)
+
+    # --- Pass 1: Smear edges into padding (Original direction, capped size) ---
+    pass1_plane = plane.copy()
+
+    # Pass 1: Top blur (vertical smear)
     for c in prange(w):
         for r in range(pad):
             acc = 0.0
-            for k in range(blur_kernel_size):
+            for k in range(pass1_kernel_size):
                 y = min(r + k, h - 1)
                 acc += plane[y, c]
-            blurred_plane[r, c] = acc / blur_kernel_size
+            pass1_plane[r, c] = acc / pass1_kernel_size
 
-    # Left blur (rightwards)
+    # Pass 1: Left blur (horizontal smear)
     for r in prange(h):
         for c in range(pad):
             acc = 0.0
-            for k in range(blur_kernel_size):
+            for k in range(pass1_kernel_size):
                 x = min(c + k, w - 1)
                 acc += plane[r, x]
-            blurred_plane[r, c] = acc / blur_kernel_size
+            pass1_plane[r, c] = acc / pass1_kernel_size
 
-    # Right blur (leftwards)
+    # Pass 1: Right blur (horizontal smear)
     for r in prange(h):
         for c in range(w - pad, w):
             acc = 0.0
-            for k in range(blur_kernel_size):
+            for k in range(pass1_kernel_size):
                 x = max(c - k, 0)
                 acc += plane[r, x]
-            blurred_plane[r, c] = acc / blur_kernel_size
+            pass1_plane[r, c] = acc / pass1_kernel_size
+            
+    # --- Pass 2: Smooth with a dynamic kernel size for a graduated blur ---
+    blurred_plane = pass1_plane.copy()
+    base_kernel_size = blur_kernel_size if blur_kernel_size > 0 else 1
 
+    # Pass 2: Top pad (horizontal box blur with increasing kernel size)
+    for r in prange(pad):
+        distance = pad - r
+        dynamic_kernel_size = base_kernel_size + distance
+        for c in range(w):
+            acc = 0.0
+            for k in range(dynamic_kernel_size):
+                x = max(0, min(c - dynamic_kernel_size // 2 + k, w - 1))
+                acc += pass1_plane[r, x]
+            blurred_plane[r, c] = acc / dynamic_kernel_size
+
+    # Pass 2: Left pad (vertical box blur with increasing kernel size)
+    for c in prange(pad):
+        distance = pad - c
+        dynamic_kernel_size = base_kernel_size + distance
+        for r in range(h):
+            acc = 0.0
+            for k in range(dynamic_kernel_size):
+                y = max(0, min(r - dynamic_kernel_size // 2 + k, h - 1))
+                acc += pass1_plane[y, c]
+            blurred_plane[r, c] = acc / dynamic_kernel_size
+            
+    # Pass 2: Right pad (vertical box blur with increasing kernel size)
+    for c in prange(w - pad, w):
+        distance = c - (w - pad - 1)
+        dynamic_kernel_size = base_kernel_size + distance
+        for r in range(h):
+            acc = 0.0
+            for k in range(dynamic_kernel_size):
+                y = max(0, min(r - dynamic_kernel_size // 2 + k, h - 1))
+                acc += pass1_plane[y, c]
+            blurred_plane[r, c] = acc / dynamic_kernel_size
+
+    # --- Pass 3: Add slight noise to break up smoothness ---
+    if noise_amplitude > 0:
+        # Add noise to the top padded region
+        for r in prange(pad):
+            for c in range(w):
+                noise = np.random.uniform(-noise_amplitude, noise_amplitude)
+                blurred_plane[r, c] += noise
+
+        # Add noise to the left padded region (excluding the top part already done)
+        for c in prange(pad):
+            for r in range(pad, h):
+                noise = np.random.uniform(-noise_amplitude, noise_amplitude)
+                blurred_plane[r, c] += noise
+
+        # Add noise to the right padded region (excluding the top part already done)
+        for c in prange(w - pad, w):
+            for r in range(pad, h):
+                noise = np.random.uniform(-noise_amplitude, noise_amplitude)
+                blurred_plane[r, c] += noise
+            
+    # The final clip and type conversion will handle any out-of-bounds values
     return np.clip(blurred_plane, 0, 255).astype(np.uint8)
 
 
@@ -284,19 +348,35 @@ def build_mappings(pto_file, pad, num_workers):
 
     return all_mappings, global_options
 
-def _apply_padding_blur(padded_y, padded_u, padded_v, pad):
-    """Applies a 1D blur to the padded areas of YUV planes."""
-    blur_size = 128
-    if blur_size <= 1:
-        return padded_y, padded_u, padded_v
+def estimate_noise(image_plane):
+    """
+    Estimates the noise standard deviation of an image plane using the
+    standard deviation of its Laplacian. Returns a value between 1.0 and 10.0.
+    """
+    if ndimage is None:
+        # Fallback to a default value if scipy is not installed
+        return 4.0
 
-    y_blurred = _blur_padded_area_numba(padded_y.astype(np.float32), pad, blur_size)
+    # The Laplacian filter is sensitive to high-frequency noise
+    laplacian = ndimage.laplace(image_plane.astype(np.float32))
+    
+    # The standard deviation of the Laplacian is a robust noise estimator
+    noise_std = np.std(laplacian)
+    
+    # Clamp the value to a reasonable range to avoid extreme results
+    return np.clip(noise_std, 1.0, 10.0)
+
+def _apply_padding_blur(padded_y, padded_u, padded_v, pad, noise_amplitude):
+    """Applies a 2-pass blur and noise to the padded areas of YUV planes."""
+    blur_size = 128
+
+    y_blurred = _blur_padded_area_numba(padded_y.astype(np.float32), pad, blur_size, noise_amplitude)
 
     pad_uv = pad // 2
     blur_size_uv = blur_size // 2
     if pad_uv > 0 and blur_size_uv > 0:
-        u_blurred = _blur_padded_area_numba(padded_u.astype(np.float32), pad_uv, blur_size_uv)
-        v_blurred = _blur_padded_area_numba(padded_v.astype(np.float32), pad_uv, blur_size_uv)
+        u_blurred = _blur_padded_area_numba(padded_u.astype(np.float32), pad_uv, blur_size_uv, noise_amplitude)
+        v_blurred = _blur_padded_area_numba(padded_v.astype(np.float32), pad_uv, blur_size_uv, noise_amplitude)
     else:
         u_blurred, v_blurred = padded_u, padded_v
 
@@ -313,16 +393,20 @@ def load_image_to_yuv(image_path, pad):
     img_pil = Image.open(image_path).convert("RGB")
     img_ycbcr = img_pil.convert("YCbCr")
     y, u, v = img_ycbcr.split()
+    
+    y_unpadded = np.array(y, np.uint8)
+    noise_level = estimate_noise(y_unpadded)
+    
     # Use the determined resampling filter
     u_resized = u.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     v_resized = v.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     
-    padded_y = np.pad(np.array(y, np.uint8), pad, mode='edge')
+    padded_y = np.pad(y_unpadded, pad, mode='edge')
     padded_u = np.pad(np.array(u_resized, np.uint8), pad // 2, mode='edge')
     padded_v = np.pad(np.array(v_resized, np.uint8), pad // 2, mode='edge')
 
-    # Apply blur to padded regions
-    padded_y, padded_u, padded_v = _apply_padding_blur(padded_y, padded_u, padded_v, pad)
+    # Apply blur to padded regions, passing in the estimated noise level
+    padded_y, padded_u, padded_v = _apply_padding_blur(padded_y, padded_u, padded_v, pad, noise_level)
 
     target_h_y = img_pil.height + pad
     target_h_uv = img_pil.height // 2 + pad // 2
@@ -593,7 +677,7 @@ def _precompile_numba_functions():
     # Call each function once to compile it
     _ = create_blend_weight_map(dw, dh)
     _ = create_corner_penalty_map(dw, dh)
-    _ = _blur_padded_area_numba(np.zeros((32, 32), dtype=np.float32), 8, 16)
+    _ = _blur_padded_area_numba(np.zeros((32, 32), dtype=np.float32), 8, 16, 4.0)
     reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y)
     reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v)
     reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float)
@@ -682,13 +766,15 @@ def worker_for_video_frame(args):
     py_src_orig = np.asarray(frame.planes[0]).reshape(sh_orig, sw_orig)
     pu_src_orig = np.asarray(frame.planes[1]).reshape(sh_orig // 2, sw_orig // 2)
     pv_src_orig = np.asarray(frame.planes[2]).reshape(sh_orig // 2, sw_orig // 2)
+    
+    noise_level = estimate_noise(py_src_orig)
 
     py_src_all = np.pad(py_src_orig, pad, mode='edge')
     pu_src_all = np.pad(pu_src_orig, pad // 2, mode='edge')
     pv_src_all = np.pad(pv_src_orig, pad // 2, mode='edge')
 
     # Apply blur to padded regions
-    py_src_all, pu_src_all, pv_src_all = _apply_padding_blur(py_src_all, pu_src_all, pv_src_all, pad)
+    py_src_all, pu_src_all, pv_src_all = _apply_padding_blur(py_src_all, pu_src_all, pv_src_all, pad, noise_level)
 
     target_h_y, target_h_uv = sh_orig + pad, sh_orig // 2 + pad // 2
     py_src, pu_src, pv_src = py_src_all[:target_h_y, :], pu_src_all[:target_h_uv, :], pv_src_all[:target_h_uv, :]

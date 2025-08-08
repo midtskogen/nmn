@@ -1046,6 +1046,16 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     out_stream.width, out_stream.height, out_stream.pix_fmt = final_w, final_h, 'yuv420p'
     out_stream.options = {"preset": "fast", "crf": "28"}
     
+    # --- MODIFIED: Calculate total frames for progress bar ---
+    total_frames = 0
+    if use_sync:
+        total_frames = len(synchronized_frame_groups)
+    else:
+        # Get frame counts from streams that provide it.
+        frame_counts = [s.frames for s in in_streams if s.frames > 0]
+        if frame_counts:
+            total_frames = min(frame_counts)
+
     cached_seam_weights, target_leveling_params, previous_leveling_params = None, None, None
     recalc_frame_number = 1
     
@@ -1108,19 +1118,19 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                 continue
 
             frame_count += 1
-            status_message = f"Processing frame group: {frame_count}"
-            if use_sync: status_message += f" / {len(synchronized_frame_groups)}"
             
-            # *** FIX: Robust progress bar for non-interactive environments ***
-            try:
-                # Try to get terminal size
-                terminal_width = os.get_terminal_size().columns
-            except OSError:
-                # Fallback to a default width if not in a real terminal
-                terminal_width = 80
+            # --- MODIFIED: Report progress to stderr ---
+            if total_frames > 0:
+                # Report every 5 frames or on the last frame to avoid excessive I/O
+                if frame_count % 5 == 0 or frame_count == total_frames:
+                    percent_done = (frame_count / total_frames) * 100
+                    # This format is easy for other scripts to parse
+                    print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
             
-            sys.stdout.write('\r' + status_message.ljust(terminal_width - 1))
-            sys.stdout.flush()
+            # This user-facing progress message is now optional
+            # status_message = f"Processing frame group: {frame_count} / {total_frames if total_frames > 0 else '?'}"
+            # sys.stdout.write('\r' + status_message.ljust(79))
+            # sys.stdout.flush()
 
             is_leveling_frame = (use_seam and num_images > 1 and (frame_count == 1 or (frame_count - 1) % level_freq == 0))
             

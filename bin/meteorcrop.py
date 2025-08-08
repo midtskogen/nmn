@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Extracts a normalized image of a meteor track from a gnomonic projection.
+Extracts a normalized image and video of a meteor track from a gnomonic projection.
 
 This script reads an event's configuration, determines the start and end
 pixel coordinates of the meteor track on a gnomonic image, and then
-performs a series of image processing steps to isolate and normalize the track.
+performs a series of processing steps to isolate and normalize the track.
 
-The process involves:
-1.  Reading the event's start/end coordinates from event.txt.
-2.  Using the pto_mapper library to transform these coordinates into pixel 
+The image process (`fireball.jpg`) involves:
+1.  Reading the event's start/end celestial coordinates from event.txt.
+2.  Using the pto_mapper library to transform these coordinates into pixel
     positions on the corresponding gnomonic image.
-3.  Finding the correct gnomonic source image based on timestamp and status.
-4.  Applying background removal, rotation, and masking to isolate the track.
+3.  Finding the correct gnomonic source image based on the event timestamp.
+4.  Applying background removal, rotation, and masking to isolate the track using
+    the Wand (ImageMagick) library.
 5.  Saving the final cropped and normalized track as 'fireball.jpg'.
 
-Usage:
-    python3 meteorcrop.py <path_to_event_directory>
+The video process (`fireball.mp4`) involves a robust, multi-step workflow:
+1.  A temporary PTO file is created to command the stitcher to reproject a
+    large, square area around the meteor track from the original source video.
+2.  The resulting square video is then rotated using FFmpeg to make the meteor
+    track horizontal.
+3.  A final, tight crop is performed on the rotated video using FFmpeg to
+    produce the final output.
 """
 
 import argparse
@@ -25,13 +31,16 @@ import ctypes
 import math
 import sys
 import traceback
-# FIXED: Import UTC alongside datetime for timezone-aware operations.
+import subprocess
+import os
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Tuple, List
 
+import numpy as np
+
 # Third-party libraries must be installed (e.g., pip install Wand).
-# The pto_mapper.py script should be in the same directory or Python path.
+# The pto_mapper.py and stitcher.py scripts should be in the same directory or Python path.
 try:
     import pto_mapper
     from wand.api import library
@@ -63,9 +72,7 @@ class ProjectionError(ScriptError):
     pass
 
 
-# --- Custom Motion Blur Binding ---
-# This adds a direct ctypes binding to the MagickMotionBlurImage function from
-# the ImageMagick library.
+# --- Custom Motion Blur Binding for Wand ---
 library.MagickMotionBlurImage.argtypes = (
     ctypes.c_void_p,  # wand
     ctypes.c_double,  # radius
@@ -74,28 +81,22 @@ library.MagickMotionBlurImage.argtypes = (
 )
 
 class MotionBlurImage(Image):
-    """
-    A Wand Image subclass with a custom motion_blur method.
-    
-    This class would allow for applying motion blur via a more direct, low-level
-    call to ImageMagick's C API. It is not currently used in the processing pipeline.
-    """
+    """A Wand Image subclass with a custom motion_blur method."""
     def motion_blur(self, radius: float = 0.0, sigma: float = 0.0, angle: float = 0.0):
         library.MagickMotionBlurImage(self.wand, radius, sigma, angle)
 
 
 class Settings:
     """Configuration constants for the script."""
-    # Width of the extracted track in pixels.
     TRACK_WIDTH = 128
-    # Output filename for the final processed image.
     OUTPUT_FILENAME = "fireball.jpg"
+    OUTPUT_VIDEO_FILENAME = "fireball.mp4"
 
 
 def get_args() -> argparse.Namespace:
     """Parses and returns command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Extracts a meteor track from a gnomonic image."
+        description="Extracts a meteor track from a gnomonic image and video."
     )
     parser.add_argument(
         "event_dir",
@@ -106,24 +107,7 @@ def get_args() -> argparse.Namespace:
 
 
 def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) -> Tuple[List[float], List[float]]:
-    """
-    Uses pto_mapper to transform celestial coordinates (az/alt) to pixels.
-
-    This function assumes the PTO file describes a transformation from a
-    360x180 degree equirectangular panorama to the source gnomonic image.
-
-    Args:
-        event_dir: The path to the event directory.
-        config: The parsed event configuration from event.txt.
-
-    Raises:
-        ConfigError: If required keys are missing from the configuration file.
-        FileNotFoundError: If the required .pto projection file is not found.
-        ProjectionError: If pto_mapper fails to parse the file or map coords.
-
-    Returns:
-        A tuple containing the (start_xy, end_xy) pixel coordinates as lists.
-    """
+    """Uses pto_mapper to transform celestial coordinates (az/alt) to pixels."""
     try:
         recalibrated = config.getint('summary', 'recalibrated', fallback=1)
         start_pos_str = config.get('summary', 'startpos')
@@ -131,96 +115,53 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
     except (configparser.NoSectionError, configparser.NoOptionError) as e:
         raise ConfigError(f"Missing required data in 'event.txt': {e}") from e
 
-    # Choose the appropriate projection file based on recalibration status
     pto_filename = 'gnomonic_grid.pto' if recalibrated != 0 else 'gnomonic_corr_grid.pto'
     pto_file = event_dir / pto_filename
     if not pto_file.is_file():
         raise FileNotFoundError(f"Projection file not found at '{pto_file}'")
 
-    # Parse the PTO file using the pto_mapper library
     try:
         pto_data = pto_mapper.parse_pto_file(str(pto_file))
         global_options, _ = pto_data
     except Exception as e:
         raise ProjectionError(f"Error parsing PTO file '{pto_file}': {e}") from e
 
-    # The projection logic relies on a full equirectangular panorama.
-    if global_options.get('f') != 2:
-        print("Warning: PTO file panorama (p-line) is not equirectangular (f=2). Results may be incorrect.", file=sys.stderr)
-    
-    pano_w = global_options.get('w')
-    pano_h = global_options.get('h')
+    pano_w, pano_h = global_options.get('w'), global_options.get('h')
     if not pano_w or not pano_h:
         raise ProjectionError("PTO 'p' line must contain 'w' and 'h' parameters.")
 
-    # Get start and end celestial coordinates from the event config
     start_az, start_alt = map(float, start_pos_str.split())
     end_az, end_alt = map(float, end_pos_str.split())
     
-    # --- Map Az/Alt to Panorama Pixel Coordinates ---
-    # This maps the spherical Az/Alt coordinates onto a flat 2D map that
-    # represents the celestial sphere.
     start_pano_x = start_az * pano_w / 360.0
     start_pano_y = (90.0 - start_alt) * pano_h / 180.0
     
     end_pano_x = end_az * pano_w / 360.0
     end_pano_y = (90.0 - end_alt) * pano_h / 180.0
 
-    # --- Map Panorama Coordinates to Source Image Coordinates ---
     start_result = pto_mapper.map_pano_to_image(pto_data, start_pano_x, start_pano_y)
     end_result = pto_mapper.map_pano_to_image(pto_data, end_pano_x, end_pano_y)
 
-    if not start_result:
-        raise ProjectionError("Could not map start coordinates to an image.")
-    if not end_result:
-        raise ProjectionError("Could not map end coordinates to an image.")
+    if not start_result: raise ProjectionError("Could not map start coordinates to an image.")
+    if not end_result: raise ProjectionError("Could not map end coordinates to an image.")
 
-    # The result from pto_mapper is a tuple: (image_index, x, y)
-    start_xy = [start_result[1], start_result[2]]
-    end_xy = [end_result[1], end_result[2]]
-
-    return start_xy, end_xy
+    return [start_result[1], start_result[2]], [end_result[1], end_result[2]]
 
 
 def find_gnomonic_image(event_dir: Path, config: configparser.ConfigParser) -> Path:
-    """
-    Finds the correct gnomonic source image using a series of fallbacks.
-
-    Args:
-        event_dir: The path to the event directory.
-        config: The parsed event configuration.
-
-    Raises:
-        ConfigError: If the timestamp is missing from the configuration.
-        FileNotFoundError: If no suitable gnomonic image can be found.
-
-    Returns:
-        The Path to the found gnomonic image file.
-    """
+    """Finds the correct gnomonic source image using a series of fallbacks."""
     try:
-        # FIXED: Replaced deprecated utcfromtimestamp with fromtimestamp(ts, UTC).
         timestamp = int(float(config.get('trail', 'timestamps').split()[0]))
         ts_str = datetime.fromtimestamp(timestamp, UTC).strftime("%Y%m%d%H%M%S")
         recalibrated = config.getint('summary', 'recalibrated', fallback=1)
     except (configparser.NoSectionError, configparser.NoOptionError, IndexError) as e:
         raise ConfigError(f"Could not read initial timestamp from 'event.txt': {e}") from e
     
-    # Define search patterns in order of preference. The script first looks
-    # for a specific timestamped file, then falls back to any generic file.
+    patterns = [f'*{ts_str}-gnomonic.jpg', '*-gnomonic.jpg']
     if recalibrated == 0:
-        patterns = [
-            f'*{ts_str}-gnomonic_uncorr.jpg',
-            f'*{ts_str}-gnomonic.jpg',
-            '*-gnomonic_uncorr.jpg',
-            '*-gnomonic.jpg',
-        ]
-    else:
-        patterns = [
-            f'*{ts_str}-gnomonic.jpg',
-            '*-gnomonic.jpg',
-        ]
+        patterns = [f'*{ts_str}-gnomonic_uncorr.jpg'] + patterns
+        patterns += ['*-gnomonic_uncorr.jpg']
 
-    # Iterate through patterns and return the first match
     for pattern in patterns:
         try:
             return next(event_dir.glob(pattern))
@@ -230,56 +171,26 @@ def find_gnomonic_image(event_dir: Path, config: configparser.ConfigParser) -> P
     raise FileNotFoundError("Could not find any gnomonic source image in the event directory.")
 
 
-def extract_meteor_track(
-    image_path: Path, start_xy: List[float], end_xy: List[float], track_width: int
-) -> Image:
-    """
-    Isolates, rotates, and normalizes the meteor track from an image.
-
-    Args:
-        image_path: Path to the source gnomonic image.
-        start_xy: The [x, y] pixel coordinates of the track start.
-        end_xy: The [x, y] pixel coordinates of the track end.
-        track_width: The desired width of the track mask.
-
-    Returns:
-        A wand.Image object of the processed meteor track.
-    """
-    # Define constants for image processing steps for clarity
+def extract_meteor_track(image_path: Path, start_xy: List[float], end_xy: List[float], track_width: int) -> Image:
+    """Isolates, rotates, and normalizes the meteor track from an image."""
     BACKGROUND_BLUR_RADIUS = 256
-    TRACK_PADDING_FACTOR = 3  # Multiplier for track_width to pad the mask length
-    CROP_WIDTH_ADJUSTMENT = 128 # Pixels to shorten the final crop from the padded length
+    TRACK_PADDING_FACTOR = 3
+    CROP_WIDTH_ADJUSTMENT = 128
 
     with Image(filename=str(image_path)) as pic:
-        # --- 1. Background Removal ---
-        # Create a heavily blurred, desaturated copy of the image to represent
-        # the large-scale background gradient (e.g., sky glow).
         with pic.clone() as background:
             background.resize(filter='box', blur=BACKGROUND_BLUR_RADIUS)
             background.modulate(brightness=100, saturation=100)
-            
-            # Subtract this background pattern from the original image. This
-            # effectively removes the glow, leaving fainter objects like stars
-            # and the meteor track more prominent.
             pic.composite(background, operator='difference')
 
-        # --- 2. Rotation ---
-        # Calculate the angle of the meteor track.
         angle_rad = math.atan2(end_xy[1] - start_xy[1], end_xy[0] - start_xy[0])
-        # Rotate the entire image so the track becomes perfectly horizontal.
-        # This simplifies the subsequent masking and cropping steps.
         pic.rotate(-math.degrees(angle_rad), background=Color('black'))
 
-        # --- 3. Masking ---
-        # Create a new black image to serve as a mask canvas.
         with Image(width=pic.width, height=pic.height, background=Color('black')) as mask:
             with Drawing() as draw:
-                # Calculate the track length and add padding to ensure the mask
-                # covers the entire track plus some buffer on each end.
                 track_len = math.hypot(end_xy[0] - start_xy[0], end_xy[1] - start_xy[1])
                 padded_len = track_len + TRACK_PADDING_FACTOR * track_width
                 
-                # Draw a thick, white horizontal line in the center of the mask.
                 draw.stroke_width = track_width
                 draw.stroke_color = Color('white')
                 draw.line(
@@ -288,16 +199,10 @@ def extract_meteor_track(
                 )
                 draw(mask)
             
-            # Apply the mask to the rotated image using a 'multiply' composite.
-            # Black areas (0) of the mask will turn corresponding image pixels
-            # black, while white areas (1) will leave them unchanged.
             pic.composite(mask, operator='multiply')
 
-        # --- 4. Cropping and Normalization ---
-        # Calculate the final length for the cropped image.
         final_len = min(int(padded_len - CROP_WIDTH_ADJUSTMENT), pic.width)
         
-        # Crop the image to the area of the horizontal track.
         pic.crop(
             left=int(pic.width / 2 - final_len / 2),
             top=int(pic.height / 2 - track_width / 2),
@@ -305,15 +210,76 @@ def extract_meteor_track(
             height=track_width
         )
         
-        # NOTE: The following motion blur code is commented out. It can be
-        # enabled to apply a blur effect along the track's axis.
-        # with MotionBlurImage(track) as img:
-        #    img.motion_blur(radius=24, sigma=24, angle=0)
-        #    track = img.clone()
-        
-        # Normalize the image to enhance contrast, making the track stand out.
         pic.normalize()
         return pic.clone()
+
+
+def create_fireball_video(event_dir: Path, gnomonic_base_pto_path: Path, start_xy: List[float], end_xy: List[float]):
+    """Creates a cropped and rotated video using a robust 2-step (stitch->rotate&crop) process."""
+    print("Creating cropped video via 2-step (stitch -> rotate & crop) process...")
+
+    # 1. Calculate the essential geometry
+    angle_rad = math.atan2(end_xy[1] - start_xy[1], end_xy[0] - start_xy[0])
+    track_len = math.hypot(end_xy[0] - start_xy[0], end_xy[1] - start_xy[1])
+    
+    final_crop_h = Settings.TRACK_WIDTH
+    padded_len = track_len + (3 * final_crop_h)
+    unaligned_width = int(padded_len - 128)
+    final_crop_w = (unaligned_width + 32 - 1) & -32
+
+    square_side = max(final_crop_w, final_crop_h) * math.sqrt(2)
+    square_side = (int(square_side) + 31) & -32
+
+    # 2. Create the PTO for the initial SQUARE crop
+    try:
+        pto_data = pto_mapper.parse_pto_file(str(gnomonic_base_pto_path))
+        global_options, images = pto_data
+        
+        mid_x = (start_xy[0] + end_xy[0]) / 2
+        mid_y = (start_xy[1] + end_xy[1]) / 2
+        s_left = mid_x - (square_side / 2)
+        s_right = mid_x + (square_side / 2)
+        s_top = mid_y - (square_side / 2)
+        s_bottom = mid_y + (square_side / 2)
+        global_options['S'] = f"{int(s_left)},{int(s_top)},{int(s_right)},{int(s_bottom)}"
+
+        pto_path = event_dir / "fireball.pto"
+        pto_mapper.write_pto_file((global_options, images), str(pto_path))
+        print(f"Generated '{pto_path}' for the initial stitch.")
+
+    except Exception as e:
+        raise ScriptError(f"Failed to create temporary PTO file: {e}")
+
+    # --- Find source video and stitcher script ---
+    source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
+    if not source_video_path: raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
+    stitcher_path = Path(__file__).parent.resolve() / "stitcher.py"
+    if not stitcher_path.is_file(): raise FileNotFoundError("stitcher.py not found in script directory.")
+
+    # --- Define temporary and final file paths ---
+    temp_square_video = event_dir / "fireball-square.mp4"
+    final_video_path = event_dir / Settings.OUTPUT_VIDEO_FILENAME
+    
+    try:
+        # STEP 1: Stitch the larger, un-rotated square video
+        stitcher_cmd = [sys.executable, str(stitcher_path), "--pad", "0", str(pto_path), str(source_video_path), str(temp_square_video)]
+        print(f"Step 1/2: Stitching square video cropped around the meteor...")
+        subprocess.run(stitcher_cmd, check=True, capture_output=True, text=True, timeout=300)
+
+        # STEP 2: Rotate AND Crop the video in a single FFmpeg command
+        filter_chain = f"rotate={-angle_rad}:c=black,crop={final_crop_w}:{final_crop_h}"
+        ffmpeg_cmd = ["ffmpeg", "-i", str(temp_square_video), "-vf", filter_chain, "-y", str(final_video_path)]
+        print(f"Step 2/2: Rotating and cropping final video...")
+        subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+
+        print(f"✅ Success! Created '{final_video_path}'")
+
+    except subprocess.CalledProcessError as e:
+        raise ScriptError(f"A processing step failed with exit code {e.returncode}:\nCOMMAND: {' '.join(e.cmd)}\nSTDERR:\n{e.stderr}")
+    finally:
+        # Clean up all intermediate files
+        pto_path.unlink(missing_ok=True)
+        temp_square_video.unlink(missing_ok=True)
 
 
 def main():
@@ -322,11 +288,9 @@ def main():
         args = get_args()
         event_dir = args.event_dir
 
-        # Ensure the event directory exists
         if not event_dir.is_dir():
             raise FileNotFoundError(f"The specified event directory does not exist: '{event_dir}'")
 
-        # Load configuration from event.txt
         config_path = event_dir / 'event.txt'
         if not config_path.is_file():
             raise FileNotFoundError(f"'event.txt' not found in directory '{event_dir}'")
@@ -334,23 +298,32 @@ def main():
         config = configparser.ConfigParser()
         config.read(config_path)
 
-        # Get all necessary data
         start_xy, end_xy = get_projection_coords(event_dir, config)
         gnomonic_image_path = find_gnomonic_image(event_dir, config)
+        
+        recalibrated = config.getint('summary', 'recalibrated', fallback=1)
+        gnomonic_grid_pto_path = event_dir / ('gnomonic_corr_grid.pto' if recalibrated == 0 else 'gnomonic_grid.pto')
+        gnomonic_base_pto_path = event_dir / 'gnomonic.pto'
 
-        # Process the image to extract the meteor track
+        if not gnomonic_grid_pto_path.is_file():
+            raise FileNotFoundError(f"Required grid PTO file not found at '{gnomonic_grid_pto_path}'")
+        if not gnomonic_base_pto_path.is_file():
+            raise FileNotFoundError(f"Base projection PTO file not found at '{gnomonic_base_pto_path}'")
+
         print("Processing image to extract meteor track...")
-        track_image = extract_meteor_track(
-            gnomonic_image_path, start_xy, end_xy, Settings.TRACK_WIDTH
-        )
-
-        # Save the final result
+        track_image = extract_meteor_track(gnomonic_image_path, start_xy, end_xy, Settings.TRACK_WIDTH)
         output_path = event_dir / Settings.OUTPUT_FILENAME
         track_image.format = 'jpeg'
         track_image.save(filename=str(output_path))
         track_image.close()
-        
         print(f"✅ Success! Created '{output_path}'")
+        
+        create_fireball_video(
+            event_dir, 
+            gnomonic_base_pto_path, 
+            start_xy, 
+            end_xy
+        )
 
     except ScriptError as e:
         print(f"❌ Error: {e}", file=sys.stderr)

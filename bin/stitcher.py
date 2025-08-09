@@ -1064,12 +1064,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     out_stream.width, out_stream.height, out_stream.pix_fmt = final_w, final_h, 'yuv420p'
     out_stream.options = {"preset": "fast", "crf": "28"}
     
-    # --- MODIFIED: Calculate total frames for progress bar ---
     total_frames = 0
     if use_sync:
         total_frames = len(synchronized_frame_groups)
     else:
-        # Get frame counts from streams that provide it.
         frame_counts = [s.frames for s in in_streams if s.frames > 0]
         if frame_counts:
             total_frames = min(frame_counts)
@@ -1137,18 +1135,20 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
 
             frame_count += 1
             
-            # --- MODIFIED: Report progress to stderr ---
             if total_frames > 0:
                 # Report every 5 frames or on the last frame to avoid excessive I/O
                 if frame_count % 5 == 0 or frame_count == total_frames:
                     percent_done = (frame_count / total_frames) * 100
-                    # This format is easy for other scripts to parse
-                    print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
-            
-            # This user-facing progress message is now optional
-            # status_message = f"Processing frame group: {frame_count} / {total_frames if total_frames > 0 else '?'}"
-            # sys.stdout.write('\r' + status_message.ljust(79))
-            # sys.stdout.flush()
+                    if sys.stderr.isatty():
+                        # Human-readable progress bar
+                        bar_length = 40
+                        filled_len = int(round(bar_length * frame_count / float(total_frames)))
+                        bar = '█' * filled_len + '-' * (bar_length - filled_len)
+                        sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r')
+                        sys.stderr.flush()
+                    else:
+                        # Machine-readable output for scripts
+                        print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
             is_leveling_frame = (use_seam and num_images > 1 and (frame_count == 1 or (frame_count - 1) % level_freq == 0))
             
@@ -1194,6 +1194,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
+
+    if total_frames > 0 and sys.stderr.isatty():
+        sys.stderr.write("\n")
+        sys.stderr.flush()
 
     for packet in out_stream.encode(): out_container.mux(packet)
     out_container.close()

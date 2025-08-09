@@ -80,7 +80,7 @@ def write_pto_file(pto_data, pto_filename, optimize_vars=None):
         f.write("# Hugin project file created by pto_mapper\n")
         # Write panorama line (p)
         p_line = ['p']
-        p_keys = ['f', 'w', 'h', 'v', 'E', 'R', 'S', 'n', 't']
+        p_keys = ['f', 'w', 'h', 'v', 'E', 'R', 'S', 'n', 't', 'r'] # Added 'r' to known keys
         
         # Write known keys in order
         for key in p_keys:
@@ -163,8 +163,18 @@ def map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=False):
     orig_w, orig_h = global_options.get('w'), global_options.get('h')
     pano_proj_f = int(global_options.get('f', 2))
     pano_hfov = global_options.get('v')
+    pano_r = global_options.get('r', 0.0)
     if orig_w is None or orig_h is None or pano_hfov is None:
         raise ValueError("PTO 'p' line must contain 'w', 'h', and 'v' parameters.")
+
+    if pano_r != 0.0:
+        pano_r_rad = math.radians(pano_r)
+        cos_r, sin_r = math.cos(pano_r_rad), math.sin(pano_r_rad)
+        center_x, center_y = orig_w / 2.0, orig_h / 2.0
+        translated_x, translated_y = pano_x - center_x, pano_y - center_y
+        rotated_x = translated_x * cos_r - translated_y * sin_r
+        rotated_y = translated_x * sin_r + translated_y * cos_r
+        pano_x, pano_y = rotated_x + center_x, rotated_y + center_y
 
     pano_hfov_rad = math.radians(pano_hfov)
 
@@ -261,6 +271,7 @@ def map_image_to_pano(pto_data, image_index, x, y):
     pano_proj_f = int(global_options.get('f', 2))
     pano_hfov = global_options.get('v')
     orig_w, orig_h = global_options.get('w'), global_options.get('h')
+    pano_r = global_options.get('r', 0.0)
     if orig_w is None or orig_h is None or pano_hfov is None:
         raise ValueError("PTO 'p' line must contain 'w', 'h', and 'v' parameters.")
 
@@ -325,31 +336,43 @@ def map_image_to_pano(pto_data, image_index, x, y):
     world_z = -cos_world_pitch * math.cos(world_yaw)
     
     pano_hfov_rad = math.radians(pano_hfov)
+    unrotated_pano_x, unrotated_pano_y = None, None
     if pano_proj_f == 2:
         pano_yaw = math.atan2(world_x, -world_z)
         pano_pitch = math.asin(world_y)
-        pano_x = (pano_yaw / (2 * math.pi) + 0.5) * orig_w
-        pano_y = (-pano_pitch / math.pi + 0.5) * orig_h
-        return pano_x, pano_y
+        unrotated_pano_x = (pano_yaw / (2 * math.pi) + 0.5) * orig_w
+        unrotated_pano_y = (-pano_pitch / math.pi + 0.5) * orig_h
     elif pano_proj_f == 0:
         pano_focal = (orig_w / 2.0) / math.tan(pano_hfov_rad / 2.0) if pano_hfov_rad > 0 else 1.0
         if world_z >= 0: return None
-        pano_x = world_x * (-pano_focal / world_z) + orig_w / 2.0
-        pano_y = -(world_y * (-pano_focal / world_z)) + orig_h / 2.0
-        return pano_x, pano_y
+        unrotated_pano_x = world_x * (-pano_focal / world_z) + orig_w / 2.0
+        unrotated_pano_y = -(world_y * (-pano_focal / world_z)) + orig_h / 2.0
     elif pano_proj_f == 3:
         fisheye_focal = (orig_w / 2.0) / (pano_hfov_rad / 2.0) if pano_hfov_rad > 0 else 1.0
         theta = math.atan2(math.sqrt(world_x**2 + world_y**2), -world_z)
         phi = math.atan2(world_y, world_x)
         r_pano = theta * fisheye_focal
-        pano_x = r_pano * math.cos(phi) + orig_w / 2.0
-        pano_y = -(r_pano * math.sin(phi)) + orig_h / 2.0
-        return pano_x, pano_y
-    
-    return None
+        unrotated_pano_x = r_pano * math.cos(phi) + orig_w / 2.0
+        unrotated_pano_y = -(r_pano * math.sin(phi)) + orig_h / 2.0
+    else:
+        return None
+
+    if unrotated_pano_x is None:
+        return None
+
+    if pano_r != 0.0:
+        pano_r_rad = math.radians(-pano_r) # Use negative angle for inverse rotation
+        cos_r, sin_r = math.cos(pano_r_rad), math.sin(pano_r_rad)
+        center_x, center_y = orig_w / 2.0, orig_h / 2.0
+        translated_x, translated_y = unrotated_pano_x - center_x, unrotated_pano_y - center_y
+        rotated_x = translated_x * cos_r - translated_y * sin_r
+        rotated_y = translated_x * sin_r + translated_y * cos_r
+        return rotated_x + center_x, rotated_y + center_y
+    else:
+        return unrotated_pano_x, unrotated_pano_y
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
-def calculate_source_coords(coords_y, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, sw, sh, R_pr_inv, camera_yaw, src_focal, src_norm_radius, a, b, c, cx, cy, src_proj_f):
+def calculate_source_coords(coords_y, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, sw, sh, R_pr_inv, camera_yaw, src_focal, src_norm_radius, a, b, c, cx, cy, src_proj_f, pano_r=0.0):
     """
     This is the core JIT-compiled reprojection function.
     It is kept here to be used by the stitching process. It maps a grid of
@@ -360,10 +383,22 @@ def calculate_source_coords(coords_y, final_w, final_h, orig_w, orig_h, crop_off
     camera_yaw_rad = math.radians(camera_yaw)
     INVALID_COORD = -99999.0
 
+    has_rotation = pano_r != 0.0
+    if has_rotation:
+        pano_r_rad = math.radians(pano_r)
+        cos_r, sin_r = math.cos(pano_r_rad), math.sin(pano_r_rad)
+        center_x, center_y = orig_w / 2.0, orig_h / 2.0
+
     for y_dest in prange(final_h):
         for x_dest in range(final_w):
             pano_x, pano_y = x_dest + crop_offset_x, y_dest + crop_offset_y
             
+            if has_rotation:
+                translated_x, translated_y = pano_x - center_x, pano_y - center_y
+                rotated_x = translated_x * cos_r - translated_y * sin_r
+                rotated_y = translated_x * sin_r + translated_y * cos_r
+                pano_x, pano_y = rotated_x + center_x, rotated_y + center_y
+
             vec_3d = np.empty(3, dtype=np.float32)
             is_valid_pano_pixel = True
             

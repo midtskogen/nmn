@@ -314,7 +314,7 @@ def _map_one_image(args):
     try:
         numba.set_num_threads(1)
         
-        img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov = args
+        img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r = args
         sw,sh,fov,src_proj_f = img.get('w'),img.get('h'),img.get('v'),int(img.get('f',0))
         if sw is None or sh is None: raise ValueError("Image must have width 'w' and height 'h'.")
         if fov is None: raise ValueError("Image must have HFOV 'v'.")
@@ -330,7 +330,7 @@ def _map_one_image(args):
         R_pr_inv = R_pr.T
         coords_y = np.empty((final_h, final_w, 2), dtype=np.float32)
 
-        pto_mapper.calculate_source_coords(coords_y,final_w,final_h,orig_w,orig_h,crop_offset_x,crop_offset_y,pano_proj_f,pano_hfov,sw,sh,R_pr_inv,y,src_focal,src_norm_radius,a,b,c,cx,cy,src_proj_f)
+        pto_mapper.calculate_source_coords(coords_y,final_w,final_h,orig_w,orig_h,crop_offset_x,crop_offset_y,pano_proj_f,pano_hfov,sw,sh,R_pr_inv,y,src_focal,src_norm_radius,a,b,c,cx,cy,src_proj_f,pano_r)
 
         map_y_idx, c01, c23, coords_uv = *compute_map_and_weights(coords_y,sw,sh,pad), coords_y[::2,::2]/2.
         map_uv_idx = compute_uv_map(coords_uv, sw//2, sh//2, pad//2)
@@ -347,6 +347,7 @@ def build_mappings(pto_file, pad, num_workers):
     if orig_w is None or orig_h is None: raise ValueError("PTO 'p' line must contain width 'w' and height 'h'.")
     pano_proj_f = int(global_options.get('f', 2))
     pano_hfov = global_options.get('v')
+    pano_r = global_options.get('r', 0.0)
     if pano_hfov is None: raise ValueError("PTO 'p' line must have HFOV 'v' for projection calculations.")
 
     crop_coords = global_options.get('S')
@@ -357,7 +358,7 @@ def build_mappings(pto_file, pad, num_workers):
     else: final_w, final_h, crop_offset_x, crop_offset_y = orig_w, orig_h, 0, 0
     global_options['final_w'], global_options['final_h'] = final_w, final_h
 
-    task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov) for img in images]
+    task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r) for img in images]
 
     print("Building projection maps...")
     with ThreadPoolExecutor(max_workers=num_workers) as executor:

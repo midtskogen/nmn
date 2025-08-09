@@ -314,7 +314,7 @@ def _map_one_image(args):
     try:
         numba.set_num_threads(1)
         
-        img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r = args
+        img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s = args
         sw,sh,fov,src_proj_f = img.get('w'),img.get('h'),img.get('v'),int(img.get('f',0))
         if sw is None or sh is None: raise ValueError("Image must have width 'w' and height 'h'.")
         if fov is None: raise ValueError("Image must have HFOV 'v'.")
@@ -330,7 +330,7 @@ def _map_one_image(args):
         R_pr_inv = R_pr.T
         coords_y = np.empty((final_h, final_w, 2), dtype=np.float32)
 
-        pto_mapper.calculate_source_coords(coords_y,final_w,final_h,orig_w,orig_h,crop_offset_x,crop_offset_y,pano_proj_f,pano_hfov,sw,sh,R_pr_inv,y,src_focal,src_norm_radius,a,b,c,cx,cy,src_proj_f,pano_r)
+        pto_mapper.calculate_source_coords(coords_y,final_w,final_h,orig_w,orig_h,crop_offset_x,crop_offset_y,pano_proj_f,pano_hfov,sw,sh,R_pr_inv,y,src_focal,src_norm_radius,a,b,c,cx,cy,src_proj_f,pano_r,pano_s)
 
         map_y_idx, c01, c23, coords_uv = *compute_map_and_weights(coords_y,sw,sh,pad), coords_y[::2,::2]/2.
         map_uv_idx = compute_uv_map(coords_uv, sw//2, sh//2, pad//2)
@@ -348,6 +348,8 @@ def build_mappings(pto_file, pad, num_workers, is_video_output=False):
     pano_proj_f = int(global_options.get('f', 2))
     pano_hfov = global_options.get('v')
     pano_r = global_options.get('r', 0.0)
+    pano_s = global_options.get('s', 1.0)
+    if pano_s <= 0: raise ValueError("Panorama scale factor 's' must be greater than 0.")
     if pano_hfov is None: raise ValueError("PTO 'p' line must have HFOV 'v' for projection calculations.")
 
     crop_coords = global_options.get('S')
@@ -356,12 +358,13 @@ def build_mappings(pto_file, pad, num_workers, is_video_output=False):
     else:
         left, top, right, bottom = 0, 0, orig_w, orig_h
 
+    # Calculate final dimensions based on crop and scale
+    final_w = int(round((right - left) * pano_s))
+    final_h = int(round((bottom - top) * pano_s))
+
     # Ensure coordinates are even for YUV processing compatibility
     left &= ~1; top &= ~1; right &= ~1; bottom &= ~1
     
-    final_w = right - left
-    final_h = bottom - top
-
     if is_video_output:
         # For video, height must be even
         if final_h % 2 != 0: final_h -= 1
@@ -370,37 +373,33 @@ def build_mappings(pto_file, pad, num_workers, is_video_output=False):
         if final_w % 32 != 0:
             original_w = final_w
             padded_w = ((original_w + 31) // 32) * 32
-
-            # Calculate the center of the original crop
-            center_x = left + original_w / 2.0
-
-            # Calculate new boundaries, centered on the original
-            new_left = round(center_x - (padded_w / 2.0))
-            new_right = new_left + padded_w
-
+            
+            # Calculate how much padding is needed
+            padding_needed = padded_w - original_w
+            pad_left = padding_needed // 2
+            
+            # Adjust original crop window before scaling
+            new_left_unscaled = left - pad_left / pano_s
+            
             # Shift the window if it extends beyond the panorama's boundaries
-            if new_right > orig_w:
-                shift = new_right - orig_w
-                new_left -= shift
-                new_right -= shift
+            if new_left_unscaled + (padded_w / pano_s) > orig_w:
+                new_left_unscaled = orig_w - (padded_w / pano_s)
             
-            if new_left < 0:
-                shift = -new_left
-                new_left += shift
-                new_right += shift
+            if new_left_unscaled < 0:
+                new_left_unscaled = 0
 
-            # Final assignment, ensuring left coordinate is even
-            left = int(new_left) & ~1
-            final_w = padded_w
+            left = int(new_left_unscaled) & ~1
+            final_w = int(round((right - left) * pano_s))
+            final_w = ((final_w + 31) // 32) * 32 # Recalculate to be safe
             
-            print(f"Warning: Output width {original_w} is not divisible by 32. Adjusting crop to {final_w}x{final_h} at ({left},{top}) to meet codec requirements.", file=sys.stderr)
+            print(f"Warning: Output width {original_w} is not divisible by 32. Adjusting crop to produce {final_w}x{final_h} video.", file=sys.stderr)
 
     crop_offset_x = left
     crop_offset_y = top
 
     global_options['final_w'], global_options['final_h'] = final_w, final_h
 
-    task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r) for img in images]
+    task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s) for img in images]
 
     print("Building projection maps...")
     with ThreadPoolExecutor(max_workers=num_workers) as executor:

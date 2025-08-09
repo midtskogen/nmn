@@ -340,7 +340,7 @@ def _map_one_image(args):
         numba.set_num_threads(original_threads)
 
 
-def build_mappings(pto_file, pad, num_workers):
+def build_mappings(pto_file, pad, num_workers, is_video_output=False):
     global_options, images = pto_mapper.parse_pto_file(pto_file)
 
     orig_w, orig_h = global_options.get('w'), global_options.get('h')
@@ -353,9 +353,51 @@ def build_mappings(pto_file, pad, num_workers):
     crop_coords = global_options.get('S')
     if crop_coords:
         left, top, right, bottom = crop_coords
-        left, top, right, bottom = left & ~1, top & ~1, right & ~1, bottom & ~1
-        final_w, final_h, crop_offset_x, crop_offset_y = right-left, bottom-top, left, top
-    else: final_w, final_h, crop_offset_x, crop_offset_y = orig_w, orig_h, 0, 0
+    else:
+        left, top, right, bottom = 0, 0, orig_w, orig_h
+
+    # Ensure coordinates are even for YUV processing compatibility
+    left &= ~1; top &= ~1; right &= ~1; bottom &= ~1
+    
+    final_w = right - left
+    final_h = bottom - top
+
+    if is_video_output:
+        # For video, height must be even
+        if final_h % 2 != 0: final_h -= 1
+
+        # For video, width must be divisible by 32 for the codec
+        if final_w % 32 != 0:
+            original_w = final_w
+            padded_w = ((original_w + 31) // 32) * 32
+
+            # Calculate the center of the original crop
+            center_x = left + original_w / 2.0
+
+            # Calculate new boundaries, centered on the original
+            new_left = round(center_x - (padded_w / 2.0))
+            new_right = new_left + padded_w
+
+            # Shift the window if it extends beyond the panorama's boundaries
+            if new_right > orig_w:
+                shift = new_right - orig_w
+                new_left -= shift
+                new_right -= shift
+            
+            if new_left < 0:
+                shift = -new_left
+                new_left += shift
+                new_right += shift
+
+            # Final assignment, ensuring left coordinate is even
+            left = int(new_left) & ~1
+            final_w = padded_w
+            
+            print(f"Warning: Output width {original_w} is not divisible by 32. Adjusting crop to {final_w}x{final_h} at ({left},{top}) to meet codec requirements.", file=sys.stderr)
+
+    crop_offset_x = left
+    crop_offset_y = top
+
     global_options['final_w'], global_options['final_h'] = final_w, final_h
 
     task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r) for img in images]
@@ -707,7 +749,7 @@ def _precompile_numba_functions():
     print("Pre-compilation complete.")
 
 def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores):
-    mappings, global_options = build_mappings(pto_file, pad, num_cores)
+    mappings, global_options = build_mappings(pto_file, pad, num_cores, is_video_output=False)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images:
@@ -1004,7 +1046,7 @@ def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
 def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, use_sync=False, model=None, save_sync_file=None, load_sync_file=None):
     if av is None: raise ImportError("PyAV is not installed.")
 
-    mappings, global_options = build_mappings(pto_file, pad, num_cores)
+    mappings, global_options = build_mappings(pto_file, pad, num_cores, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")

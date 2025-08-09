@@ -178,7 +178,7 @@ def map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=False):
 
     # Apply inverse rotation
     if pano_r != 0.0:
-        pano_r_rad = math.radians(pano_r)
+        pano_r_rad = math.radians(-pano_r)
         cos_r, sin_r = math.cos(pano_r_rad), math.sin(pano_r_rad)
         center_x, center_y = orig_w / 2.0, orig_h / 2.0
         translated_x, translated_y = pano_x - center_x, pano_y - center_y
@@ -376,7 +376,7 @@ def map_image_to_pano(pto_data, image_index, x, y):
     pano_x, pano_y = untransformed_pano_x, untransformed_pano_y
 
     if pano_r != 0.0:
-        pano_r_rad = math.radians(-pano_r) # Use negative angle for inverse rotation
+        pano_r_rad = math.radians(pano_r) # Use positive angle for inverse of inverse
         cos_r, sin_r = math.cos(pano_r_rad), math.sin(pano_r_rad)
         center_x, center_y = orig_w / 2.0, orig_h / 2.0
         translated_x, translated_y = pano_x - center_x, pano_y - center_y
@@ -405,7 +405,7 @@ def calculate_source_coords(coords_y, final_w, final_h, orig_w, orig_h, crop_off
 
     has_rotation = pano_r != 0.0
     if has_rotation:
-        pano_r_rad = math.radians(pano_r)
+        pano_r_rad = math.radians(-pano_r)
         cos_r, sin_r = math.cos(pano_r_rad), math.sin(pano_r_rad)
         center_x, center_y = orig_w / 2.0, orig_h / 2.0
 

@@ -754,6 +754,23 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
     if len(input_files) != num_images:
         raise ValueError(f"Input files ({len(input_files)}) != PTO images ({num_images}).")
 
+    # --- Validate image dimensions before processing ---
+    for i, input_path in enumerate(input_files):
+        try:
+            with Image.open(input_path) as img:
+                actual_w, actual_h = img.size
+        except Exception as e:
+            raise FileNotFoundError(f"Could not open or read image file: {input_path}. Error: {e}")
+        
+        expected_w = mappings[i][4]
+        expected_h = mappings[i][5]
+
+        if actual_w != expected_w or actual_h != expected_h:
+            raise ValueError(
+                f"Dimension mismatch for '{os.path.basename(input_path)}'. "
+                f"Image is {actual_w}x{actual_h}, but PTO file expects {expected_w}x{expected_h}."
+            )
+
     # Eagerly compile Numba functions before entering the thread pool
     _precompile_numba_functions()
 

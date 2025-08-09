@@ -50,12 +50,16 @@ def create_blend_weight_map(width, height):
     weights = np.empty((height, width), dtype=np.float32)
     norm = min(width, height) / 2.0
     if norm == 0: norm = 1.0
+    
     for y in prange(height):
         dist_y = min(y, height - 1 - y)
         for x in range(width):
             dist_x = min(x, width - 1 - x)
-            weights[y, x] = min(dist_x, dist_y) / norm
-    np.clip(weights, 0.0, 1.0, out=weights)
+            # Calculate the weight
+            raw_weight = min(dist_x, dist_y) / norm
+            # Manually clip the value to the [0.0, 1.0] range before assignment
+            weights[y, x] = max(0.0, min(1.0, raw_weight))
+            
     return weights
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
@@ -211,8 +215,21 @@ def _blur_padded_area_numba(plane, pad, blur_kernel_size, noise_amplitude):
                 noise = np.random.uniform(-noise_amplitude, noise_amplitude)
                 blurred_plane[r, c] += noise
             
-    # The final clip and type conversion will handle any out-of-bounds values
-    return np.clip(blurred_plane, 0, 255).astype(np.uint8)
+    # --- Final Manual Clip and Type Conversion ---
+    # Create the final output array with the correct type
+    final_plane = np.empty_like(blurred_plane, dtype=np.uint8)
+    # Loop through the plane, clip the values, and cast to uint8
+    for i in prange(h):
+        for j in range(w):
+            val = blurred_plane[i, j]
+            if val < 0:
+                final_plane[i, j] = 0
+            elif val > 255:
+                final_plane[i, j] = 255
+            else:
+                final_plane[i, j] = val
+                
+    return final_plane
 
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)

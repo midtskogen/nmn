@@ -378,7 +378,8 @@ def finalize_and_save(luma_plane: np.ndarray, u_plane: np.ndarray,
 def main():
     """Parses command-line arguments and starts the appropriate stacking process."""
     parser = argparse.ArgumentParser(
-        description="Stack video frames to simulate a long exposure.",
+        description="Stack video frames to simulate a long exposure. "
+                    "By default, an enhancement/denoise filter is applied.",
         formatter_class=argparse.RawTextHelpFormatter)
     
     parser.add_argument("video_files", nargs='*',
@@ -402,16 +403,20 @@ def main():
     raw_group.add_argument("--fps", type=float, default=25.0,
                            help="FPS for raw stream timing (default: 25.0).")
 
-    noise_group = parser.add_argument_group('Noise Reduction (choose one)')
+    noise_group = parser.add_argument_group('Noise Reduction')
     noise_mutex = noise_group.add_mutually_exclusive_group()
     noise_mutex.add_argument("--denoise", action="store_true",
-                             help="Enable OpenCV's fastNlMeansDenoising filter on the final image.")
-    noise_mutex.add_argument("--enhance", action="store_true",
-                             help="Enable the custom C-style adaptive enhancement filter.")
+                             help="Use OpenCV's denoising filter instead of the default enhancement filter.")
+    noise_mutex.add_argument("--noenhance", action="store_true",
+                             help="Disable the default enhancement filter. No noise reduction will be applied.")
     noise_group.add_argument("--denoise-strength", type=float, default=10.0,
                              help="Strength of the --denoise filter (default: 10.0).")
     
     args = parser.parse_args()
+
+    # By default, enhancement is on. It's disabled if the user explicitly asks
+    # for --noenhance or chooses the alternative --denoise filter.
+    enhance = not (args.noenhance or args.denoise)
 
     if args.raw and args.individual:
         parser.error("The --raw and --individual options cannot be used together.")
@@ -422,14 +427,14 @@ def main():
         width, height = args.raw
         stack_raw_frames(width, height, args.output, args.start, args.duration,
                          args.fps, args.denoise, args.denoise_strength,
-                         args.quality, args.enhance)
+                         args.quality, enhance)
     else:
         if not args.video_files:
             parser.error("Missing input. Provide video file(s) or use the --raw option.")
         stack_video_frames(args.video_files, args.output, args.start,
                            args.duration, args.denoise,
                            args.denoise_strength, args.quality, args.threads,
-                           args.individual, args.enhance)
+                           args.individual, enhance)
 
 if __name__ == "__main__":
     main()

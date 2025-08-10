@@ -414,7 +414,7 @@ def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) ->
             return None
         
         initial_brightness = brightness[:baseline_frames]
-        baseline = np.median(initial_brightness)
+        baseline = np.median(initial_brightness) + 0.02
         noise_range = np.max(initial_brightness) - np.min(initial_brightness)
         threshold = baseline + (trim_config.NOISE_RANGE_FACTOR * noise_range)
 
@@ -444,7 +444,7 @@ def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) ->
         return None
 
 def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, trim_times: Optional[Tuple[float, float]]):
-    """Helper function to trim and save the final MP4 and WebM videos."""
+    """Helper function to trim and save the final MP4, WebM, and inverted WebM videos."""
     print("Step 3/3: Finalizing videos...")
     # Define MP4 output paths
     final_video_path = event_dir / Settings.OUTPUT_VIDEO_FILENAME
@@ -493,6 +493,15 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
     webm_cmd = ["ffmpeg", "-i", str(final_video_path)] + webm_opts + [str(final_webm_path)]
     subprocess.run(webm_cmd, check=True, capture_output=True)
     print(f"✅ Success! Created '{final_webm_path.name}'")
+    
+    # --- Create Inverted WebM Video ---
+    final_neg_webm_path = final_video_path.with_name("fireball_neg.webm")
+    print(f"Creating inverted WebM version ({final_neg_webm_path.name})...")
+    # Apply luminance inversion filter to the common options
+    neg_webm_cmd = ["ffmpeg", "-i", str(final_video_path), "-vf", "lutyuv=y=negval"] + webm_opts + [str(final_neg_webm_path)]
+    subprocess.run(neg_webm_cmd, check=True, capture_output=True)
+    print(f"✅ Success! Created '{final_neg_webm_path.name}'")
+
 
     print(f"Creating WebM version ({final_orig_webm_path.name})...")
     orig_webm_cmd = ["ffmpeg", "-i", str(final_orig_video_path)] + webm_opts + [str(final_orig_webm_path)]

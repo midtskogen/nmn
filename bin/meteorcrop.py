@@ -455,25 +455,28 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
         start_time, end_time = trim_times
         trim_duration = end_time - start_time
         
+        print("Trimming final video...")
         # Trim the final processed video
         final_cmd = [
             "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(processed_vid),
             "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-y", str(final_video_path)
         ]
-        run_command_with_progress(final_cmd, desc="Step 3a: Trimming Final", total=trim_duration)
+        subprocess.run(final_cmd, check=True, capture_output=True)
         
+        print("Trimming original video...")
         # Trim the original stitched video to the same duration
         final_orig_cmd = [
             "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(original_vid),
             "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-c:v", "libx264", "-y", str(final_orig_video_path)
         ]
-        run_command_with_progress(final_orig_cmd, desc="Step 3b: Trimming Original", total=trim_duration)
+        subprocess.run(final_orig_cmd, check=True, capture_output=True)
         print(f"✅ Saved original trimmed video to '{final_orig_video_path.name}'")
     else: # No trimming needed, save full-length videos
-        final_duration, _, _ = get_video_info(processed_vid)
+        print("Saving final video...")
         final_cmd = ["ffmpeg", "-i", str(processed_vid), "-vf", final_filter, "-y", str(final_video_path)]
-        run_command_with_progress(final_cmd, desc="Step 3a: Saving Final", total=final_duration)
+        subprocess.run(final_cmd, check=True, capture_output=True)
         
+        print("Saving original video...")
         # Simply copy the original untrimmed video
         shutil.copy(str(original_vid), str(final_orig_video_path))
         print(f"✅ Saved original untrimmed video to '{final_orig_video_path.name}'")

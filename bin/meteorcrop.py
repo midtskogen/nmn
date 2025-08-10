@@ -453,7 +453,7 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
     try:
         # Step 1: Stitch the video
         stitcher_cmd_vid = [
-            sys.executable, str(stitcher_path), "--pad", "128", str(pto_path), 
+            sys.executable, str(stitcher_path), "--pad", "0", str(pto_path), 
             str(source_video_path), str(temp_stitched_video)
         ]
         # Stitcher progress is percentage-based (total=100)

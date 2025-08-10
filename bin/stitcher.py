@@ -788,7 +788,33 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
     if len(input_files) != num_images:
         raise ValueError(f"Input files ({len(input_files)}) != PTO images ({num_images}).")
 
-    # --- Validate image dimensions before processing ---
+    # --- Start of Proposed Optimization ---
+    if num_images == 1:
+        print("INFO: Single image detected, taking optimized path.")
+    
+        # Directly get the required variables instead of reading from process_args
+        input_path = input_files[0]
+        mapping = mappings[0]
+        dw, dh = final_w, final_h
+        # The 'pad' and 'padsides' arguments are already available in the function's scope.
+
+        # Directly reproject the image without any weight maps
+        py, pu, pv, _, _ = load_image_to_yuv(input_path, pad, padsides)
+    
+        map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
+    
+        y_final = np.zeros((dh, dw), dtype=np.uint8)
+        u_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
+        v_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
+
+        reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel())
+        reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel())
+
+        save_image_yuv420(y_final, u_final, v_final, output_file)
+        print(f"Panoramic image saved to {output_file}")
+        return # End execution here for the single-image case
+
+# --- Validate image dimensions before processing ---
     for i, input_path in enumerate(input_files):
         try:
             with Image.open(input_path) as img:
@@ -1114,6 +1140,82 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     
     # Eagerly compile Numba functions before entering the thread pool
     _precompile_numba_functions()
+
+    # --- Start of Single-Video Optimization ---
+    if num_images == 1:
+        print("INFO: Single video detected, taking optimized path.")
+
+        # --- Simplified Setup ---
+        input_path = input_files[0]
+        mapping = mappings[0]
+        dw, dh = final_w, final_h
+
+        in_container = av.open(input_path)
+        in_stream = in_container.streams.video[0]
+        in_stream.thread_type = 'AUTO'
+        
+        total_frames = in_stream.frames if in_stream.frames > 0 else 0
+        frame_count = 0
+
+        out_container = av.open(output_file, mode='w')
+        out_stream = out_container.add_stream("libx264", rate=in_stream.average_rate)
+        out_stream.width, out_stream.height, out_stream.pix_fmt = dw, dh, 'yuv420p'
+        out_stream.options = {"preset": "fast", "crf": "28"}
+
+        map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
+
+        # --- Simplified Frame-by-Frame Processing Loop ---
+        for frame in in_container.decode(in_stream):
+            frame_count += 1
+            if total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
+                percent_done = (frame_count / total_frames) * 100
+                if sys.stderr.isatty():
+                    bar_length = 40; filled_len = int(round(bar_length * frame_count / float(total_frames)))
+                    bar = '█' * filled_len + '-' * (bar_length - filled_len)
+                    sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
+                else:
+                    print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
+
+            if frame.format.name not in ("yuv420p", "yuvj420p"): frame = frame.reformat(format="yuv420p")
+            
+            # Get frame dimensions and reshape the planes to 2D before padding
+            sw, sh = frame.width, frame.height
+            py_src = np.asarray(frame.planes[0]).reshape(sh, sw)
+            pu_src = np.asarray(frame.planes[1]).reshape(sh // 2, sw // 2)
+            pv_src = np.asarray(frame.planes[2]).reshape(sh // 2, sw // 2)
+            
+            # Pad the source planes to match what the mapping expects
+            pad_t = pad if 'top' in padsides else 0; pad_b = pad if 'bottom' in padsides else 0
+            pad_l = pad if 'left' in padsides else 0; pad_r = pad if 'right' in padsides else 0
+            pad_y_width = ((pad_t, pad_b), (pad_l, pad_r)); pad_uv_width = ((pad_t//2, pad_b//2), (pad_l//2, pad_r//2))
+            
+            py_padded = np.pad(py_src, pad_y_width, mode='edge')
+            pu_padded = np.pad(pu_src, pad_uv_width, mode='edge')
+            pv_padded = np.pad(pv_src, pad_uv_width, mode='edge')
+
+            # Allocate final frame buffers
+            y_final = np.zeros((dh, dw), dtype=np.uint8)
+            u_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
+            v_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
+
+            # Reproject directly into the final buffers
+            reproject_y(py_padded.ravel(), dw, dh, py_padded.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel())
+            reproject_uv(pu_padded.ravel(), pv_padded.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel())
+            
+            # Create and encode the output frame
+            out_frame = av.VideoFrame(width=dw, height=dh, format='yuv420p')
+            out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
+            for packet in out_stream.encode(out_frame):
+                out_container.mux(packet)
+                
+        # Finalize video file
+        if total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
+        for packet in out_stream.encode(): out_container.mux(packet)
+        out_container.close()
+        in_container.close()
+        print(f"\nPanoramic video saved to {output_file}")
+        return
+    # --- End of Single-Video Optimization ---
 
     # --- Video Synchronization Pass ---
     synchronized_frame_groups = []

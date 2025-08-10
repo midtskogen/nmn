@@ -444,44 +444,60 @@ def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) ->
         return None
 
 def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, trim_times: Optional[Tuple[float, float]]):
-    """Helper function to trim and save the final and original videos."""
+    """Helper function to trim and save the final MP4 and WebM videos."""
     print("Step 3/3: Finalizing videos...")
+    # Define MP4 output paths
     final_video_path = event_dir / Settings.OUTPUT_VIDEO_FILENAME
     final_orig_video_path = event_dir / Settings.OUTPUT_ORIG_VIDEO_FILENAME
     # Ensure yuv420p pixel format for maximum compatibility with players and web.
     final_filter = "format=yuv420p"
 
+    # --- Create MP4 Videos ---
     if trim_times:
         start_time, end_time = trim_times
         trim_duration = end_time - start_time
         
-        print("Trimming final video...")
-        # Trim the final processed video
+        print(f"Trimming final video ({final_video_path.name})...")
         final_cmd = [
             "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(processed_vid),
             "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-y", str(final_video_path)
         ]
         subprocess.run(final_cmd, check=True, capture_output=True)
         
-        print("Trimming original video...")
-        # Trim the original stitched video to the same duration
+        print(f"Trimming original video ({final_orig_video_path.name})...")
         final_orig_cmd = [
             "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(original_vid),
             "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-c:v", "libx264", "-y", str(final_orig_video_path)
         ]
         subprocess.run(final_orig_cmd, check=True, capture_output=True)
-        print(f"✅ Saved original trimmed video to '{final_orig_video_path.name}'")
+        print(f"✅ Saved '{final_orig_video_path.name}'")
     else: # No trimming needed, save full-length videos
-        print("Saving final video...")
+        print(f"Saving final video ({final_video_path.name})...")
         final_cmd = ["ffmpeg", "-i", str(processed_vid), "-vf", final_filter, "-y", str(final_video_path)]
         subprocess.run(final_cmd, check=True, capture_output=True)
         
-        print("Saving original video...")
-        # Simply copy the original untrimmed video
+        print(f"Saving original video ({final_orig_video_path.name})...")
         shutil.copy(str(original_vid), str(final_orig_video_path))
-        print(f"✅ Saved original untrimmed video to '{final_orig_video_path.name}'")
-
+        print(f"✅ Saved '{final_orig_video_path.name}'")
+    
     print(f"✅ Success! Created '{final_video_path.name}'")
+
+    # --- Create WebM Videos from the newly created MP4s ---
+    final_webm_path = final_video_path.with_suffix(".webm")
+    final_orig_webm_path = final_orig_video_path.with_suffix(".webm")
+
+    # Common FFmpeg options for high-quality, web-optimized WebM conversion
+    webm_opts = ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30", "-an", "-y"]
+
+    print(f"Creating WebM version ({final_webm_path.name})...")
+    webm_cmd = ["ffmpeg", "-i", str(final_video_path)] + webm_opts + [str(final_webm_path)]
+    subprocess.run(webm_cmd, check=True, capture_output=True)
+    print(f"✅ Success! Created '{final_webm_path.name}'")
+
+    print(f"Creating WebM version ({final_orig_webm_path.name})...")
+    orig_webm_cmd = ["ffmpeg", "-i", str(final_orig_video_path)] + webm_opts + [str(final_orig_webm_path)]
+    subprocess.run(orig_webm_cmd, check=True, capture_output=True)
+    print(f"✅ Success! Created '{final_orig_webm_path.name}'")
 
 
 def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path):

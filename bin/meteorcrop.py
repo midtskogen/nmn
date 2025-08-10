@@ -26,6 +26,7 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import Tuple, List, Optional
 import re
+import shutil
 
 import numpy as np
 
@@ -82,6 +83,9 @@ class Settings:
     TRACK_WIDTH = 128
     OUTPUT_FILENAME = "fireball.jpg"
     OUTPUT_VIDEO_FILENAME = "fireball.mp4"
+    OUTPUT_ORIG_FILENAME = "fireball_orig.jpg"
+    OUTPUT_ORIG_VIDEO_FILENAME = "fireball_orig.mp4"
+
 
     class VideoTrim:
         """Parameters for detecting the meteor event to trim the video."""
@@ -346,6 +350,12 @@ def extract_meteor_track(image_path: Path, pto_path: Path, event_dir: Path, back
     stitcher_cmd = [sys.executable, str(stitcher_path), "--pad", "128", str(pto_path), str(image_path), str(stitched_track_path)]
     subprocess.run(stitcher_cmd, check=True, capture_output=True)
 
+    # --- MODIFICATION: Save original stitched image ---
+    orig_output_path = event_dir / Settings.OUTPUT_ORIG_FILENAME
+    shutil.copy(str(stitched_track_path), str(orig_output_path))
+    print(f"Saved original stitched image as '{orig_output_path.name}'")
+    # --- END MODIFICATION ---
+
     print("Applying luminance-gated background removal to image...")
     with Image(filename=str(stitched_track_path)) as main_img, \
          Image(filename=str(background_plate_path)) as bg_img:
@@ -449,6 +459,8 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
     temp_mask_video = event_dir / "fireball-mask.mp4"
     temp_subtracted_video = event_dir / "fireball-subtracted.mp4"
     final_video_path = event_dir / Settings.OUTPUT_VIDEO_FILENAME
+    final_orig_video_path = event_dir / Settings.OUTPUT_ORIG_VIDEO_FILENAME
+
     
     try:
         # Step 1: Stitch the video
@@ -499,17 +511,33 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
         if trim_times:
             start_time, end_time = trim_times
             trim_duration = end_time - start_time
+            # Trim the final processed video
             final_cmd = [
                 "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(temp_subtracted_video),
                 "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-y", str(final_video_path)
             ]
-            run_command_with_progress(final_cmd, desc="Step 3: Trimming", total=trim_duration)
+            run_command_with_progress(final_cmd, desc="Step 3: Trimming Final", total=trim_duration)
+            
+            # --- MODIFICATION: Trim the original stitched video ---
+            final_orig_cmd = [
+                "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(temp_stitched_video),
+                "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-c:v", "libx264", "-y", str(final_orig_video_path)
+            ]
+            run_command_with_progress(final_orig_cmd, desc="Step 3: Trimming Original", total=trim_duration)
+            print(f"✅ Saved original trimmed video to '{final_orig_video_path.name}'")
+            # --- END MODIFICATION ---
+
         else:
             final_duration, _, _ = get_video_info(temp_subtracted_video)
             final_cmd = ["ffmpeg", "-i", str(temp_subtracted_video), "-vf", final_filter, "-y", str(final_video_path)]
-            run_command_with_progress(final_cmd, desc="Step 3: Finalizing", total=final_duration)
+            run_command_with_progress(final_cmd, desc="Step 3: Finalizing Final", total=final_duration)
+            
+            # --- MODIFICATION: Save the untrimmed original stitched video ---
+            shutil.copy(str(temp_stitched_video), str(final_orig_video_path))
+            print(f"✅ Saved original untrimmed video to '{final_orig_video_path.name}'")
+            # --- END MODIFICATION ---
 
-        print(f"✅ Success! Created '{final_video_path}'")
+        print(f"✅ Success! Created '{final_video_path.name}'")
 
     except (subprocess.CalledProcessError, ScriptError) as e:
         stdout_output = e.stdout if hasattr(e, 'stdout') else ''
@@ -567,7 +595,7 @@ def main():
             output_path = event_dir / Settings.OUTPUT_FILENAME
             track_image.save(filename=str(output_path))
             track_image.close()
-            print(f"✅ Success! Created '{output_path}'")
+            print(f"✅ Success! Created '{output_path.name}'")
         
         if args.mode in ["video", "both"]:
             create_fireball_video(event_dir, pto_path, background_plate_path)

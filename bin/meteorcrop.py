@@ -716,8 +716,6 @@ def main():
         # Final cleanup of shared and temporary resources
         if background_plate_path and background_plate_path.exists():
             background_plate_path.unlink()
-        if pto_path.exists():
-             pto_path.unlink()
         # The stitched video is kept for 'both' mode, so clean it up here.
         if temp_stitched_video_path.exists():
             temp_stitched_video_path.unlink()

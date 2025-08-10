@@ -117,118 +117,147 @@ def _apply_offset_numba(plane_stack, offset_arr):
                     plane_stack[i, r, c] = new_val
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
-def _blur_padded_area_numba(plane, pad, blur_kernel_size, noise_amplitude):
+def _blur_padded_area_numba(plane, pad_t, pad_b, pad_l, pad_r, blur_kernel_size, noise_amplitude):
     """Applies a 2-pass blur and a final noise pass for a natural, textured effect."""
     h, w = plane.shape
-    if pad <= 0:
+    if pad_t <= 0 and pad_b <= 0 and pad_l <= 0 and pad_r <= 0:
         return plane.astype(np.uint8)
 
     # The first pass kernel is capped at a maximum of 16 pixels.
     pass1_kernel_size = min(blur_kernel_size, 16)
     if pass1_kernel_size < 1: pass1_kernel_size = 1
 
-
-    # --- Pass 1: Smear edges into padding (Original direction, capped size) ---
+    # --- Pass 1: Smear edges into padding ---
     pass1_plane = plane.copy()
 
     # Pass 1: Top blur (vertical smear)
-    for c in prange(w):
-        for r in range(pad):
-            acc = 0.0
-            for k in range(pass1_kernel_size):
-                y = min(r + k, h - 1)
-                acc += plane[y, c]
-            pass1_plane[r, c] = acc / pass1_kernel_size
+    if pad_t > 0:
+        for c in prange(w):
+            for r in range(pad_t):
+                acc = 0.0
+                for k in range(pass1_kernel_size):
+                    y = min(r + k, h - 1)
+                    acc += plane[y, c]
+                pass1_plane[r, c] = acc / pass1_kernel_size
+
+    # Pass 1: Bottom blur (vertical smear)
+    if pad_b > 0:
+        for c in prange(w):
+            for r in range(h - pad_b, h):
+                acc = 0.0
+                for k in range(pass1_kernel_size):
+                    y = max(r - k, 0)
+                    acc += plane[y, c]
+                pass1_plane[r, c] = acc / pass1_kernel_size
 
     # Pass 1: Left blur (horizontal smear)
-    for r in prange(h):
-        for c in range(pad):
-            acc = 0.0
-            for k in range(pass1_kernel_size):
-                x = min(c + k, w - 1)
-                acc += plane[r, x]
-            pass1_plane[r, c] = acc / pass1_kernel_size
+    if pad_l > 0:
+        for r in prange(h):
+            for c in range(pad_l):
+                acc = 0.0
+                for k in range(pass1_kernel_size):
+                    x = min(c + k, w - 1)
+                    acc += plane[r, x]
+                pass1_plane[r, c] = acc / pass1_kernel_size
 
     # Pass 1: Right blur (horizontal smear)
-    for r in prange(h):
-        for c in range(w - pad, w):
-            acc = 0.0
-            for k in range(pass1_kernel_size):
-                x = max(c - k, 0)
-                acc += plane[r, x]
-            pass1_plane[r, c] = acc / pass1_kernel_size
-            
+    if pad_r > 0:
+        for r in prange(h):
+            for c in range(w - pad_r, w):
+                acc = 0.0
+                for k in range(pass1_kernel_size):
+                    x = max(c - k, 0)
+                    acc += plane[r, x]
+                pass1_plane[r, c] = acc / pass1_kernel_size
+
     # --- Pass 2: Smooth with a dynamic kernel size for a graduated blur ---
     blurred_plane = pass1_plane.copy()
     base_kernel_size = blur_kernel_size if blur_kernel_size > 0 else 1
 
     # Pass 2: Top pad (horizontal box blur with increasing kernel size)
-    for r in prange(pad):
-        distance = pad - r
-        dynamic_kernel_size = base_kernel_size + distance
-        for c in range(w):
-            acc = 0.0
-            for k in range(dynamic_kernel_size):
-                x = max(0, min(c - dynamic_kernel_size // 2 + k, w - 1))
-                acc += pass1_plane[r, x]
-            blurred_plane[r, c] = acc / dynamic_kernel_size
+    if pad_t > 0:
+        for r in prange(pad_t):
+            distance = pad_t - r
+            dynamic_kernel_size = base_kernel_size + distance
+            for c in range(w):
+                acc = 0.0
+                for k in range(dynamic_kernel_size):
+                    x = max(0, min(c - dynamic_kernel_size // 2 + k, w - 1))
+                    acc += pass1_plane[r, x]
+                blurred_plane[r, c] = acc / dynamic_kernel_size
+
+    # Pass 2: Bottom pad (horizontal box blur with increasing kernel size)
+    if pad_b > 0:
+        for r in prange(h - pad_b, h):
+            distance = r - (h - pad_b - 1)
+            dynamic_kernel_size = base_kernel_size + distance
+            for c in range(w):
+                acc = 0.0
+                for k in range(dynamic_kernel_size):
+                    x = max(0, min(c - dynamic_kernel_size // 2 + k, w - 1))
+                    acc += pass1_plane[r, x]
+                blurred_plane[r, c] = acc / dynamic_kernel_size
 
     # Pass 2: Left pad (vertical box blur with increasing kernel size)
-    for c in prange(pad):
-        distance = pad - c
-        dynamic_kernel_size = base_kernel_size + distance
-        for r in range(h):
-            acc = 0.0
-            for k in range(dynamic_kernel_size):
-                y = max(0, min(r - dynamic_kernel_size // 2 + k, h - 1))
-                acc += pass1_plane[y, c]
-            blurred_plane[r, c] = acc / dynamic_kernel_size
-            
+    if pad_l > 0:
+        for c in prange(pad_l):
+            distance = pad_l - c
+            dynamic_kernel_size = base_kernel_size + distance
+            for r in range(h):
+                acc = 0.0
+                for k in range(dynamic_kernel_size):
+                    y = max(0, min(r - dynamic_kernel_size // 2 + k, h - 1))
+                    acc += pass1_plane[y, c]
+                blurred_plane[r, c] = acc / dynamic_kernel_size
+
     # Pass 2: Right pad (vertical box blur with increasing kernel size)
-    for c in prange(w - pad, w):
-        distance = c - (w - pad - 1)
-        dynamic_kernel_size = base_kernel_size + distance
-        for r in range(h):
-            acc = 0.0
-            for k in range(dynamic_kernel_size):
-                y = max(0, min(r - dynamic_kernel_size // 2 + k, h - 1))
-                acc += pass1_plane[y, c]
-            blurred_plane[r, c] = acc / dynamic_kernel_size
+    if pad_r > 0:
+        for c in prange(w - pad_r, w):
+            distance = c - (w - pad_r - 1)
+            dynamic_kernel_size = base_kernel_size + distance
+            for r in range(h):
+                acc = 0.0
+                for k in range(dynamic_kernel_size):
+                    y = max(0, min(r - dynamic_kernel_size // 2 + k, h - 1))
+                    acc += pass1_plane[y, c]
+                blurred_plane[r, c] = acc / dynamic_kernel_size
 
     # --- Pass 3: Add slight noise to break up smoothness ---
     if noise_amplitude > 0:
-        # Add noise to the top padded region
-        for r in prange(pad):
-            for c in range(w):
-                noise = np.random.uniform(-noise_amplitude, noise_amplitude)
-                blurred_plane[r, c] += noise
+        # Top region
+        if pad_t > 0:
+            for r in prange(pad_t):
+                for c in range(w):
+                    noise = np.random.uniform(-noise_amplitude, noise_amplitude)
+                    blurred_plane[r, c] += noise
+        # Bottom region
+        if pad_b > 0:
+            for r in prange(h - pad_b, h):
+                for c in range(w):
+                    noise = np.random.uniform(-noise_amplitude, noise_amplitude)
+                    blurred_plane[r, c] += noise
+        # Left region (excluding corners)
+        if pad_l > 0:
+            for c in prange(pad_l):
+                for r in range(pad_t, h - pad_b):
+                    noise = np.random.uniform(-noise_amplitude, noise_amplitude)
+                    blurred_plane[r, c] += noise
+        # Right region (excluding corners)
+        if pad_r > 0:
+            for c in prange(w - pad_r, w):
+                for r in range(pad_t, h - pad_b):
+                    noise = np.random.uniform(-noise_amplitude, noise_amplitude)
+                    blurred_plane[r, c] += noise
 
-        # Add noise to the left padded region (excluding the top part already done)
-        for c in prange(pad):
-            for r in range(pad, h):
-                noise = np.random.uniform(-noise_amplitude, noise_amplitude)
-                blurred_plane[r, c] += noise
-
-        # Add noise to the right padded region (excluding the top part already done)
-        for c in prange(w - pad, w):
-            for r in range(pad, h):
-                noise = np.random.uniform(-noise_amplitude, noise_amplitude)
-                blurred_plane[r, c] += noise
-            
     # --- Final Manual Clip and Type Conversion ---
-    # Create the final output array with the correct type
     final_plane = np.empty_like(blurred_plane, dtype=np.uint8)
-    # Loop through the plane, clip the values, and cast to uint8
     for i in prange(h):
         for j in range(w):
             val = blurred_plane[i, j]
-            if val < 0:
-                final_plane[i, j] = 0
-            elif val > 255:
-                final_plane[i, j] = 255
-            else:
-                final_plane[i, j] = val
-                
+            if val < 0: final_plane[i, j] = 0
+            elif val > 255: final_plane[i, j] = 255
+            else: final_plane[i, j] = val
+
     return final_plane
 
 
@@ -272,15 +301,15 @@ def reproject_uv(pu, pv, dw, dh, map_uv_idx, out_u, out_v):
                 out_v[base_uv + x_uv] = 128
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def compute_map_and_weights(coords_y, sw, sh, pad):
+def compute_map_and_weights(coords_y, sw, sh, pad_t, pad_b, pad_l, pad_r):
     dh, dw, _ = coords_y.shape
     map_y_idx, c01, c23 = np.full(dh*dw,-1,dtype=np.int32), np.zeros(dh*dw,dtype=np.uint16), np.zeros(dh*dw,dtype=np.uint16)
-    effective_sw, effective_sh = sw + 2 * pad, sh + pad
+    effective_sw, effective_sh = sw + pad_l + pad_r, sh + pad_t + pad_b
     for idx in prange(dh * dw):
         y_dest, x_dest = idx // dw, idx % dw
         dx_orig, dy_orig = coords_y[y_dest, x_dest, 0], coords_y[y_dest, x_dest, 1]
         if dx_orig <= -99999.0: continue
-        dx, dy = dx_orig + pad, dy_orig + pad
+        dx, dy = dx_orig + pad_l, dy_orig + pad_t
         if 0 <= dx < effective_sw - 1 and 0 <= dy < effective_sh - 1:
             xi, yi = int(dx), int(dy)
             xf, yf = dx - xi, dy - yi
@@ -294,15 +323,15 @@ def compute_map_and_weights(coords_y, sw, sh, pad):
     return map_y_idx, c01.reshape(dh, dw), c23.reshape(dh, dw)
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def compute_uv_map(coords_uv, sw_uv, sh_uv, pad_uv):
+def compute_uv_map(coords_uv, sw_uv, sh_uv, pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r):
     h_uv, w_uv, _ = coords_uv.shape
     map_uv_idx = np.full(h_uv * w_uv, -1, dtype=np.int32)
-    effective_sw_uv, effective_sh_uv = sw_uv + 2 * pad_uv, sh_uv + pad_uv
+    effective_sw_uv, effective_sh_uv = sw_uv + pad_uv_l + pad_uv_r, sh_uv + pad_uv_t + pad_uv_b
     for idx in prange(h_uv * w_uv):
         y_uv, x_uv = idx // w_uv, idx % w_uv
         sx_uv_orig, sy_uv_orig = coords_uv[y_uv, x_uv, 0], coords_uv[y_uv, x_uv, 1]
         if sx_uv_orig <= -99999.0: continue
-        sx_uv, sy_uv = sx_uv_orig + pad_uv, sy_uv_orig + pad_uv
+        sx_uv, sy_uv = sx_uv_orig + pad_uv_l, sy_uv_orig + pad_uv_t
         if 0 <= sx_uv < effective_sw_uv and 0 <= sy_uv < effective_sh_uv:
             map_uv_idx[idx] = int(sy_uv) * effective_sw_uv + int(sx_uv)
     return map_uv_idx.reshape(h_uv, w_uv)
@@ -314,7 +343,7 @@ def _map_one_image(args):
     try:
         numba.set_num_threads(1)
         
-        img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s = args
+        img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s, padsides = args
         sw,sh,fov,src_proj_f = img.get('w'),img.get('h'),img.get('v'),int(img.get('f',0))
         if sw is None or sh is None: raise ValueError("Image must have width 'w' and height 'h'.")
         if fov is None: raise ValueError("Image must have HFOV 'v'.")
@@ -332,15 +361,21 @@ def _map_one_image(args):
 
         pto_mapper.calculate_source_coords(coords_y,final_w,final_h,orig_w,orig_h,crop_offset_x,crop_offset_y,pano_proj_f,pano_hfov,sw,sh,R_pr_inv,y,src_focal,src_norm_radius,a,b,c,cx,cy,src_proj_f,pano_r,pano_s)
 
-        map_y_idx, c01, c23, coords_uv = *compute_map_and_weights(coords_y,sw,sh,pad), coords_y[::2,::2]/2.
-        map_uv_idx = compute_uv_map(coords_uv, sw//2, sh//2, pad//2)
+        pad_t = pad if 'top' in padsides else 0
+        pad_b = pad if 'bottom' in padsides else 0
+        pad_l = pad if 'left' in padsides else 0
+        pad_r = pad if 'right' in padsides else 0
+        
+        map_y_idx, c01, c23 = compute_map_and_weights(coords_y, sw, sh, pad_t, pad_b, pad_l, pad_r)
+        coords_uv = coords_y[::2,::2]/2.
+        map_uv_idx = compute_uv_map(coords_uv, sw//2, sh//2, pad_t//2, pad_b//2, pad_l//2, pad_r//2)
         
         return (map_y_idx, c01, c23, map_uv_idx, sw, sh)
     finally:
         numba.set_num_threads(original_threads)
 
 
-def build_mappings(pto_file, pad, num_workers, is_video_output=False):
+def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
     global_options, images = pto_mapper.parse_pto_file(pto_file)
 
     orig_w, orig_h = global_options.get('w'), global_options.get('h')
@@ -399,7 +434,7 @@ def build_mappings(pto_file, pad, num_workers, is_video_output=False):
 
     global_options['final_w'], global_options['final_h'] = final_w, final_h
 
-    task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s) for img in images]
+    task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s, padsides) for img in images]
 
     print("Building projection maps...")
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -425,23 +460,7 @@ def estimate_noise(image_plane):
     # Clamp the value to a reasonable range to avoid extreme results
     return np.clip(noise_std, 1.0, 10.0)
 
-def _apply_padding_blur(padded_y, padded_u, padded_v, pad, noise_amplitude):
-    """Applies a 2-pass blur and noise to the padded areas of YUV planes."""
-    blur_size = 96
-
-    y_blurred = _blur_padded_area_numba(padded_y.astype(np.float32), pad, blur_size, noise_amplitude)
-
-    pad_uv = pad // 2
-    blur_size_uv = blur_size // 2
-    if pad_uv > 0 and blur_size_uv > 0:
-        u_blurred = _blur_padded_area_numba(padded_u.astype(np.float32), pad_uv, blur_size_uv, noise_amplitude)
-        v_blurred = _blur_padded_area_numba(padded_v.astype(np.float32), pad_uv, blur_size_uv, noise_amplitude)
-    else:
-        u_blurred, v_blurred = padded_u, padded_v
-
-    return y_blurred, u_blurred, v_blurred
-
-def load_image_to_yuv(image_path, pad):
+def load_image_to_yuv(image_path, pad, padsides):
     # Add a compatibility check for different Pillow versions
     try:
         resample_filter = Image.Resampling.BICUBIC
@@ -460,19 +479,30 @@ def load_image_to_yuv(image_path, pad):
     u_resized = u.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     v_resized = v.resize((img_pil.width // 2, img_pil.height // 2), resample_filter)
     
-    # Correctly pad only top, left, and right sides
-    pad_y_width = ((pad, 0), (pad, pad)) # ((top, bottom), (left, right))
-    pad_uv_width = ((pad // 2, 0), (pad // 2, pad // 2))
+    pad_t = pad if 'top' in padsides else 0
+    pad_b = pad if 'bottom' in padsides else 0
+    pad_l = pad if 'left' in padsides else 0
+    pad_r = pad if 'right' in padsides else 0
+
+    pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
+    pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
 
     padded_y = np.pad(np.array(y, np.uint8), pad_y_width, mode='edge')
     padded_u = np.pad(np.array(u_resized, np.uint8), pad_uv_width, mode='edge')
     padded_v = np.pad(np.array(v_resized, np.uint8), pad_uv_width, mode='edge')
 
-    # Apply blur to padded regions, passing in the estimated noise level
-    padded_y, padded_u, padded_v = _apply_padding_blur(padded_y, padded_u, padded_v, pad, noise_level)
+    blur_size = 96
+    padded_y = _blur_padded_area_numba(padded_y.astype(np.float32), pad_t, pad_b, pad_l, pad_r, blur_size, noise_level)
 
-    target_h_y = img_pil.height + pad
-    target_h_uv = img_pil.height // 2 + pad // 2
+    pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
+    blur_size_uv = blur_size // 2
+    if pad_uv_t > 0 or pad_uv_b > 0 or pad_uv_l > 0 or pad_uv_r > 0:
+        padded_u = _blur_padded_area_numba(padded_u.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+        padded_v = _blur_padded_area_numba(padded_v.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+
+    target_h_y = img_pil.height + pad_t + pad_b
+    target_h_uv = img_pil.height // 2 + pad_uv_t + pad_uv_b
+    
     return (padded_y[:target_h_y, :], padded_u[:target_h_uv, :], padded_v[:target_h_uv, :], img_pil.width, img_pil.height)
 
 
@@ -492,12 +522,16 @@ def save_image_yuv420(y_plane, u_plane, v_plane, output_path):
 
 def process_and_reproject_image(args):
     """Worker function to reproject a single image, writing to pre-allocated buffers."""
-    (input_path, dw, dh, mapping, pad, use_seam), out_buffers = args
+    (input_path, dw, dh, mapping, pad, use_seam, padsides), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y, reproj_weights_uv, reproj_penalty_y = out_buffers
 
-    py, pu, pv, sw_orig, sh_orig = load_image_to_yuv(input_path, pad)
+    py, pu, pv, sw_orig, sh_orig = load_image_to_yuv(input_path, pad, padsides)
     
-    sw_padded, sh_padded = sw_orig + 2 * pad, sh_orig + pad
+    pad_t = pad if 'top' in padsides else 0
+    pad_b = pad if 'bottom' in padsides else 0
+    pad_l = pad if 'left' in padsides else 0
+    pad_r = pad if 'right' in padsides else 0
+    sw_padded, sh_padded = sw_orig + pad_l + pad_r, sh_orig + pad_t + pad_b
     
     blend_weights_y = create_blend_weight_map(sw_padded, sh_padded)
 
@@ -740,15 +774,15 @@ def _precompile_numba_functions():
     # Call each function once to compile it
     _ = create_blend_weight_map(dw, dh)
     _ = create_corner_penalty_map(dw, dh)
-    _ = _blur_padded_area_numba(np.zeros((32, 32), dtype=np.float32), 8, 16, 4.0)
+    _ = _blur_padded_area_numba(np.zeros((32, 32), dtype=np.float32), 8, 8, 8, 8, 16, 4.0)
     reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y)
     reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v)
     reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float)
     
     print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores):
-    mappings, global_options = build_mappings(pto_file, pad, num_cores, is_video_output=False)
+def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, padsides):
+    mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=False)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images:
@@ -783,7 +817,7 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
 
     process_args = [
         (
-            (input_files[i], final_w, final_h, mappings[i], pad, use_seam),
+            (input_files[i], final_w, final_h, mappings[i], pad, use_seam, padsides),
             (all_reproj_y[i], all_reproj_u[i], all_reproj_v[i], all_weights_y[i], all_weights_uv[i], all_penalty_y[i] if use_seam else None)
         )
         for i in range(num_images)
@@ -836,7 +870,7 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
 
 def worker_for_video_frame(args):
     """Worker function for video frames, writing to pre-allocated buffers."""
-    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, use_seam, corner_penalty_src), out_buffers = args
+    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, use_seam, corner_penalty_src, padsides), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y, reproj_weights_uv, reproj_penalty_y = out_buffers
 
     if frame is None: return None
@@ -849,18 +883,29 @@ def worker_for_video_frame(args):
     
     noise_level = estimate_noise(py_src_orig)
 
-    # Correctly pad only top, left, and right sides
-    pad_y_width = ((pad, 0), (pad, pad)) # ((top, bottom), (left, right))
-    pad_uv_width = ((pad // 2, 0), (pad // 2, pad // 2))
+    pad_t = pad if 'top' in padsides else 0
+    pad_b = pad if 'bottom' in padsides else 0
+    pad_l = pad if 'left' in padsides else 0
+    pad_r = pad if 'right' in padsides else 0
+
+    pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
+    pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
     
     py_src_all = np.pad(py_src_orig, pad_y_width, mode='edge')
     pu_src_all = np.pad(pu_src_orig, pad_uv_width, mode='edge')
     pv_src_all = np.pad(pv_src_orig, pad_uv_width, mode='edge')
 
-    # Apply blur to padded regions
-    py_src_all, pu_src_all, pv_src_all = _apply_padding_blur(py_src_all, pu_src_all, pv_src_all, pad, noise_level)
+    blur_size = 96
+    py_src_all = _blur_padded_area_numba(py_src_all.astype(np.float32), pad_t, pad_b, pad_l, pad_r, blur_size, noise_level)
 
-    target_h_y, target_h_uv = sh_orig + pad, sh_orig // 2 + pad // 2
+    pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
+    blur_size_uv = blur_size // 2
+    if pad_uv_t > 0 or pad_uv_b > 0 or pad_uv_l > 0 or pad_uv_r > 0:
+        pu_src_all = _blur_padded_area_numba(pu_src_all.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+        pv_src_all = _blur_padded_area_numba(pv_src_all.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+
+    target_h_y = sh_orig + pad_t + pad_b
+    target_h_uv = sh_orig // 2 + pad_uv_t + pad_uv_b
     py_src, pu_src, pv_src = py_src_all[:target_h_y, :], pu_src_all[:target_h_uv, :], pv_src_all[:target_h_uv, :]
 
     padded_sw_y = py_src.shape[1]
@@ -1059,10 +1104,10 @@ def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
             
     return synchronized_frame_groups
 
-def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, use_sync=False, model=None, save_sync_file=None, load_sync_file=None):
+def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None):
     if av is None: raise ImportError("PyAV is not installed.")
 
-    mappings, global_options = build_mappings(pto_file, pad, num_cores, is_video_output=True)
+    mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")
@@ -1141,9 +1186,14 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     frame_penalty_y = np.empty((num_images, final_h, final_w), dtype=np.float32) if use_seam else None
     
     blend_weights_y, blend_weights_uv, corner_penalties_y = [], [], []
+    pad_t = pad if 'top' in padsides else 0
+    pad_b = pad if 'bottom' in padsides else 0
+    pad_l = pad if 'left' in padsides else 0
+    pad_r = pad if 'right' in padsides else 0
+    
     for i, stream in enumerate(in_streams):
         sw_map, sh_map = mappings[i][4], mappings[i][5]
-        sw_padded, sh_padded = sw_map + 2 * pad, sh_map + pad
+        sw_padded, sh_padded = sw_map + pad_l + pad_r, sh_map + pad_t + pad_b
         weights_y = create_blend_weight_map(sw_padded, sh_padded)
         blend_weights_y.append(weights_y)
         blend_weights_uv.append(np.ascontiguousarray(weights_y[::2, ::2]))
@@ -1194,8 +1244,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             frame_count += 1
             
             if total_frames > 0:
-                # Report every 5 frames or on the last frame to avoid excessive I/O
-                if frame_count % 5 == 0 or frame_count == total_frames:
+                # Only update progress if we are not past the expected total and it's time for an update.
+                if frame_count <= total_frames and (frame_count % 5 == 0 or frame_count == total_frames):
                     percent_done = (frame_count / total_frames) * 100
                     if sys.stderr.isatty():
                         # Human-readable progress bar
@@ -1212,7 +1262,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             
             worker_args = [
                 (
-                    (i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], blend_weights_uv[i], pad, use_seam, corner_penalties_y[i] if use_seam else None),
+                    (i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], blend_weights_uv[i], pad, use_seam, corner_penalties_y[i] if use_seam else None, padsides),
                     (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i], frame_penalty_y[i] if use_seam else None)
                 ) for i in range(num_images) if final_group_frames[i] is not None
             ]
@@ -1275,6 +1325,7 @@ def main():
     parser.add_argument("input_files", nargs='+', help="One or more input image or video files.")
     parser.add_argument("output_file", help="Path for the output panoramic image or video.")
     parser.add_argument("--pad", type=int, default=32, help="Padding (pixels) for seamless stitching. Defaults to 32.")
+    parser.add_argument("--padsides", type=str, default="left,top,right,bottom", help='Comma-separated sides to pad (e.g., "left,top,right,bottom"). Defaults to all sides.')
     parser.add_argument("--seamless", action='store_true', help="Enable optimal seam finding with feathering and leveling.")
     parser.add_argument("--level-subsample", type=int, default=16, help="Subsampling factor for seam leveling to improve performance. Higher is faster. Defaults to 16.")
     parser.add_argument("--seam-subsample", type=int, default=16, help="Subsampling factor for the seam finder to improve performance. Higher is faster. Defaults to 16.")
@@ -1298,18 +1349,24 @@ def main():
     if not args.input_files:
         print("Error: No input files specified.", file=sys.stderr)
         sys.exit(1)
+
+    padsides_set = {s.strip().lower() for s in args.padsides.split(',') if s.strip()}
+    valid_sides = {"left", "top", "right", "bottom"}
+    if not padsides_set.issubset(valid_sides):
+        print(f"Error: Invalid side(s) in --padsides: {','.join(padsides_set - valid_sides)}", file=sys.stderr)
+        sys.exit(1)
         
     is_image_input = all(f.lower().endswith(('.jpg', '.jpeg', '.png')) for f in args.input_files)
     is_video_input = all(f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')) for f in args.input_files)
     
     try:
         if is_image_input:
-            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores)
+            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, padsides_set)
         elif is_video_input:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file, 
                 args.pad, args.seamless, args.level_subsample, args.seam_subsample, 
-                num_cores, args.level_freq, args.sync, args.model, 
+                num_cores, args.level_freq, padsides_set, args.sync, args.model, 
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync
             )
         else:

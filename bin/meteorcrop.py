@@ -24,12 +24,12 @@ import subprocess
 import os
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import re
 
 import numpy as np
 
-# Third-party libraries must be installed (e.g., pip install Wand tqdm).
+# Third-party libraries must be installed (e.g., pip install Wand tqdm opencv-python-headless).
 # The pto_mapper.py and stitcher.py scripts should be in the same directory or Python path.
 try:
     import pto_mapper
@@ -37,9 +37,10 @@ try:
     from wand.color import Color
     from wand.image import Image
     from tqdm import tqdm
+    import cv2
 except ImportError as e:
     print(f"Error: A required library is missing. {e}", file=sys.stderr)
-    print("Please install required packages using: pip install Wand tqdm", file=sys.stderr)
+    print("Please install required packages using: pip install Wand tqdm opencv-python-headless", file=sys.stderr)
     sys.exit(1)
 
 
@@ -86,7 +87,7 @@ class Settings:
         """Parameters for detecting the meteor event to trim the video."""
         ENABLED = True
         BASELINE_FRAMES = 30
-        NOISE_RANGE_FACTOR = 1.2
+        NOISE_RANGE_FACTOR = 2
         MIN_EVENT_DURATION_S = 0.2
         PADDING_S = 0.5
 
@@ -143,7 +144,7 @@ def run_command_with_progress(cmd: List[str], desc: str, total: float):
     """
     process = subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         encoding='utf-8',
@@ -156,9 +157,11 @@ def run_command_with_progress(cmd: List[str], desc: str, total: float):
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
     stitcher_pattern = re.compile(r"PROGRESS:(\d+\.?\d*)")
 
+    stderr_lines = []
     with tqdm(total=round(total, 2), desc=desc, unit=unit, bar_format=bar_format) as pbar:
         last_update = 0.0
         for line in iter(process.stderr.readline, ''):
+            stderr_lines.append(line) # Store stderr for error reporting
             current_update = None
             if is_ffmpeg:
                 match = time_pattern.search(line)
@@ -178,14 +181,11 @@ def run_command_with_progress(cmd: List[str], desc: str, total: float):
 
         if pbar.n < total: pbar.update(total - pbar.n)
     
-    process.wait()
+    stdout, _ = process.communicate() # Get stdout, stderr is already read
     if process.returncode != 0:
         raise subprocess.CalledProcessError(
-            process.returncode, process.args, stderr=process.stderr.read()
+            process.returncode, process.args, output=stdout, stderr="".join(stderr_lines)
         )
-
-
-# --- End Helper Functions ---
 
 
 def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) -> Tuple[List[float], List[float]]:
@@ -273,35 +273,114 @@ def create_background_plate(event_dir: Path, pto_path: Path, source_video_path: 
 
     ffmpeg_extract_cmd = ["ffmpeg", "-i", str(source_video_path), "-vframes", "1", "-q:v", "2", "-y", str(first_frame_tmp)]
     subprocess.run(ffmpeg_extract_cmd, check=True, capture_output=True)
-    
-    stitcher_cmd_img = [sys.executable, str(stitcher_path), str(pto_path), str(first_frame_tmp), str(bg_plate_path)]
+
+    stitcher_cmd_img = [sys.executable, str(stitcher_path), "--pad", "128", str(pto_path), str(first_frame_tmp), str(bg_plate_path)]
     subprocess.run(stitcher_cmd_img, check=True, capture_output=True)
-    
-    with MotionBlurImage(filename=str(bg_plate_path)) as bg_img:
-        bg_img.motion_blur(radius=0, sigma=Settings.TRACK_WIDTH, angle=0)
+
+    with Image(filename=str(bg_plate_path)) as bg_img:
+        # --- Use a much faster, localized 2D blur method ---
+        # Store original size, resize down to 2% of the original, then resize back up.
+        # This preserves local gradients while being extremely fast.
+        original_width, original_height = bg_img.width, bg_img.height
+        
+        # Calculate 2% of the original dimensions, ensuring they are at least 1 pixel.
+        new_width = max(1, int(original_width * 0.05))
+        new_height = max(1, int(original_height * 0.05))
+        
+        bg_img.resize(new_width, new_height)
+        bg_img.resize(original_width, original_height)
         bg_img.save(filename=str(bg_plate_path))
-    
+
     first_frame_tmp.unlink(missing_ok=True)
     return bg_plate_path
 
 
+def scale_luminance(image_array: np.ndarray) -> Tuple[np.ndarray, float]:
+    """
+    Calculates a scaling factor from an image array and applies it to the
+    luminance, returning the processed array and the factor.
+    """
+    print("Applying brightness multiplication directly with NumPy...")
+
+    # Ensure the array is a float type for calculations.
+    img_float_array = image_array.astype(np.float32)
+
+    # 1. Calculate the original luminance of each pixel using the Rec. 709 formula.
+    luminance = (0.2126 * img_float_array[:, :, 0] +  # Red channel
+                 0.7152 * img_float_array[:, :, 1] +  # Green channel
+                 0.0722 * img_float_array[:, :, 2])   # Blue channel
+
+    # 2. Find the robust max value from the luminance data.
+    max_val = np.percentile(luminance, 99.95)
+    
+    scaling_factor = 1.0  # Default to no scaling
+    final_image_array = image_array
+
+    if max_val > 1:
+        # 3. Calculate the scaling factor.
+        scaling_factor = 255.0 / max_val
+        print(f"Luminance max (99.95th percentile): {max_val:.2f}. Scaling by {scaling_factor:.4f}x.")
+
+        # 4. Calculate the ratio of new luminance to old luminance.
+        epsilon = 1e-6 # Avoid division by zero
+        luminance_ratio = (luminance * scaling_factor) / (luminance + epsilon)
+        
+        # 5. Apply this ratio to the original R, G, B channels.
+        final_image_array = img_float_array * luminance_ratio[:, :, np.newaxis]
+
+        # 6. Clip the final values and convert back to an 8-bit integer.
+        final_image_array = np.clip(final_image_array, 0, 255).astype(np.uint8)
+
+    return final_image_array, scaling_factor
+
+
 def extract_meteor_track(image_path: Path, pto_path: Path, event_dir: Path, background_plate_path: Path) -> Image:
-    """Isolates the track using the stitcher and a pre-made background plate."""
+    """
+    Isolates the meteor track using a direct, luminance-based threshold
+    comparison between the source image and the background plate.
+    """
     stitched_track_path = event_dir / "fireball-stitched.jpg"
     stitcher_path = Path(__file__).parent.resolve() / "stitcher.py"
-    
-    stitcher_cmd = [sys.executable, str(stitcher_path), "--pad", "0", str(pto_path), str(image_path), str(stitched_track_path)]
+
+    # 1. Stitch the source image.
+    stitcher_cmd = [sys.executable, str(stitcher_path), "--pad", "128", str(pto_path), str(image_path), str(stitched_track_path)]
     subprocess.run(stitcher_cmd, check=True, capture_output=True)
 
-    with Image(filename=str(stitched_track_path)) as pic:
-        with Image(filename=str(background_plate_path)) as background:
-            pic.composite(background, operator='difference')
-        pic.normalize()
-        stitched_track_path.unlink(missing_ok=True)
-        return pic.clone()
+    print("Applying luminance-gated background removal to image...")
+    with Image(filename=str(stitched_track_path)) as main_img, \
+         Image(filename=str(background_plate_path)) as bg_img:
+        
+        # Convert both images to NumPy arrays for pixel-level operations
+        main_array = np.array(main_img, dtype=np.float32)
+        bg_array = np.array(bg_img, dtype=np.float32)
+
+    # 2. Calculate luminance for both images using the standard formula.
+    lum_A = (0.2126 * main_array[:, :, 0] + 0.7152 * main_array[:, :, 1] + 0.0722 * main_array[:, :, 2])
+    lum_B = (0.2126 * bg_array[:, :, 0] + 0.7152 * bg_array[:, :, 1] + 0.0722 * bg_array[:, :, 2])
+    
+    threshold = 32
+    
+    # 3. Create a boolean mask where the condition lum(A) >= lum(B) + threshold is true.
+    mask = lum_A >= (lum_B + threshold)
+    
+    # 4. Create a black canvas of the same size.
+    black_array = np.zeros_like(main_array, dtype=np.float32)
+    
+    # 5. Use the mask to construct the final image. Where the mask is True, use the
+    #    original pixel; where it's False, use the corresponding pixel from the black canvas.
+    final_array = np.where(mask[:, :, np.newaxis], main_array, black_array)
+    
+    # Convert back to an 8-bit image for saving.
+    final_array_uint8 = final_array.astype(np.uint8)
+    
+    with Image.from_array(final_array_uint8) as final_image_obj:
+        final_image = final_image_obj.clone()
+        
+    stitched_track_path.unlink(missing_ok=True)
+    return final_image
 
 
-def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) -> Tuple[float, float] | None:
+def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) -> Optional[Tuple[float, float]]:
     """Analyzes a video to find the start and end time of significant brightness changes."""
     print("Step 2/3: Detecting meteor activity...")
     try:
@@ -356,59 +435,90 @@ def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) ->
 
 
 def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path):
-    """Creates a cropped, rotated, and background-subtracted video using the stitcher."""
+    """
+    Creates a video by using a highly compatible, three-step masking process
+    to isolate the meteor track and work around FFmpeg build limitations.
+    """
     print("\nStarting video creation process...")
-
     source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
     if not source_video_path: raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
     stitcher_path = Path(__file__).parent.resolve() / "stitcher.py"
-    if not stitcher_path.is_file(): raise FileNotFoundError("stitcher.py not found in script directory.")
 
     temp_stitched_video = event_dir / "fireball-stitched.mp4"
+    temp_diff_video = event_dir / "fireball-diff.mp4"
+    temp_mask_video = event_dir / "fireball-mask.mp4"
     temp_subtracted_video = event_dir / "fireball-subtracted.mp4"
     final_video_path = event_dir / Settings.OUTPUT_VIDEO_FILENAME
     
     try:
-        stitcher_cmd_vid = [sys.executable, str(stitcher_path), str(pto_path), str(source_video_path), str(temp_stitched_video)]
-        run_command_with_progress(stitcher_cmd_vid, desc="Step 1/3: Stitching rotated video", total=100)
+        # Step 1: Stitch the video
+        stitcher_cmd_vid = [
+            sys.executable, str(stitcher_path), "--pad", "128", str(pto_path), 
+            str(source_video_path), str(temp_stitched_video)
+        ]
+        # Stitcher progress is percentage-based (total=100)
+        run_command_with_progress(stitcher_cmd_vid, desc="Step 1: Stitching", total=100)
 
         duration, _, _ = get_video_info(temp_stitched_video)
-        ffmpeg_blend_cmd = [
-            "ffmpeg", 
-            "-i", str(temp_stitched_video),
-            "-loop", "1",
-            "-i", str(background_plate_path),
-            "-filter_complex", "[0:v][1:v]blend=c0_mode=difference",
-            "-t", str(duration),
-            "-y", str(temp_subtracted_video)
+
+        # Step 2A: Create a simple 'difference' video.
+        filter_graph_diff = "[0:v][1:v]blend=c0_mode=difference"
+        ffmpeg_diff_cmd = [
+            "ffmpeg", "-i", str(temp_stitched_video),
+            "-loop", "1", "-i", str(background_plate_path),
+            "-filter_complex", filter_graph_diff,
+            "-t", str(duration), "-y", str(temp_diff_video)
         ]
-        run_command_with_progress(ffmpeg_blend_cmd, total=duration, desc="Step 2/3: Subtracting background")
+        run_command_with_progress(ffmpeg_diff_cmd, desc="Step 2A: Creating Difference", total=duration)
         
-        trim_times = detect_meteor_activity(temp_subtracted_video, Settings.VideoTrim())
+        # Step 2B: Create a black-and-white mask from the difference video.
+        threshold = 32
+        filter_graph_mask = f"geq=lum='if(gt(lum(X,Y),{threshold}),255,0)'"
+        ffmpeg_mask_cmd = [
+            "ffmpeg", "-i", str(temp_diff_video),
+            "-vf", filter_graph_mask,
+            "-t", str(duration), "-y", str(temp_mask_video)
+        ]
+        run_command_with_progress(ffmpeg_mask_cmd, desc="Step 2B: Generating Mask", total=duration)
+
+        # Step 2C: Apply the mask to the original stitched video.
+        filter_graph_apply_mask = "[0:v][1:v]blend=c0_mode=multiply"
+        ffmpeg_apply_mask_cmd = [
+            "ffmpeg", "-i", str(temp_stitched_video),
+            "-i", str(temp_mask_video),
+            "-filter_complex", filter_graph_apply_mask,
+            "-t", str(duration), "-y", str(temp_subtracted_video)
+        ]
+        run_command_with_progress(ffmpeg_apply_mask_cmd, desc="Step 2C: Applying Mask", total=duration)
         
-        print("Step 3/3: Finalizing video...")
-        normalization_filter = "normalize"
+        # Step 3: Trim the final video.
+        trim_times = detect_meteor_activity(temp_subtracted_video, Settings.VideoTrim)
+        print("Step 3: Finalizing video...")
+        final_filter = "format=yuv420p"
+
         if trim_times:
             start_time, end_time = trim_times
-            duration = end_time - start_time
+            trim_duration = end_time - start_time
             final_cmd = [
                 "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(temp_subtracted_video),
-                "-t", f"{duration:.3f}", "-vf", normalization_filter, "-y", str(final_video_path)
+                "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-y", str(final_video_path)
             ]
-            run_command_with_progress(final_cmd, total=duration, desc="Trimming & Normalizing")
+            run_command_with_progress(final_cmd, desc="Step 3: Trimming", total=trim_duration)
         else:
             final_duration, _, _ = get_video_info(temp_subtracted_video)
-            final_cmd = ["ffmpeg", "-i", str(temp_subtracted_video), "-vf", normalization_filter, "-y", str(final_video_path)]
-            run_command_with_progress(final_cmd, total=final_duration, desc="Normalizing Video")
+            final_cmd = ["ffmpeg", "-i", str(temp_subtracted_video), "-vf", final_filter, "-y", str(final_video_path)]
+            run_command_with_progress(final_cmd, desc="Step 3: Finalizing", total=final_duration)
 
         print(f"✅ Success! Created '{final_video_path}'")
 
-    except subprocess.CalledProcessError as e:
-        stderr_output = e.stderr or ''
-        raise ScriptError(f"A processing step failed with exit code {e.returncode}:\nCOMMAND: {' '.join(e.cmd)}\nSTDERR:\n{stderr_output}")
+    except (subprocess.CalledProcessError, ScriptError) as e:
+        stdout_output = e.stdout if hasattr(e, 'stdout') else ''
+        stderr_output = e.stderr if hasattr(e, 'stderr') else ''
+        command = ' '.join(e.cmd) if hasattr(e, 'cmd') else 'N/A'
+        print(f"❌ Error during video processing:\nCOMMAND: {command}\nSTDOUT:\n{stdout_output}\nSTDERR:\n{stderr_output}", file=sys.stderr)
+        sys.exit(1)
     finally:
-        # Clean up intermediate files used only by the video process
-        for f in [temp_stitched_video, temp_subtracted_video]:
+        for f in [temp_stitched_video, temp_diff_video, temp_mask_video, temp_subtracted_video]:
             f.unlink(missing_ok=True)
 
 
@@ -417,8 +527,10 @@ def main():
     args = get_args()
     event_dir = args.event_dir
     background_plate_path = None
-    pto_path = event_dir / "fireball.pto" # Define a single path for the PTO
+    pto_path = event_dir / "fireball.pto"
     
+    scaling_factor = None
+
     try:
         if not event_dir.is_dir():
             raise FileNotFoundError(f"The specified event directory does not exist: '{event_dir}'")
@@ -436,17 +548,16 @@ def main():
         if not gnomonic_base_pto_path.is_file():
             raise FileNotFoundError(f"Base projection PTO file not found at '{gnomonic_base_pto_path}'")
 
-        # --- Create shared PTO ---
         create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
         
-        # --- Create background plate if needed by the selected mode ---
+        source_video_path = None
         if args.mode in ["image", "video", "both"]:
             source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
             if not source_video_path: raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
             background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
 
-        # --- Conditional Image Processing ---
         if args.mode in ["image", "both"]:
+            if not source_video_path: raise ScriptError("Source video path needed for image processing not found.")
             source_image_path = source_video_path.with_suffix('.jpg')
             if not source_image_path.is_file():
                 raise FileNotFoundError(f"Could not find corresponding source image '{source_image_path.name}'")
@@ -458,10 +569,9 @@ def main():
             track_image.close()
             print(f"✅ Success! Created '{output_path}'")
         
-        # --- Conditional Video Processing ---
         if args.mode in ["video", "both"]:
             create_fireball_video(event_dir, pto_path, background_plate_path)
-
+            
     except ScriptError as e:
         print(f"❌ Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -470,7 +580,6 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     finally:
-        # Centralized cleanup of shared resources
         if background_plate_path and background_plate_path.exists():
             background_plate_path.unlink()
 

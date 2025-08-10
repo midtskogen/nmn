@@ -332,8 +332,8 @@ def create_background_plate(event_dir: Path, pto_path: Path, source_video_path: 
         # This method is much faster than a large-radius Gaussian blur.
         # It preserves local color gradients while smoothing out star details.
         original_width, original_height = bg_img.width, bg_img.height
-        new_width = max(1, int(original_width * 0.1))
-        new_height = max(1, int(original_height * 0.1))
+        new_width = max(1, int(original_width * 0.3))
+        new_height = max(1, int(original_height * 0.3))
 
         bg_img.resize(new_width, new_height)
         bg_img.resize(original_width, original_height)
@@ -342,6 +342,84 @@ def create_background_plate(event_dir: Path, pto_path: Path, source_video_path: 
     first_frame_tmp.unlink(missing_ok=True)
     return bg_plate_path
 
+
+def stack_video_to_image(video_path: Path) -> np.ndarray:
+    """
+    Stacks all frames of a video file to create a single max-brightness image.
+    This function is inspired by the logic in stack.py.
+    Returns a BGR numpy array.
+    """
+    print(f"Stacking frames from '{video_path.name}' to create a composite image...")
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ScriptError(f"Could not open video file for stacking: {video_path}")
+
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if frame_count <= 0:
+        cap.release()
+        raise ScriptError(f"Video file '{video_path.name}' contains no frames.")
+
+    # Initialize a YUV stack. U and V are set to 128 (neutral grey).
+    yuv_stack = np.zeros((height, width, 3), dtype=np.uint8)
+    yuv_stack[:, :, 1:] = 128
+
+    with tqdm(total=frame_count, desc="Stacking Frames", unit="frame") as pbar:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+            
+            # Create a mask where the new frame's luma is brighter than the stack's
+            update_mask = yuv_frame[:, :, 0] > yuv_stack[:, :, 0]
+            
+            # Apply the mask to update all channels (Y, U, and V)
+            yuv_stack[update_mask] = yuv_frame[update_mask]
+            pbar.update(1)
+
+    cap.release()
+    bgr_result = cv2.cvtColor(yuv_stack, cv2.COLOR_YUV2BGR)
+    print("✅ Frame stacking complete.")
+    return bgr_result
+
+
+def subtract_background_from_image_array(main_image_bgr: np.ndarray, background_plate_path: Path) -> Image:
+    """
+    Performs luminance-gated background subtraction on a numpy image array (BGR).
+    Returns a wand.Image object.
+    """
+    print("Applying luminance-gated background removal to stacked image...")
+    with Image(filename=str(background_plate_path)) as bg_img:
+        # Ensure background matches dimensions of main image array
+        if bg_img.width != main_image_bgr.shape[1] or bg_img.height != main_image_bgr.shape[0]:
+             bg_img.resize(main_image_bgr.shape[1], main_image_bgr.shape[0])
+        # Convert wand's RGB image to a BGR numpy array to match the input
+        bg_array_rgb = np.array(bg_img, dtype=np.uint8)
+        bg_array_bgr = cv2.cvtColor(bg_array_rgb, cv2.COLOR_RGB2BGR)
+
+    main_array = main_image_bgr.astype(np.float32)
+    bg_array = bg_array_bgr.astype(np.float32)
+
+    # Calculate luminance using Rec. 709 standard on BGR arrays
+    # Index 2 is Red, 1 is Green, 0 is Blue for a BGR array
+    lum_A = (0.2126 * main_array[:, :, 2] + 0.7152 * main_array[:, :, 1] + 0.0722 * main_array[:, :, 0])
+    lum_B = (0.2126 * bg_array[:, :, 2] + 0.7152 * bg_array[:, :, 1] + 0.0722 * bg_array[:, :, 0])
+
+    mask = lum_A >= (lum_B + Settings.BG_SUBTRACT_THRESHOLD)
+    
+    black_array = np.zeros_like(main_array, dtype=np.float32)
+    final_array = np.where(mask[:, :, np.newaxis], main_array, black_array)
+    final_array_uint8 = final_array.astype(np.uint8)
+    
+    # wand.Image.from_array expects an RGB image, so convert final BGR back to RGB
+    final_array_rgb = cv2.cvtColor(final_array_uint8, cv2.COLOR_BGR2RGB)
+
+    with Image.from_array(final_array_rgb, 'RGB') as final_image_obj:
+        return final_image_obj.clone()
 
 def extract_meteor_track(image_path: Path, pto_path: Path, event_dir: Path, background_plate_path: Path) -> Image:
     """Isolates the meteor track from a source image using background subtraction."""
@@ -358,29 +436,11 @@ def extract_meteor_track(image_path: Path, pto_path: Path, event_dir: Path, back
     print(f"Saved original stitched image as '{orig_output_path.name}'")
 
     print("Applying luminance-gated background removal to image...")
-    with Image(filename=str(stitched_track_path)) as main_img, \
-         Image(filename=str(background_plate_path)) as bg_img:
-        main_array = np.array(main_img, dtype=np.float32)
-        bg_array = np.array(bg_img, dtype=np.float32)
-
-    # 2. Calculate luminance (brightness) for both images using Rec. 709 standard.
-    lum_A = (0.2126 * main_array[:, :, 2] + 0.7152 * main_array[:, :, 1] + 0.0722 * main_array[:, :, 0])
-    lum_B = (0.2126 * bg_array[:, :, 2] + 0.7152 * bg_array[:, :, 1] + 0.0722 * bg_array[:, :, 0])
+    # Use the numpy-based subtraction function for consistency.
+    # Load the stitched image with OpenCV (as BGR) and process.
+    stitched_bgr = cv2.imread(str(stitched_track_path))
+    final_image = subtract_background_from_image_array(stitched_bgr, background_plate_path)
     
-    # 3. Create a mask where the main image is significantly brighter than the background.
-    mask = lum_A >= (lum_B + Settings.BG_SUBTRACT_THRESHOLD)
-    
-    # 4. Use the mask to create the final image, keeping original pixels where the
-    #    mask is true and making them black otherwise.
-    black_array = np.zeros_like(main_array, dtype=np.float32)
-    # np.newaxis adds a dimension to the mask to match the 3-channel image array.
-    final_array = np.where(mask[:, :, np.newaxis], main_array, black_array)
-    
-    final_array_uint8 = final_array.astype(np.uint8)
-    
-    with Image.from_array(final_array_uint8) as final_image_obj:
-        final_image = final_image_obj.clone()
-        
     stitched_track_path.unlink(missing_ok=True)
     return final_image
 
@@ -509,8 +569,11 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
     print(f"✅ Success! Created '{final_orig_webm_path.name}'")
 
 
-def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path):
-    """Creates a background-subtracted and trimmed video of the meteor track."""
+def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path, delete_stitched_vid: bool = True):
+    """
+    Creates a background-subtracted and trimmed video of the meteor track.
+    If delete_stitched_vid is False, the temporary stitched video is not removed.
+    """
     print("\nStarting video creation process...")
     source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
     if not source_video_path:
@@ -556,8 +619,9 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
         sys.exit(1)
     finally:
         # Clean up temporary video files
-        for f in [temp_stitched_video, temp_subtracted_video]:
-            f.unlink(missing_ok=True)
+        if delete_stitched_vid:
+            temp_stitched_video.unlink(missing_ok=True)
+        temp_subtracted_video.unlink(missing_ok=True)
 
 
 # ==============================================================================
@@ -568,8 +632,10 @@ def main():
     """Main execution flow of the script."""
     args = get_args()
     event_dir = args.event_dir.resolve()
+    
     background_plate_path = None
     pto_path = event_dir / Settings.TEMP_PTO
+    temp_stitched_video_path = event_dir / Settings.TEMP_STITCHED_VID
 
     try:
         if not event_dir.is_dir():
@@ -582,7 +648,7 @@ def main():
         config = configparser.ConfigParser()
         config.read(config_path)
 
-        # --- Setup Phase ---
+        # --- Common Setup Phase ---
         start_xy, end_xy = get_projection_coords(event_dir, config)
         
         gnomonic_base_pto_path = event_dir / "gnomonic.pto"
@@ -591,32 +657,54 @@ def main():
 
         create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
         
-        source_video_path = None
-        if args.mode in ["image", "video", "both"]:
-            source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
-            if not source_video_path:
-                raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
-            background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
+        source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
+        if not source_video_path:
+            raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
+        
+        background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
 
-        # --- Image Processing ---
-        if args.mode in ["image", "both"]:
-            if not source_video_path:
-                raise ScriptError("Source video path needed for image processing not found.")
+        # --- Mode-Specific Processing ---
+
+        if args.mode == "image":
+            print("\nProcessing image to extract meteor track...")
             source_image_path = source_video_path.with_suffix(".jpg")
             if not source_image_path.is_file():
                 raise FileNotFoundError(f"Could not find corresponding source image '{source_image_path.name}'")
             
-            print("\nProcessing image to extract meteor track...")
             track_image = extract_meteor_track(source_image_path, pto_path, event_dir, background_plate_path)
             output_path = event_dir / Settings.OUTPUT_FILENAME
             track_image.save(filename=str(output_path))
             track_image.close()
             print(f"✅ Success! Created '{output_path.name}'")
         
-        # --- Video Processing ---
-        if args.mode in ["video", "both"]:
-            create_fireball_video(event_dir, pto_path, background_plate_path)
+        elif args.mode == "video":
+            create_fireball_video(event_dir, pto_path, background_plate_path, delete_stitched_vid=True)
             
+        elif args.mode == "both":
+            # 1. Process video, keeping the stitched intermediate for the image step
+            create_fireball_video(event_dir, pto_path, background_plate_path, delete_stitched_vid=False)
+            
+            # 2. Process image using the stacked frames of the stitched video
+            print("\nProcessing to create final image from video stack...")
+            if not temp_stitched_video_path.is_file():
+                raise FileNotFoundError(f"Stitched video '{temp_stitched_video_path.name}' needed for stacking not found. Video processing may have failed.")
+
+            # Stack frames from the stitched video into a single BGR numpy array
+            stacked_bgr_array = stack_video_to_image(temp_stitched_video_path)
+            
+            # Save a copy of the original (pre-subtraction) stacked image
+            orig_output_path = event_dir / Settings.OUTPUT_ORIG_FILENAME
+            cv2.imwrite(str(orig_output_path), stacked_bgr_array)
+            print(f"Saved original stacked image as '{orig_output_path.name}'")
+
+            # Subtract the background from the stacked image array
+            track_image = subtract_background_from_image_array(stacked_bgr_array, background_plate_path)
+            
+            output_path = event_dir / Settings.OUTPUT_FILENAME
+            track_image.save(filename=str(output_path))
+            track_image.close()
+            print(f"✅ Success! Created '{output_path.name}'")
+
     except ScriptError as e:
         print(f"❌ Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -625,11 +713,14 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     finally:
-        # Final cleanup of shared resources
+        # Final cleanup of shared and temporary resources
         if background_plate_path and background_plate_path.exists():
             background_plate_path.unlink()
         if pto_path.exists():
              pto_path.unlink()
+        # The stitched video is kept for 'both' mode, so clean it up here.
+        if temp_stitched_video_path.exists():
+            temp_stitched_video_path.unlink()
 
 
 if __name__ == "__main__":

@@ -46,14 +46,13 @@ def jit_stack_planes(luma_stack: np.ndarray, chroma_u_stack: np.ndarray,
                 chroma_v_stack[i // 2, j // 2] = new_v[i // 2, j // 2]
 
 
-@numba.jit(nopython=True, cache=True)
 def enhance_filter(plane: np.ndarray, t: int, log2sizex: int, log2sizey: int,
                    dither: int, seed: int) -> np.ndarray:
     """
-    Replicates the C-style adaptive enhancement/denoise filter.
+    Replicates the C-style adaptive enhancement/denoise filter using numpy vectorization.
 
-    This function is a direct port of the C implementation, using explicit
-    loops that are heavily optimized by the Numba JIT compiler.
+    This version is designed for performance using NumPy's optimized array operations
+    and is easily importable into other scripts.
 
     Args:
         plane: The 2D numpy array (image plane) to filter.
@@ -67,67 +66,68 @@ def enhance_filter(plane: np.ndarray, t: int, log2sizex: int, log2sizey: int,
         The filtered 8-bit image plane.
     """
     height, width = plane.shape
-    tmp_h = np.zeros((height, width), dtype=np.int32)
-    final_plane = np.zeros_like(plane)
+    plane_f = plane.astype(np.int32)
 
     # --- Parameter setup ---
-    c_log2sizex = min(max(log2sizex, 3), 6)
-    c_log2sizey = min(max(log2sizey, 3), 6)
-    shiftx = 6 - c_log2sizex
-    shifty = 6 - c_log2sizey
+    log2sizex = np.clip(log2sizex, 3, 6)
+    log2sizey = np.clip(log2sizey, 3, 6)
+    sizex = 1 << log2sizex
+    sizey = 1 << log2sizey
+    size2x = sizex >> 1
+    size2y = sizey >> 1
+    shiftx = 6 - log2sizex
+    shifty = 6 - log2sizey
     
     indices = np.array([-31, -23, -14, -5, 5, 14, 23, 31], dtype=np.int32)
-    indices_x = indices // (1 << shiftx)
-    indices_y = indices // (1 << shifty)
-    
-    # --- Horizontal Pass ---
-    for i in range(height):
-        for j in range(width):
-            acc = 0
-            center_val = plane[i, j]
-            for l_offset in indices_x:
-                sample_j = min(max(j + l_offset, 0), width - 1)
-                sample_val = plane[i, sample_j]
-                
-                if abs(sample_val - center_val) > t:
-                    acc += center_val
-                else:
-                    acc += sample_val
-            tmp_h[i, j] = acc
+    log2indices = 3
 
-    # --- Vertical Pass & Dithering ---
+    # --- Horizontal Pass ---
+    indices_x = (indices // (1 << shiftx))
+    # Pad the image horizontally to handle edges during sampling
+    padded_h = np.pad(plane_f, ((0, 0), (size2x, size2x)), 'edge')
+    tmp_h = np.zeros_like(plane_f)
+    for l in indices_x:
+        # Create a view of the sampled pixels, shifted by 'l'
+        sample = padded_h[:, size2x + l : size2x + l + width]
+        # Apply the adaptive threshold: if a sample is too different, use the center pixel's value instead
+        filtered_sample = np.where(np.abs(sample - plane_f) > t, plane_f, sample)
+        tmp_h += filtered_sample
+
+    # --- Vertical Pass ---
+    indices_y = (indices // (1 << shifty))
+    # Pad the result of the horizontal pass vertically
+    padded_v = np.pad(tmp_h, ((size2y, size2y), (0, 0)), 'edge')
+    final_f = np.zeros_like(plane_f)
+    for l in indices_y:
+        sample = padded_v[size2y + l : size2y + l + height, :]
+        # Apply a larger threshold for the vertical pass
+        filtered_sample = np.where(np.abs(sample - tmp_h) > t * 4, tmp_h, sample)
+        final_f += filtered_sample
+    
+    # --- Dithering ---
     c_dither = dither
     if c_dither < 2: c_dither = 2
-    c_dither = min(c_dither - 2, 11)
+    c_dither -= 2
+    if c_dither > 11: c_dither = 11
     
     c_seed = seed if seed != 0 else 1
-    np.random.seed(c_seed)
-
     dmask = (1 << c_dither) - 1
     doffset = (1 << (c_dither - 1)) - 8 if c_dither > 0 else -8
+    
+    if dmask > 0 and seed != 0:
+        # Use NumPy's modern random number generator for better performance and reproducibility
+        rng = np.random.default_rng(c_seed)
+        noise = rng.integers(0, dmask + 1, size=plane.shape, dtype=np.int32) + doffset
+        final_f += noise
+    else:
+        final_f += doffset
 
-    for i in range(height):
-        for j in range(width):
-            acc = 0
-            center_val = tmp_h[i, j]
-            for l_offset in indices_y:
-                sample_i = min(max(i + l_offset, 0), height - 1)
-                sample_val = tmp_h[sample_i, j]
+    # --- Scale down and clip to final 8-bit range ---
+    scale_factor = 1 << (2 * log2indices)
+    final_f //= scale_factor
+    
+    return np.clip(final_f, 0, 255).astype(np.uint8)
 
-                if abs(sample_val - center_val) > t * 4:
-                    acc += center_val
-                else:
-                    acc += sample_val
-            
-            if dmask > 0:
-                acc += np.random.randint(0, dmask + 1) + doffset
-            else:
-                acc += doffset
-            
-            final_val = acc // 64
-            final_plane[i, j] = min(max(final_val, 0), 255)
-            
-    return final_plane
 
 # ==============================================================================
 # Core Application Logic

@@ -22,6 +22,14 @@ except ImportError:
     print("Please ensure pto_mapper.py is in the same directory as this script.", file=sys.stderr)
     sys.exit(1)
 
+try:
+    from stack import enhance_filter
+except ImportError:
+    print("Error: The 'stack.py' module was not found.", file=sys.stderr)
+    print("Please ensure stack.py (containing the enhancement filter) is in the same directory.", file=sys.stderr)
+    sys.exit(1)
+
+
 # The timestamp import is now deferred to the video processing function where it is needed.
 
 try:
@@ -781,7 +789,7 @@ def _precompile_numba_functions():
     
     print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, padsides):
+def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, padsides, enhance):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=False)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
@@ -809,6 +817,13 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
 
         reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel())
         reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel())
+
+        if enhance:
+            print("Applying enhancement filter...")
+            seed_y = int.from_bytes(os.urandom(4), 'little')
+            y_final = enhance_filter(y_final, t=12, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+            u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+            v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
         save_image_yuv420(y_final, u_final, v_final, output_file)
         print(f"Panoramic image saved to {output_file}")
@@ -890,6 +905,13 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
         masking_stack = y_weight_stack
 
     y_final, u_final, v_final = _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weights_uv, masking_stack)
+
+    if enhance:
+        print("Applying enhancement filter...")
+        seed_y = int.from_bytes(os.urandom(4), 'little')
+        y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+        u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+        v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
     save_image_yuv420(y_final, u_final, v_final, output_file)
     print(f"Panoramic image saved to {output_file}")
@@ -1130,7 +1152,7 @@ def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
             
     return synchronized_frame_groups
 
-def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None):
+def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False):
     if av is None: raise ImportError("PyAV is not installed.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -1202,6 +1224,12 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             reproject_y(py_padded.ravel(), dw, dh, py_padded.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel())
             reproject_uv(pu_padded.ravel(), pv_padded.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel())
             
+            if enhance:
+                seed_y = int.from_bytes(os.urandom(4), 'little')
+                y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+                u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+
             # Create and encode the output frame
             out_frame = av.VideoFrame(width=dw, height=dh, format='yuv420p')
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
@@ -1400,6 +1428,13 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                 masking_stack = frame_weights_y
 
             y_final, u_final, v_final = _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weights_uv, masking_stack)
+            
+            if enhance:
+                seed_y = int.from_bytes(os.urandom(4), 'little')
+                y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+                u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+
             out_frame = av.VideoFrame(width=final_w, height=final_h, format='yuv420p')
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             for packet in out_stream.encode(out_frame):
@@ -1436,6 +1471,7 @@ def main():
     parser.add_argument("--model", type=str, default=None, help="Specify the model for timestamp extraction.")
     parser.add_argument("--save-sync", type=str, default=None, help="Save the synchronization map to a JSON file (requires --sync).")
     parser.add_argument("--load-sync", type=str, default=None, help="Load a pre-computed synchronization map from a JSON file (requires --sync).")
+    parser.add_argument("--enhance", action='store_true', help="Apply an adaptive enhancement filter to the final output for noise and artifact reduction.")
     args = parser.parse_args()
     
     # --- Argument Validation ---
@@ -1463,13 +1499,13 @@ def main():
     
     try:
         if is_image_input:
-            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, padsides_set)
+            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, padsides_set, args.enhance)
         elif is_video_input:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file, 
                 args.pad, args.seamless, args.level_subsample, args.seam_subsample, 
                 num_cores, args.level_freq, padsides_set, args.sync, args.model, 
-                save_sync_file=args.save_sync, load_sync_file=args.load_sync
+                save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance
             )
         else:
             print("Error: Input files must all be either images or videos.", file=sys.stderr)

@@ -332,12 +332,7 @@ def run_classification(event_config, event_dir: Path):
     # Define the path to the fireball.jpg file.
     fireball_jpg = event_dir.resolve() / 'fireball.jpg'
 
-    # If fireball.jpg does not exist, run the classification script to create it.
-    if not fireball_jpg.exists():
-        print(f"'{fireball_jpg.name}' not found. Running classification script...")
-        run_command([sys.executable, Settings.CROP_SCRIPT, str(event_dir.resolve())], cwd=event_dir)
-    else:
-        print(f"Skipping generation: '{fireball_jpg.name}' already exists.")
+    run_command([sys.executable, Settings.CROP_SCRIPT, '--mode', 'both', str(event_dir.resolve())], cwd=event_dir)
 
     if event_config.has_option('summary', 'meteor_probability'):
         return

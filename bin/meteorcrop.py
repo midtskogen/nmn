@@ -235,6 +235,10 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
     except (configparser.NoSectionError, configparser.NoOptionError) as e:
         raise ConfigError(f"Missing required data in 'event.txt': {e}") from e
 
+    # Clean the strings to remove byte string formatting (e.g., "b'123.45'")
+    start_pos_str = start_pos_str.replace("b'", "").replace("'", "")
+    end_pos_str = end_pos_str.replace("b'", "").replace("'", "")
+
     # Determine which grid file to use based on calibration status
     pto_filename = "gnomonic_grid.pto" if recalibrated != 0 else "gnomonic_corr_grid.pto"
     pto_file = event_dir / pto_filename
@@ -252,8 +256,16 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
         raise ProjectionError("PTO 'p' line must contain 'w' and 'h' parameters.")
 
     # Convert az/alt to panoramic pixel coordinates
-    start_az, start_alt = map(float, start_pos_str.split())
-    end_az, end_alt = map(float, end_pos_str.split())
+    try:
+        start_az, start_alt = map(float, start_pos_str.split())
+        end_az, end_alt = map(float, end_pos_str.split())
+    except ValueError as e:
+        raise ConfigError(
+            f"Could not convert coordinate strings to floats. "
+            f"Problematic values might be startpos='{start_pos_str}' or endpos='{end_pos_str}'. Original error: {e}"
+        ) from e
+
+
     start_pano_x = start_az * pano_w / 360.0
     start_pano_y = (90.0 - start_alt) * pano_h / 180.0
     end_pano_x = end_az * pano_w / 360.0

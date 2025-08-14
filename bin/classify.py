@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""
-A professional-grade script for meteor image classification with five modes, powered by PyTorch.
-1.  pipeline: Runs the full tune -> train -> evaluate pipeline across multiple resolutions.
-2.  tune:     Uses Optuna to find the best model architecture for a single resolution.
-3.  train:    Trains a model using either default or tuned hyperparameters.
-4.  evaluate: Analyzes a trained model to find the optimal classification threshold.
-5.  predict:  Uses a trained model to classify one or more images.
 
-This script includes optional, on-the-fly dataset balancing for training and tuning.
-If the --balance flag is used and the number of negative images is less than positive,
-it will generate synthetic "wobbly" negatives from the positive images to balance the classes.
-Evaluation is always performed on the original, unaltered data.
 """
+A professional-grade script for image and video meteor classification, powered by PyTorch.
+
+This script supports two data types:
+1. Images (e.g., JPG, PNG) using a 2D CNN.
+2. Videos (e.g., WebM, MP4) using a 3D CNN to analyze motion.
+
+It provides parallel modes for each data type (e.g., 'train' vs. 'videotrain').
+The 'predict' mode is unified and intelligently uses the best available model.
+
+A new 'buildensemble' mode automates the entire process of tuning and training
+all models to produce the final, high-accuracy stacking ensemble.
+"""
+# ... (all imports and CONFIG are the same as the previous version) ...
 import os
 import sys
 import argparse
@@ -20,11 +22,9 @@ import json
 import pathlib
 import tempfile
 import shutil
-import contextlib
 from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
-import random
 from PIL import Image
 
 try:
@@ -34,741 +34,524 @@ except ImportError:
         logging.info("tqdm not found. To see progress bars, please run 'pip install tqdm'")
         return iterable
 
-# --- PyTorch and related imports ---
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
+import cv2
+from sklearn.metrics import precision_recall_curve
+from sklearn.model_selection import GridSearchCV
+import optuna
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+import joblib
 
-# --- Default Configuration ---
 CONFIG = {
     "DEFAULT_IMG_HEIGHT": 96,
     "DEFAULT_IMG_WIDTH": 192,
-    "DEFAULT_MODEL_NAME": 'meteor_model.pth',
-    "PARAMS_FILE": 'best_params.json',
-    "INDEX_FILE": 'class_indices.json'
+    "NUM_FRAMES": 16,
+    "DEFAULT_IMAGE_MODEL_NAME": 'meteor_image_model.pth',
+    "DEFAULT_VIDEO_MODEL_NAME": 'meteor_video_model.pth',
+    "IMAGE_PARAMS_FILE": 'best_image_params.json',
+    "VIDEO_PARAMS_FILE": 'best_video_params.json',
+    "STACKER_MODEL_NAME": 'stacker_model.joblib',
+    "STACKING_DATA_CSV": 'stacking_train_data.csv',
 }
 
-# --- Utility Functions (Largely Unchanged) ---
+# --- Utility, Models, Data Handling, and Core Logic Functions ---
+# (All functions from the previous version like setup_logging, ConvNet2D,
+# VideoConvNet3D, sample_video_frames, VideoDataset, get_dataloaders,
+# get_model, _run_training, _run_evaluation, _run_tuning are included here,
+# unchanged. They are omitted below for brevity but are part of the final script.)
 
 def setup_logging(verbose: bool):
-    """Configures the logging module based on verbosity."""
-    level = logging.DEBUG if verbose else logging.INFO
+    """Configures logging to be quiet by default and verbose when requested."""
+    # If verbose, show INFO messages. Otherwise, only show WARNING and above.
+    level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-@contextlib.contextmanager
-def suppress_stderr():
-    """A robust context manager to suppress C-level stderr output."""
-    stderr_fd = sys.stderr.fileno()
-    saved_stderr_fd = os.dup(stderr_fd)
-    try:
-        devnull_fd = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull_fd, stderr_fd)
-        yield
-    finally:
-        os.dup2(saved_stderr_fd, stderr_fd)
-        os.close(saved_stderr_fd)
-        if 'devnull_fd' in locals(): os.close(devnull_fd)
-
-def _get_meteor_index(cli_index: Optional[int], model_path: str) -> int:
-    """
-    Determines the meteor class index with tiered logic:
-    1. Use the command-line argument if provided.
-    2. Fall back to the 'class_indices.json' file next to the model.
-    3. Default to 0 if neither is found.
-    """
-    if cli_index is not None:
-        logging.info(f"Using user-provided command-line index: {cli_index}")
-        return cli_index
-
-    index_file_path = os.path.join(os.path.dirname(model_path), CONFIG["INDEX_FILE"])
-    if os.path.exists(index_file_path):
-        try:
-            with open(index_file_path, 'r') as f:
-                indices = json.load(f)
-                meteor_index = int(indices.get('meteor', 0))
-                logging.info(f"Found and using index from '{index_file_path}': {meteor_index}")
-                return meteor_index
-        except (ValueError, TypeError, json.JSONDecodeError):
-            logging.warning(f"Could not parse index from '{index_file_path}'.")
-
-    logging.warning(f"No index provided and '{index_file_path}' not found. Defaulting to 0.")
-    logging.warning("This may lead to incorrect predictions if 'meteor' was not class 0 during training.")
-    return 0
-
-def _apply_wobble(input_path: str, output_path: str, amplitude: float, frequency: float):
-    """Internal function to apply a vertical wobble effect to an image."""
-    try:
-        with Image.open(input_path) as img:
-            if img.mode != 'RGB': img = img.convert('RGB')
-            pixels = np.array(img)
-            height, width, _ = pixels.shape
-            new_pixels = np.zeros_like(pixels)
-            for x in range(width):
-                shift = int(amplitude * np.sin(2 * np.pi * x * frequency / width))
-                rolled_column = np.roll(pixels[:, x, :], shift, axis=0)
-                if shift > 0: rolled_column[:shift, :] = 0
-                elif shift < 0: rolled_column[shift:, :] = 0
-                new_pixels[:, x, :] = rolled_column
-            Image.fromarray(new_pixels).save(output_path)
-    except Exception as e:
-        logging.warning(f"Could not apply wobble to {input_path}: {e}")
-
-def prepare_data_directories(positive_dir: str, negative_dir: str, temp_dir_path: str, balance_dataset: bool = False) -> str:
-    """Copies images into a temporary, structured directory and optionally balances the dataset."""
-    data_dir = pathlib.Path(temp_dir_path) / 'data'
-    pos_path = data_dir / 'meteor'
-    neg_path = data_dir / 'non_meteor'
-    pos_path.mkdir(parents=True, exist_ok=True)
-    neg_path.mkdir(parents=True, exist_ok=True)
-
-    logging.info("Organizing images into temporary directory...")
-    pos_files = [f for f in os.listdir(positive_dir) if os.path.isfile(os.path.join(positive_dir, f))]
-    neg_files = [f for f in os.listdir(negative_dir) if os.path.isfile(os.path.join(negative_dir, f))]
-
-    for img_file in pos_files: shutil.copy(os.path.join(positive_dir, img_file), pos_path)
-    for img_file in neg_files: shutil.copy(os.path.join(negative_dir, img_file), neg_path)
-
-    if balance_dataset:
-        num_pos = len(pos_files)
-        num_neg = len(neg_files)
-        if num_pos > num_neg:
-            num_to_generate = num_pos - num_neg
-            logging.info(f"Balancing dataset: {num_pos} positives, {num_neg} negatives. Generating {num_to_generate} wobbly negatives from positive images.")
-            source_images_to_wobble = random.choices(pos_files, k=num_to_generate)
-            for i, source_img_name in enumerate(tqdm(source_images_to_wobble, desc="Balancing dataset", unit="image", file=sys.stdout, disable=logging.getLogger().level > logging.INFO)):
-                input_path = os.path.join(positive_dir, source_img_name)
-                output_path = os.path.join(neg_path, f'synthetic_wobble_{i:05d}.jpg')
-                amplitude = random.uniform(5.0, 15.0)
-                frequency = random.uniform(1.0, 4.0)
-                _apply_wobble(input_path, output_path, amplitude, frequency)
-    else:
-        logging.info("Skipping dataset balancing.")
-
-    return str(data_dir)
-
-# --- PyTorch Model Definition ---
-
-class ConvNet(nn.Module):
+class ConvNet2D(nn.Module):
     def __init__(self, params: Dict[str, Any], image_size: Tuple[int, int]):
-        super(ConvNet, self).__init__()
-        img_height, img_width = image_size
-        self.layers = nn.ModuleList()
-
-        # Input layer
-        in_channels = 3
-        
-        # Convolutional layers from params
+        super(ConvNet2D, self).__init__()
+        img_height, img_width = image_size; self.conv_layers = nn.Sequential(); in_channels = 3
         for i in range(params.get('num_conv_layers', 3)):
             out_channels = params.get(f'conv_{i}_filters', 64)
-            self.layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding='same'))
-            self.layers.append(nn.ReLU())
-            self.layers.append(nn.MaxPool2d(2, 2))
-            in_channels = out_channels
+            self.conv_layers.add_module(f'conv2d_{i}', nn.Conv2d(in_channels, out_channels, kernel_size=3, padding='same'))
+            self.conv_layers.add_module(f'relu_{i}', nn.ReLU()); self.conv_layers.add_module(f'pool2d_{i}', nn.MaxPool2d(2, 2)); in_channels = out_channels
+        with torch.no_grad(): flattened_size = self.conv_layers(torch.zeros(1, 3, img_height, img_width)).numel()
+        self.fc_layers = nn.Sequential(nn.Flatten(), nn.Linear(flattened_size, params.get('dense_units', 128)), nn.ReLU(),
+            nn.Dropout(p=params.get('dropout_rate', 0.5)), nn.Linear(params.get('dense_units', 128), 1), nn.Sigmoid())
+    def forward(self, x: torch.Tensor) -> torch.Tensor: return self.fc_layers(self.conv_layers(x))
 
-        self.layers.append(nn.Flatten())
+class VideoConvNet3D(nn.Module):
+    def __init__(self, params: Dict[str, Any], image_size: Tuple[int, int], num_frames: int):
+        super(VideoConvNet3D, self).__init__()
+        img_height, img_width = image_size; self.conv_layers = nn.Sequential(); in_channels = 3
+        for i in range(params.get('num_conv_layers', 3)):
+            out_channels = params.get(f'conv_{i}_filters', 32)
+            self.conv_layers.add_module(f'conv3d_{i}', nn.Conv3d(in_channels, out_channels, kernel_size=3, padding='same'))
+            self.conv_layers.add_module(f'relu_{i}', nn.ReLU()); self.conv_layers.add_module(f'pool3d_{i}', nn.MaxPool3d(kernel_size=(2, 2, 2))); in_channels = out_channels
+        with torch.no_grad(): flattened_size = self.conv_layers(torch.zeros(1, 3, num_frames, img_height, img_width)).numel()
+        self.fc_layers = nn.Sequential(nn.Flatten(), nn.Linear(flattened_size, params.get('dense_units', 256)), nn.ReLU(),
+            nn.Dropout(p=params.get('dropout_rate', 0.5)), nn.Linear(params.get('dense_units', 256), 1), nn.Sigmoid())
+    def forward(self, x: torch.Tensor) -> torch.Tensor: return self.fc_layers(self.conv_layers(x))
 
-        # Calculate flattened size to connect to dense layers
-        # Use a dummy tensor to probe the output size of the conv layers
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, 3, img_height, img_width)
-            probe = nn.Sequential(*self.layers)(dummy_input)
-            flattened_size = probe.shape[1]
+def sample_video_frames(video_path: str, num_frames: int) -> List[Image.Image]:
+    frames = []; cap = None
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened(): return frames
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT));
+        if total_frames < 1: return frames
+        indices = np.linspace(0, total_frames - 1, num=num_frames, dtype=int)
+        for i in sorted(set(indices)):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ret, frame = cap.read()
+            if ret: frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+        while len(frames) < num_frames and len(frames) > 0: frames.append(frames[-1])
+    finally:
+        if cap is not None: cap.release()
+    return frames[:num_frames]
 
-        # Dense layers
-        self.layers.append(nn.Linear(flattened_size, params.get('dense_units', 128)))
-        self.layers.append(nn.ReLU())
-        self.layers.append(nn.Dropout(p=params.get('dropout_rate', 0.5)))
-        self.layers.append(nn.Linear(params.get('dense_units', 128), 1))
-        self.layers.append(nn.Sigmoid())
+class VideoDataset(Dataset):
+    def __init__(self, data_dir, num_frames, transform=None):
+        self.num_frames, self.transform = num_frames, transform; self.classes, self.class_to_idx = self._find_classes(data_dir); self.samples = self._make_dataset(data_dir, self.class_to_idx)
+    def _find_classes(self, dir_path): classes = sorted([d.name for d in os.scandir(dir_path) if d.is_dir()]); return classes, {cls_name: i for i, cls_name in enumerate(classes)}
+    def _make_dataset(self, directory, class_to_idx):
+        instances, VIDEO_EXTENSIONS = [], ('.webm', '.mp4', '.avi', '.mov', '.mkv')
+        for target_class in sorted(class_to_idx.keys()):
+            class_index, target_dir = class_to_idx[target_class], os.path.join(directory, target_class)
+            for root, _, fnames in sorted(os.walk(target_dir, followlinks=True)):
+                for fname in sorted(fnames):
+                    if fname.lower().endswith(VIDEO_EXTENSIONS): instances.append((os.path.join(root, fname), class_index))
+        return instances
+    def __len__(self): return len(self.samples)
+    def __getitem__(self, index):
+        video_path, target = self.samples[index]; frames = sample_video_frames(video_path, self.num_frames)
+        if not frames: return torch.zeros((3, self.num_frames, 1, 1)), target
+        if self.transform: frames = [self.transform(frame) for frame in frames]
+        return torch.stack(frames, dim=1), target
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-# --- Core Logic Functions (PyTorch Version) ---
-
-def _get_dataloaders(data_dir: str, image_size: Tuple[int, int], batch_size: int, for_training: bool) -> Tuple[DataLoader, DataLoader, Dict[str, int]]:
-    """Creates PyTorch DataLoaders."""
-    img_height, img_width = image_size
-    
-    # Augmentation for training, simple resizing for validation
-    train_transform = transforms.Compose([
-        transforms.Resize((img_height, img_width)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(20),
-        transforms.ToTensor(),
-    ])
-    val_transform = transforms.Compose([
-        transforms.Resize((img_height, img_width)),
-        transforms.ToTensor(),
-    ])
-    
-    transform = train_transform if for_training else val_transform
-    
-    full_dataset = datasets.ImageFolder(data_dir, transform=transform)
-    
-    # Split dataset into training and validation
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
+def get_dataloaders(args, data_dir, split=True):
+    transform = transforms.Compose([transforms.Resize((args.img_height, args.img_width)), transforms.ToTensor()])
+    if args.input_type == 'image': full_dataset = datasets.ImageFolder(data_dir, transform=transform)
+    else: full_dataset = VideoDataset(data_dir, num_frames=args.num_frames, transform=transform)
+    if not hasattr(full_dataset, 'classes') or not full_dataset.classes: raise ValueError(f"No classes found in {data_dir}.")
+    num_workers = min(16, os.cpu_count())
+    if not split: return DataLoader(full_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True), full_dataset.class_to_idx
+    train_size=int(0.8 * len(full_dataset)); val_size = len(full_dataset)-train_size
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
-    
-    # We need to apply the correct transform to the validation subset if we are in training mode
-    if for_training:
-        val_dataset.dataset = datasets.ImageFolder(data_dir, transform=val_transform)
+    return (DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, pin_memory=True),
+            DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
+            full_dataset.class_to_idx)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    
-    class_indices = full_dataset.class_to_idx
-    return train_loader, val_loader, class_indices
+def get_model(args, params={}):
+    if args.input_type == 'image': return ConvNet2D(params, (args.img_height, args.img_width))
+    else: return VideoConvNet3D(params, (args.img_height, args.img_width), args.num_frames)
 
-def tune_model(args: argparse.Namespace):
-    """Public-facing wrapper for the tuning logic using Optuna."""
-    params_path = os.path.join(os.getcwd(), CONFIG["PARAMS_FILE"])
-    _run_tuning(args.positive_dir, args.negative_dir, (args.img_height, args.img_width),
-                args.batch_size, args.epochs, os.getcwd(), params_path, args.balance)
-
-    script_name = os.path.basename(sys.argv[0])
-    print("\n" + "="*20 + " Next Step " + "="*20)
-    print(f"Tuning complete. Best parameters saved to '{params_path}'")
-    print("\nTo train a model with these optimal parameters, run:")
-    print(f"  python {script_name} train {args.positive_dir} {args.negative_dir} --params-file {params_path} "
-          f"--img-width {args.img_width} --img-height {args.img_height}")
-
-def _run_tuning(positive_dir, negative_dir, image_size, batch_size, epochs, output_dir, params_path, balance_dataset):
-    import optuna
-    
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    img_height, img_width = image_size
-    logging.info(f"--- Starting Hyperparameter Tuning for resolution {img_width}x{img_height} on {device} ---")
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        data_dir = prepare_data_directories(positive_dir, negative_dir, temp_dir, balance_dataset=balance_dataset)
-        train_loader, val_loader, _ = _get_dataloaders(data_dir, image_size, batch_size, for_training=True)
-
-        def objective(trial: optuna.Trial) -> float:
-            params = {
-                'num_conv_layers': trial.suggest_int('num_conv_layers', 2, 4),
-                'dense_units': trial.suggest_categorical('dense_units', [128, 256, 512]),
-                'dropout_rate': trial.suggest_float('dropout_rate', 0.2, 0.5, step=0.1),
-                'learning_rate': trial.suggest_categorical('learning_rate', [1e-3, 1e-4])
-            }
-            for i in range(params['num_conv_layers']):
-                params[f'conv_{i}_filters'] = trial.suggest_categorical(f'conv_{i}_filters', [32, 64, 128])
-
-            model = ConvNet(params, image_size).to(device)
-            optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
-            criterion = nn.BCELoss()
-            
-            best_val_accuracy = 0.0
-            patience_counter = 0
-
-            for epoch in range(epochs):
-                model.train()
-                for inputs, labels in train_loader:
-                    inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
-                    optimizer.zero_grad()
-                    outputs = model(inputs)
-                    loss = criterion(outputs, labels)
-                    loss.backward()
-                    optimizer.step()
-
-                model.eval()
-                val_loss, correct, total = 0, 0, 0
-                with torch.no_grad():
-                    for inputs, labels in val_loader:
-                        inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
-                        outputs = model(inputs)
-                        val_loss += criterion(outputs, labels).item()
-                        predicted = (outputs > 0.5).float()
-                        total += labels.size(0)
-                        correct += (predicted == labels).sum().item()
-
-                val_accuracy = correct / total
-                if val_accuracy > best_val_accuracy:
-                    best_val_accuracy = val_accuracy
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                trial.report(val_accuracy, epoch)
-                if trial.should_prune() or patience_counter >= 5:
-                    raise optuna.exceptions.TrialPruned()
-            
-            return best_val_accuracy
-
-        study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner())
-        study.optimize(objective, n_trials=50, timeout=1800) # 50 trials or 30 minutes
-        
-        best_hps = study.best_trial.params
-        logging.info(f"\n--- Tuning Complete for {img_width}x{img_height} ---\n" +
-                     f"Best Validation Accuracy: {study.best_value:.4f}\n" +
-                     f"Optimal Parameters: {json.dumps(best_hps, indent=4)}")
-
-        with open(params_path, 'w') as f:
-            json.dump(best_hps, f, indent=4)
-        logging.info(f"Best parameters saved to {params_path}")
-    return params_path
-
-def train_model(args: argparse.Namespace):
-    """Public-facing wrapper for the training logic."""
-    model_path = os.path.join(os.getcwd(), args.output)
-    _run_training(args.positive_dir, args.negative_dir, (args.img_height, args.img_width),
-                  args.batch_size, args.epochs, args.params_file, model_path, args.balance)
-
-def _run_training(positive_dir, negative_dir, image_size, batch_size, epochs, params_file, model_path, balance_dataset):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    img_height, img_width = image_size
-    logging.info(f"--- Starting Model Training for resolution {img_width}x{img_height} on {device} ---")
-    
+def _run_training(args, data_dir, model_path, params_file):
+    device = "cuda" if torch.cuda.is_available() else "cpu"; logging.info(f"--- Starting {args.input_type.capitalize()} Model Training on {device} ---")
     params = {}
     if params_file and os.path.exists(params_file):
-        logging.info(f"Loading tuned hyperparameters from {params_file}")
         with open(params_file, 'r') as f: params = json.load(f)
-    else:
-        logging.warning("No params file found. Using default hyperparameters.")
-        params = {'num_conv_layers': 3, 'conv_0_filters': 32, 'conv_1_filters': 64, 
-                  'conv_2_filters': 128, 'dense_units': 128, 'dropout_rate': 0.5, 'learning_rate': 1e-3}
+    else: params = {'num_conv_layers': 3, 'conv_0_filters': 32, 'conv_1_filters': 64, 'conv_2_filters': 128, 'dense_units': 256, 'dropout_rate': 0.5, 'learning_rate': 1e-4}
+    train_loader, val_loader, _ = get_dataloaders(args, data_dir)
+    model = get_model(args, params).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=params.get('learning_rate', 1e-4)); criterion = nn.BCELoss()
+    patience, patience_counter, best_val_loss = 8, 0, float('inf')
+    for epoch in range(args.epochs):
+        model.train()
+        for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch"):
+            inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
+            optimizer.zero_grad(); outputs = model(inputs); loss = criterion(outputs, labels); loss.backward(); optimizer.step()
+        model.eval(); val_loss = 0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                outputs = model(inputs.to(device)); val_loss += criterion(outputs, labels.to(device).float().unsqueeze(1)).item()
+        avg_val_loss = val_loss / len(val_loader)
+        if avg_val_loss < best_val_loss:
+            best_val_loss, patience_counter = avg_val_loss, 0; torch.save(model.state_dict(), model_path)
+            logging.info(f"Epoch {epoch+1}: Val loss improved to {avg_val_loss:.4f}. Model saved.")
+        else:
+            patience_counter += 1; logging.info(f"Epoch {epoch+1}: Val loss did not improve. Patience: {patience_counter}/{patience}.")
+        if patience_counter >= patience: logging.info("Stopping early."); break
+    logging.info(f"Training finished. Loading best model weights from '{model_path}'.")
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    params_path = os.path.splitext(model_path)[0] + '.json'
+    with open(params_path, 'w') as f: json.dump(params, f, indent=4)
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        data_dir = prepare_data_directories(positive_dir, negative_dir, temp_dir, balance_dataset=balance_dataset)
-        train_loader, val_loader, class_indices = _get_dataloaders(data_dir, image_size, batch_size, for_training=True)
-        
-        logging.info(f"Classes found: {class_indices}")
-        meteor_class_index = class_indices.get('meteor', 0)
-
-        model = ConvNet(params, image_size).to(device)
-        optimizer = optim.Adam(model.parameters(), lr=params.get('learning_rate', 1e-3))
-        criterion = nn.BCELoss()
-        
-        logging.info("Model Summary:")
-        logging.info(model)
-        
-        best_val_loss = float('inf')
-        patience_counter = 0
-        patience = 8
-
-        logging.info("Starting training with automated stopping...")
-        for epoch in range(epochs):
-            model.train()
-            running_loss = 0.0
-            for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", unit="batch", leave=False, file=sys.stdout):
-                inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-                running_loss += loss.item()
-
-            # Validation
-            model.eval()
-            val_loss, correct, total = 0, 0, 0
-            with torch.no_grad():
-                for inputs, labels in val_loader:
-                    inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
-                    outputs = model(inputs)
-                    val_loss += criterion(outputs, labels).item()
-                    predicted = (outputs > 0.5).float()
-                    total += labels.size(0)
-                    correct += (predicted == labels).sum().item()
-            
-            avg_train_loss = running_loss / len(train_loader)
-            avg_val_loss = val_loss / len(val_loader)
-            val_accuracy = correct / total
-            logging.info(f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
-
-            # Early stopping and model checkpointing
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                torch.save(model.state_dict(), model_path)
-                logging.info(f"Validation loss decreased. Saving model to {model_path}")
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    logging.info(f"Validation loss did not improve for {patience} epochs. Stopping early.")
-                    break
-        
-    index_file_path = os.path.join(os.path.dirname(model_path), CONFIG["INDEX_FILE"])
-    with open(index_file_path, 'w') as f:
-        json.dump(class_indices, f, indent=4)
-
-    logging.info(f"Training complete. Best model saved to '{model_path}'")
-    logging.info(f"Class indices saved to '{index_file_path}'")
-    return model_path
-
-def evaluate_model(args: argparse.Namespace):
-    """Public-facing wrapper for the evaluation logic."""
-    _run_evaluation(args.positive_dir, args.negative_dir, (args.img_height, args.img_width),
-                    args.batch_size, args.model_file, cli_meteor_index=args.meteor_class_index)
-
-def _run_evaluation(positive_dir, negative_dir, image_size, batch_size, model_path, cli_meteor_index: Optional[int] = None):
-    from sklearn.metrics import precision_recall_curve, confusion_matrix
-    
+def _run_evaluation(args, data_dir, model_path):
+    """A single, shared evaluation loop for both images and videos."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    img_height, img_width = image_size
-    logging.info(f"--- Starting Model Evaluation for {img_width}x{img_height} on {device} ---")
-    if not os.path.isfile(model_path):
-        logging.error(f"Model file not found at '{model_path}'"); return None
+    logging.info(f"--- Starting {args.input_type.capitalize()} Model Evaluation on {device} ---")
+    if not os.path.isfile(model_path): logging.error(f"Model file not found: '{model_path}'"); return
 
-    # Load dummy model to infer architecture from params file, then load state_dict
-    params = {}
-    params_path = os.path.join(os.path.dirname(model_path), CONFIG['PARAMS_FILE'])
+    params_path = os.path.splitext(model_path)[0] + '.json'; params = {}
     if os.path.exists(params_path):
         with open(params_path, 'r') as f: params = json.load(f)
-    else: # Default params if none found
-        params = {'num_conv_layers': 3, 'conv_0_filters': 32, 'conv_1_filters': 64, 
-                  'conv_2_filters': 128, 'dense_units': 128, 'dropout_rate': 0.5}
-
-    model = ConvNet(params, image_size).to(device)
-    try:
-        model.load_state_dict(torch.load(model_path, map_location=device))
-    except Exception as e:
-        logging.error(f"Failed to load model state: {e}. Ensure params file matches model architecture.")
-        return None
-
-    model.eval()
+    model = get_model(args, params).to(device); model.load_state_dict(torch.load(model_path, map_location=device)); model.eval()
     
-    meteor_class_index = _get_meteor_index(cli_meteor_index, model_path)
-
-    results = {}
-    with tempfile.TemporaryDirectory() as temp_dir:
-        data_dir = prepare_data_directories(positive_dir, negative_dir, temp_dir, balance_dataset=False)
-        _, val_loader, class_indices = _get_dataloaders(data_dir, image_size, batch_size, for_training=False)
-
-        y_true, y_pred_probs = [], []
-        logging.info("Extracting true labels and predicting probabilities...")
-        with torch.no_grad():
-            for inputs, labels in tqdm(val_loader, desc="Evaluating", unit="batch", file=sys.stdout):
-                inputs = inputs.to(device)
-                outputs = model(inputs).cpu()
-                y_pred_probs.extend(outputs.numpy().flatten())
-                y_true.extend(labels.numpy().flatten())
-
-        y_true, y_pred_probs = np.array(y_true), np.array(y_pred_probs)
-        
-        # In PyTorch ImageFolder, class names are sorted alphabetically.
-        # 'meteor' is class 0, 'non_meteor' is class 1.
-        # The model predicts the probability of class 1 (non_meteor).
-        # We want the probability of meteor (class 0).
-        y_pred_probs_meteor = 1 - y_pred_probs 
-        # True labels are also 0 for meteor, 1 for non_meteor. We need to flip them for sklearn.
-        y_true_meteor = 1 - y_true 
-
-        logging.info("Calculating metrics across all thresholds...")
-        precision, recall, thresholds = precision_recall_curve(y_true_meteor, y_pred_probs_meteor)
-        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
-        best_f1_idx = np.argmax(f1_scores)
-        best_threshold = thresholds[best_f1_idx] if best_f1_idx < len(thresholds) else 0.5
-        best_f1, best_precision, best_recall = f1_scores[best_f1_idx], precision[best_f1_idx], recall[best_f1_idx]
-        y_pred_binary = (y_pred_probs_meteor >= best_threshold).astype(int)
-        
-        results = {
-            "resolution": f"{img_width}x{img_height}", "f1_score": float(best_f1),
-            "precision": float(best_precision), "recall": float(best_recall), "threshold": float(best_threshold)}
-        logging.info(f"\n--- Evaluation Report for {img_width}x{img_height} ---")
-        print(f"Optimal Threshold: {results['threshold']:.4f}")
-        print(f"  - F1-Score:      {results['f1_score']:.4f}")
-        print(f"  - Precision:     {results['precision']:.4f}")
-        print(f"  - Recall:        {results['recall']:.4f}")
-    return results
-
-def predict_image(args: argparse.Namespace):
-    """Classifies one or more images using a trained PyTorch model."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if not os.path.isfile(args.model_file):
-        logging.error(f"Model file not found at '{args.model_file}'"); sys.exit(1)
-
-    logging.info(f"Loading model: {args.model_file}")
+    loader, class_indices = get_dataloaders(args, data_dir, split=False)
+    positive_class_index = class_indices.get('meteor', 0)
     
-    # We don't know the image size or architecture, so we must load params
-    params = {}
-    params_path = os.path.join(os.path.dirname(args.model_file), CONFIG['PARAMS_FILE'])
-    if not os.path.exists(params_path):
-        logging.error(f"Cannot predict: Parameters file '{params_path}' not found alongside the model.")
-        sys.exit(1)
-        
-    with open(params_path, 'r') as f: params = json.load(f)
+    y_true, y_pred_probs = [], []
+    with torch.no_grad():
+        for inputs, labels in tqdm(loader, desc="Evaluating"):
+            outputs = model(inputs.to(device)).cpu()
+            y_pred_probs.extend(outputs.numpy().flatten())
+            y_true.extend(labels.numpy().flatten())
+
+    y_true, y_pred_probs = np.array(y_true), np.array(y_pred_probs)
+    y_pred_probs_positive = 1.0 - y_pred_probs if positive_class_index == 0 else y_pred_probs
+    y_true_positive = (y_true == positive_class_index).astype(int)
     
-    # A bit of a chicken-and-egg problem. We need image size to build the model,
-    # but that's not stored in the params file. We assume the user has set it correctly
-    # or is using a pipeline-generated model where we could store it.
-    # For now, we will rely on command-line args. This is a weakness. A better
-    # approach would be to save metadata with the model.
-    # Let's assume the model was trained with the default dimensions if not specified.
-    img_height = args.img_height if 'img_height' in args else CONFIG["DEFAULT_IMG_HEIGHT"]
-    img_width = args.img_width if 'img_width' in args else CONFIG["DEFAULT_IMG_WIDTH"]
+    precision, recall, thresholds = precision_recall_curve(y_true_positive, y_pred_probs_positive)
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
+    best_f1_idx = np.argmax(f1_scores)
+    
+    # Extract all the best metrics at the optimal threshold
+    best_threshold = thresholds[best_f1_idx]
+    best_f1 = f1_scores[best_f1_idx]
+    best_precision = precision[best_f1_idx]
+    best_recall = recall[best_f1_idx]
 
-    model = ConvNet(params, (img_height, img_width)).to(device)
-    model.load_state_dict(torch.load(args.model_file, map_location=device))
-    model.eval()
+    # Display the detailed report
+    print("\n" + "="*50 + f"\n--- Evaluation Report for {args.input_type.capitalize()} Model ---\n" + "="*50)
+    print(f"✅ Optimal Classification Threshold: {best_threshold:.4f}")
+    print(f"\nThis threshold provides the best balance (F1-Score) between Precision and Recall:")
+    print(f"  - F1-Score:      {best_f1:.4f}")
+    print(f"  - Precision:     {best_precision:.4f}")
+    print(f"  - Recall:        {best_recall:.4f}\n" + "="*50)
 
-    meteor_class_index = _get_meteor_index(args.meteor_class_index, args.model_file)
-
-    transform = transforms.Compose([
-        transforms.Resize((img_height, img_width)),
-        transforms.ToTensor(),
-    ])
-
-    for image_path in args.image_files:
-        if not os.path.isfile(image_path):
-            logging.warning(f"Skipping '{image_path}': file not found."); continue
+def _run_tuning(args, data_dir, params_path):
+    device = "cuda" if torch.cuda.is_available() else "cpu"; logging.info(f"--- Starting Hyperparameter Tuning for {args.input_type.capitalize()} on {device} ---")
+    def objective(trial: optuna.Trial) -> float:
+        params = {'num_conv_layers': trial.suggest_int('num_conv_layers', 2, 4), 'dense_units': trial.suggest_categorical('dense_units', [128, 256, 512]),
+                  'dropout_rate': trial.suggest_float('dropout_rate', 0.2, 0.5), 'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)}
+        for i in range(params['num_conv_layers']): params[f'conv_{i}_filters'] = trial.suggest_categorical(f'conv_{i}_filters', [16, 32, 64, 128])
         try:
-            img = Image.open(image_path).convert('RGB')
-            img_tensor = transform(img).unsqueeze(0).to(device)
+            model = get_model(args, params).to(device); optimizer = optim.Adam(model.parameters(), lr=params['learning_rate']); criterion = nn.BCELoss()
+            train_loader, val_loader, _ = get_dataloaders(args, data_dir); model.train()
+            for inputs, labels in train_loader:
+                inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
+                optimizer.zero_grad(); loss = criterion(model(inputs), labels); loss.backward(); optimizer.step()
+            model.eval(); correct, total = 0, 0
             with torch.no_grad():
-                prediction = model(img_tensor).item() # returns prob of non-meteor
+                for inputs, labels in val_loader:
+                    outputs = model(inputs.to(device)); correct += ((outputs > 0.5).float() == labels.to(device).float().unsqueeze(1)).sum().item(); total += labels.size(0)
+            return correct / total if total > 0 else 0
+        except Exception: raise optuna.exceptions.TrialPruned()
+    study = optuna.create_study(direction='maximize'); study.optimize(objective, n_trials=args.trials)
+    with open(params_path, 'w') as f: json.dump(study.best_params, f, indent=4)
+    logging.info(f"Tuning complete. Best validation accuracy: {study.best_value:.4f}. Parameters saved to {params_path}")
 
-            meteor_probability = 1.0 - prediction
-            print(f"{os.path.basename(image_path)}: {meteor_probability:.6f}")
-        except Exception as e:
-            logging.error(f"Failed to process {image_path}: {e}")
+# --- Main Mode Wrappers ---
+def run_generic_mode(args):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        data_dir = os.path.join(temp_dir, 'data')
+        shutil.copytree(args.positive_dir, os.path.join(data_dir, 'meteor')); shutil.copytree(args.negative_dir, os.path.join(data_dir, 'non_meteor'))
+        if args.mode in ['train', 'videotrain']: _run_training(args, data_dir, args.output, getattr(args, 'params_file', None))
+        elif args.mode in ['evaluate', 'videoevaluate']: _run_evaluation(args, data_dir, args.model_file)
+        elif args.mode in ['tune', 'videotune']: _run_tuning(args, data_dir, args.output)
 
-def run_pipeline(args: argparse.Namespace):
-    """Runs the full tune->train->evaluate pipeline across multiple resolutions."""
-    # This function's logic remains largely the same, only the calls to the
-    # underlying _run_* functions are different.
-    heights = [64, 96, 128]
-    widths = [96, 128, 160, 192, 224, 256]
-    resolutions_to_test = sorted([(w, h) for w in widths for h in heights if w >= h])
-    
-    pipeline_dir = "pipeline_results"
-    summary_file_path = os.path.join(pipeline_dir, "summary.json")
-    
-    all_results = []
-    completed_resolutions = set()
-
-    is_fresh_run = not args.resume and not args.preliminary
-
-    if is_fresh_run:
-        if os.path.exists(pipeline_dir):
-            logging.info(f"Starting new pipeline. Removing existing results in '{pipeline_dir}'...")
-            shutil.rmtree(pipeline_dir)
-        os.makedirs(pipeline_dir, exist_ok=True)
-        logging.info(f"Starting new pipeline. Results will be stored in '{pipeline_dir}'")
-    else:
-        # Load existing results for a resume or a preliminary report.
-        os.makedirs(pipeline_dir, exist_ok=True)
-        logging.info(f"Attempting to load existing results from '{pipeline_dir}'...")
-        if os.path.exists(summary_file_path):
-            try:
-                with open(summary_file_path, 'r') as f:
-                    all_results = json.load(f)
-                for result in all_results:
-                    completed_resolutions.add(result['resolution'])
-                if completed_resolutions:
-                    logging.info(f"Loaded {len(completed_resolutions)} completed resolutions from summary.json.")
-            except (json.JSONDecodeError, IOError) as e:
-                logging.warning(f"Could not read summary file at '{summary_file_path}'. Will check for individual result files. Error: {e}")
-                all_results = []
-        
-        logging.info("Checking for individually completed runs to recover...")
-        for width, height in resolutions_to_test:
-            res_str = f"{width}x{height}"
-            if res_str in completed_resolutions:
-                continue
-
-            res_dir = os.path.join(pipeline_dir, res_str)
-            model_path = os.path.join(res_dir, CONFIG['DEFAULT_MODEL_NAME'])
-            
-            if os.path.exists(model_path):
-                logging.info(f"Found existing model for {res_str}. Re-running evaluation to recover results.")
-                try:
-                    eval_results = _run_evaluation(args.positive_dir, args.negative_dir, (height, width),
-                                                   args.batch_size, model_path, cli_meteor_index=None)
-                    if eval_results:
-                        all_results.append(eval_results)
-                        completed_resolutions.add(res_str)
-                        logging.info(f"Successfully recovered results for {res_str}.")
-                except Exception as e:
-                    logging.error(f"Failed to recover results for {res_str} due to an error during evaluation: {e}")
-            
-        if all_results:
-            with open(summary_file_path, 'w') as f:
-                json.dump(all_results, f, indent=4)
-    
-    if args.preliminary and not args.resume:
-        if not all_results:
-            logging.warning(f"No results found in '{pipeline_dir}' to report on.")
-            return
-
-        all_results.sort(key=lambda x: x['f1_score'], reverse=True)
-        best_result = all_results[0]
-        
-        logging.info("\n" + "="*50 + "\n--- Pipeline Status Report ---\n" + "="*50)
-        print(f"Best overall performance found for resolution {best_result['resolution']}\n")
-        print(f"| {'Resolution':<12} | {'F1-Score':<10} | {'Precision':<10} | {'Recall':<10} | {'Optimal Threshold':<20} |")
-        print(f"|{'-'*14}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*22}|")
-        for result in all_results:
-            print(f"| {result['resolution']:<12} | {result['f1_score']:.4f}     | {result['precision']:.4f}     | {result['recall']:.4f}   | {result['threshold']:.4f}               |")
-        
-        best_res_dir = os.path.join(pipeline_dir, best_result['resolution'])
-        print("\n" + "="*20 + " Best Model Location " + "="*20)
-        print(f"The best model and its parameters are located in:")
-        print(f"  Model:       {os.path.join(best_res_dir, CONFIG['DEFAULT_MODEL_NAME'])}")
-        print(f"  Parameters:  {os.path.join(best_res_dir, CONFIG['PARAMS_FILE'])}")
-        print("\nTo continue the pipeline run, use the --resume flag.")
-        return
-
+def pipeline_mode(args):
+    logging.info(f"--- Starting {args.input_type.capitalize()} Pipeline ---")
+    resolutions_to_test = [(128, 96), (192, 128)]; pipeline_dir = f"{args.input_type}_pipeline_results"; os.makedirs(pipeline_dir, exist_ok=True)
     for width, height in resolutions_to_test:
-        res_str = f"{width}x{height}"
-        if res_str in completed_resolutions:
-            logging.info(f"Skipping already completed resolution: {res_str}")
+        res_str = f"{width}x{height}"; logging.info(f"\n{'='*20} Pipeline for {res_str} {'='*20}")
+        res_dir = os.path.join(pipeline_dir, res_str); os.makedirs(res_dir, exist_ok=True)
+        args.img_width, args.img_height = width, height
+        params_path = os.path.join(res_dir, args.params_file_name); model_path = os.path.join(res_dir, args.output)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = os.path.join(temp_dir, 'data')
+            shutil.copytree(args.positive_dir, os.path.join(data_dir, 'meteor')); shutil.copytree(args.negative_dir, os.path.join(data_dir, 'non_meteor'))
+            _run_tuning(args, data_dir, params_path)
+            _run_training(args, data_dir, model_path, params_path)
+            _run_evaluation(args, data_dir, model_path)
+    logging.info(f"--- {args.input_type.capitalize()} Pipeline Finished ---")
+
+class PairedDataset(Dataset):
+    def __init__(self, file_pairs, args, transform):
+        self.file_pairs, self.args, self.transform = file_pairs, args, transform
+    def __len__(self): return len(self.file_pairs)
+    def __getitem__(self, index):
+        img_path, video_path, label = self.file_pairs[index]
+        img_tensor = self.transform(Image.open(img_path).convert('RGB'))
+        frames = sample_video_frames(video_path, self.args.num_frames)
+        video_tensor = torch.zeros((3, self.args.num_frames, 1, 1))
+        if frames: video_tensor = torch.stack([self.transform(f) for f in frames], dim=1)
+        return img_tensor, video_tensor, label
+
+def load_model_helper(model_type, model_file, args):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    params_path = os.path.splitext(model_file)[0] + '.json'; params = {}
+    if os.path.exists(params_path):
+        with open(params_path, 'r') as f: params = json.load(f)
+    model_args = argparse.Namespace(**vars(args)); model_args.input_type = model_type
+    model = get_model(model_args, params).to(device); model.load_state_dict(torch.load(model_file, map_location=device)); model.eval()
+    return model
+
+def _get_stacking_data(args, image_model, video_model):
+    """Helper to generate predictions from base models for stacking."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    def find_data_pairs(positive_dir, negative_dir):
+        pairs = []
+        for label, directory in [(1, positive_dir), (0, negative_dir)]:
+            for f in os.listdir(directory):
+                if f.lower().endswith('.jpg'):
+                    basename = os.path.splitext(f)[0]; img_path = os.path.join(directory, f)
+                    vid_path = os.path.join(directory, basename + '.webm')
+                    if os.path.exists(vid_path): pairs.append((img_path, vid_path, label))
+        return pairs
+    
+    file_pairs = find_data_pairs(args.positive_dir, args.negative_dir)
+    transform = transforms.Compose([transforms.Resize((args.img_height, args.img_width)), transforms.ToTensor()])
+    dataset = PairedDataset(file_pairs, args, transform)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=min(16, os.cpu_count()))
+    
+    img_preds, vid_preds, true_labels = [], [], []
+    with torch.no_grad():
+        for img_batch, vid_batch, label_batch in tqdm(loader, desc="Generating Stacking Data"):
+            img_preds.extend(1.0 - image_model(img_batch.to(device)).cpu().numpy().flatten())
+            vid_preds.extend(1.0 - video_model(vid_batch.to(device)).cpu().numpy().flatten())
+            true_labels.extend(label_batch.numpy().flatten())
+    return pd.DataFrame({'image_prediction': img_preds, 'video_prediction': vid_preds, 'is_meteor': true_labels})
+
+def train_stacker_mode(args):
+    image_model = load_model_helper('image', args.image_model_file, args)
+    video_model = load_model_helper('video', args.video_model_file, args)
+    data = _get_stacking_data(args, image_model, video_model)
+    data.to_csv(CONFIG['STACKING_DATA_CSV'], index=False)
+    logging.info(f"Stacking data created. Training meta-learner on {len(data)} samples...")
+    X, y = data[['image_prediction', 'video_prediction']], data['is_meteor']
+    meta_learner = LogisticRegression(); meta_learner.fit(X, y)
+    joblib.dump(meta_learner, args.output)
+    logging.info(f"Stacking meta-learner trained and saved to {args.output}")
+
+def tune_stacker_mode(args):
+    logging.info("--- Tuning Stacking Meta-Learner ---")
+    data = pd.read_csv(args.input_csv)
+    X, y = data[['image_prediction', 'video_prediction']], data['is_meteor']
+    param_grid = {'C': [0.001, 0.01, 0.1, 1, 10, 100], 'penalty': ['l1', 'l2'], 'solver': ['liblinear']}
+    grid_search = GridSearchCV(LogisticRegression(), param_grid, cv=5, scoring='f1', n_jobs=-1)
+    grid_search.fit(X, y)
+    logging.info(f"Best parameters found: {grid_search.best_params_}")
+    joblib.dump(grid_search.best_estimator_, args.output)
+    logging.info(f"Tuned stacking meta-learner saved to {args.output}")
+
+def evaluate_stack_mode(args):
+    """Evaluates the full stacking ensemble and finds its optimal threshold."""
+    logging.info("--- Evaluating Stacking Ensemble ---")
+    image_model = load_model_helper('image', args.image_model_file, args)
+    video_model = load_model_helper('video', args.video_model_file, args)
+    stacker_model = joblib.load(args.stacker_model_file)
+    
+    data = _get_stacking_data(args, image_model, video_model)
+    
+    X, y_true_positive = data[['image_prediction', 'video_prediction']], data['is_meteor']
+    y_pred_probs_positive = stacker_model.predict_proba(X)[:, 1]
+    
+    precision, recall, thresholds = precision_recall_curve(y_true_positive, y_pred_probs_positive)
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
+    best_f1_idx = np.argmax(f1_scores)
+
+    # Extract all the best metrics at the optimal threshold
+    best_threshold = thresholds[best_f1_idx]
+    best_f1 = f1_scores[best_f1_idx]
+    best_precision = precision[best_f1_idx]
+    best_recall = recall[best_f1_idx]
+    
+    # Display the detailed report
+    print("\n" + "="*50 + "\n--- Evaluation Report for Stacking Ensemble ---\n" + "="*50)
+    print(f"✅ Optimal Classification Threshold: {best_threshold:.4f}")
+    print(f"\nThis threshold provides the best balance (F1-Score) between Precision and Recall:")
+    print(f"  - F1-Score:      {best_f1:.4f}")
+    print(f"  - Precision:     {best_precision:.4f}")
+    print(f"  - Recall:        {best_recall:.4f}\n" + "="*50)
+
+def predict_mode(args):
+    device = "cuda" if torch.cuda.is_available() else "cpu"; IMAGE_EXTS, VIDEO_EXTS = ('.jpg', '.jpeg', '.png'), ('.webm', '.mp4')
+    image_model, video_model, stacker_model = None, None, None
+    transform = transforms.Compose([transforms.Resize((args.img_height, args.img_width)), transforms.ToTensor()])
+
+    if os.path.exists(args.stacker_model_file):
+        logging.info("Stacker model found. Defaulting to ensemble mode.")
+        stacker_model = joblib.load(args.stacker_model_file)
+    
+    if os.path.exists(args.image_model_file): image_model = load_model_helper('image', args.image_model_file, args)
+    if os.path.exists(args.video_model_file): video_model = load_model_helper('video', args.video_model_file, args)
+
+    for file_path in args.files_to_predict:
+        # --- START FIX ---
+        # First, check if the provided file path even exists before doing anything else.
+        if not os.path.exists(file_path):
+            logging.error(f"Input file not found: '{file_path}'. Skipping.")
+            continue # Go to the next file in the list
+        # --- END FIX ---
+
+        basename, file_ext = os.path.splitext(file_path); file_ext = file_ext.lower()
+        predicted_this_loop = False
+
+        # Handle force flags first
+        if args.image: # User explicitly requested image prediction
+            if file_ext in IMAGE_EXTS and image_model:
+                score = 1.0 - image_model(transform(Image.open(file_path).convert('RGB')).unsqueeze(0).to(device)).item()
+                print(f"{os.path.basename(file_path)} (image forced): {score:.6f}")
+            else:
+                logging.warning(f"Cannot force image prediction: '{file_path}' is not a valid image or model is not loaded.")
             continue
 
-        res_dir = os.path.join(pipeline_dir, res_str)
-        os.makedirs(res_dir, exist_ok=True)
-        
-        params_path = os.path.join(res_dir, CONFIG['PARAMS_FILE'])
-        model_path = os.path.join(res_dir, CONFIG['DEFAULT_MODEL_NAME'])
-        
-        try:
-            logging.info(f"\n{'='*20} Starting pipeline for {res_str} {'='*20}")
-            _run_tuning(args.positive_dir, args.negative_dir, (height, width),
-                        args.batch_size, args.tune_epochs, res_dir, params_path, args.balance)
-            _run_training(args.positive_dir, args.negative_dir, (height, width),
-                          args.batch_size, args.train_epochs, params_path, model_path, args.balance)
-            eval_results = _run_evaluation(args.positive_dir, args.negative_dir, (height, width),
-                                           args.batch_size, model_path, cli_meteor_index=None)
-            if eval_results:
-                all_results.append(eval_results)
-                with open(summary_file_path, 'w') as f:
-                    json.dump(all_results, f, indent=4)
-                logging.info(f"Successfully completed and saved results for {res_str}")
-
-                if args.preliminary:
-                    temp_results = sorted(all_results, key=lambda x: x['f1_score'], reverse=True)
-                    best_prelim_result = temp_results[0]
-                    
-                    logging.info("\n" + "="*50 + "\n--- Preliminary Pipeline Report (Tuning ongoing) ---\n" + "="*50)
-                    print(f"Best performance so far for resolution {best_prelim_result['resolution']}\n")
-                    print(f"| {'Resolution':<12} | {'F1-Score':<10} | {'Precision':<10} | {'Recall':<10} | {'Optimal Threshold':<20} |")
-                    print(f"|{'-'*14}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*22}|")
-                    for result in temp_results:
-                        print(f"| {result['resolution']:<12} | {result['f1_score']:.4f}     | {result['precision']:.4f}     | {result['recall']:.4f}   | {result['threshold']:.4f}               |")
-                    print("\n" + "="*20 + " Continuing to next resolution " + "="*20)
-
-        except Exception as e:
-            logging.error(f"Pipeline failed for resolution {width}x{height}: {e}", exc_info=args.verbose)
-            logging.info("Continuing to next resolution...")
+        if args.video: # User explicitly requested video prediction
+            if file_ext in VIDEO_EXTS and video_model:
+                frames = sample_video_frames(file_path, args.num_frames)
+                if frames:
+                    score = 1.0 - video_model(torch.stack([transform(f) for f in frames], dim=1).unsqueeze(0).to(device)).item()
+                    print(f"{os.path.basename(file_path)} (video forced): {score:.6f}")
+            else:
+                logging.warning(f"Cannot force video prediction: '{file_path}' is not a valid video or model is not loaded.")
             continue
+        
+        # Default intelligent logic (if no force flags are used)
+        # 1. Attempt to use the stacking ensemble
+        if stacker_model and image_model and video_model:
+            img_path, vid_path = basename + '.jpg', basename + '.webm'
+            if os.path.exists(img_path) and os.path.exists(vid_path):
+                logging.info(f"Found pair for ensemble: {os.path.basename(img_path)} and {os.path.basename(vid_path)}")
+                with torch.no_grad():
+                    img_score = 1.0 - image_model(transform(Image.open(img_path).convert('RGB')).unsqueeze(0).to(device)).item()
+                    frames = sample_video_frames(vid_path, args.num_frames)
+                    vid_score = 1.0 - video_model(torch.stack([transform(f) for f in frames], dim=1).unsqueeze(0).to(device)).item() if frames else 0.0
+                feature_names = stacker_model.feature_names_in_
+                prediction_df = pd.DataFrame([[img_score, vid_score]], columns=feature_names)
+                final_prob = stacker_model.predict_proba(prediction_df)[0][1]
+                print(f"{os.path.basename(basename)} (ensemble): {final_prob:.6f}")
+                predicted_this_loop = True
 
-    if not all_results:
-        logging.error("Pipeline finished but no results were generated. Please check logs for errors.")
-        return
+        # 2. Fall back to single models
+        if not predicted_this_loop:
+            if file_ext in IMAGE_EXTS and image_model:
+                score = 1.0 - image_model(transform(Image.open(file_path).convert('RGB')).unsqueeze(0).to(device)).item()
+                print(f"{os.path.basename(file_path)} (image): {score:.6f}")
+                predicted_this_loop = True
+            elif file_ext in VIDEO_EXTS and video_model:
+                frames = sample_video_frames(file_path, args.num_frames)
+                if frames:
+                    score = 1.0 - video_model(torch.stack([transform(f) for f in frames], dim=1).unsqueeze(0).to(device)).item()
+                    print(f"{os.path.basename(file_path)} (video): {score:.6f}")
+                predicted_this_loop = True
 
-    all_results.sort(key=lambda x: x['f1_score'], reverse=True)
-    best_result = all_results[0]
+        # 3. Final warning if no prediction could be made
+        if not predicted_this_loop:
+            logging.warning(f"Skipping '{file_path}': suitable model not loaded or unsupported file type.")
+
+def build_ensemble_mode(args):
+    """Automates the entire process of tuning and training all models."""
+    logging.info("--- Starting Full Ensemble Build Process ---")
+    logging.warning("This is a long-running process that will tune and train all models.")
     
-    logging.info("\n" + "="*50 + "\n--- Pipeline Complete: Final Summary ---\n" + "="*50)
-    print(f"Best overall performance found for resolution {best_result['resolution']}\n")
-    print(f"| {'Resolution':<12} | {'F1-Score':<10} | {'Precision':<10} | {'Recall':<10} | {'Optimal Threshold':<20} |")
-    print(f"|{'-'*14}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*22}|")
-    for result in all_results:
-        print(f"| {result['resolution']:<12} | {result['f1_score']:.4f}     | {result['precision']:.4f}     | {result['recall']:.4f}   | {result['threshold']:.4f}               |")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        data_dir = os.path.join(temp_dir, 'data')
+        shutil.copytree(args.positive_dir, os.path.join(data_dir, 'meteor'))
+        shutil.copytree(args.negative_dir, os.path.join(data_dir, 'non_meteor'))
+        
+        # 1. Image Model
+        logging.info("\n--- Building Image Model ---")
+        img_args = argparse.Namespace(**vars(args))
+        img_args.input_type = 'image'
+        _run_tuning(img_args, data_dir, args.image_params_file)
+        _run_training(img_args, data_dir, args.image_model_file, args.image_params_file)
+
+        # 2. Video Model
+        logging.info("\n--- Building Video Model ---")
+        vid_args = argparse.Namespace(**vars(args))
+        vid_args.input_type = 'video'
+        _run_tuning(vid_args, data_dir, args.video_params_file)
+        _run_training(vid_args, data_dir, args.video_model_file, args.video_params_file)
+
+    # 3. Stacker Model (uses original data paths)
+    logging.info("\n--- Building Stacker Model ---")
     
-    best_res_dir = os.path.join(pipeline_dir, best_result['resolution'])
-    print("\n" + "="*20 + " Best Model Location " + "="*20)
-    print(f"The best model and its parameters are located in:")
-    print(f"  Model:       {os.path.join(best_res_dir, CONFIG['DEFAULT_MODEL_NAME'])}")
-    print(f"  Parameters:  {os.path.join(best_res_dir, CONFIG['PARAMS_FILE'])}")
+    # Create a specific set of arguments for the stacker training step
+    stacker_train_args = argparse.Namespace(**vars(args))
+    stacker_train_args.output = args.stacker_model_file # This is the fix
+
+    train_stacker_mode(stacker_train_args)
+    
+    # Create a specific set of arguments for the stacker tuning step
+    stacker_tune_args = argparse.Namespace(
+        input_csv=CONFIG['STACKING_DATA_CSV'], 
+        output=args.stacker_model_file
+    )
+    tune_stacker_mode(stacker_tune_args)
+
+    logging.info("--- Full Ensemble Build Complete! ---")
 
 def main():
-    # --- Argument Parsing (Largely Unchanged) ---
-    parser = argparse.ArgumentParser(description="A tool for meteor classification using PyTorch.", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose logging output.")
-    
-    subparsers = parser.add_subparsers(dest='mode', required=True, help="Operating mode")
-    
+    parser = argparse.ArgumentParser(description="A tool for meteor image and video classification.", formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose logging.")
+    subparsers = parser.add_subparsers(dest='mode', required=True, help="Operating mode.")
+
     parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument('--img-width', type=int, default=CONFIG["DEFAULT_IMG_WIDTH"], help="Image width for processing.")
-    parent_parser.add_argument('--img-height', type=int, default=CONFIG["DEFAULT_IMG_HEIGHT"], help="Image height for processing.")
-    parent_parser.add_argument('--batch-size', type=int, default=32, help="Batch size for training/evaluation.")
-    
-    balance_parent_parser = argparse.ArgumentParser(add_help=False)
-    balance_parent_parser.add_argument('--balance', action='store_true', help="Enable on-the-fly dataset balancing.")
-
+    parent_parser.add_argument('--img-width', type=int, default=CONFIG["DEFAULT_IMG_WIDTH"])
+    parent_parser.add_argument('--img-height', type=int, default=CONFIG["DEFAULT_IMG_HEIGHT"])
+    parent_parser.add_argument('--batch-size', type=int, default=16)
     dir_parent_parser = argparse.ArgumentParser(add_help=False)
-    dir_parent_parser.add_argument('positive_dir', help="Directory with positive meteor images.")
-    dir_parent_parser.add_argument('negative_dir', help="Directory with negative (non-meteor) images.")
+    dir_parent_parser.add_argument('positive_dir'); dir_parent_parser.add_argument('negative_dir')
+    video_parent_parser = argparse.ArgumentParser(add_help=False)
+    video_parent_parser.add_argument('--num-frames', type=int, default=CONFIG["NUM_FRAMES"])
 
-    meteor_index_parser = argparse.ArgumentParser(add_help=False)
-    meteor_index_parser.add_argument('--meteor-class-index', type=int, default=None, choices=[0, 1],
-                                     help="Override the class index for 'meteor'. If not provided, it's inferred\n"
-                                          "from the '" + CONFIG["INDEX_FILE"] + "' file or defaults to 0.")
+    # Base Model Modes
+    for m, n, p in [('train', 'image', CONFIG["DEFAULT_IMAGE_MODEL_NAME"]), ('videotrain', 'video', CONFIG["DEFAULT_VIDEO_MODEL_NAME"])]:
+        p_train = subparsers.add_parser(m, help=f"Train the {n} model.", parents=[parent_parser, dir_parent_parser] + ([video_parent_parser] if n=='video' else []))
+        p_train.add_argument('--params-file', help="Path to a .json file with hyperparameters."); p_train.add_argument('--epochs', type=int, default=50); p_train.add_argument('-o', '--output', default=p)
+    for m, n, p in [('evaluate', 'image', CONFIG["DEFAULT_IMAGE_MODEL_NAME"]), ('videoevaluate', 'video', CONFIG["DEFAULT_VIDEO_MODEL_NAME"])]:
+        p_eval = subparsers.add_parser(m, help=f"Evaluate the {n} model.", parents=[parent_parser, dir_parent_parser] + ([video_parent_parser] if n=='video' else []))
+        p_eval.add_argument('-m', '--model-file', default=p)
+    for m, n, p in [('tune', 'image', CONFIG["IMAGE_PARAMS_FILE"]), ('videotune', 'video', CONFIG["VIDEO_PARAMS_FILE"])]:
+        p_tune = subparsers.add_parser(m, help=f"Tune the {n} model.", parents=[parent_parser, dir_parent_parser] + ([video_parent_parser] if n=='video' else []))
+        p_tune.add_argument('--trials', type=int, default=20); p_tune.add_argument('-o', '--output', default=p)
+    for m, n, p, f in [('pipeline', 'image', CONFIG["DEFAULT_IMAGE_MODEL_NAME"], CONFIG["IMAGE_PARAMS_FILE"]), ('videopipeline', 'video', CONFIG["DEFAULT_VIDEO_MODEL_NAME"], CONFIG["VIDEO_PARAMS_FILE"])]:
+        p_pipe = subparsers.add_parser(m, help=f"Run the full pipeline for {n}s.", parents=[parent_parser, dir_parent_parser] + ([video_parent_parser] if n=='video' else []))
+        p_pipe.add_argument('--epochs', type=int, default=50); p_pipe.add_argument('--trials', type=int, default=10); p_pipe.add_argument('-o', '--output', default=p); p_pipe.add_argument('--params-file-name', default=f)
 
-    parser_pipeline = subparsers.add_parser('pipeline', help="Run the full tune->train->evaluate workflow.",
-                                            parents=[dir_parent_parser, balance_parent_parser],
-                                            formatter_class=argparse.RawTextHelpFormatter,
-                                            epilog="example:\n  python %(prog)s ./pos/ ./neg/ --balance --resume")
-    parser_pipeline.add_argument('--tune-epochs', type=int, default=20, help="Max epochs for each tuning trial.")
-    parser_pipeline.add_argument('--train-epochs', type=int, default=100, help="Max epochs for the final training stage.")
-    parser_pipeline.add_argument('--batch-size', type=int, default=32, help="Batch size used throughout the pipeline.")
-    parser_pipeline.add_argument('--resume', action='store_true', help="Resume a previously stopped pipeline run.")
-    parser_pipeline.add_argument('--preliminary', action='store_true', help="Print a report of existing results and exit. If used with --resume, prints intermediate reports during the run.")
+    # Unified Predict Mode
+    p_predict = subparsers.add_parser('predict', help="Classify files, using stacking ensemble if available.", parents=[parent_parser, video_parent_parser])
+    p_predict.add_argument('files_to_predict', nargs='+'); p_predict.add_argument('--image-model-file', default=CONFIG["DEFAULT_IMAGE_MODEL_NAME"]); p_predict.add_argument('--video-model-file', default=CONFIG["DEFAULT_VIDEO_MODEL_NAME"]); p_predict.add_argument('--stacker-model-file', default=CONFIG["STACKER_MODEL_NAME"])
+    force_group = p_predict.add_mutually_exclusive_group()
+    force_group.add_argument('--image', action='store_true', help="Force image-only prediction, even if a pair exists.")
+    force_group.add_argument('--video', action='store_true', help="Force video-only prediction, even if a pair exists.")
 
-    parser_tune = subparsers.add_parser('tune', help="Find the best model hyperparameters.", parents=[parent_parser, balance_parent_parser, dir_parent_parser],
-                                        formatter_class=argparse.RawTextHelpFormatter,
-                                        epilog="example:\n  python %(prog)s ./pos/ ./neg/ --balance --img-width 192")
-    parser_tune.add_argument('--epochs', type=int, default=20, help="Max epochs per tuning trial.")
+    # Stacking Modes
+    p_stack_train = subparsers.add_parser('trainstacker', help="Create data & train the meta-learner.", parents=[parent_parser, dir_parent_parser, video_parent_parser])
+    p_stack_train.add_argument('--image-model-file', default=CONFIG["DEFAULT_IMAGE_MODEL_NAME"]); p_stack_train.add_argument('--video-model-file', default=CONFIG["DEFAULT_VIDEO_MODEL_NAME"]); p_stack_train.add_argument('-o', '--output', default=CONFIG["STACKER_MODEL_NAME"])
+    p_stack_tune = subparsers.add_parser('tunestack', help="Tune the meta-learner.", parents=[parent_parser])
+    p_stack_tune.add_argument('--input-csv', default=CONFIG["STACKING_DATA_CSV"]); p_stack_tune.add_argument('-o', '--output', default=CONFIG["STACKER_MODEL_NAME"])
+    p_stack_eval = subparsers.add_parser('evaluatestack', help="Evaluate the full stacking ensemble.", parents=[parent_parser, dir_parent_parser, video_parent_parser])
+    p_stack_eval.add_argument('--image-model-file', default=CONFIG["DEFAULT_IMAGE_MODEL_NAME"]); p_stack_eval.add_argument('--video-model-file', default=CONFIG["DEFAULT_VIDEO_MODEL_NAME"]); p_stack_eval.add_argument('--stacker-model-file', default=CONFIG["STACKER_MODEL_NAME"])
     
-    parser_train = subparsers.add_parser('train', help="Train the model.", parents=[parent_parser, balance_parent_parser, dir_parent_parser],
-                                         formatter_class=argparse.RawTextHelpFormatter,
-                                         epilog="""examples:\n  python %(prog)s ./pos/ ./neg/ --balance -o v2.pth""")
-    parser_train.add_argument('--params-file', default=CONFIG["PARAMS_FILE"], help="JSON file with tuned hyperparameters.")
-    parser_train.add_argument('--epochs', type=int, default=100, help="Maximum number of training epochs.")
-    parser_train.add_argument('-o', '--output', default=CONFIG["DEFAULT_MODEL_NAME"], help="Output filename for the model.")
-    
-    parser_evaluate = subparsers.add_parser('evaluate', help="Find the optimal classification threshold.", parents=[parent_parser, dir_parent_parser, meteor_index_parser],
-                                            formatter_class=argparse.RawTextHelpFormatter,
-                                            epilog="""example:\n  python %(prog)s ./pos/ ./neg/ -m model.pth\n  python %(prog)s ./pos/ ./neg/ -m m.pth --meteor-class-index 0""")
-    parser_evaluate.add_argument('-m', '--model-file', default=CONFIG["DEFAULT_MODEL_NAME"], help="Path to the trained model file.")
-    
-    parser_predict = subparsers.add_parser('predict', help="Classify one or more images.", parents=[meteor_index_parser, parent_parser], formatter_class=argparse.RawTextHelpFormatter,
-                                           epilog="""examples:\n  python %(prog)s image1.jpg\n  python %(prog)s i.jpg -m m.pth --meteor-class-index 0""")
-    parser_predict.add_argument('image_files', nargs='+', help="One or more image file paths to classify.")
-    parser_predict.add_argument('-m', '--model-file', default=CONFIG["DEFAULT_MODEL_NAME"], help="Path to the trained model file.")
+    # All-in-one Build Mode
+    p_build = subparsers.add_parser('buildensemble', help="Run the full end-to-end tuning and training for all models.", parents=[parent_parser, dir_parent_parser, video_parent_parser])
+    p_build.add_argument('--image-model-file', default=CONFIG["DEFAULT_IMAGE_MODEL_NAME"]); p_build.add_argument('--video-model-file', default=CONFIG["DEFAULT_VIDEO_MODEL_NAME"])
+    p_build.add_argument('--image-params-file', default=CONFIG["IMAGE_PARAMS_FILE"]); p_build.add_argument('--video-params-file', default=CONFIG["VIDEO_PARAMS_FILE"])
+    p_build.add_argument('--stacker-model-file', default=CONFIG["STACKER_MODEL_NAME"]); p_build.add_argument('--epochs', type=int, default=50); p_build.add_argument('--trials', type=int, default=20)
 
     args = parser.parse_args()
-    
-    # --- PyTorch Dependency Check ---
-    import importlib.util
-    REQUIRED_LIBS = {
-        'pipeline': ['torch', 'torchvision', 'optuna', 'sklearn'], 
-        'tune': ['torch', 'torchvision', 'optuna'],
-        'train': ['torch', 'torchvision'], 
-        'evaluate': ['torch', 'torchvision', 'sklearn'], 
-        'predict': ['torch', 'torchvision']
-    }
-    missing_libs = [lib for lib in REQUIRED_LIBS.get(args.mode, []) if importlib.util.find_spec(lib) is None]
-    if missing_libs:
-        print(f"Error: Missing required libraries for '{args.mode}' mode: {', '.join(missing_libs)}", file=sys.stderr)
-        print("Please install them. For example:", file=sys.stderr)
-        if any(lib in missing_libs for lib in ['torch', 'torchvision']): print("  pip install torch torchvision", file=sys.stderr)
-        if 'optuna' in missing_libs: print("  pip install optuna", file=sys.stderr)
-        if 'sklearn' in missing_libs: print("  pip install scikit-learn", file=sys.stderr)
-        sys.exit(1)
-
-    if hasattr(args, 'img_width') and hasattr(args, 'img_height'):
-        if args.img_width < args.img_height:
-            parser.error("Image width must be greater than or equal to image height.")
-
     setup_logging(args.verbose)
+    if not torch.backends.nnpack.is_available(): torch.backends.nnpack.enabled = False
     
-    run_action(args)
-
-def run_action(args: argparse.Namespace):
-    """Calls the appropriate function based on the chosen mode."""
-    if args.mode == 'pipeline': run_pipeline(args)
-    elif args.mode == 'tune': tune_model(args)
-    elif args.mode == 'train': train_model(args)
-    elif args.mode == 'evaluate': evaluate_model(args)
-    elif args.mode == 'predict': predict_image(args)
+    # Mode Dispatcher
+    if args.mode == 'predict': predict_mode(args)
+    elif args.mode == 'trainstacker': train_stacker_mode(args)
+    elif args.mode == 'tunestack': tune_stacker_mode(args)
+    elif args.mode == 'evaluatestack': evaluate_stack_mode(args)
+    elif args.mode == 'buildensemble': build_ensemble_mode(args)
+    elif 'pipeline' in args.mode:
+        args.input_type = 'video' if 'video' in args.mode else 'image'
+        pipeline_mode(args)
+    else:
+        args.input_type = 'video' if 'video' in args.mode else 'image'
+        run_generic_mode(args)
 
 if __name__ == '__main__':
     main()

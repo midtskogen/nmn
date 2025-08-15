@@ -1,199 +1,309 @@
 #!/usr/bin/env python3
+"""
+Processes a meteor event, classifies it using a CNN, and reports it to the
+Norsk Meteornettverk server if it meets the probability threshold.
 
-# Usage report.py <event.txt>
+Usage:
+    python report.py <event.txt>
+"""
 
 import configparser
-import sys
-import os
-from dateutil import parser
-import calendar
 import datetime
-import subprocess
+import calendar
 import math
 import socket
+import subprocess
 import sys
 import time
-import ephem
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import numpy as np
-import re
-from math import factorial
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional, Tuple
 
-if len(sys.argv) != 2:
-    print('Usage: ' + sys.argv[0] + ' <event.txt>')
-    exit(0)
+# Third-party libraries
+try:
+    import ephem
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from dateutil import parser
+except ImportError as e:
+    print(f"Error: Missing required library. {e}", file=sys.stderr)
+    print("Please install it using: pip install pyephem matplotlib python-dateutil", file=sys.stderr)
+    sys.exit(1)
 
 
-# Calculate arc
-def calcarc(az1, alt1, az2, alt2):
-    x1 = math.radians(az1)
-    x2 = math.radians(az2)
-    y1 = math.radians(alt1)
-    y2 = math.radians(alt2)
-    a = math.sin((y2-y1)/2) * math.sin((y2-y1)/2) + math.cos(y1) * math.cos(y2) * math.sin((x2-x1)/2) * math.sin((x2-x1)/2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+# --- Constants ---
+METEOR_PROBABILITY_THRESHOLD = 0.5
+SSH_TUNNEL_CONFIG_PATH = '/etc/default/ssh_tunnel'
+REMOTE_REPORT_URL = "http://norskmeteornettverk.no/ssh/report.php"
+# Assume processing scripts are in the user's bin directory
+METEORCROP_PATH = Path.home() / "bin" / "meteorcrop.py"
+CLASSIFY_PATH = Path.home() / "bin" / "classify.py"
+
+
+def load_config(event_file_path: Path) -> configparser.ConfigParser:
+    """Loads configuration from the event file and system/user config files."""
+    config = configparser.ConfigParser()
+    config.read(event_file_path)
+    station_config_paths = ['/etc/meteor.cfg', Path.home() / 'meteor.cfg']
+    config.read(station_config_paths)
+    return config
+
+
+def haversine_arc(az1: float, alt1: float, az2: float, alt2: float) -> float:
+    """Calculates the angular separation (arc) in degrees between two points."""
+    x1, x2 = math.radians(az1), math.radians(az2)
+    y1, y2 = math.radians(alt1), math.radians(alt2)
+    delta_lat = (y2 - y1) / 2
+    delta_lon = (x2 - x1) / 2
+    a = math.sin(delta_lat)**2 + math.cos(y1) * math.cos(y2) * math.sin(delta_lon)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return math.degrees(c)
 
-config = configparser.ConfigParser()
-config.read([sys.argv[1]])
 
-try:
-    flash = bool(int(config.get('video', 'flash')))
-except:
-    flash = False
+def get_sun_position(config: configparser.ConfigParser) -> Tuple[float, float]:
+    """Computes the sun's altitude and azimuth for the event time."""
+    video_start_str = config.get('video', 'start')
+    observer = ephem.Observer()
+    observer.lat = config.get('astronomy', 'latitude')
+    observer.lon = config.get('astronomy', 'longitude')
+    observer.elevation = config.getfloat('astronomy', 'elevation')
+    observer.date = parser.parse(video_start_str)
+    sun = ephem.Sun()
+    sun.compute(observer)
+    return math.degrees(sun.alt), math.degrees(sun.az)
 
-# Discard objects near the horizon moving upwards
-try:
-    t = config.get('trail', 'coordinates').split()
-    startalt, endalt = float(t[0].split(',')[1]), float(t[-1].split(',')[1])
 
-    if endalt > startalt and endalt < 20 and not flash:
-        exit(0)
-except:
-    pass
-
-# Short path?
-timestamps = config.get('trail', 'timestamps').split()
-if float(timestamps[-1]) - float(timestamps[0]) < 0.65 or int(config.get('trail', 'frames')) < 5:
-
-    count = 3600
-    command = ['lynx', '-dump', 'http://norskmeteornettverk.no/meteor/event.php?time=' + re.sub('.*events/', '', os.path.dirname(sys.argv[1]))]
-
-    # Check server for matching event
-    while count > 0 and time.time() < float(timestamps[0]) + 3600:
-        result = int(subprocess.Popen(command, stdout=subprocess.PIPE).communicate()[0].strip())
-        if result:
-            break
-        count -= 300
-        time.sleep(300)
-
-    if count <= 0:
-        exit(0)
-
-duration = float(config.get('trail', 'duration'))
-positions = config.get('trail', 'positions').split()
-arc = float(config.get('trail', 'arc'))
-
-config2 = configparser.ConfigParser()
-config2.read(['/etc/meteor.cfg', os.path.expanduser('~/meteor.cfg')])
-name = config2.get('station', 'name')
-
-videostart = config.get('video', 'start').rsplit(' ', 1)[0]
-start = float(calendar.timegm(parser.parse(videostart).utctimetuple())) + parser.parse(videostart).microsecond/1000000.0
-dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(sys.argv[1]))))
-dir2 = os.path.dirname(sys.argv[1])
-
-name += '-' + (datetime.datetime.strftime(parser.parse(videostart), '%Y%m%d%H%M%S'))
-
-# Compute sun altitude
-pos = ephem.Observer()
-pos.lat = config2.get('astronomy', 'latitude')
-pos.lon = config2.get('astronomy', 'longitude')
-pos.elevation = float(config2.get('astronomy', 'elevation'))
-pos.temp = float(config2.get('astronomy', 'temperature'))
-pos.pressure = float(config2.get('astronomy', 'pressure'))
-pos.date = parser.parse(videostart)
-body = ephem.Sun()
-body.compute(pos)
-sunalt = math.degrees(float(repr(body.alt)))
-sunaz = math.degrees(float(repr(body.az)))
-
-midpoint = config.get('trail', 'midpoint').split(',')
-
-# Too close to the sun?
-if sunalt > 1 and calcarc(sunaz, sunalt, float(midpoint[0]), float(midpoint[1])) < 20:
-    exit(0)
- 
-# Wait for other processes to finish to reduce load.  Use a socket to lock.
-# This works even if we get a SIGKILL, but will probably only work on Linux.
-while True:
-    global lock_socket
+@contextmanager
+def acquire_lock():
+    """Acquires a system-wide lock to prevent multiple instances from running."""
     lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    lock_name = f'\0{Path(__file__).name}'
     try:
-        lock_socket.bind('\0' + sys.argv[0])
-        break
-    except socket.error:
-        time.sleep(3)
+        while True:
+            try:
+                lock_socket.bind(lock_name)
+                print("Lock acquired.")
+                yield
+                break
+            except socket.error:
+                print("Another instance is running. Waiting...")
+                time.sleep(5)
+    finally:
+        lock_socket.close()
+        print("Lock released.")
 
-pos=positions[0].split(',')
-xpos1=float(pos[0])
-ypos1=float(pos[1])
-pos=positions[-1].split(',')
-xpos2=float(pos[0])
-ypos2=float(pos[1])
 
-command = [os.path.expanduser('~/bin/makevideos.py'), "--client", "--video-dir", dir, "--start", str(int(round(start))), "--length", str(int(float(math.ceil(duration)))), name]
+def run_video_creation(config: configparser.ConfigParser, event_file_path: Path) -> Optional[list]:
+    """Runs makevideos.py script and returns its output."""
+    video_start_str = config.get('video', 'start')
+    start_dt = parser.parse(video_start_str)
+    start_timestamp = calendar.timegm(start_dt.utctimetuple()) + start_dt.microsecond / 1_000_000.0
+    duration = math.ceil(config.getfloat('trail', 'duration'))
+    station_name = config.get('station', 'name')
+    event_timestamp_str = start_dt.strftime('%Y%m%d%H%M%S')
+    video_name = f"{station_name}-{event_timestamp_str}"
+    video_dir = event_file_path.parents[3]
+    event_dir = event_file_path.parent
+    makevideos_script = Path.home() / 'bin' / 'makevideos.py'
+    command = [
+        str(makevideos_script), "--client",
+        "--video-dir", str(video_dir),
+        "--start", str(int(round(start_timestamp))),
+        "--length", str(duration),
+        video_name
+    ]
+    print(f"Running command: {' '.join(command)}")
+    try:
+        proc = subprocess.run(command, cwd=event_dir, capture_output=True, text=True, check=True)
+        return proc.stdout.split()
+    except subprocess.CalledProcessError as e:
+        print(f"Error running makevideos.py: {e}\nStderr: {e.stderr}", file=sys.stderr)
+        return None
 
-print(' '.join(command))
 
-with open("/tmp/cmd.txt", "a") as myfile:
-    myfile.write(' '.join(command))
+def generate_reports(config: configparser.ConfigParser, video_output: list, event_dir: Path, video_name: str):
+    """Generates metrack, centroid, light data files and a brightness plot."""
+    video_start_str = config.get('video', 'start')
+    start_dt = parser.parse(video_start_str)
+    start_timestamp = calendar.timegm(start_dt.utctimetuple()) + start_dt.microsecond / 1_000_000.0
+    original_arc = config.getfloat('trail', 'arc')
+    original_duration = config.getfloat('trail', 'duration')
+    start_az, start_alt = float(video_output[-5]), float(video_output[-4])
+    end_az, end_alt = float(video_output[-2]), float(video_output[-1])
+    recalibrated_arc = haversine_arc(start_az, start_alt, end_az, end_alt)
+    duration = original_duration * (recalibrated_arc / original_arc) if original_arc > 0 else 0
+    lon = config.get('astronomy', 'longitude')
+    lat = config.get('astronomy', 'latitude')
+    elevation = config.get('astronomy', 'elevation')
+    station_code = config.get('station', 'code')
+    metrack_data = [
+        lon, lat, str(start_az), str(end_az), str(start_alt), str(end_alt),
+        '1', str(round(duration, 2)), '400', '128', '255', '255',
+        station_code, str(round(start_timestamp, 2)), elevation
+    ]
+    (event_dir / f"{video_name}.txt").write_text(' '.join(metrack_data) + '\n')
+    print(f"Generated {video_name}.txt")
 
-proc = subprocess.Popen(command, cwd=(dir2 if dir2 else '.'), stdout=subprocess.PIPE)
-proc.wait()
-output = proc.stdout.read().split()
+    timestamps = [float(t) for t in config.get('trail', 'timestamps').split()]
+    coordinates = config.get('trail', 'coordinates').split()
+    brightness = config.get('trail', 'brightness').split()
+    frame_brightness = config.get('trail', 'frame_brightness').split()
+    size = config.get('trail', 'size').split()
 
-if proc.returncode != 0:
-    exit(proc.returncode)
+    with open(event_dir / 'centroid.txt', 'w') as f_centroid, \
+         open(event_dir / 'light.txt', 'w') as f_light:
+        for i, t in enumerate(timestamps):
+            time_offset = round(t - timestamps[0], 2)
+            az, alt = coordinates[i].split(',')
+            gm_time = time.gmtime(t)
+            time_str = time.strftime('%Y-%m-%d %H:%M:%S', gm_time)
+            ms = f"{round(t - math.floor(t), 2):.2f}"[2:]
+            f_centroid.write(f"{i} {time_offset} {alt} {az} 1.0 {station_code} {time_str}.{ms} UTC\n")
+            f_light.write(f"{time_offset} {brightness[i]} {size[i]} {frame_brightness[i]}\n")
+    print("Generated centroid.txt and light.txt")
 
-duration *= calcarc(float(output[-5]), float(output[-4]), float(output[-2]), float(output[-1])) / arc
+    time_points = [t - timestamps[0] for t in timestamps]
+    plt.figure()
+    plt.plot(time_points, list(map(float, brightness)))
+    plt.xlabel('Time [s]')
+    plt.ylabel('Brightness')
+    plt.savefig(event_dir / 'brightness.svg')
+    plt.savefig(event_dir / 'brightness.jpg')
+    print("Generated brightness plot.")
 
-# Write metrack file
-dat_file = open(dir2 + '/' + name + '.txt', "w")
-dat_file.write(' '.join([config2.get('astronomy', 'longitude'), config2.get('astronomy', 'latitude'), str(output[-5].decode('utf-8')), str(output[-2].decode('utf-8')), str(output[-4].decode('utf-8')), str(output[-1].decode('utf-8')), '1', str(round(duration, 2)), '400', '128', '255', '255', config2.get('station', 'code'), str(round(start, 2)), config2.get('astronomy', 'elevation')]) + '\n')
-dat_file.close()
 
-if not config.has_section('summary'):
-    config.add_section('summary')
+def get_meteor_probability(event_dir: Path) -> float:
+    """
+    Runs meteorcrop and classify scripts to determine the meteor probability.
+    Returns the probability score as a float.
+    """
+    print("\n--- Starting Meteor Classification ---")
+    # 1. Run meteorcrop to generate fireball.jpg and other files
+    try:
+        print(f"Running meteorcrop in '{event_dir}'...")
+        crop_cmd = [sys.executable, str(METEORCROP_PATH), "--mode", "both", str(event_dir)]
+        subprocess.run(crop_cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error running meteorcrop.py: {e}\nStderr: {e.stderr}", file=sys.stderr)
+        return 0.0
 
-config.set('summary', 'latitude', config2.get('astronomy', 'latitude'));
-config.set('summary', 'longitude', config2.get('astronomy', 'longitude'));
-config.set('summary', 'elevation', config2.get('astronomy', 'elevation'));
-config.set('summary', 'timestamp', config.get('video', 'start'));
-config.set('summary', 'startpos', ' '.join([str(output[-5].decode('utf-8')), str(output[-4].decode('utf-8'))]))
-config.set('summary', 'endpos', ' '.join([str(output[-2].decode('utf-8')), str(output[-1].decode('utf-8'))]))
-config.set('summary', 'duration', str(round(duration, 2)))
-config.set('summary', 'sunalt', str(round(sunalt, 1)))
-config.set('summary', 'recalibrated', "0" if sunalt > -10 else "1")
+    # 2. Run classify on the resulting fireball.jpg
+    fireball_jpg_path = event_dir / "fireball.jpg"
+    if not fireball_jpg_path.is_file():
+        print(f"Error: meteorcrop did not produce '{fireball_jpg_path.name}'.", file=sys.stderr)
+        return 0.0
 
-with open(sys.argv[1], 'w') as configfile:
-    config.write(configfile)
+    try:
+        print(f"Running classify on '{fireball_jpg_path.name}'...")
+        classify_cmd = [sys.executable, str(CLASSIFY_PATH), "predict", str(fireball_jpg_path)]
+        result = subprocess.run(classify_cmd, check=True, capture_output=True, text=True)
+        
+        # 3. Parse the output (e.g., "fireball.jpg (image): 0.999766")
+        output_line = result.stdout.strip()
+        probability_str = output_line.split(' ')[-1]
+        probability = float(probability_str)
+        print(f"Meteor probability: {probability:.4f}")
+        return probability
+    except (subprocess.CalledProcessError, ValueError, IndexError) as e:
+        print(f"Error getting probability from classify.py: {e}", file=sys.stderr)
+        if isinstance(e, subprocess.CalledProcessError):
+            print(f"Stderr: {e.stderr}", file=sys.stderr)
+        return 0.0
 
-frame = 0
-timestamps = config.get('trail', 'timestamps').split()
-coordinates = config.get('trail', 'coordinates').split()
-brightness = config.get('trail', 'brightness').split()
-fbrightness = config.get('trail', 'frame_brightness').split()
-size = config.get('trail', 'size').split()
 
-with open(dir2 + '/centroid.txt', 'w') as centroid:
-    for (t, c) in zip(timestamps, coordinates):
-        az, alt = c.split(',')
-        centroid.write(str(frame) + ' ' + str(round(float(t) - float(timestamps[0]), 2)) + ' ' + str(alt) + ' ' + str(az) + ' 1.0 ' + config2.get('station', 'code') + time.strftime(' %Y-%m-%d %H:%M:%S', time.gmtime(float(t))) + '.' + str(round(float(t)-math.floor(float(t)), 2))[2:] + ' UTC\n')
-        frame += 1
+def update_event_file(config: configparser.ConfigParser, video_output: list, event_file_path: Path, probability: float):
+    """Adds a [summary] section to the event file with key results."""
+    original_duration = config.getfloat('trail', 'duration')
+    original_arc = config.getfloat('trail', 'arc')
+    start_az, start_alt = float(video_output[-5]), float(video_output[-4])
+    end_az, end_alt = float(video_output[-2]), float(video_output[-1])
+    recalibrated_arc = haversine_arc(start_az, start_alt, end_az, end_alt)
+    duration = original_duration * (recalibrated_arc / original_arc) if original_arc > 0 else 0
+    sun_alt, _ = get_sun_position(config)
 
-with open(dir2 + '/light.txt', 'w') as light:
-    for (t, b, s, f) in zip(timestamps, brightness, size, fbrightness):
-        light.write(str(round(float(t) - float(timestamps[0]), 2)) + ' ' + str(b) + ' ' + str(s) + ' ' + str(f) + '\n')
+    if not config.has_section('summary'):
+        config.add_section('summary')
 
-plt.plot([float(x) - float(timestamps[0]) for x in timestamps], list(map(float, brightness)))
-plt.xlabel('Tid [s]')
-plt.ylabel('Lysstyrke')
-plt.savefig(dir2 + '/brightness.svg')
-plt.savefig(dir2 + '/brightness.jpg')
+    config.set('summary', 'latitude', config.get('astronomy', 'latitude'))
+    config.set('summary', 'longitude', config.get('astronomy', 'longitude'))
+    config.set('summary', 'elevation', config.get('astronomy', 'elevation'))
+    config.set('summary', 'timestamp', config.get('video', 'start'))
+    config.set('summary', 'startpos', f"{start_az} {start_alt}")
+    config.set('summary', 'endpos', f"{end_az} {end_alt}")
+    config.set('summary', 'duration', str(round(duration, 2)))
+    config.set('summary', 'sunalt', str(round(sun_alt, 1)))
+    config.set('summary', 'recalibrated', "0" if sun_alt > -10 else "1")
+    config.set('summary', 'meteor_probability', f"{probability:.6f}")
 
-with open('/etc/default/ssh_tunnel') as f:
-    for line in f:
-        l, r = line.split('=')
-        if l == 'PORT':
-            port = r.rstrip()
+    with open(event_file_path, 'w') as configfile:
+        config.write(configfile)
+    print(f"Updated event file with summary and probability: {event_file_path.name}")
 
-if int(port) == 0:
-    command = [ 'lftp', '-e' ,'mirror -R ' + dir2 + ' upload/meteor/' + config2.get('station', 'name') + '/' + dir2, 'norskmeteornettverk.no' ]
-    proc = subprocess.Popen(command)
-    proc.communicate()
 
-command = ['curl', '-s', '-o', '/dev/null', 'http://norskmeteornettverk.no/ssh/report.php?station=' + config2.get('station', 'name') + '&port=' + port + '&dir=' + (dir2 if dir2 else '.') ]
-proc = subprocess.Popen(command)
+def upload_results(config: configparser.ConfigParser, event_dir: Path):
+    """Uploads the event directory to the server and pings the report URL."""
+    try:
+        with open(SSH_TUNNEL_CONFIG_PATH) as f:
+            port = next((line.strip().split('=')[1] for line in f if line.startswith('PORT=')), '0')
+    except FileNotFoundError:
+        port = '0'
+
+    station_name = config.get('station', 'name')
+    if int(port) == 0:
+        print("SSH tunnel port is 0, using lftp to upload...")
+        remote_path = f"upload/meteor/{station_name}/"
+        command = ['lftp', '-e', f'mirror -R {event_dir} {remote_path}', 'norskmeteornettverk.no']
+        subprocess.run(command)
+    else:
+        print(f"SSH tunnel is active on port {port}. Not using lftp.")
+
+    print("Pinging report URL...")
+    report_command = [
+        'curl', '-s', '-o', '/dev/null',
+        f'{REMOTE_REPORT_URL}?station={station_name}&port={port}&dir={event_dir.name}'
+    ]
+    subprocess.run(report_command)
+    print("Upload and reporting complete.")
+
+
+def main():
+    """Main execution function."""
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <event.txt>")
+        sys.exit(1)
+
+    event_file_path = Path(sys.argv[1]).resolve()
+    if not event_file_path.is_file():
+        print(f"Error: File not found at {event_file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    event_dir = event_file_path.parent
+    config = load_config(event_file_path)
+
+    with acquire_lock():
+        video_output = run_video_creation(config, event_file_path)
+        if not video_output:
+            sys.exit(1)
+
+        video_start_str = config.get('video', 'start')
+        start_dt = parser.parse(video_start_str)
+        station_name = config.get('station', 'name')
+        event_timestamp_str = start_dt.strftime('%Y%m%d%H%M%S')
+        video_name = f"{station_name}-{event_timestamp_str}"
+
+        generate_reports(config, video_output, event_dir, video_name)
+        
+        # New classification and reporting logic
+        probability = get_meteor_probability(event_dir)
+        
+        update_event_file(config, video_output, event_file_path, probability)
+
+        if probability >= METEOR_PROBABILITY_THRESHOLD:
+            print(f"Probability ({probability:.4f}) is >= {METEOR_PROBABILITY_THRESHOLD}. Reporting to server.")
+            upload_results(config, event_dir)
+        else:
+            print(f"Probability ({probability:.4f}) is < {METEOR_PROBABILITY_THRESHOLD}. Not reporting to server.")
+
+if __name__ == "__main__":
+    main()

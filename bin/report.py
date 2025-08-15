@@ -61,14 +61,13 @@ def haversine_arc(az1: float, alt1: float, az2: float, alt2: float) -> float:
     return math.degrees(c)
 
 
-def get_sun_position(config: configparser.ConfigParser) -> Tuple[float, float]:
+def get_sun_position(config: configparser.ConfigParser, start_dt: datetime.datetime) -> Tuple[float, float]:
     """Computes the sun's altitude and azimuth for the event time."""
-    video_start_str = config.get('video', 'start')
     observer = ephem.Observer()
     observer.lat = config.get('astronomy', 'latitude')
     observer.lon = config.get('astronomy', 'longitude')
     observer.elevation = config.getfloat('astronomy', 'elevation')
-    observer.date = parser.parse(video_start_str)
+    observer.date = start_dt
     sun = ephem.Sun()
     sun.compute(observer)
     return math.degrees(sun.alt), math.degrees(sun.az)
@@ -94,15 +93,10 @@ def acquire_lock():
         print("Lock released.")
 
 
-def run_video_creation(config: configparser.ConfigParser, event_file_path: Path) -> Optional[list]:
+def run_video_creation(config: configparser.ConfigParser, event_file_path: Path, start_timestamp: float, video_name: str) -> Optional[list]:
     """Runs makevideos.py script and returns its output."""
-    video_start_str = config.get('video', 'start')
-    start_dt = parser.parse(video_start_str)
-    start_timestamp = calendar.timegm(start_dt.utctimetuple()) + start_dt.microsecond / 1_000_000.0
     duration = math.ceil(config.getfloat('trail', 'duration'))
-    station_name = config.get('station', 'name')
-    event_timestamp_str = start_dt.strftime('%Y%m%d%H%M%S')
-    video_name = f"{station_name}-{event_timestamp_str}"
+    # Use the event directory itself as the video directory
     video_dir = event_file_path.parents[3]
     event_dir = event_file_path.parent
     makevideos_script = Path.home() / 'bin' / 'makevideos.py'
@@ -122,11 +116,8 @@ def run_video_creation(config: configparser.ConfigParser, event_file_path: Path)
         return None
 
 
-def generate_reports(config: configparser.ConfigParser, video_output: list, event_dir: Path, video_name: str):
+def generate_reports(config: configparser.ConfigParser, video_output: list, event_dir: Path, video_name: str, start_timestamp: float):
     """Generates metrack, centroid, light data files and a brightness plot."""
-    video_start_str = config.get('video', 'start')
-    start_dt = parser.parse(video_start_str)
-    start_timestamp = calendar.timegm(start_dt.utctimetuple()) + start_dt.microsecond / 1_000_000.0
     original_arc = config.getfloat('trail', 'arc')
     original_duration = config.getfloat('trail', 'duration')
     start_az, start_alt = float(video_output[-5]), float(video_output[-4])
@@ -179,7 +170,6 @@ def get_meteor_probability(event_dir: Path) -> float:
     Returns the probability score as a float.
     """
     print("\n--- Starting Meteor Classification ---")
-    # 1. Run meteorcrop to generate fireball.jpg and other files
     try:
         print(f"Running meteorcrop in '{event_dir}'...")
         crop_cmd = [sys.executable, str(METEORCROP_PATH), "--mode", "both", str(event_dir)]
@@ -188,7 +178,6 @@ def get_meteor_probability(event_dir: Path) -> float:
         print(f"Error running meteorcrop.py: {e}\nStderr: {e.stderr}", file=sys.stderr)
         return 0.0
 
-    # 2. Run classify on the resulting fireball.jpg
     fireball_jpg_path = event_dir / "fireball.jpg"
     if not fireball_jpg_path.is_file():
         print(f"Error: meteorcrop did not produce '{fireball_jpg_path.name}'.", file=sys.stderr)
@@ -199,7 +188,6 @@ def get_meteor_probability(event_dir: Path) -> float:
         classify_cmd = [sys.executable, str(CLASSIFY_PATH), "predict", str(fireball_jpg_path)]
         result = subprocess.run(classify_cmd, check=True, capture_output=True, text=True)
         
-        # 3. Parse the output (e.g., "fireball.jpg (image): 0.999766")
         output_line = result.stdout.strip()
         probability_str = output_line.split(' ')[-1]
         probability = float(probability_str)
@@ -212,7 +200,7 @@ def get_meteor_probability(event_dir: Path) -> float:
         return 0.0
 
 
-def update_event_file(config: configparser.ConfigParser, video_output: list, event_file_path: Path, probability: float):
+def update_event_file(config: configparser.ConfigParser, video_output: list, event_file_path: Path, probability: float, start_dt: datetime.datetime):
     """Adds a [summary] section to the event file with key results."""
     original_duration = config.getfloat('trail', 'duration')
     original_arc = config.getfloat('trail', 'arc')
@@ -220,7 +208,7 @@ def update_event_file(config: configparser.ConfigParser, video_output: list, eve
     end_az, end_alt = float(video_output[-2]), float(video_output[-1])
     recalibrated_arc = haversine_arc(start_az, start_alt, end_az, end_alt)
     duration = original_duration * (recalibrated_arc / original_arc) if original_arc > 0 else 0
-    sun_alt, _ = get_sun_position(config)
+    sun_alt, _ = get_sun_position(config, start_dt)
 
     if not config.has_section('summary'):
         config.add_section('summary')
@@ -261,7 +249,7 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
     print("Pinging report URL...")
     report_command = [
         'curl', '-s', '-o', '/dev/null',
-        f'{REMOTE_REPORT_URL}?station={station_name}&port={port}&dir={event_dir.name}'
+        f'{REMOTE_REPORT_URL}?station={station_name}&port={port}&dir={str(event_dir)}'
     ]
     subprocess.run(report_command)
     print("Upload and reporting complete.")
@@ -273,7 +261,7 @@ def main():
         print(f"Usage: {sys.argv[0]} <event.txt>")
         sys.exit(1)
 
-    event_file_path = Path(sys.argv[1]).resolve()
+    event_file_path = Path(sys.argv[1])
     if not event_file_path.is_file():
         print(f"Error: File not found at {event_file_path}", file=sys.stderr)
         sys.exit(1)
@@ -281,29 +269,33 @@ def main():
     event_dir = event_file_path.parent
     config = load_config(event_file_path)
 
+    # --- PARSE THE DATE ONCE AND REUSE ---
+    video_start_str = config.get('video', 'start').split(' (')[0]
+    start_dt = parser.parse(video_start_str)
+    start_timestamp = calendar.timegm(start_dt.utctimetuple()) + start_dt.microsecond / 1_000_000.0
+    # ---
+
+    station_name = config.get('station', 'name')
+    event_timestamp_str = start_dt.strftime('%Y%m%d%H%M%S')
+    video_name = f"{station_name}-{event_timestamp_str}"
+
     with acquire_lock():
-        video_output = run_video_creation(config, event_file_path)
+        video_output = run_video_creation(config, event_file_path, start_timestamp, video_name)
         if not video_output:
             sys.exit(1)
 
-        video_start_str = config.get('video', 'start')
-        start_dt = parser.parse(video_start_str)
-        station_name = config.get('station', 'name')
-        event_timestamp_str = start_dt.strftime('%Y%m%d%H%M%S')
-        video_name = f"{station_name}-{event_timestamp_str}"
-
-        generate_reports(config, video_output, event_dir, video_name)
+        generate_reports(config, video_output, event_dir, video_name, start_timestamp)
         
-        # New classification and reporting logic
         probability = get_meteor_probability(event_dir)
         
-        update_event_file(config, video_output, event_file_path, probability)
+        update_event_file(config, video_output, event_file_path, probability, start_dt)
 
         if probability >= METEOR_PROBABILITY_THRESHOLD:
             print(f"Probability ({probability:.4f}) is >= {METEOR_PROBABILITY_THRESHOLD}. Reporting to server.")
             upload_results(config, event_dir)
         else:
             print(f"Probability ({probability:.4f}) is < {METEOR_PROBABILITY_THRESHOLD}. Not reporting to server.")
+
 
 if __name__ == "__main__":
     main()

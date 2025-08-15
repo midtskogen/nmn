@@ -459,15 +459,53 @@ def evaluate_stack_mode(args):
     print(f"  - Precision:     {best_precision:.4f}")
     print(f"  - Recall:        {best_recall:.4f}\n" + "="*50)
 
+def resolve_model_path(arg_path: str, default_name: str) -> Optional[str]:
+    """
+    Finds a model file, respecting user overrides and searching default locations.
+    Search Order:
+    1. If a path is provided via CLI that differs from the default, use it exclusively.
+    2. If no override is given, search for the default filename in the current directory.
+    3. If not found, search in the user's model directory (~/nmn/model).
+    """
+    if arg_path != default_name:  # User has provided an override path
+        if os.path.exists(arg_path):
+            logging.info(f"Using user-specified model file: {arg_path}")
+            return arg_path
+        logging.error(f"User-specified model file not found: '{arg_path}'. Cannot proceed.")
+        return None
+    else:  # No override, use standard search path
+        # 1. Check current directory
+        if os.path.exists(default_name):
+            logging.info(f"Found model file in current directory: ./{default_name}")
+            return default_name
+        # 2. Check ~/nmn/model directory
+        user_model_dir = pathlib.Path.home() / 'nmn' / 'model'
+        user_model_path = user_model_dir / default_name
+        if os.path.exists(user_model_path):
+            logging.info(f"Found model file in user directory: {user_model_path}")
+            return str(user_model_path)
+        return None
+
 def predict_mode(args):
     """Classifies files using the best available model."""
     device = "cuda" if torch.cuda.is_available() else "cpu"; IMAGE_EXTS, VIDEO_EXTS = ('.jpg', '.jpeg', '.png'), ('.webm', '.mp4')
     image_model, video_model, stacker_model = None, None, None
     transform = transforms.Compose([transforms.Resize((args.img_height, args.img_width)), transforms.ToTensor()])
-    if os.path.exists(args.stacker_model_file):
-        logging.info("Stacker model found. Defaulting to ensemble mode."); stacker_model = joblib.load(args.stacker_model_file)
-    if os.path.exists(args.image_model_file): image_model = load_model_helper('image', args.image_model_file, args)
-    if os.path.exists(args.video_model_file): video_model = load_model_helper('video', args.video_model_file, args)
+    
+    # Resolve model paths using the new logic
+    image_model_path = resolve_model_path(args.image_model_file, CONFIG["DEFAULT_IMAGE_MODEL_NAME"])
+    video_model_path = resolve_model_path(args.video_model_file, CONFIG["DEFAULT_VIDEO_MODEL_NAME"])
+    stacker_model_path = resolve_model_path(args.stacker_model_file, CONFIG["STACKER_MODEL_NAME"])
+
+    # Load models if their paths were found
+    if stacker_model_path:
+        logging.info("Stacker model found. Defaulting to ensemble mode.")
+        stacker_model = joblib.load(stacker_model_path)
+    if image_model_path:
+        image_model = load_model_helper('image', image_model_path, args)
+    if video_model_path:
+        video_model = load_model_helper('video', video_model_path, args)
+
     for file_path in args.files_to_predict:
         if not os.path.exists(file_path): logging.error(f"Input file not found: '{file_path}'. Skipping."); continue
         basename, file_ext = os.path.splitext(file_path); file_ext = file_ext.lower(); predicted_this_loop = False

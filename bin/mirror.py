@@ -178,7 +178,7 @@ async def watch_videos():
                 if args.link:
                     snapshot_link = os.path.join(args.remotedir, f'cam{cam}', 'snapshot.jpg')
                     if os.path.lexists(snapshot_link): os.remove(snapshot_link)
-                    os.symlink(jpgfile, snapshot_link)
+                    os.link(jpgfile, snapshot_link)
 
         except Exception as e:
             logging.exception(f"Error in video watcher loop: {e}")

@@ -196,7 +196,7 @@ async def watch_detections():
             filepath = os.path.join(eventdir, eventfile)
             dir_parts = eventdir.split('/')
             
-            if 'IN_CLOSE_WRITE' in type_names and dir_parts[-1] == METEORS_DIR_NAME and eventfile.endswith(REDUCED_JSON_SUFFIX):
+            if 'IN_CLOSE_WRITE' in type_names and eventfile.endswith(REDUCED_JSON_SUFFIX):
                 logging.info(f"Executing: {args.exefile} {filepath}")
                 await run_command_async(args.exefile, filepath)
 

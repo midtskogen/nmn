@@ -2,34 +2,35 @@
 """
 Monitors directories for new video and data files from AMS (Allsky7 Meteor System).
 
-This script performs three main tasks concurrently:
-1.  Watches for new one-minute video files (.mp4) and processes them.
+This script performs two main tasks concurrently:
+1.  Watches for new one-minute video files (.mp4). When a new video appears, it:
+    - Calculates an accurate creation timestamp using the file's system birth time.
+    - Uses FFmpeg to embed the high-precision timestamp into the video's metadata.
+    - Overwrites the original file's content to apply the change while preserving ownership.
+    - Copies or links the processed video to a structured destination directory.
+    - Generates a JPG preview for HD videos.
 2.  Watches for new meteor detection data files (*-reduced.json) and passes them
     to an external script for event processing.
-3.  Watches for changes to itself and restarts the service if updated.
 """
 
 import inotify.adapters
 import argparse
 import logging
 import re
+import shlex
+import subprocess
 import os
-import sys
 import asyncio
 import datetime
 import tempfile
 import shutil
 from collections import deque
-import stack  # For direct JPG generation
 
 # --- Constants for Configuration ---
 AMS2EVENT_PY_DEFAULT = "/home/meteor/bin/ams2event.py"
+VID2JPG_SH = "/home/meteor/bin/vid2jpg.sh"
 METEORS_DIR_NAME = "meteors"
 REDUCED_JSON_SUFFIX = "-reduced.json"
-
-# --- Self-Restarting Logic ---
-# Store the script's modification time at startup
-_SELF_MOD_TIME = os.path.getmtime(__file__)
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description='Monitor AMS directories for new files.')
@@ -88,7 +89,6 @@ async def watch_videos():
             (_, _, eventdir, eventfile) = event
             filepath = os.path.join(eventdir, eventfile)
 
-            # FIX: Handle race condition where file disappears before processing
             if not os.path.exists(filepath):
                 continue
 
@@ -100,7 +100,6 @@ async def watch_videos():
 
             match = FILENAME_PATTERN.match(eventfile)
             if not match:
-                # FIX: Change log level from warning to info for skipped files
                 logging.info(f"Skipping file with unexpected name format: {filepath}")
                 continue
             
@@ -111,15 +110,23 @@ async def watch_videos():
                 continue
 
             # --- Timestamp Calculation ---
+            # Get the base timestamp (Y-M-D H:M:S) from the filename.
             (year, month, day, hour, minute, second) = match.groups()[:6]
             dt_from_name = datetime.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
+
+            # Get the precise system time to "borrow" its sub-second value.
+            file_stat = os.stat(filepath)
             try:
-                file_stat = os.stat(filepath)
                 file_time = datetime.datetime.fromtimestamp(file_stat.st_birthtime)
-            except (AttributeError, FileNotFoundError):
-                file_time = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
+            except AttributeError:
+                file_time = datetime.datetime.fromtimestamp(file_stat.st_mtime)
+
+            # Combine the accurate filename time with the system's sub-second precision.
             final_dt = dt_from_name.replace(microsecond=file_time.microsecond)
+
+            # Apply the configured delay.
             final_dt = final_dt - datetime.timedelta(milliseconds=args.videodelay)
+
             offset = final_dt.timestamp()
             creation_time_iso = final_dt.isoformat(timespec='microseconds') + "Z"
 
@@ -128,19 +135,24 @@ async def watch_videos():
             try:
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_f:
                     modified_file = temp_f.name
+
                 ffmpeg_cmd_list = [
                     'ffmpeg', '-y', '-i', filepath, '-c', 'copy', '-movflags',
                     '+faststart', '-metadata', f"creation_time={creation_time_iso}",
                     '-output_ts_offset', str(offset), modified_file
                 ]
+
                 proc = await asyncio.create_subprocess_exec(*ffmpeg_cmd_list, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 stdout, stderr = await proc.communicate()
+
                 if proc.returncode == 0:
+                    # Overwrite original file content to preserve ownership and permissions
                     with open(filepath, 'wb') as dest_f, open(modified_file, 'rb') as src_f:
                         shutil.copyfileobj(src_f, dest_f)
                 else:
                     logging.error(f"FFmpeg failed for {filepath}. Stderr: {stderr.decode()}")
                     continue
+            
             finally:
                 if modified_file and os.path.exists(modified_file):
                     os.remove(modified_file)
@@ -150,8 +162,10 @@ async def watch_videos():
             # --- File Organization ---
             cam = int(id_str) % 10
             dt_for_path = final_dt + datetime.timedelta(seconds=20)
+            
             remotedir = os.path.join(args.remotedir, f'cam{cam}', dt_for_path.strftime('%Y%m%d'), dt_for_path.strftime('%H'))
             os.makedirs(remotedir, exist_ok=True)
+
             file_prefix = 'mini_' if eventdir.endswith('SD') else 'full_'
             remotefile = os.path.join(remotedir, f"{file_prefix}{dt_for_path.strftime('%M')}.mp4")
             
@@ -163,21 +177,13 @@ async def watch_videos():
             
             if eventdir.endswith('HD'):
                 jpgfile = os.path.join(remotedir, f"{file_prefix}{dt_for_path.strftime('%M')}.jpg")
-                
-                # FIX: Replace shell script with direct, non-blocking call to stack.py
-                try:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(
-                        None, stack.stack_video_frames, [filepath], jpgfile, 0.0, 0.2,
-                        False, 10.0, 95, os.cpu_count() or 1, False, True
-                    )
-                    
-                    if args.link:
-                        snapshot_link = os.path.join(args.remotedir, f'cam{cam}', 'snapshot.jpg')
-                        if os.path.lexists(snapshot_link): os.remove(snapshot_link)
-                        os.link(jpgfile, snapshot_link)
-                except Exception as stack_err:
-                    logging.error(f"Failed to stack video {filepath}: {stack_err}")
+
+                # Check for success before creating the snapshot link
+                rc = await run_command_async(VID2JPG_SH, filepath, jpgfile)
+                if rc == 0 and args.link:
+                    snapshot_link = os.path.join(args.remotedir, f'cam{cam}', 'snapshot.jpg')
+                    if os.path.lexists(snapshot_link): os.remove(snapshot_link)
+                    os.link(jpgfile, snapshot_link)
 
         except Exception as e:
             logging.exception(f"Error in video watcher loop: {e}")
@@ -193,8 +199,8 @@ async def watch_detections():
         try:
             (_, type_names, eventdir, eventfile) = event
             filepath = os.path.join(eventdir, eventfile)
+            dir_parts = eventdir.split('/')
             
-            # FIX: Corrected logic to find files in subdirectories
             if 'IN_CLOSE_WRITE' in type_names and eventfile.endswith(REDUCED_JSON_SUFFIX):
                 logging.info(f"Executing: {args.exefile} {filepath}")
                 await run_command_async(args.exefile, filepath)
@@ -203,30 +209,12 @@ async def watch_detections():
             logging.exception(f"Error in detection watcher loop: {e}")
             continue
 
-async def watch_self_for_changes():
-    """Periodically checks if the script file has been updated and restarts."""
-    logging.info('Self-update watcher started.')
-    while True:
-        await asyncio.sleep(60)  # Check every 60 seconds
-        try:
-            current_mod_time = os.path.getmtime(__file__)
-            if current_mod_time > _SELF_MOD_TIME:
-                logging.warning("Script has been updated. Restarting service...")
-                # This call replaces the current process with a new one
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-        except FileNotFoundError:
-            # This could happen during a file-save operation; ignore and retry
-            continue
-        except Exception as e:
-            logging.error(f"Error in self-update watcher: {e}")
-
 async def main():
     """Main function to run all watcher tasks concurrently."""
     logging.info("Starting AMS Mirror service.")
     await asyncio.gather(
         watch_detections(),
-        watch_videos(),
-        watch_self_for_changes()  # Add the self-watcher to the main tasks
+        watch_videos()
     )
 
 if __name__ == '__main__':

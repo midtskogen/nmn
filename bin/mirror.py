@@ -89,6 +89,9 @@ async def watch_videos():
             (_, _, eventdir, eventfile) = event
             filepath = os.path.join(eventdir, eventfile)
 
+            if not os.path.exists(filepath):
+                continue
+
             if filepath in processed_files:
                 continue
 

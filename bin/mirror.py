@@ -97,7 +97,7 @@ async def watch_videos():
 
             match = FILENAME_PATTERN.match(eventfile)
             if not match:
-                logging.warning(f"Skipping file with unexpected name format: {filepath}")
+                logging.info(f"Skipping file with unexpected name format: {filepath}")
                 continue
             
             id_str = match.groups()[-1]

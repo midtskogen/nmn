@@ -174,8 +174,10 @@ async def watch_videos():
             
             if eventdir.endswith('HD'):
                 jpgfile = os.path.join(remotedir, f"{file_prefix}{dt_for_path.strftime('%M')}.jpg")
-                await run_command_async(VID2JPG_SH, filepath, jpgfile)
-                if args.link:
+
+                # Check for success before creating the snapshot link
+                rc = await run_command_async(VID2JPG_SH, filepath, jpgfile)
+                if rc == 0 and args.link:
                     snapshot_link = os.path.join(args.remotedir, f'cam{cam}', 'snapshot.jpg')
                     if os.path.lexists(snapshot_link): os.remove(snapshot_link)
                     os.link(jpgfile, snapshot_link)

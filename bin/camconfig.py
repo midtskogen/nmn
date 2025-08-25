@@ -37,8 +37,8 @@ for ip in ips:
     widget_settings[0]["ChannelTitleAttribute"]["RelativePos"] = [8192, 8192, 0, 0]
     widget_settings[0]["ChannelTitleAttribute"]["EncodeBlend"] = False
     widget_settings[0]["Covers"][0]["EncodeBlend"] = True
-#    widget_settings[0]["Covers"][0]["RelativePos"] = [0, 7930, 1320, 8130]
-    widget_settings[0]["Covers"][0]["RelativePos"] = [0, 7930, 1540, 8140]
+    widget_settings[0]["Covers"][0]["RelativePos"] = [0, 7930, 1320, 8130]
+#    widget_settings[0]["Covers"][0]["RelativePos"] = [0, 7930, 1540, 8140]
     widget_settings[0]["TimeTitleAttribute"]["BackColor"] = "0xFF808080"
     widget_settings[0]["TimeTitleAttribute"]["EncodeBlend"] = True
     widget_settings[0]["TimeTitleAttribute"]["FrontColor"] = "0xFFFFFFFF"

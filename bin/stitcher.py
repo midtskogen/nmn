@@ -14,40 +14,40 @@ import datetime
 import pytz
 import json
 
+# --- Dependency Imports with User-Friendly Error Handling ---
 
 try:
     import pto_mapper
 except ImportError:
-    print("Error: The 'pto_mapper.py' module was not found.", file=sys.stderr)
-    print("Please ensure pto_mapper.py is in the same directory as this script.", file=sys.stderr)
+    print("FATAL ERROR: The required 'pto_mapper.py' module was not found.", file=sys.stderr)
+    print("Please ensure 'pto_mapper.py' is in the same directory as this script.", file=sys.stderr)
     sys.exit(1)
 
 try:
     from stack import enhance_filter
 except ImportError:
-    print("Error: The 'stack.py' module was not found.", file=sys.stderr)
-    print("Please ensure stack.py (containing the enhancement filter) is in the same directory.", file=sys.stderr)
+    print("FATAL ERROR: The 'stack.py' module was not found.", file=sys.stderr)
+    print("Please ensure 'stack.py' (containing the enhancement filter) is in the same directory.", file=sys.stderr)
     sys.exit(1)
-
 
 # The timestamp import is now deferred to the video processing function where it is needed.
 
 try:
     import av
 except ImportError:
-    print("Warning: 'PyAV' library not found. Video processing functionality will be unavailable.")
+    print("Warning: 'PyAV' library not found. Video processing functionality will be unavailable.", file=sys.stderr)
     av = None
 
 try:
     import scipy.ndimage as ndimage
 except ImportError:
-    print("Warning: 'scipy' not found. Seam finding, noise estimation, and leveling will be unavailable. Run 'pip install scipy'")
+    print("Warning: 'scipy' not found. Seam finding, noise estimation, and leveling will be unavailable. Run 'pip install scipy'", file=sys.stderr)
     ndimage = None
 
 try:
     import pandas as pd
 except ImportError:
-    print("Warning: 'pandas' not found. Seam leveling performance will be degraded. Run 'pip install pandas'")
+    print("Warning: 'pandas' not found. Seam leveling performance will be degraded. Run 'pip install pandas'", file=sys.stderr)
     pd = None
 
 
@@ -384,58 +384,59 @@ def _map_one_image(args):
 
 
 def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
-    global_options, images = pto_mapper.parse_pto_file(pto_file)
+    try:
+        global_options, images = pto_mapper.parse_pto_file(pto_file)
+    except Exception as e:
+        raise ValueError(f"Failed to parse PTO file '{pto_file}'. Reason: {e}")
 
     orig_w, orig_h = global_options.get('w'), global_options.get('h')
-    if orig_w is None or orig_h is None: raise ValueError("PTO 'p' line must contain width 'w' and height 'h'.")
+    if orig_w is None or orig_h is None: raise ValueError("PTO 'p' line must contain canvas width 'w' and height 'h'.")
+    
+    # Get panorama settings with safe defaults
+    pano_s = global_options.get('s', 1.0)
     pano_proj_f = int(global_options.get('f', 2))
     pano_hfov = global_options.get('v')
     pano_r = global_options.get('r', 0.0)
-    pano_s = global_options.get('s', 1.0)
-    if pano_s <= 0: raise ValueError("Panorama scale factor 's' must be greater than 0.")
+
+    if pano_s <= 0: raise ValueError("PTO panorama scale factor 's' must be greater than 0.")
     if pano_hfov is None: raise ValueError("PTO 'p' line must have HFOV 'v' for projection calculations.")
 
+    # Get crop coordinates. If 'S' line is missing, default to the full canvas size.
     crop_coords = global_options.get('S')
     if crop_coords:
-        left, top, right, bottom = crop_coords
+        # If 'S' line exists, use its values in the correct L, R, T, B order
+        left, right, top, bottom = crop_coords
     else:
+        print("INFO: No crop 'S' line found in PTO file. Using full canvas dimensions.")
         left, top, right, bottom = 0, 0, orig_w, orig_h
 
     # Calculate final dimensions based on crop and scale
     final_w = int(round((right - left) * pano_s))
     final_h = int(round((bottom - top) * pano_s))
+    
+    # --- CRITICAL VALIDATION WITH DETAILED FEEDBACK ---
+    if final_w <= 0 or final_h <= 0:
+        error_details = (
+            f"Calculated final panorama dimensions are invalid: {final_w}x{final_h}.\n\n"
+            f"🕵️ Here's how these dimensions were calculated from your PTO file:\n"
+            f"  - Crop Box (Left, Right, Top, Bottom): ({left}, {right}, {top}, {bottom})\n"
+            f"  - Scale Factor ('s'): {pano_s}\n"
+            f"  - Width Formula: (Right - Left) * Scale = ({right} - {left}) * {pano_s} = {final_w}\n"
+            f"  - Height Formula: (Bottom - Top) * Scale = ({bottom} - {top}) * {pano_s} = {final_h}\n\n"
+            f"The error is because the crop width (Right - Left) or height (Bottom - Top) is zero or negative.\n"
+            f"Please correct the 'S' line in '{os.path.basename(pto_file)}'."
+        )
+        raise ValueError(error_details)
 
     # Ensure coordinates are even for YUV processing compatibility
     left &= ~1; top &= ~1; right &= ~1; bottom &= ~1
     
     if is_video_output:
-        # For video, height must be even
         if final_h % 2 != 0: final_h -= 1
-
-        # For video, width must be divisible by 32 for the codec
         if final_w % 32 != 0:
             original_w = final_w
-            padded_w = ((original_w + 31) // 32) * 32
-            
-            # Calculate how much padding is needed
-            padding_needed = padded_w - original_w
-            pad_left = padding_needed // 2
-            
-            # Adjust original crop window before scaling
-            new_left_unscaled = left - pad_left / pano_s
-            
-            # Shift the window if it extends beyond the panorama's boundaries
-            if new_left_unscaled + (padded_w / pano_s) > orig_w:
-                new_left_unscaled = orig_w - (padded_w / pano_s)
-            
-            if new_left_unscaled < 0:
-                new_left_unscaled = 0
-
-            left = int(new_left_unscaled) & ~1
-            final_w = int(round((right - left) * pano_s))
-            final_w = ((final_w + 31) // 32) * 32 # Recalculate to be safe
-            
-            print(f"Warning: Output width {original_w} is not divisible by 32. Adjusting crop to produce {final_w}x{final_h} video.", file=sys.stderr)
+            final_w = ((original_w + 31) // 32) * 32
+            print(f"Warning: Output width {original_w} is not optimal for video. Adjusting to {final_w} for codec compatibility.", file=sys.stderr)
 
     crop_offset_x = left
     crop_offset_y = top
@@ -476,7 +477,13 @@ def load_image_to_yuv(image_path, pad, padsides):
         # Fallback for older versions
         resample_filter = Image.BICUBIC
 
-    img_pil = Image.open(image_path).convert("RGB")
+    try:
+        img_pil = Image.open(image_path).convert("RGB")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Input image not found at path: {image_path}")
+    except Exception as e:
+        raise IOError(f"Could not open or read image file '{image_path}'. Reason: {e}")
+        
     img_ycbcr = img_pil.convert("YCbCr")
     y, u, v = img_ycbcr.split()
     
@@ -515,18 +522,27 @@ def load_image_to_yuv(image_path, pad, padsides):
 
 
 def save_image_yuv420(y_plane, u_plane, v_plane, output_path):
-    # Add a compatibility check for different Pillow versions
+    # --- Robustness Check ---
+    if y_plane is None or y_plane.size == 0:
+        raise ValueError("Cannot save image: The final luma (Y) plane is empty.")
+
     try:
-        resample_filter = Image.Resampling.BICUBIC
-    except AttributeError:
-        # Fallback for older versions
-        resample_filter = Image.BICUBIC
-        
-    h, w = y_plane.shape
-    y_img = Image.fromarray(y_plane,"L")
-    u_img = Image.fromarray(u_plane,"L").resize((w,h), resample_filter)
-    v_img = Image.fromarray(v_plane,"L").resize((w,h), resample_filter)
-    Image.merge("YCbCr", (y_img,u_img,v_img)).convert("RGB").save(output_path, "JPEG", quality=95)
+        # Add a compatibility check for different Pillow versions
+        try:
+            resample_filter = Image.Resampling.BICUBIC
+        except AttributeError:
+            # Fallback for older versions
+            resample_filter = Image.BICUBIC
+            
+        h, w = y_plane.shape
+        y_img = Image.fromarray(y_plane,"L")
+        u_img = Image.fromarray(u_plane,"L").resize((w,h), resample_filter)
+        v_img = Image.fromarray(v_plane,"L").resize((w,h), resample_filter)
+        Image.merge("YCbCr", (y_img,u_img,v_img)).convert("RGB").save(output_path, "JPEG", quality=95)
+    except Exception as e:
+        # Catch errors from Pillow (e.g., cannot write empty image) or filesystem (permission denied)
+        raise IOError(f"Failed to save the final image to '{output_path}'. Reason: {e}")
+
 
 def process_and_reproject_image(args):
     """Worker function to reproject a single image, writing to pre-allocated buffers."""
@@ -794,21 +810,16 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images:
-        raise ValueError(f"Input files ({len(input_files)}) != PTO images ({num_images}).")
+        raise ValueError(f"Number of input files ({len(input_files)}) does not match the number of images in the PTO file ({num_images}).")
 
-    # --- Start of Proposed Optimization ---
+    # --- Start of Optimized Path for a Single Image ---
     if num_images == 1:
         print("INFO: Single image detected, taking optimized path.")
-    
-        # Directly get the required variables instead of reading from process_args
         input_path = input_files[0]
         mapping = mappings[0]
         dw, dh = final_w, final_h
-        # The 'pad' and 'padsides' arguments are already available in the function's scope.
 
-        # Directly reproject the image without any weight maps
         py, pu, pv, _, _ = load_image_to_yuv(input_path, pad, padsides)
-    
         map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
     
         y_final = np.zeros((dh, dw), dtype=np.uint8)
@@ -826,29 +837,31 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
             v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
         save_image_yuv420(y_final, u_final, v_final, output_file)
-        print(f"Panoramic image saved to {output_file}")
+        print(f"✅ Success! Panoramic image saved to {output_file}")
         return # End execution here for the single-image case
 
-# --- Validate image dimensions before processing ---
+    # --- Validate image dimensions before multi-image processing ---
+    print("Validating input image dimensions...")
     for i, input_path in enumerate(input_files):
         try:
             with Image.open(input_path) as img:
                 actual_w, actual_h = img.size
         except Exception as e:
-            raise FileNotFoundError(f"Could not open or read image file: {input_path}. Error: {e}")
+            raise FileNotFoundError(f"Could not open or read image file: '{input_path}'. Error: {e}")
         
         expected_w = mappings[i][4]
         expected_h = mappings[i][5]
 
         if actual_w != expected_w or actual_h != expected_h:
             raise ValueError(
-                f"Dimension mismatch for '{os.path.basename(input_path)}'. "
+                f"Dimension mismatch for '{os.path.basename(input_path)}'.\n"
                 f"Image is {actual_w}x{actual_h}, but PTO file expects {expected_w}x{expected_h}."
             )
 
     # Eagerly compile Numba functions before entering the thread pool
     _precompile_numba_functions()
 
+    print("Reprojecting source images...")
     all_reproj_y = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     all_reproj_u = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     all_reproj_v = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
@@ -866,18 +879,20 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
 
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         list(executor.map(process_and_reproject_image, process_args))
+    print("Reprojection complete.")
 
     y_planes = all_reproj_y
     u_planes = all_reproj_u
     v_planes = all_reproj_v
     
     if use_seam:
+        print("Calculating optimal seams...")
         y_weight_stack = all_weights_y
         penalty_stack = all_penalty_y
         final_weights_y, final_weights_uv, penalized_scores = _calculate_seam_blend_weights(y_weight_stack, penalty_stack, seam_subsample)
         
         if num_images > 1:
-            print("Leveling seams...")
+            print("Leveling seams for consistent brightness and color...")
             background_mask = np.max(y_weight_stack, axis=0) < 1e-9
             y_indices = np.argmax(penalized_scores, axis=0)
             y_indices[background_mask] = -1
@@ -899,11 +914,13 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
             
         masking_stack = penalized_scores
     else: # Feathering
+        print("Calculating feather blending weights...")
         y_weight_stack = all_weights_y
         uv_weight_stack = all_weights_uv
         final_weights_y, final_weights_uv = _calculate_feather_blend_weights(y_weight_stack, uv_weight_stack)
         masking_stack = y_weight_stack
 
+    print("Blending final panorama...")
     y_final, u_final, v_final = _blend_final_image(y_planes, u_planes, v_planes, final_weights_y, final_weights_uv, masking_stack)
 
     if enhance:
@@ -913,8 +930,9 @@ def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_su
         u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
         v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
+    print("Saving final image...")
     save_image_yuv420(y_final, u_final, v_final, output_file)
-    print(f"Panoramic image saved to {output_file}")
+    print(f"✅ Success! Panoramic image saved to {output_file}")
 
 def worker_for_video_frame(args):
     """Worker function for video frames, writing to pre-allocated buffers."""
@@ -1153,40 +1171,49 @@ def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
     return synchronized_frame_groups
 
 def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, level_freq, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False):
-    if av is None: raise ImportError("PyAV is not installed.")
+    if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")
     
-    # Eagerly compile Numba functions before entering the thread pool
     _precompile_numba_functions()
 
     # --- Start of Single-Video Optimization ---
     if num_images == 1:
         print("INFO: Single video detected, taking optimized path.")
-
-        # --- Simplified Setup ---
         input_path = input_files[0]
         mapping = mappings[0]
         dw, dh = final_w, final_h
 
-        in_container = av.open(input_path)
-        in_stream = in_container.streams.video[0]
-        in_stream.thread_type = 'AUTO'
+        try:
+            in_container = av.open(input_path)
+            in_stream = in_container.streams.video[0]
+            in_stream.thread_type = 'AUTO'
+            total_frames = in_stream.frames if in_stream.frames > 0 else 0
+            
+            out_container = av.open(output_file, mode='w')
+            out_stream = out_container.add_stream("libx264", rate=in_stream.average_rate)
+            out_stream.width, out_stream.height, out_stream.pix_fmt = dw, dh, 'yuv420p'
+            out_stream.options = {"preset": "fast", "crf": "28"}
+        except av.AVError as e:
+            raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
         
-        total_frames = in_stream.frames if in_stream.frames > 0 else 0
+        map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
         frame_count = 0
 
-        out_container = av.open(output_file, mode='w')
-        out_stream = out_container.add_stream("libx264", rate=in_stream.average_rate)
-        out_stream.width, out_stream.height, out_stream.pix_fmt = dw, dh, 'yuv420p'
-        out_stream.options = {"preset": "fast", "crf": "28"}
-
-        map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
-
-        # --- Simplified Frame-by-Frame Processing Loop ---
+        # --- Create output frame once to improve performance and stability ---
+        try:
+            out_frame = av.VideoFrame(width=dw, height=dh, format='yuv420p')
+            if not out_frame.planes or not out_frame.planes[0]:
+                raise RuntimeError() # Will be caught below
+        except Exception:
+            raise RuntimeError(
+                f"Failed to allocate video frame buffer with dimensions {dw}x{dh}.\n"
+                "Please check system memory and ensure PTO parameters result in valid dimensions."
+            )
+        
         for frame in in_container.decode(in_stream):
             frame_count += 1
             if total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
@@ -1200,13 +1227,11 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
 
             if frame.format.name not in ("yuv420p", "yuvj420p"): frame = frame.reformat(format="yuv420p")
             
-            # Get frame dimensions and reshape the planes to 2D before padding
             sw, sh = frame.width, frame.height
             py_src = np.asarray(frame.planes[0]).reshape(sh, sw)
             pu_src = np.asarray(frame.planes[1]).reshape(sh // 2, sw // 2)
             pv_src = np.asarray(frame.planes[2]).reshape(sh // 2, sw // 2)
             
-            # Pad the source planes to match what the mapping expects
             pad_t = pad if 'top' in padsides else 0; pad_b = pad if 'bottom' in padsides else 0
             pad_l = pad if 'left' in padsides else 0; pad_r = pad if 'right' in padsides else 0
             pad_y_width = ((pad_t, pad_b), (pad_l, pad_r)); pad_uv_width = ((pad_t//2, pad_b//2), (pad_l//2, pad_r//2))
@@ -1215,12 +1240,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             pu_padded = np.pad(pu_src, pad_uv_width, mode='edge')
             pv_padded = np.pad(pv_src, pad_uv_width, mode='edge')
 
-            # Allocate final frame buffers
             y_final = np.zeros((dh, dw), dtype=np.uint8)
             u_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
             v_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
 
-            # Reproject directly into the final buffers
             reproject_y(py_padded.ravel(), dw, dh, py_padded.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel())
             reproject_uv(pu_padded.ravel(), pv_padded.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel())
             
@@ -1230,18 +1253,15 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                 u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
                 v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
-            # Create and encode the output frame
-            out_frame = av.VideoFrame(width=dw, height=dh, format='yuv420p')
+            # --- Update and encode the single, reused output frame ---
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
                 
-        # Finalize video file
         if total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
         for packet in out_stream.encode(): out_container.mux(packet)
-        out_container.close()
-        in_container.close()
-        print(f"\nPanoramic video saved to {output_file}")
+        out_container.close(); in_container.close()
+        print(f"\n✅ Success! Panoramic video saved to {output_file}")
         return
     # --- End of Single-Video Optimization ---
 
@@ -1250,18 +1270,19 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     if use_sync:
         if load_sync_file:
             print(f"Loading sync map from {load_sync_file}...")
-            with open(load_sync_file, 'r') as f:
-                synchronized_frame_groups = json.load(f)
-            print(f"Loaded {len(synchronized_frame_groups)} synchronized frame groups.")
+            try:
+                with open(load_sync_file, 'r') as f:
+                    synchronized_frame_groups = json.load(f)
+                print(f"Loaded {len(synchronized_frame_groups)} synchronized frame groups.")
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                raise ValueError(f"Could not load or parse sync file '{load_sync_file}'. Reason: {e}")
         else:
             print("Starting Pass 1: Timestamp analysis (utilizing all available cores)...")
             try:
                 with ThreadPoolExecutor(max_workers=num_cores) as executor:
                     raw_ts_data_unordered = list(executor.map(_extract_timestamps_from_file, [(i, f, model) for i, f in enumerate(input_files)]))
             except ImportError:
-                print("\nError: The 'timestamp.py' module is required for the --sync feature but was not found.", file=sys.stderr)
-                print("Please ensure timestamp.py is in the same directory as this script.", file=sys.stderr)
-                sys.exit(1)
+                raise ImportError("\nThe 'timestamp.py' module is required for the --sync feature but was not found.")
             
             raw_ts_data = [d for _, d in sorted(raw_ts_data_unordered)]
 
@@ -1275,8 +1296,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             synchronized_frame_groups = _find_synchronized_frames(cleaned_ts_data, sync_tolerance)
 
             if not synchronized_frame_groups:
-                print("\nError: Could not find any synchronized frames. Aborting.", file=sys.stderr)
-                return
+                raise RuntimeError("Could not find any synchronized frames. Aborting.")
                 
             print(f"Found {len(synchronized_frame_groups)} synchronized frame groups to stitch.")
 
@@ -1288,15 +1308,18 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
 
     # --- Stitching Pass ---
     print("\nStarting stitching process...")
-    in_containers = [av.open(f) for f in input_files]
-    in_streams = [c.streams.video[0] for c in in_containers]
-    for s in in_streams: s.thread_type = 'AUTO'
+    try:
+        in_containers = [av.open(f) for f in input_files]
+        in_streams = [c.streams.video[0] for c in in_containers]
+        for s in in_streams: s.thread_type = 'AUTO'
 
-    out_container = av.open(output_file, mode='w')
-    out_stream = out_container.add_stream("libx264", rate=in_streams[0].average_rate)
-    out_stream.width, out_stream.height, out_stream.pix_fmt = final_w, final_h, 'yuv420p'
-    out_stream.options = {"preset": "fast", "crf": "28"}
-    
+        out_container = av.open(output_file, mode='w')
+        out_stream = out_container.add_stream("libx264", rate=in_streams[0].average_rate)
+        out_stream.width, out_stream.height, out_stream.pix_fmt = final_w, final_h, 'yuv420p'
+        out_stream.options = {"preset": "fast", "crf": "28"}
+    except av.AVError as e:
+        raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
+        
     total_frames = 0
     if use_sync:
         total_frames = len(synchronized_frame_groups)
@@ -1316,87 +1339,73 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
     frame_penalty_y = np.empty((num_images, final_h, final_w), dtype=np.float32) if use_seam else None
     
     blend_weights_y, blend_weights_uv, corner_penalties_y = [], [], []
-    pad_t = pad if 'top' in padsides else 0
-    pad_b = pad if 'bottom' in padsides else 0
-    pad_l = pad if 'left' in padsides else 0
-    pad_r = pad if 'right' in padsides else 0
+    pad_t = pad if 'top' in padsides else 0; pad_b = pad if 'bottom' in padsides else 0
+    pad_l = pad if 'left' in padsides else 0; pad_r = pad if 'right' in padsides else 0
     
     for i, stream in enumerate(in_streams):
         sw_map, sh_map = mappings[i][4], mappings[i][5]
         sw_padded, sh_padded = sw_map + pad_l + pad_r, sh_map + pad_t + pad_b
-        weights_y = create_blend_weight_map(sw_padded, sh_padded)
-        blend_weights_y.append(weights_y)
-        blend_weights_uv.append(np.ascontiguousarray(weights_y[::2, ::2]))
-        if use_seam:
-            corner_penalties_y.append(create_corner_penalty_map(sw_padded, sh_padded))
+        blend_weights_y.append(create_blend_weight_map(sw_padded, sh_padded))
+        if use_seam: corner_penalties_y.append(create_corner_penalty_map(sw_padded, sh_padded))
 
     frame_iters = [c.decode(s) for c, s in zip(in_containers, in_streams)]
     frame_count = 0
-    
     loop_iterator = synchronized_frame_groups if use_sync else zip(*frame_iters)
     
+    # --- Create output frame once to improve performance and stability ---
+    try:
+        out_frame = av.VideoFrame(width=final_w, height=final_h, format='yuv420p')
+        if not out_frame.planes or not out_frame.planes[0]:
+            raise RuntimeError() # Will be caught below
+    except Exception:
+        raise RuntimeError(
+            f"FATAL: Failed to allocate video frame buffer with dimensions {final_w}x{final_h}.\n"
+            "This is the root cause of the 'IndexError'.\n"
+            "Please check that the crop ('S') and scale ('s') parameters in your PTO file produce valid, non-zero dimensions."
+        )
+
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         current_frame_indices = [-1] * num_images
         
         for group in loop_iterator:
             final_group_frames = [None] * num_images
-            
             if use_sync:
                 target_indices = group
                 for i, target_idx in enumerate(target_indices):
                     if target_idx == -1: continue
-                    
                     frame = None
                     try:
                         while current_frame_indices[i] < target_idx:
                             frame = next(frame_iters[i])
                             current_frame_indices[i] += 1
-                        
                         if frame and current_frame_indices[i] == target_idx:
                              final_group_frames[i] = frame
-                        else:
-                             raise StopIteration
+                        else: raise StopIteration
                     except StopIteration:
                         print(f"\nWarning: Stream {i} ended unexpectedly while seeking frame {target_idx}. Terminating.", file=sys.stderr)
-                        group = None 
-                        break
+                        group = None; break
                 if group is None: break
-
             else:
-                try:
-                    final_group_frames = list(group)
-                except StopIteration:
-                    break
+                try: final_group_frames = list(group)
+                except StopIteration: break
             
-            if any(f is None for f in final_group_frames):
-                continue
-
+            if any(f is None for f in final_group_frames): continue
             frame_count += 1
             
-            if total_frames > 0:
-                # Only update progress if we are not past the expected total and it's time for an update.
-                if frame_count <= total_frames and (frame_count % 5 == 0 or frame_count == total_frames):
-                    percent_done = (frame_count / total_frames) * 100
-                    if sys.stderr.isatty():
-                        # Human-readable progress bar
-                        bar_length = 40
-                        filled_len = int(round(bar_length * frame_count / float(total_frames)))
-                        bar = '█' * filled_len + '-' * (bar_length - filled_len)
-                        sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r')
-                        sys.stderr.flush()
-                    else:
-                        # Machine-readable output for scripts
-                        print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
+            if total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
+                percent_done = (frame_count / total_frames) * 100
+                if sys.stderr.isatty():
+                    bar_length = 40; filled_len = int(round(bar_length*frame_count/float(total_frames)))
+                    bar = '█'*filled_len + '-'*(bar_length - filled_len)
+                    sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
+                else: print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
             is_leveling_frame = (use_seam and num_images > 1 and (frame_count == 1 or (frame_count - 1) % level_freq == 0))
-            
             worker_args = [
-                (
-                    (i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], blend_weights_uv[i], pad, use_seam, corner_penalties_y[i] if use_seam else None, padsides),
-                    (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i], frame_penalty_y[i] if use_seam else None)
-                ) for i in range(num_images) if final_group_frames[i] is not None
+                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, use_seam, corner_penalties_y[i] if use_seam else None, padsides),
+                 (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i], frame_penalty_y[i] if use_seam else None))
+                for i in range(num_images) if final_group_frames[i] is not None
             ]
-            
             list(executor.map(worker_for_video_frame, worker_args))
             
             y_planes, u_planes, v_planes = frame_y_planes, frame_u_planes, frame_v_planes
@@ -1407,21 +1416,18 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                 final_weights_y, final_weights_uv, penalized_scores = cached_seam_weights
                 masking_stack = penalized_scores
                 if is_leveling_frame:
-                    y_indices = np.argmax(penalized_scores, axis=0)
-                    y_indices[np.max(frame_weights_y, axis=0) < 1e-9] = -1
+                    y_indices = np.argmax(penalized_scores, axis=0); y_indices[np.max(frame_weights_y, axis=0) < 1e-9] = -1
                     new_params = solve_corrections(y_indices, y_planes, u_planes, v_planes, num_images, level_subsample)
                     previous_leveling_params = target_leveling_params if target_leveling_params is not None else new_params
                     target_leveling_params = new_params
                     recalc_frame_number = frame_count
                 if target_leveling_params:
-                    alpha = min((frame_count - recalc_frame_number) / level_freq, 1.0)
-                    p_gain, p_y_off, p_u_off, p_v_off = previous_leveling_params
-                    t_gain, t_y_off, t_u_off, t_v_off = target_leveling_params
-                    interp_gain, interp_y_off, interp_u_off, interp_v_off = (1 - alpha) * p_gain + alpha * t_gain, (1 - alpha) * p_y_off + alpha * t_y_off, (1 - alpha) * p_u_off + alpha * t_u_off, (1 - alpha) * p_v_off + alpha * t_v_off
-                    y_planes_leveled, u_planes_leveled, v_planes_leveled = y_planes.astype(np.float32), u_planes.astype(np.float32), v_planes.astype(np.float32)
+                    alpha = min((frame_count-recalc_frame_number)/level_freq, 1.0)
+                    p_gain,p_y_off,p_u_off,p_v_off=previous_leveling_params; t_gain,t_y_off,t_u_off,t_v_off=target_leveling_params
+                    interp_gain,interp_y_off,interp_u_off,interp_v_off = (1-alpha)*p_gain+alpha*t_gain, (1-alpha)*p_y_off+alpha*t_y_off, (1-alpha)*p_u_off+alpha*t_u_off, (1-alpha)*p_v_off+alpha*t_v_off
+                    y_planes_leveled,u_planes_leveled,v_planes_leveled = y_planes.astype(np.float32),u_planes.astype(np.float32),v_planes.astype(np.float32)
                     _apply_gain_offset_numba(y_planes_leveled, interp_gain, interp_y_off)
-                    _apply_offset_numba(u_planes_leveled, interp_u_off)
-                    _apply_offset_numba(v_planes_leveled, interp_v_off)
+                    _apply_offset_numba(u_planes_leveled, interp_u_off); _apply_offset_numba(v_planes_leveled, interp_v_off)
                     y_planes, u_planes, v_planes = y_planes_leveled, u_planes_leveled, v_planes_leveled
             else:
                 final_weights_y, final_weights_uv = _calculate_feather_blend_weights(frame_weights_y, frame_weights_uv)
@@ -1434,20 +1440,17 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                 y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
                 u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
                 v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-
-            out_frame = av.VideoFrame(width=final_w, height=final_h, format='yuv420p')
+            
+            # --- Update and encode the single, reused output frame ---
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
 
-    if total_frames > 0 and sys.stderr.isatty():
-        sys.stderr.write("\n")
-        sys.stderr.flush()
+    if total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
 
     for packet in out_stream.encode(): out_container.mux(packet)
-    out_container.close()
-    for c in in_containers: c.close()
-    print(f"\nPanoramic video saved to {output_file}")
+    out_container.close(); [c.close() for c in in_containers]
+    print(f"\n✅ Success! Panoramic video saved to {output_file}")
 
 def main():
     try:
@@ -1457,46 +1460,53 @@ def main():
     print(f"INFO: Detected {num_cores} available CPU cores.")
     numba.set_num_threads(num_cores)
     
-    parser = argparse.ArgumentParser(description="Reproject and stitch images or videos into a panorama.")
-    parser.add_argument("pto_file", help="Path to the PTO project file.")
-    parser.add_argument("input_files", nargs='+', help="One or more input image or video files.")
+    parser = argparse.ArgumentParser(
+        description="Reproject and stitch images or videos into a panorama based on a Hugin .pto file.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("pto_file", help="Path to the Hugin PTO project file.")
+    parser.add_argument("input_files", nargs='+', help="One or more input image or video files (must all be same type).")
     parser.add_argument("output_file", help="Path for the output panoramic image or video.")
-    parser.add_argument("--pad", type=int, default=32, help="Padding (pixels) for seamless stitching. Defaults to 32.")
-    parser.add_argument("--padsides", type=str, default="left,top,right,bottom", help='Comma-separated sides to pad (e.g., "left,top,right,bottom"). Defaults to all sides.')
+    parser.add_argument("--pad", type=int, default=32, help="Padding (pixels) for seamless stitching. (default: 32)")
+    parser.add_argument("--padsides", type=str, default="left,top,right,bottom", help='Comma-separated sides to pad (default: "left,top,right,bottom")')
     parser.add_argument("--seamless", action='store_true', help="Enable optimal seam finding with feathering and leveling.")
-    parser.add_argument("--level-subsample", type=int, default=16, help="Subsampling factor for seam leveling to improve performance. Higher is faster. Defaults to 16.")
-    parser.add_argument("--seam-subsample", type=int, default=16, help="Subsampling factor for the seam finder to improve performance. Higher is faster. Defaults to 16.")
-    parser.add_argument("--level-freq", type=int, default=8, help="Frequency of seam leveling recalculation for videos. Defaults to 8 frames.")
-    parser.add_argument("--sync", action='store_true', help="For videos, synchronize streams by their embedded timestamps before stitching.")
-    parser.add_argument("--model", type=str, default=None, help="Specify the model for timestamp extraction.")
-    parser.add_argument("--save-sync", type=str, default=None, help="Save the synchronization map to a JSON file (requires --sync).")
-    parser.add_argument("--load-sync", type=str, default=None, help="Load a pre-computed synchronization map from a JSON file (requires --sync).")
-    parser.add_argument("--enhance", action='store_true', help="Apply an adaptive enhancement filter to the final output for noise and artifact reduction.")
+    parser.add_argument("--level-subsample", type=int, default=16, help="Subsampling factor for seam leveling to improve performance. Higher is faster. (default: 16)")
+    parser.add_argument("--seam-subsample", type=int, default=16, help="Subsampling factor for the seam finder to improve performance. Higher is faster. (default: 16)")
+    parser.add_argument("--level-freq", type=int, default=8, help="Frequency of seam leveling recalculation for videos (in frames). (default: 8)")
+    parser.add_argument("--enhance", action='store_true', help="Apply an adaptive enhancement filter to reduce noise and artifacts.")
+    
+    sync_group = parser.add_argument_group('Video Synchronization Options')
+    sync_group.add_argument("--sync", action='store_true', help="Synchronize video streams by their embedded timestamps before stitching.")
+    sync_group.add_argument("--model", type=str, default=None, help="Specify the model for timestamp extraction.")
+    sync_group.add_argument("--save-sync", type=str, default=None, help="Save the synchronization map to a JSON file (requires --sync).")
+    sync_group.add_argument("--load-sync", type=str, default=None, help="Load a pre-computed synchronization map from a JSON file (requires --sync).")
+    
     args = parser.parse_args()
     
     # --- Argument Validation ---
     if args.save_sync and args.load_sync:
-        print("Error: --save-sync and --load-sync cannot be used at the same time.", file=sys.stderr)
-        sys.exit(1)
+        print("Error: --save-sync and --load-sync cannot be used at the same time.", file=sys.stderr); sys.exit(1)
     if (args.save_sync or args.load_sync) and not args.sync:
-        print("Error: --save-sync and --load-sync require the --sync flag to be enabled.", file=sys.stderr)
-        sys.exit(1)
+        print("Error: --save-sync and --load-sync require the --sync flag to be enabled.", file=sys.stderr); sys.exit(1)
     if len(args.input_files) < 2:
-        args.seamless = False
-        args.sync = False
+        if args.seamless: print("INFO: --seamless option ignored for a single input file."); args.seamless = False
+        if args.sync: print("INFO: --sync option ignored for a single input file."); args.sync = False
     if not args.input_files:
-        print("Error: No input files specified.", file=sys.stderr)
-        sys.exit(1)
+        print("Error: No input files specified.", file=sys.stderr); sys.exit(1)
+
+    for f in [args.pto_file] + args.input_files:
+        if not os.path.exists(f):
+            print(f"Error: Input file not found: {f}", file=sys.stderr); sys.exit(1)
 
     padsides_set = {s.strip().lower() for s in args.padsides.split(',') if s.strip()}
     valid_sides = {"left", "top", "right", "bottom"}
     if not padsides_set.issubset(valid_sides):
-        print(f"Error: Invalid side(s) in --padsides: {','.join(padsides_set - valid_sides)}", file=sys.stderr)
-        sys.exit(1)
+        print(f"Error: Invalid side(s) in --padsides: {','.join(padsides_set - valid_sides)}", file=sys.stderr); sys.exit(1)
         
     is_image_input = all(f.lower().endswith(('.jpg', '.jpeg', '.png')) for f in args.input_files)
     is_video_input = all(f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')) for f in args.input_files)
     
+    # --- Main Execution with Global Error Handling ---
     try:
         if is_image_input:
             reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, padsides_set, args.enhance)
@@ -1508,10 +1518,15 @@ def main():
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance
             )
         else:
-            print("Error: Input files must all be either images or videos.", file=sys.stderr)
+            print("Error: Input files must all be of the same type (either all images or all videos).", file=sys.stderr)
             sys.exit(1)
-    except (ValueError, FileNotFoundError, ImportError, KeyboardInterrupt) as e:
-        print(f"\nAn error occurred: {e}", file=sys.stderr)
+    except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
+        print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ An unexpected critical error occurred:\n{e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":

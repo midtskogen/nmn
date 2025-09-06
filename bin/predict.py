@@ -87,7 +87,7 @@ def main():
     parser.add_argument(
         'files',
         nargs='+',
-        help="Path to one or more image files to classify."
+        help="Path to one or more image or video files to classify."
     )
     args = parser.parse_args()
 
@@ -114,18 +114,27 @@ def main():
     # Process each file
     with torch.no_grad():
         for file_path in args.files:
+            path_to_process = file_path
             try:
-                img = Image.open(file_path).convert('RGB')
+                # If a video file is given, automatically switch to the corresponding .jpg
+                if any(file_path.lower().endswith(ext) for ext in ['.webm', '.mp4', '.avi', '.mov', '.mkv']):
+                    base, _ = os.path.splitext(file_path)
+                    path_to_process = base + '.jpg'
+                    print(f"Info: Video file detected, processing '{os.path.basename(path_to_process)}' instead.", file=sys.stderr)
+
+                img = Image.open(path_to_process).convert('RGB')
                 tensor = transform(img).unsqueeze(0).to(device)
                 
                 # The model is trained to output P(non_meteor), so P(meteor) is 1.0 - output
                 pred_prob_non_meteor = model(tensor).item()
                 final_prob_meteor = 1.0 - pred_prob_non_meteor
                 
-                print(f"{os.path.basename(file_path)}: {final_prob_meteor:.6f}")
+                # Use the basename of the originally provided file for the output
+                base_name = os.path.basename(os.path.splitext(file_path)[0])
+                print(f"{base_name}: {final_prob_meteor:.6f}")
 
             except FileNotFoundError:
-                print(f"Error: File not found at '{file_path}'", file=sys.stderr)
+                print(f"Error: File not found at '{path_to_process}'", file=sys.stderr)
             except Exception as e:
                 print(f"Error: Could not process file '{file_path}': {e}", file=sys.stderr)
 

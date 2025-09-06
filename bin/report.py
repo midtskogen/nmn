@@ -178,7 +178,7 @@ def get_meteor_probability(event_dir: Path) -> float:
         print(f"Error running meteorcrop.py: {e}\nStderr: {e.stderr}", file=sys.stderr)
         return 0.0
 
-    fireball_jpg_path = event_dir / "fireball.jpg"
+    fireball_jpg_path = event_dir / "fireball_orig.jpg"
     if not fireball_jpg_path.is_file():
         print(f"Error: meteorcrop did not produce '{fireball_jpg_path.name}'.", file=sys.stderr)
         return 0.0

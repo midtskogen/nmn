@@ -33,12 +33,12 @@ except ImportError as e:
 
 
 # --- Constants ---
-METEOR_PROBABILITY_THRESHOLD = 0.5
+METEOR_PROBABILITY_THRESHOLD = 0.2278
 SSH_TUNNEL_CONFIG_PATH = '/etc/default/ssh_tunnel'
 REMOTE_REPORT_URL = "http://norskmeteornettverk.no/ssh/report.php"
 # Assume processing scripts are in the user's bin directory
 METEORCROP_PATH = Path.home() / "bin" / "meteorcrop.py"
-CLASSIFY_PATH = Path.home() / "bin" / "classify.py"
+PREDICT_PATH = Path.home() / "bin" / "predict.py"
 
 
 def load_config(event_file_path: Path) -> configparser.ConfigParser:
@@ -166,7 +166,7 @@ def generate_reports(config: configparser.ConfigParser, video_output: list, even
 
 def get_meteor_probability(event_dir: Path) -> float:
     """
-    Runs meteorcrop and classify scripts to determine the meteor probability.
+    Runs meteorcrop and predict scripts to determine the meteor probability.
     Returns the probability score as a float.
     """
     print("\n--- Starting Meteor Classification ---")
@@ -184,9 +184,9 @@ def get_meteor_probability(event_dir: Path) -> float:
         return 0.0
 
     try:
-        print(f"Running classify on '{fireball_jpg_path.name}'...")
-        classify_cmd = [sys.executable, str(CLASSIFY_PATH), "predict", str(fireball_jpg_path)]
-        result = subprocess.run(classify_cmd, check=True, capture_output=True, text=True)
+        print(f"Running predict on '{fireball_jpg_path.name}'...")
+        predict_cmd = [sys.executable, str(PREDICT_PATH), str(fireball_jpg_path)]
+        result = subprocess.run(predict_cmd, check=True, capture_output=True, text=True)
         
         output_line = result.stdout.strip()
         probability_str = output_line.split(' ')[-1]
@@ -194,7 +194,7 @@ def get_meteor_probability(event_dir: Path) -> float:
         print(f"Meteor probability: {probability:.4f}")
         return probability
     except (subprocess.CalledProcessError, ValueError, IndexError) as e:
-        print(f"Error getting probability from classify.py: {e}", file=sys.stderr)
+        print(f"Error getting probability from predict.py: {e}", file=sys.stderr)
         if isinstance(e, subprocess.CalledProcessError):
             print(f"Stderr: {e.stderr}", file=sys.stderr)
         return 0.0

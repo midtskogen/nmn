@@ -1,9 +1,0 @@
-{
-    "num_conv_layers": 3,
-    "dense_units": 512,
-    "dropout_rate": 0.20214007008786467,
-    "learning_rate": 0.0003753496002056344,
-    "conv_0_filters": 64,
-    "conv_1_filters": 128,
-    "conv_2_filters": 32
-}

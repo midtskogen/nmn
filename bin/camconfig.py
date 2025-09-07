@@ -34,7 +34,7 @@ for ip in ips:
     
     enc_settings = cam.get_info("AVEnc.Encode")
     enc_settings[0]["MainFormat"][0]["Video"]["Resolution"] = '1080P'
-    enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'WSVGA'
+    enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'HD1'
     enc_settings[0]["ExtraFormat"][1]["Video"]["Resolution"] = 'WSVGA'
     enc_settings[0]["ExtraFormat"][2]["Video"]["Resolution"] = 'WSVGA'
     cam.set_info("AVEnc.Encode", enc_settings)

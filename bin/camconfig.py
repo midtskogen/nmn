@@ -32,10 +32,12 @@ for ip in ips:
     cam.set_info("Camera.Param", cam_settings)
     cam.set_info("Camera.ParamEx", cam_settings)
     
-    enc_settings = cam.get_info("Simplify.Encode")
-    enc_settings[0]["MainFormat"]["Video"]["Resolution"] = '1080P'
-    enc_settings[0]["ExtraFormat"]["Video"]["Resolution"] = 'WSVGA'
-    cam.set_info("Simplify.Encode", enc_settings)
+    enc_settings = cam.get_info("AVEnc.Encode")
+    enc_settings[0]["MainFormat"][0]["Video"]["Resolution"] = '1080P'
+    enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'WSVGA'
+    enc_settings[0]["ExtraFormat"][1]["Video"]["Resolution"] = 'WSVGA'
+    enc_settings[0]["ExtraFormat"][2]["Video"]["Resolution"] = 'WSVGA'
+    cam.set_info("AVEnc.Encode", enc_settings)
 
     widget_settings = cam.get_info("AVEnc.VideoWidget")
     widget_settings[0]["ChannelTitle"]["Name"] = "NMN"

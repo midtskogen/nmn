@@ -161,18 +161,33 @@ async def watch_videos():
             else:
                 shutil.copy2(filepath, remotefile)
             
-            if eventdir.endswith('HD'):
+            # --- JPG Stacking ---
+            # Stack a short clip for HD videos and the entire clip for SD videos.
+            if eventdir.endswith('HD') or eventdir.endswith('SD'):
                 jpgfile = os.path.join(remotedir, f"{file_prefix}{dt_for_path.strftime('%M')}.jpg")
                 
-                # FIX: Replace shell script with direct, non-blocking call to stack.py
+                # For HD, stack a short 0.2s preview. For SD, stack the whole video (duration=None).
+                stack_duration = 0.2 if eventdir.endswith('HD') else None
+
                 try:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(
-                        None, stack.stack_video_frames, [filepath], jpgfile, 0.0, 0.2,
-                        False, 10.0, 95, os.cpu_count() or 1, False, True
+                        None, stack.stack_video_frames, 
+                        # --- stack.py arguments ---
+                        [filepath],           # video_paths
+                        jpgfile,              # output_path
+                        0.0,                  # start_seconds
+                        stack_duration,       # duration_seconds
+                        False,                # denoise
+                        10.0,                 # denoise_strength
+                        95,                   # quality
+                        os.cpu_count() or 1,  # num_threads
+                        False,                # individual
+                        True                  # enhance
                     )
                     
-                    if args.link:
+                    # Create a snapshot link only for the high-resolution version
+                    if eventdir.endswith('HD') and args.link:
                         snapshot_link = os.path.join(args.remotedir, f'cam{cam}', 'snapshot.jpg')
                         if os.path.lexists(snapshot_link): os.remove(snapshot_link)
                         os.link(jpgfile, snapshot_link)

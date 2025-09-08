@@ -28,6 +28,10 @@ for ip in ips:
     cam_settings[0]["LightRestrainLevel"] = 16
     cam_settings[0]['WhiteBalance'] = '0x00000000'
     cam_settings[0]['AutomaticAdjustment'] = 3
+    cam_settings[0]['Day_nfLevel'] = 5
+    cam_settings[0]['Night_nfLevel'] = 5
+    cam_settings[0]['LowLuxMode'] = 0
+    cam_settings[0]['Ldc'] = 1
 
     cam.set_info("Camera.Param", cam_settings)
     cam.set_info("Camera.ParamEx", cam_settings)
@@ -35,7 +39,8 @@ for ip in ips:
     enc_settings = cam.get_info("AVEnc.Encode")
     enc_settings[0]["MainFormat"][0]["Video"]["Resolution"] = '1080P'
     enc_settings[0]["MainFormat"][0]["Video"]["BitRate"] = 8192
-    enc_settings[0]["MainFormat"][0]["Video"]["Quality"] = 1
+    enc_settings[0]["MainFormat"][0]["Video"]["Quality"] = 6
+    enc_settings[0]["MainFormat"][0]["Video"]["GOP"] = 6
     enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'HD1'
     enc_settings[0]["ExtraFormat"][1]["Video"]["Resolution"] = 'WSVGA'
     enc_settings[0]["ExtraFormat"][2]["Video"]["Resolution"] = 'WSVGA'

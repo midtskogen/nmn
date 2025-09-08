@@ -34,6 +34,8 @@ for ip in ips:
     
     enc_settings = cam.get_info("AVEnc.Encode")
     enc_settings[0]["MainFormat"][0]["Video"]["Resolution"] = '1080P'
+    enc_settings[0]["MainFormat"][0]["Video"]["BitRate"] = 8192
+    enc_settings[0]["MainFormat"][0]["Video"]["Quality"] = 1
     enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'HD1'
     enc_settings[0]["ExtraFormat"][1]["Video"]["Resolution"] = 'WSVGA'
     enc_settings[0]["ExtraFormat"][2]["Video"]["Resolution"] = 'WSVGA'
@@ -53,7 +55,7 @@ for ip in ips:
     widget_settings[0]["TimeTitleAttribute"]["RelativePos"] = [0, 8192, 0, 0]
     widget_settings[0]["TimeTitleAttribute"]["RelativePos"] = [0, 8192, 0, 0]
     cam.set_info("AVEnc.VideoWidget", widget_settings)
-
+    cam.reboot()
 
     
 #[[{'Enable': True,
@@ -66,7 +68,7 @@ for ip in ips:
 #                       'Saturation': 50,
 #                       'Whitebalance': 128}},
 
-exit()
+#exit()
 
 settings = [ "fVideo.Tour", "fVideo.GUISet", "fVideo.WheelFunction", "fVideo.TVAdjust", "fVideo.AudioInFormat", "fVideo.Play", "fVideo.VideoOut", "fVideo.OSDWidget", "fVideo.Spot", "fVideo.Volume", "fVideo.LossShowStr", "fVideo.VideoOutPriority", "fVideo.VideoSeque", "fVideo.VoColorAdjust", "fVideo.OSDInfo", "fVideo.OsdLogo", "fVideo.VideoSignal", "fVideo.OEMChSeq", "fVideo.AudioSupportType", "Camera.Param", "Camera.ParamEx", "Camera.FishEye", "Camera.ClearFog", "Camera.MotorCtrl", "Camera.FishLensParam", "Camera.DistortionCorrect", "Camera.FishViCut", "Camera.WhiteLight", "AVEnc.CombineEncodeParam", "AVEnc.EncodeStaticParam", "AVEnc.Encode", "AVEnc.VideoWidget", "AVEnc.VideoColor", "AVEnc.CombineEncode", "AVEnc.CombineEncodeParam", "AVEnc.WaterMark", "AVEnc.EncodeStaticParamV2", "AVEnc.VideoColorCustom", "AVEnc.EncodeEx", "AVEnc.EncodeAddBeep" ]
 

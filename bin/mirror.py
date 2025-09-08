@@ -20,6 +20,7 @@ import datetime
 import tempfile
 import shutil
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor # MODIFICATION: Import ProcessPoolExecutor
 import stack  # For direct JPG generation
 
 # --- Constants for Configuration ---
@@ -48,6 +49,11 @@ logging.basicConfig(format='%(asctime)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%
 # --- Global State ---
 processed_files = deque(maxlen=200)
 FILENAME_PATTERN = re.compile(r"(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\w+)_(\w+)\.mp4")
+
+# Create a process pool executor to isolate the stack.py call.
+# This prevents it from crashing the main script or leaking memory into it.
+process_pool = ProcessPoolExecutor(max_workers=os.cpu_count())
+
 
 # --- Asynchronous Helper for Blocking Notifier ---
 async def async_event_gen(inotify_iterator):
@@ -88,7 +94,6 @@ async def watch_videos():
             (_, _, eventdir, eventfile) = event
             filepath = os.path.join(eventdir, eventfile)
 
-            # FIX: Handle race condition where file disappears before processing
             if not os.path.exists(filepath):
                 continue
 
@@ -100,7 +105,6 @@ async def watch_videos():
 
             match = FILENAME_PATTERN.match(eventfile)
             if not match:
-                # FIX: Change log level from warning to info for skipped files
                 logging.info(f"Skipping file with unexpected name format: {filepath}")
                 continue
             
@@ -162,17 +166,18 @@ async def watch_videos():
                 shutil.copy2(filepath, remotefile)
             
             # --- JPG Stacking ---
-            # Stack a short clip for HD videos and the entire clip for SD videos.
             if eventdir.endswith('HD') or eventdir.endswith('SD'):
                 jpgfile = os.path.join(remotedir, f"{file_prefix}{dt_for_path.strftime('%M')}.jpg")
-                
-                # For HD, stack a short 0.2s preview. For SD, stack the whole video (duration=None).
                 stack_duration = 0.2 if eventdir.endswith('HD') else None
 
                 try:
                     loop = asyncio.get_running_loop()
+                    # Run stacking in the process_pool to isolate it.
+                    # This prevents crashes (sys.exit) and memory leaks in stack.py
+                    # from affecting the main mirror.py application.
                     await loop.run_in_executor(
-                        None, stack.stack_video_frames, 
+                        process_pool,             # Use the dedicated process pool
+                        stack.stack_video_frames, 
                         # --- stack.py arguments ---
                         [filepath],           # video_paths
                         jpgfile,              # output_path
@@ -186,16 +191,17 @@ async def watch_videos():
                         True                  # enhance
                     )
                     
-                    # Create a snapshot link only for the high-resolution version
                     if eventdir.endswith('HD') and args.link:
                         snapshot_link = os.path.join(args.remotedir, f'cam{cam}', 'snapshot.jpg')
                         if os.path.lexists(snapshot_link): os.remove(snapshot_link)
                         os.link(jpgfile, snapshot_link)
                 except Exception as stack_err:
+                    # This will now catch errors within stack.py but not sys.exit,
+                    # which is what we want. The process will just exit cleanly.
                     logging.error(f"Failed to stack video {filepath}: {stack_err}")
 
         except Exception as e:
-            logging.exception(f"Error in video watcher loop: {e}")
+            logging.exception(f"FATAL error in video watcher loop: {e}")
             continue
 
 async def watch_detections():
@@ -209,7 +215,6 @@ async def watch_detections():
             (_, type_names, eventdir, eventfile) = event
             filepath = os.path.join(eventdir, eventfile)
             
-            # FIX: Corrected logic to find files in subdirectories
             if 'IN_CLOSE_WRITE' in type_names and eventfile.endswith(REDUCED_JSON_SUFFIX):
                 logging.info(f"Executing: {args.exefile} {filepath}")
                 await run_command_async(args.exefile, filepath)
@@ -222,15 +227,13 @@ async def watch_self_for_changes():
     """Periodically checks if the script file has been updated and restarts."""
     logging.info('Self-update watcher started.')
     while True:
-        await asyncio.sleep(60)  # Check every 60 seconds
+        await asyncio.sleep(60)
         try:
             current_mod_time = os.path.getmtime(__file__)
             if current_mod_time > _SELF_MOD_TIME:
                 logging.warning("Script has been updated. Restarting service...")
-                # This call replaces the current process with a new one
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         except FileNotFoundError:
-            # This could happen during a file-save operation; ignore and retry
             continue
         except Exception as e:
             logging.error(f"Error in self-update watcher: {e}")
@@ -241,7 +244,7 @@ async def main():
     await asyncio.gather(
         watch_detections(),
         watch_videos(),
-        watch_self_for_changes()  # Add the self-watcher to the main tasks
+        watch_self_for_changes()
     )
 
 if __name__ == '__main__':
@@ -249,3 +252,14 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("AMS Mirror service stopped by user.")
+    except Exception as e:
+        # Add a final fail-safe. If any unhandled exception
+        # reaches this point, log it and restart the entire script.
+        logging.exception(f"UNHANDLED EXCEPTION. Restarting service. Error: {e}")
+        try:
+            # Attempt a clean shutdown of the process pool
+            process_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception as shutdown_err:
+            logging.error(f"Error during process pool shutdown: {shutdown_err}")
+        # Restart the script using the same mechanism as the self-updater
+        os.execv(sys.executable, [sys.executable] + sys.argv)

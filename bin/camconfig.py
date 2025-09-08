@@ -73,7 +73,7 @@ for ip in ips:
 #                       'Saturation': 50,
 #                       'Whitebalance': 128}},
 
-#exit()
+exit()
 
 settings = [ "fVideo.Tour", "fVideo.GUISet", "fVideo.WheelFunction", "fVideo.TVAdjust", "fVideo.AudioInFormat", "fVideo.Play", "fVideo.VideoOut", "fVideo.OSDWidget", "fVideo.Spot", "fVideo.Volume", "fVideo.LossShowStr", "fVideo.VideoOutPriority", "fVideo.VideoSeque", "fVideo.VoColorAdjust", "fVideo.OSDInfo", "fVideo.OsdLogo", "fVideo.VideoSignal", "fVideo.OEMChSeq", "fVideo.AudioSupportType", "Camera.Param", "Camera.ParamEx", "Camera.FishEye", "Camera.ClearFog", "Camera.MotorCtrl", "Camera.FishLensParam", "Camera.DistortionCorrect", "Camera.FishViCut", "Camera.WhiteLight", "AVEnc.CombineEncodeParam", "AVEnc.EncodeStaticParam", "AVEnc.Encode", "AVEnc.VideoWidget", "AVEnc.VideoColor", "AVEnc.CombineEncode", "AVEnc.CombineEncodeParam", "AVEnc.WaterMark", "AVEnc.EncodeStaticParamV2", "AVEnc.VideoColorCustom", "AVEnc.EncodeEx", "AVEnc.EncodeAddBeep" ]
 

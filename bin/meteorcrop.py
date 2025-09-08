@@ -283,7 +283,7 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
     return [start_result[1], start_result[2]], [end_result[1], end_result[2]]
 
 
-def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: List[float], end_xy: List[float]):
+def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: List[float], end_xy: List[float]) -> Tuple[int, int]:
     """Generates a precise, video-compatible PTO file for the stitcher."""
     angle_rad = math.atan2(end_xy[1] - start_xy[1], end_xy[0] - start_xy[0])
     angle_deg = math.degrees(angle_rad)
@@ -318,6 +318,7 @@ def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: Li
     global_options["S"] = f"{int(s_left)},{int(s_top)},{int(s_right)},{int(s_bottom)}"
     pto_mapper.write_pto_file((global_options, images), str(output_pto_path))
     print(f"Generated '{output_pto_path.name}' for direct rotation and cropping.")
+    return final_w, final_h
 
 
 # ==============================================================================
@@ -581,7 +582,7 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
     print(f"✅ Success! Created '{final_orig_webm_path.name}'")
 
 
-def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path, delete_stitched_vid: bool = True):
+def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path, final_w: int, final_h: int, delete_stitched_vid: bool = True):
     """
     Creates a background-subtracted and trimmed video of the meteor track.
     If delete_stitched_vid is False, the temporary stitched video is not removed.
@@ -598,18 +599,20 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
     try:
         # Step 1: Stitch the source video using the generated PTO.
         stitcher_cmd_vid = [
-            sys.executable, str(stitcher_path), "--pad", "0", str(pto_path),
+            sys.executable, str(stitcher_path), "--pad", "128", str(pto_path),
             str(source_video_path), str(temp_stitched_video)
         ]
         run_command_with_progress(stitcher_cmd_vid, desc="Step 1/3: Stitching", total=100)
 
         # Step 2: Perform background subtraction using a single, efficient FFmpeg command.
-        # This graph creates a difference matte, thresholds it to a mask, and applies the mask.
+        # This graph scales both inputs to ensure they match and are codec-compliant before blending.
         duration, _, _ = get_video_info(temp_stitched_video)
         filter_graph = (
-            f"[0:v][1:v]blend=c0_mode=difference[diff];"
+            f"[0:v]scale={final_w}:{final_h},format=yuv420p,split=2[v1][v2];"
+            f"[1:v]scale={final_w}:{final_h},format=yuv420p[imgscaled];"
+            f"[v1][imgscaled]blend=c0_mode=difference[diff];"
             f"[diff]geq=lum='if(gt(lum(X,Y),{Settings.BG_SUBTRACT_THRESHOLD}),255,0)'[mask];"
-            f"[0:v][mask]blend=c0_mode=multiply"
+            f"[v2][mask]blend=c0_mode=multiply"
         )
         ffmpeg_subtract_cmd = [
             "ffmpeg", "-i", str(temp_stitched_video),
@@ -667,7 +670,7 @@ def main():
         if not gnomonic_base_pto_path.is_file():
             raise FileNotFoundError(f"Base projection PTO file not found at '{gnomonic_base_pto_path}'")
 
-        create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
+        final_w, final_h = create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
         
         source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
         if not source_video_path:
@@ -690,11 +693,11 @@ def main():
             print(f"✅ Success! Created '{output_path.name}'")
         
         elif args.mode == "video":
-            create_fireball_video(event_dir, pto_path, background_plate_path, delete_stitched_vid=True)
+            create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h, delete_stitched_vid=True)
             
         elif args.mode == "both":
             # 1. Process video, keeping the stitched intermediate for the image step
-            create_fireball_video(event_dir, pto_path, background_plate_path, delete_stitched_vid=False)
+            create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h, delete_stitched_vid=False)
             
             # 2. Process image using the stacked frames of the stitched video
             print("\nProcessing to create final image from video stack...")

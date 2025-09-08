@@ -1741,7 +1741,8 @@ if __name__ == '__main__':
             temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp")
             temp_dirs.append(temp_dir)
             try:
-                print(f"Processing {f}: skipping {current_file_skip:.2f}s, loading up to {current_file_load_duration or 'all available':.2f}s.")
+                load_duration_msg = f"{current_file_load_duration:.2f}" if current_file_load_duration is not None else "all available"
+                print(f"Processing {f}: skipping {current_file_skip:.2f}s, loading up to {load_duration_msg}s.")
                 read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
                 
                 decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))

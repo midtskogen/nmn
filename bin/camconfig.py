@@ -38,7 +38,7 @@ for ip in ips:
     
     enc_settings = cam.get_info("AVEnc.Encode")
     enc_settings[0]["MainFormat"][0]["Video"]["Resolution"] = '1080P'
-    enc_settings[0]["MainFormat"][0]["Video"]["BitRate"] = 8192
+    enc_settings[0]["MainFormat"][0]["Video"]["BitRate"] = 2048
     enc_settings[0]["MainFormat"][0]["Video"]["Quality"] = 6
     enc_settings[0]["MainFormat"][0]["Video"]["GOP"] = 6
     enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'HD1'

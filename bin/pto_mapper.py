@@ -9,8 +9,43 @@ import unittest
 import os
 import sys
 import random
+import json
 
 # --- PTO Parsing and Core Mapping Logic ---
+
+def _parse_pto_params(content):
+    """
+    Parses a content string from a PTO line into a dictionary of parameters.
+
+    Args:
+        content (str): The parameter string (e.g., 'f2 w3600 h1800 v90...').
+
+    Returns:
+        dict: A dictionary of the parsed key-value parameters.
+    """
+    params = {}
+    # Regex to handle parameters, including quoted values for filenames (n)
+    pattern = r'([a-zA-Z]+)(?:"([^"]*)"|(\S+))'
+
+    for key, val_quoted, val_unquoted in re.findall(pattern, content):
+        value_str = val_quoted if val_quoted else val_unquoted
+        if key == 'S':
+            try:
+                coords = [int(c) for c in value_str.split(',')]
+                if len(coords) == 4:
+                    params[key] = (coords[0], coords[1], coords[2], coords[3])
+            except (ValueError, IndexError):
+                print(f"Warning: Malformed crop 'S' parameter: {value_str}", file=sys.stderr)
+            continue
+        try:
+            value = float(value_str)
+            if value == int(value):
+                value = int(value)
+            params[key] = value
+        except (ValueError, TypeError):
+            params[key] = value_str
+    return params
+
 def parse_pto_file(pto_file):
     """
     Parses a Hugin PTO project file to extract panorama and image parameters.
@@ -27,42 +62,71 @@ def parse_pto_file(pto_file):
     with open(pto_file, 'r') as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#'): continue
+            if not line or line.startswith('#'):
+                continue
             line_type = line[0]
-            if line_type not in ('p', 'i', 'm'): continue # Also parse 'm' lines for i-line modifiers
+            if line_type not in ('p', 'i', 'm'):
+                continue  # Also parse 'm' lines for i-line modifiers
+
+            content_parts = line.split(' ', 1)
+            if len(content_parts) < 2:
+                continue
             
-            params, content_parts = {}, line.split(' ', 1)
-            if len(content_parts) < 2: continue
-            content = content_parts[1]
-            
-            # Regex to handle parameters, including quoted values for filenames (n)
-            pattern = r'([a-zA-Z]+)(?:"([^"]*)"|(\S+))'
-            
-            for key, val_quoted, val_unquoted in re.findall(pattern, content):
-                value_str = val_quoted if val_quoted else val_unquoted
-                if key == 'S':
-                    try:
-                        coords = [int(c) for c in value_str.split(',')]
-                        if len(coords) == 4: params[key] = (coords[0], coords[1], coords[2], coords[3])
-                    except (ValueError, IndexError): print(f"Warning: Malformed crop 'S' parameter: {value_str}")
-                    continue
-                try:
-                    value = float(value_str)
-                    if value == int(value): value = int(value)
-                    params[key] = value
-                except (ValueError, TypeError): params[key] = value_str
-            
+            params = _parse_pto_params(content_parts[1])
+
             if line_type == 'p':
                 global_options.update(params)
             elif line_type == 'i':
                 images.append(params)
             elif line_type == 'm':
-                 # Apply modifier to the last image line
-                 if images:
-                     images[-1].update(params)
+                # Apply modifier to the last image line
+                if images:
+                    images[-1].update(params)
 
-    if not global_options or not images: raise ValueError("Could not parse panorama or image lines from PTO file.")
+    if not global_options or not images:
+        raise ValueError("Could not parse panorama or image lines from PTO file.")
     return global_options, images
+
+def get_pto_data_from_json(json_path, selector):
+    """
+    Creates a pto_data structure from a cameras.json file and a selector.
+
+    Args:
+        json_path (str): Path to the cameras.json file.
+        selector (str): The station and camera identifier (e.g., "171:7").
+
+    Returns:
+        tuple: A (global_options, images) tuple, same as parse_pto_file.
+    """
+    try:
+        parts = selector.replace(',', ':').split(':')
+        if len(parts) != 2:
+            raise ValueError("Selector must be two numbers separated by ':' or ','")
+        station_num, cam_num = int(parts[0]), int(parts[1])
+        station_id, cam_name = f"ams{station_num}", f"cam{cam_num}"
+    except (ValueError, IndexError):
+        raise ValueError(f"Invalid format for selector '{selector}'. Use STATION:CAMERA (e.g., 171:7).")
+
+    with open(json_path, 'r', encoding='utf-8') as f:
+        cameras_data = json.load(f)
+
+    i_line = cameras_data.get(station_id, {}).get(cam_name, {}).get("calibration")
+    if not i_line:
+        raise ValueError(f"Calibration data for {station_id}/{cam_name} not found in {json_path}.")
+
+    # Create a default panorama 'p' line. This is a reasonable default
+    # for a full spherical panorama.
+    global_options = {
+        'f': 2, 'w': 36000, 'h': 18000, 'v': 360, 'k': 0,
+        'E': 0, 'R': 0, 'n': "TIFF_m c:LZW"
+    }
+
+    # The calibration string includes the 'i', so we pass the rest of the string
+    # to the parser.
+    image_params = _parse_pto_params(i_line.split(' ', 1)[1])
+    
+    return global_options, [image_params]
+
 
 def write_pto_file(pto_data, pto_filename, optimize_vars=None):
     """
@@ -509,7 +573,8 @@ class TestPtoMapping(unittest.TestCase):
         else:
             self.pto_filename = "test_project.pto"
             self.created_dummy_file = True
-            pto_content = ""
+            pto_content = """p f2 w2000 h1000 v360
+i w1920 h1080 f0 v58 y0 p0 r0"""
             with open(self.pto_filename, "w") as f:
                 f.write(pto_content)
 
@@ -596,67 +661,105 @@ class TestPtoMapping(unittest.TestCase):
             report = "\n".join(failures[:10])
             self.fail(f"{len(failures)} round-trip mapping failures occurred:\n{report}")
 
+def print_usage():
+    """Prints the command-line usage instructions."""
+    script_name = os.path.basename(sys.argv[0])
+    print("Usage:")
+    print(f"  Run unit test: python {script_name} <pto_file>")
+    print(f"  Run unit test: python {script_name} <json_file> <station:cam>")
+    print(f"  Pano -> Image: python {script_name} <pto_file> <pano_x> <pano_y> [--restrict]")
+    print(f"  Pano -> Image: python {script_name} <json_file> <station:cam> <pano_x> <pano_y> [--restrict]")
+    print(f"  Image -> Pano: python {script_name} <pto_file> <src_x> <src_y> <image_index>")
+    print(f"  Image -> Pano: python {script_name} <json_file> <station:cam> <src_x> <src_y> <image_index>")
 
 if __name__ == '__main__':
-    num_args = len(sys.argv)
-
-    # Dispatch based on number of command-line arguments
-    if num_args not in [2, 4, 5]:
-        # Print usage information if the number of arguments is incorrect
-        print("Usage:")
-        print(f"  Run unit test: python {sys.argv[0]} <pto_file>")
-        print(f"  Pano -> Image: python {sys.argv[0]} <pto_file> <pano_x> <pano_y> [--restrict]")
-        print(f"  Image -> Pano: python {sys.argv[0]} <pto_file> <src_x> <src_y> <image_index>")
+    # --- Argument Parsing ---
+    if len(sys.argv) < 2:
+        print_usage()
         sys.exit(1)
 
-    pto_path = sys.argv[1]
-    if not os.path.exists(pto_path):
-        print(f"Error: PTO file not found at '{pto_path}'")
-        sys.exit(1)
+    first_arg = sys.argv[1]
+    is_json_input = first_arg.lower().endswith('.json')
+    
+    pto_data = None
+    arg_offset = 0 # How many extra args are used for source selection (0 for .pto, 1 for .json)
 
-    # Mode 1: Run the unit test with the given pto file
-    if num_args == 2:
-        TestPtoMapping.pto_file_override = pto_path
-        # Remove the argument from sys.argv for unittest framework
-        sys.argv.pop(1)
-        unittest.main()
-        sys.exit(0)
-
-    # For direct mapping, parse the PTO file first
     try:
-        pto_data = parse_pto_file(pto_path)
-    except Exception as e:
-        print(f"Error parsing PTO file: {e}")
+        if is_json_input:
+            if len(sys.argv) < 3:
+                print("Error: JSON file must be followed by a <station:cam> selector.", file=sys.stderr)
+                print_usage()
+                sys.exit(1)
+            json_path = first_arg
+            selector = sys.argv[2]
+            pto_data = get_pto_data_from_json(json_path, selector)
+            arg_offset = 1
+        else:
+            pto_path = first_arg
+            if not os.path.exists(pto_path):
+                print(f"Error: PTO file not found at '{pto_path}'", file=sys.stderr)
+                sys.exit(1)
+            pto_data = parse_pto_file(pto_path)
+
+    except (ValueError, FileNotFoundError, json.JSONDecodeError, IndexError) as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Determine which mapping mode is being invoked
-    is_pano_to_image = (num_args == 4) or (num_args == 5 and sys.argv[4] == '--restrict')
+    # --- Mode Dispatch ---
+    # Calculate the number of "action" arguments after the file/selector part.
+    num_action_args = len(sys.argv) - 2 - arg_offset
+    
+    # Mode 1: Unit Test (0 action arguments)
+    if num_action_args == 0:
+        if is_json_input:
+            # Recreate a temporary pto file for the test suite to use,
+            # as it expects a filename.
+            temp_pto_filename = "temp_test_project_from_json.pto"
+            write_pto_file(pto_data, temp_pto_filename)
+            TestPtoMapping.pto_file_override = temp_pto_filename
+            sys.argv = [sys.argv[0]]
+        else:
+            TestPtoMapping.pto_file_override = sys.argv[1]
+            # Remove the arguments from sys.argv for unittest framework so it doesn't
+            # interpret the filename as a test to run.
+            sys.argv = [sys.argv[0]]
 
+        unittest.main(exit=False)
+        
+        if is_json_input and os.path.exists("temp_test_project_from_json.pto"):
+            os.remove("temp_test_project_from_json.pto")
+        sys.exit(0)
+    
+    # --- Pano -> Image Mode ---
+    # (2 action arguments, or 3 with --restrict)
+    is_pano_to_image = (num_action_args == 2) or \
+                       (num_action_args == 3 and sys.argv[4 + arg_offset] == '--restrict')
+    
     if is_pano_to_image:
-        # Mode 2: Forward mapping (Panorama -> Image)
         try:
-            pano_x = float(sys.argv[2])
-            pano_y = float(sys.argv[3])
+            pano_x = float(sys.argv[2 + arg_offset])
+            pano_y = float(sys.argv[3 + arg_offset])
         except ValueError:
-            print("Error: Panorama coordinates <pano_x> and <pano_y> must be numbers.")
+            print("Error: Panorama coordinates <pano_x> and <pano_y> must be numbers.", file=sys.stderr)
             sys.exit(1)
         
-        restrict_bounds = (num_args == 5 and sys.argv[4] == '--restrict')
+        restrict_bounds = (num_action_args == 3 and sys.argv[4 + arg_offset] == '--restrict')
         result = map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=restrict_bounds)
         
         if result:
             print(f"{result[1]} {result[2]} {result[0]}")
         else:
             print("None")
-
-    elif num_args == 5:
-        # Mode 3: Reverse mapping (Image -> Panorama)
+    
+    # --- Image -> Pano Mode ---
+    # (3 action arguments)
+    elif num_action_args == 3:
         try:
-            src_x = float(sys.argv[2])
-            src_y = float(sys.argv[3])
-            img_idx = int(sys.argv[4])
+            src_x = float(sys.argv[2 + arg_offset])
+            src_y = float(sys.argv[3 + arg_offset])
+            img_idx = int(sys.argv[4 + arg_offset])
         except ValueError:
-            print("Error: Source coordinates <src_x>, <src_y> must be numbers and <image_index> must be an integer.")
+            print("Error: Source coordinates <src_x>, <src_y> must be numbers and <image_index> must be an integer.", file=sys.stderr)
             sys.exit(1)
             
         try:
@@ -666,5 +769,15 @@ if __name__ == '__main__':
             else:
                 print("None")
         except IndexError:
-            print(f"Error: Image index {img_idx} is out of bounds.")
+            # With JSON input, there's always only one image (index 0)
+            if is_json_input:
+                print(f"Error: Image index must be 0 when using JSON input.", file=sys.stderr)
+            else:
+                 print(f"Error: Image index {img_idx} is out of bounds.", file=sys.stderr)
             sys.exit(1)
+    
+    else:
+        print_usage()
+        sys.exit(1)
+
+

@@ -4,6 +4,9 @@ Connects to a list of meteor stations via SSH to fetch camera calibration
 files (lens.pto), parses them, and compiles the data into a single
 JSON file (cameras.json). It preserves existing data for any stations
 or cameras that cannot be reached during the run.
+
+Can also be used in an extraction mode to reconstruct a .pto file from
+the generated cameras.json file.
 """
 
 import json
@@ -23,6 +26,28 @@ STATIONS_FILENAME = "stations.json"
 CAMERAS_FILENAME = "cameras.json"
 REMOTE_CAM_PATH_TPL = "/meteor/cam{}/lens.pto"
 MAX_CAMERAS = 7
+PTO_TEMPLATE = """# hugin project file
+#hugin_ptoversion 2
+p f2 w36000 h18000 v360  k0 E0 R0 n"TIFF_m c:LZW"
+m i0
+
+# image lines
+#-hugin  cropFactor=1
+{i_line}
+
+
+# specify variables that should be optimized
+v v0
+v r0
+v p0
+v y0
+v a0
+v b0
+v c0
+v d0
+v e0
+v"""
+
 
 # Suppress paramiko's cryptography warnings which are not relevant here
 warnings.filterwarnings(action='ignore', module='.*paramiko.*')
@@ -208,22 +233,72 @@ def print_final_summary(stats: dict, stations_data: dict, processed_this_run: di
     elif stats['errors'] == 0 and stats['missing'] == 0:
         print("\nSuccess! All files from all stations were processed and updated.")
 
+def extract_pto(extract_arg: str, cameras_json_path: str):
+    """Reads cameras.json and prints a reconstructed .pto file to stdout."""
+    try:
+        # Normalize separator and split
+        parts = extract_arg.replace(',', ':').split(':')
+        if len(parts) != 2:
+            raise ValueError("Argument must be two numbers separated by ':' or ','")
+        
+        station_num = int(parts[0])
+        cam_num = int(parts[1])
+        
+        station_id = f"ams{station_num}"
+        cam_name = f"cam{cam_num}"
+
+    except (ValueError, IndexError):
+        log_error(f"Error: Invalid format for --extract. Use STATION:CAMERA (e.g., 171:7).")
+        sys.exit(1)
+
+    try:
+        with open(cameras_json_path, 'r', encoding='utf-8') as f:
+            cameras_data = json.load(f)
+    except FileNotFoundError:
+        log_error(f"Error: {cameras_json_path} not found. Cannot extract data.")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        log_error(f"Error: {cameras_json_path} is not a valid JSON file.")
+        sys.exit(1)
+
+    # Find the calibration line
+    i_line = cameras_data.get(station_id, {}).get(cam_name, {}).get("calibration")
+
+    if not i_line:
+        log_error(f"Error: Calibration data for {station_id}/{cam_name} not found in {cameras_json_path}.")
+        sys.exit(1)
+
+    # Print the reconstructed file to stdout
+    print(PTO_TEMPLATE.format(i_line=i_line))
+
 def main():
     """Main execution function."""
-    parser = argparse.ArgumentParser(description="Fetch camera calibration data from meteor stations.")
+    parser = argparse.ArgumentParser(
+        description="Fetch camera calibration data from meteor stations or extract a .pto file from existing data."
+    )
     parser.add_argument(
         "-d", "--directory", default=".",
-        help="Directory for stations.json (input) and cameras.json (output)."
+        help="Directory for stations.json (input) and cameras.json (output/input)."
     )
     parser.add_argument(
         "-q", "--quiet", action="store_true",
-        help="Silence all non-error output."
+        help="Silence all non-error output during fetch mode."
+    )
+    parser.add_argument(
+        "-e", "--extract",
+        help="Extract a .pto file for a given STATION:CAMERA (e.g., 171:7). Does not fetch data."
     )
     args = parser.parse_args()
 
-    stations_json_path = os.path.join(args.directory, STATIONS_FILENAME)
     cameras_json_path = os.path.join(args.directory, CAMERAS_FILENAME)
 
+    # --- Extract Mode ---
+    if args.extract:
+        extract_pto(args.extract, cameras_json_path)
+        return
+
+    # --- Fetch Mode ---
+    stations_json_path = os.path.join(args.directory, STATIONS_FILENAME)
     try:
         with open(stations_json_path, 'r', encoding='utf-8') as f:
             stations_data = validate_stations_data(json.load(f))

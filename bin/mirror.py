@@ -20,7 +20,7 @@ import datetime
 import tempfile
 import shutil
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor # MODIFICATION: Import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, BrokenProcessPool
 import stack  # For direct JPG generation
 
 # --- Constants for Configuration ---
@@ -79,6 +79,24 @@ async def run_command_async(*command):
         if stderr:
             logging.error(f"[stderr]\n{stderr.decode()}")
     return proc.returncode
+
+def stack_wrapper(*args, **kwargs):
+    """
+    Wrapper for stack.stack_video_frames that redirects its stdout to /dev/null.
+    This prevents print statements within stack.py from appearing in the main
+    service log file when stdout is redirected.
+    """
+    # Redirect stdout to the null device for the duration of the call.
+    with open(os.devnull, 'w') as f_null:
+        original_stdout = sys.stdout
+        sys.stdout = f_null
+        try:
+            # The 'stack' module is available here because the worker process
+            # inherits loaded modules from the parent.
+            return stack.stack_video_frames(*args, **kwargs)
+        finally:
+            # Restore stdout, although the process will likely exit shortly anyway.
+            sys.stdout = original_stdout
 
 # --- Core Watcher Functions ---
 async def watch_videos():
@@ -172,13 +190,11 @@ async def watch_videos():
 
                 try:
                     loop = asyncio.get_running_loop()
-                    # Run stacking in the process_pool to isolate it.
-                    # This prevents crashes (sys.exit) and memory leaks in stack.py
-                    # from affecting the main mirror.py application.
+                    # Run stacking in the process_pool via a wrapper to isolate it and suppress stdout.
                     await loop.run_in_executor(
                         process_pool,             # Use the dedicated process pool
-                        stack.stack_video_frames, 
-                        # --- stack.py arguments ---
+                        stack_wrapper,            # Call our wrapper to suppress stdout
+                        # --- stack.py arguments (passed to wrapper) ---
                         [filepath],           # video_paths
                         jpgfile,              # output_path
                         0.0,                  # start_seconds
@@ -195,9 +211,13 @@ async def watch_videos():
                         snapshot_link = os.path.join(args.remotedir, f'cam{cam}', 'snapshot.jpg')
                         if os.path.lexists(snapshot_link): os.remove(snapshot_link)
                         os.link(jpgfile, snapshot_link)
+                except BrokenProcessPool:
+                    # This error means the worker process terminated abruptly. This can happen
+                    # if stack.py calls sys.exit(). We log this for diagnostics.
+                    logging.error(f"Stacking process for {filepath} terminated unexpectedly.")
                 except Exception as stack_err:
-                    # This will now catch errors within stack.py but not sys.exit,
-                    # which is what we want. The process will just exit cleanly.
+                    # This will now catch other errors within stack.py (e.g., a ValueError)
+                    # and log them without crashing the main application.
                     logging.error(f"Failed to stack video {filepath}: {stack_err}")
 
         except Exception as e:

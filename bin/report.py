@@ -33,7 +33,7 @@ except ImportError as e:
 
 
 # --- Constants ---
-METEOR_PROBABILITY_THRESHOLD = 0.2278
+METEOR_PROBABILITY_THRESHOLD = 0.5
 SSH_TUNNEL_CONFIG_PATH = '/etc/default/ssh_tunnel'
 REMOTE_REPORT_URL = "http://norskmeteornettverk.no/ssh/report.php"
 # Assume processing scripts are in the user's bin directory

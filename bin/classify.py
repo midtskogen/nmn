@@ -280,6 +280,9 @@ def prepare_data_in_tempdir(temp_dir_path: str, args: argparse.Namespace) -> str
         generate_for_type('video')
     elif hasattr(args, 'input_type'):
         generate_for_type(args.input_type)
+    elif mode_to_check == 'efficientnet': # Check for the new mode
+        generate_for_type('image')
+
 
     return str(data_dir)
 
@@ -301,53 +304,115 @@ def get_dataloaders(args, data_dir, split=True):
             DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
             full_dataset.class_to_idx)
 
+def _run_epoch_loop(model, device, num_epochs, start_epoch, train_loader, val_loader, optimizer, criterion, scheduler, model_path, best_val_loss, patience, model_name):
+    """Helper function to run a training loop for a set number of epochs."""
+    patience_counter = 0
+    for epoch in range(start_epoch, start_epoch + num_epochs):
+        model.train()
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{start_epoch + num_epochs}", unit="batch")
+        for inputs, labels in pbar:
+            inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            # FORMATTED: Loss is now formatted to 4 fixed decimal places
+            pbar.set_postfix(loss=f'{loss.item():.4f}')
+
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                outputs = model(inputs.to(device))
+                val_loss += criterion(outputs, labels.to(device).float().unsqueeze(1)).item()
+        
+        avg_val_loss = val_loss / len(val_loader)
+        if scheduler:
+            scheduler.step(avg_val_loss)
+
+        if avg_val_loss < best_val_loss:
+            best_val_loss, patience_counter = avg_val_loss, 0
+            torch.save(model.state_dict(), model_path)
+            logging.info(f"Epoch {epoch+1}: Val loss for {model_name} improved to {avg_val_loss:.4f}. Model saved.")
+        else:
+            patience_counter += 1
+            logging.info(f"Epoch {epoch+1}: Val loss did not improve. Patience: {patience_counter}/{patience}.")
+        
+        if patience_counter >= patience:
+            logging.info("Stopping early due to patience limit.")
+            break
+    return best_val_loss
+
+
 def _run_training(args, data_dir, model_path, params_file):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_name = getattr(args, 'model_name', 'custom_image' if args.input_type == 'image' else 'custom_video')
     logging.info(f"--- Starting Training for '{model_name}' on {device} ---")
-    
-    params = {};
+
+    params = {}
     if params_file and os.path.exists(params_file):
         with open(params_file, 'r') as f: params = json.load(f)
-    if 'custom' in model_name:
-        default_params = {'num_conv_layers': 3, 'conv_0_filters': 32, 'conv_1_filters': 64, 'conv_2_filters': 128, 'dense_units': 256, 'dropout_rate': 0.5, 'learning_rate': 1e-4}
-    else:
-        default_params = {'learning_rate': 1e-4}
-    params = {**default_params, **params}
-    
-    model = get_model(model_name, args, params).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=params['learning_rate']); criterion = nn.BCELoss()
+    params = {**{'learning_rate': 1e-4}, **params}
+
+    criterion = nn.BCELoss()
     
     current_batch_size = args.batch_size
     while current_batch_size >= 1:
         try:
             logging.info(f"Attempting to train with batch size: {current_batch_size}")
-            # Create a temporary args namespace to pass the adjusted batch size
-            temp_args = argparse.Namespace(**vars(args))
-            temp_args.batch_size = current_batch_size
+            temp_args = argparse.Namespace(**vars(args)); temp_args.batch_size = current_batch_size
             train_loader, val_loader, _ = get_dataloaders(temp_args, data_dir)
             
-            patience, patience_counter, best_val_loss = 8, 0, float('inf')
-            for epoch in range(args.epochs):
-                model.train()
-                for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch"):
-                    inputs, labels = inputs.to(device), labels.to(device).float().unsqueeze(1)
-                    optimizer.zero_grad(); outputs = model(inputs); loss = criterion(outputs, labels); loss.backward(); optimizer.step()
-                model.eval(); val_loss = 0
-                with torch.no_grad():
-                    for inputs, labels in val_loader:
-                        outputs = model(inputs.to(device)); val_loss += criterion(outputs, labels.to(device).float().unsqueeze(1)).item()
-                avg_val_loss = val_loss / len(val_loader)
-                if avg_val_loss < best_val_loss:
-                    best_val_loss, patience_counter = avg_val_loss, 0
-                    torch.save(model.state_dict(), model_path)
-                    logging.info(f"Epoch {epoch+1}: Val loss for {model_name} improved to {avg_val_loss:.4f}. Model saved.")
-                else:
-                    patience_counter += 1; logging.info(f"Epoch {epoch+1}: Val loss did not improve. Patience: {patience_counter}/{patience}.")
-                if patience_counter >= patience: logging.info("Stopping early."); break
+            model = get_model(model_name, args, params).to(device)
+            best_val_loss = float('inf')
             
+            is_finetuning = getattr(args, 'unfreeze_from_block', None) is not None and 'custom' not in model_name
+            
+            if not is_finetuning:
+                logging.info("--- Starting Standard Training ---")
+                optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1) if args.scheduler else None
+                _run_epoch_loop(model, device, args.epochs, 0, train_loader, val_loader, optimizer, criterion, scheduler, model_path, best_val_loss, args.patience, model_name)
+            else:
+                # --- Phase 1: Train Classifier Head ---
+                logging.info(f"--- Starting Fine-Tuning Phase 1: Training Classifier Head for {args.finetune_head_epochs} epochs ---")
+                for param in model.parameters(): param.requires_grad = False
+                if hasattr(model, 'fc'):
+                    for param in model.fc.parameters(): param.requires_grad = True
+                elif hasattr(model, 'classifier'):
+                    for param in model.classifier.parameters(): param.requires_grad = True
+                
+                # Optimizer for head only
+                head_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=params['learning_rate'])
+                head_scheduler = optim.lr_scheduler.ReduceLROnPlateau(head_optimizer, 'min', patience=2, factor=0.1) if args.scheduler else None
+
+                best_val_loss = _run_epoch_loop(model, device, args.finetune_head_epochs, 0, train_loader, val_loader, head_optimizer, criterion, head_scheduler, model_path, best_val_loss, 5, f"{model_name} [HEAD]")
+                
+                # --- Phase 2: Unfreeze and Fine-tune ---
+                logging.info(f"--- Starting Fine-Tuning Phase 2: Unfreezing from block {args.unfreeze_from_block} ---")
+                model.load_state_dict(torch.load(model_path, map_location=device)) # Load best head
+                
+                if model_name == 'efficientnet_b0' and hasattr(model, 'features'):
+                    for i, child in enumerate(model.features.children()):
+                        if i >= args.unfreeze_from_block:
+                            logging.info(f"Unfreezing efficientnet_b0 block {i}")
+                            for param in child.parameters(): param.requires_grad = True
+                elif model_name == 'resnet50':
+                    layers_to_unfreeze = [model.layer4, model.layer3, model.layer2, model.layer1][: (5 - args.unfreeze_from_block)]
+                    for layer in layers_to_unfreeze:
+                        logging.info(f"Unfreezing resnet50 layer")
+                        for param in layer.parameters(): param.requires_grad = True
+
+                full_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=params['learning_rate'] / 10)
+                full_scheduler = optim.lr_scheduler.ReduceLROnPlateau(full_optimizer, 'min', patience=3, factor=0.1) if args.scheduler else None
+                
+                remaining_epochs = args.epochs - args.finetune_head_epochs
+                if remaining_epochs > 0:
+                    _run_epoch_loop(model, device, remaining_epochs, args.finetune_head_epochs, train_loader, val_loader, full_optimizer, criterion, full_scheduler, model_path, best_val_loss, args.patience, f"{model_name} [FULL]")
+
             logging.info(f"Training finished successfully for {model_name}. Best model saved to '{model_path}'.")
-            return # Exit function on success
+            return
 
         except torch.cuda.OutOfMemoryError:
             if torch.cuda.is_available(): torch.cuda.empty_cache()
@@ -1016,6 +1081,32 @@ def build_ensemble_mode(args):
     final_stacker_model = joblib.load(args.stacker_model_file)
     _report_feature_importance(final_stacker_model)
 
+def train_single_ensemble_model_mode(args):
+    """Trains and optionally clusters a single, specified ensemble model."""
+    model_name = 'efficientnet_b0' # Hard-coded for this new mode
+    logging.info(f"--- 🚀 Starting Single Model Build Process for '{model_name}' 🚀 ---")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        data_dir = prepare_data_in_tempdir(temp_dir, args)
+
+        model_path = CONFIG["IMAGE_MODEL_CONFIGS"][model_name]
+        
+        # Re-purpose the _process_single_model logic for a single run
+        args.resume = getattr(args, 'resume', False)
+        task_args = (model_name, model_path, args, data_dir)
+        result = _process_single_model(task_args)
+
+        logging.info(f"\n--- Build Summary for {model_name} ---")
+        logging.info(f"  - {result}")
+
+        if "Success" in result:
+            final_artifact_path = model_path
+            if getattr(args, 'cluster', False):
+                final_artifact_path = model_path.replace('.pth', '_clustered.pth.zst')
+            logging.info(f"--- ✅ Process Complete! Find the final artifact at: {final_artifact_path} ---")
+        else:
+            logging.error(f"--- ❌ Process Failed for {model_name}. Please check logs for errors. ---")
+
 def train_stacker_mode(args):
     """Trains the stacking meta-learner, using a cached data file if available."""
     logging.info("--- Training Stacking Meta-Learner ---")
@@ -1091,6 +1182,10 @@ def main():
     balance_parent_parser.add_argument('--balance', action='store_true', help="Enable dataset balancing by creating synthetic negatives.")
     balance_parent_parser.add_argument('--cluster', action='store_true', help="Apply K-Means weight clustering after training.")
     balance_parent_parser.add_argument('--clusters', type=int, default=256, help="Number of clusters (bins) for weight clustering.")
+    balance_parent_parser.add_argument('--scheduler', action='store_true', help="Use a learning rate scheduler (ReduceLROnPlateau).")
+    balance_parent_parser.add_argument('--unfreeze-from-block', type=int, default=None, help="Enable progressive unfreezing starting from this block. (e.g., 6 for efficientnet_b0, 4 for resnet50 layer4)")
+    balance_parent_parser.add_argument('--finetune-head-epochs', type=int, default=5, help="Number of epochs to train only the classifier head during progressive unfreezing.")
+    balance_parent_parser.add_argument('--patience', type=int, default=8, help="Number of epochs to wait for improvement before stopping early.")
 
     p_train = subparsers.add_parser('train', help="Train the custom image model.", parents=[parent_parser, dir_parent_parser, balance_parent_parser])
     p_train.add_argument('--params-file', help="Path to a .json file with hyperparameters."); p_train.add_argument('--epochs', type=int, default=50); p_train.add_argument('-o', '--output', default=CONFIG["CUSTOM_IMAGE_MODEL_PATH"])
@@ -1110,6 +1205,10 @@ def main():
 
     p_vtune = subparsers.add_parser('videotune', help="Tune the custom video model.", parents=[parent_parser, dir_parent_parser, video_parent_parser, balance_parent_parser])
     p_vtune.add_argument('--trials', type=int, default=20); p_vtune.add_argument('-o', '--output', default=CONFIG["VIDEO_PARAMS_FILE"])
+
+    p_efficientnet = subparsers.add_parser('efficientnet', help="Train and cluster only the efficientnet_b0 model.", parents=[parent_parser, dir_parent_parser, balance_parent_parser])
+    p_efficientnet.add_argument('--epochs', type=int, default=50)
+    p_efficientnet.add_argument('--resume', action='store_true', help="Skip training if a final clustered model already exists.")
 
     p_build = subparsers.add_parser('buildensemble', help="Run the full end-to-end training for all models and the ensemble.", parents=[parent_parser, dir_parent_parser, video_parent_parser, balance_parent_parser])
     p_build.add_argument('--stacker-model-file', default=CONFIG["STACKER_MODEL_NAME"])
@@ -1142,6 +1241,8 @@ def main():
     # --- Mode Dispatcher ---
     if args.mode == 'predict':
         predict_mode(args)
+    elif args.mode == 'efficientnet':
+        train_single_ensemble_model_mode(args)
     elif args.mode == 'buildensemble':
         build_ensemble_mode(args)
     elif args.mode == 'trainstacker':

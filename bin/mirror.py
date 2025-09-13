@@ -109,11 +109,17 @@ async def run_command_async(*command):
 
 def stack_wrapper(*args, **kwargs):
     """
-    Wrapper for stack.stack_video_frames that redirects its stdout to /dev/null.
-    This prevents print statements within stack.py from appearing in the main
-    service log file when stdout is redirected.
+    Wrapper for stack.stack_video_frames that redirects its stdout to /dev/null
+    and suppresses its INFO-level log messages.
     """
-    # Redirect stdout to the null device for the duration of the call.
+    # This function runs in a child process and inherits the parent's logging config.
+    # To prevent stack.py's INFO messages from cluttering mirror.log, we raise
+    # the logging level for the duration of this call to only show warnings/errors.
+    root_logger = logging.getLogger()
+    original_level = root_logger.level
+    root_logger.setLevel(logging.WARNING)
+
+    # Also redirect stdout to the null device to silence any print() statements.
     with open(os.devnull, 'w') as f_null:
         original_stdout = sys.stdout
         sys.stdout = f_null
@@ -122,8 +128,9 @@ def stack_wrapper(*args, **kwargs):
             # inherits loaded modules from the parent.
             return stack.stack_video_frames(*args, **kwargs)
         finally:
-            # Restore stdout, although the process will likely exit shortly anyway.
+            # Restore stdout and logging level to their original state.
             sys.stdout = original_stdout
+            root_logger.setLevel(original_level)
 
 # --- Core Watcher Functions ---
 async def watch_videos():

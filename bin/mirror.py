@@ -12,6 +12,7 @@ This script performs three main tasks concurrently:
 import inotify.adapters
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 import re
 import os
 import sys
@@ -44,7 +45,32 @@ parser.add_argument(nargs='*', action='store', dest='dirs', help='additional dir
 args = parser.parse_args()
 
 # --- Logging Configuration ---
-logging.basicConfig(format='%(asctime)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S', filename=args.logfile, level=logging.INFO)
+# Set up a rotating log file handler to limit the log size.
+# An average log line is ~100 bytes. 100,000 lines * 100 bytes/line = 10 MB.
+LOG_MAX_BYTES = 10000000
+LOG_BACKUP_COUNT = 5
+
+# Get the root logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Create a formatter
+formatter = logging.Formatter('%(asctime)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+if args.logfile:
+    # Create a rotating file handler if a logfile is specified
+    handler = RotatingFileHandler(
+        args.logfile,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+else:
+    # If no logfile is specified, log to the console (stderr)
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 # --- Global State ---
 processed_files = deque(maxlen=200)

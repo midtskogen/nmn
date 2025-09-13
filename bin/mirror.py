@@ -21,7 +21,8 @@ import datetime
 import tempfile
 import shutil
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, BrokenProcessPool
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 import stack  # For direct JPG generation
 
 # --- Constants for Configuration ---

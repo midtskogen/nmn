@@ -201,6 +201,6 @@ if __name__ == '__main__':
             print('duration = ' + str(duration), file=output)
     
         # Execute external reporting script for significant events
-        if alt and alt[0] > -2 and alt[-1] > -2 and len(data['meteor_frame_data']) > 3:
+        if alt and alt[0] > -2 and alt[-1] > -2 and len(data['meteor_frame_data']) > 5:
             proc = subprocess.Popen([args.exefile, eventfile])
             # proc.wait() # Uncomment if the script needs to wait for completion

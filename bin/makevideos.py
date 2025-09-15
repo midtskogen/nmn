@@ -577,7 +577,7 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, verbose, executor,
 
 # --- Gnomonic View Processing Helpers ---
 
-def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked_jpg_path):
+def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked_jpg_path, padding_value=1024):
     """Generates the base gnomonic projection image from a stacked JPG."""
     azalt_start = event_data.get('start_azalt')
     azalt_end = event_data.get('end_azalt')
@@ -595,7 +595,7 @@ def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked
 
     # 2. Stitch gnomonic JPG
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
-    stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad 1024 "
+    stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad {padding_value} "
                         f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
     run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
     
@@ -907,7 +907,9 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
             print(f"Recalibration check: manual={event_data.get('manual', 0)}, sunalt={event_data.get('sunalt', 0)} -> Recalibrate: {event_data['recalibrate']}")
 
         # Generate the base gnomonic image needed for meteorcrop
-        gnomonic_image_path = generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, filenames['jpg'])
+        gnomonic_image_path = generate_gnomonic_projection(
+            event_data, filenames, tmpdir, verbose, filenames['jpg'], padding_value=32
+        )
 
         if gnomonic_image_path:
             # Run recalibration step to create gnomonic_corr_grid.pto

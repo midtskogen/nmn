@@ -219,7 +219,7 @@ async def watch_videos():
             # --- JPG Stacking ---
             if eventdir.endswith('HD') or eventdir.endswith('SD'):
                 jpgfile = os.path.join(remotedir, f"{file_prefix}{dt_for_path.strftime('%M')}.jpg")
-                stack_duration = 0.2 if eventdir.endswith('HD') else None
+                stack_duration = 0.2  # if eventdir.endswith('HD') else None
 
                 try:
                     loop = asyncio.get_running_loop()

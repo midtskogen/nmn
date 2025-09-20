@@ -69,7 +69,7 @@ def process_directory(source: Path, destination: Path, dir_arg: str, dry_run: bo
         print(f"    [DRY RUN] Would delete any files inside: {time_level_dir}")
         print(f"    [DRY RUN] If '{time_level_dir}' becomes empty, it would be removed.")
         print(f"    [DRY RUN] If '{date_level_dir}' then becomes empty, it would also be removed.")
-        print(f"    [DRY RUN] If '{time_level_dir}' still contains directories, would run: {FETCH_SCRIPT} {time_level_dir.resolve()}")
+        print(f"    [DRY RUN] If '{time_level_dir}' still contains directories, would run: {sys.executable} {FETCH_SCRIPT} {time_level_dir.resolve()}")
         return
 
     leaf_dirs_found = []
@@ -77,6 +77,10 @@ def process_directory(source: Path, destination: Path, dir_arg: str, dry_run: bo
 
     # --- 1. Copy Phase (Real and --keep runs) ---
     try:
+        # Check if source exists before walking
+        if not source.is_dir():
+             print(f"❌ Error: Source directory '{source}' does not exist. Aborting.", file=sys.stderr)
+             return
         for root_str, dirs, files in os.walk(source):
             root = Path(root_str)
             relative_path = root.relative_to(source)
@@ -120,18 +124,23 @@ def process_directory(source: Path, destination: Path, dir_arg: str, dry_run: bo
             for item in leaf.iterdir():
                 if item.is_file(): item.unlink()
             current_dir = leaf
-            while current_dir != date_level_dir:
-                if not any(current_dir.iterdir()):
-                    print(f"    Removing empty source directory: {current_dir}")
-                    current_dir.rmdir()
-                    current_dir = current_dir.parent
-                else: break
+            # Walk up the tree from the leaf, removing empty directories
+            while current_dir != date_level_dir.parent and current_dir.is_dir() and not any(current_dir.iterdir()):
+                print(f"    Removing empty source directory: {current_dir}")
+                current_dir.rmdir()
+                current_dir = current_dir.parent
         except OSError as e:
             print(f"  ⚠️ Error during primary cleanup of {leaf}: {e}. Halting for this branch.", file=sys.stderr)
             continue
 
     # --- 4. Final Cleanup ---
     print(f"  Performing final cleanup on target directory: {time_level_dir}")
+
+    # *** FIX 1: Check if the target directory was already removed in the primary cleanup phase. ***
+    if not time_level_dir.is_dir():
+        print(f"  Skipping final cleanup: target directory '{time_level_dir}' was already removed.")
+        return
+
     try:
         for item in time_level_dir.iterdir():
             if item.is_file():
@@ -146,12 +155,22 @@ def process_directory(source: Path, destination: Path, dir_arg: str, dry_run: bo
                 print(f"    Date-level directory '{date_level_dir}' is now empty. Removing it.")
                 date_level_dir.rmdir()
         else:
-            cmd = [FETCH_SCRIPT, str(time_level_dir.resolve())]
+            # *** FIX 2A: Use sys.executable for a robust, explicit call to the interpreter. ***
+            cmd = [sys.executable, FETCH_SCRIPT, str(time_level_dir.resolve())]
             print(f"    Target cleanup directory still contains subdirectories. Running: {' '.join(cmd)}")
             subprocess.run(cmd, check=True, capture_output=True, text=True)
 
-    except FileNotFoundError:
-        print(f"  ❌ Error: Fetch script not found at '{FETCH_SCRIPT}'.", file=sys.stderr)
+    # *** FIX 2B: Provide a more detailed and accurate error message for FileNotFoundError. ***
+    except FileNotFoundError as e:
+        print(f"  ❌ Error: A required file for execution could not be found.", file=sys.stderr)
+        # The exception object tells us exactly which file was missing.
+        if e.filename == sys.executable:
+            print(f"  The Python interpreter specified at '{sys.executable}' appears to be invalid or missing.", file=sys.stderr)
+        elif e.filename == FETCH_SCRIPT:
+            print(f"  The fetch script itself is missing from the expected location: '{FETCH_SCRIPT}'.", file=sys.stderr)
+        else:
+            # Fallback for any other unexpected case
+            print(f"  Details: {e}", file=sys.stderr)
     except subprocess.CalledProcessError as e:
         print(f"  ❌ Error: The script '{FETCH_SCRIPT}' failed.", file=sys.stderr)
         print(f"  --- STDOUT ---\n{e.stdout}", file=sys.stderr)
@@ -191,6 +210,7 @@ def main():
         if not source_dir.is_dir():
             source_dir = ALT_SOURCE_PREFIX / dir_arg
         
+        # In dry_run, we don't need the source to exist to show what would happen
         if not source_dir.is_dir() and not args.dry_run:
             print(f"⚠️ Warning: Source not found in current path or '{ALT_SOURCE_PREFIX}'. Skipping '{dir_arg}'", file=sys.stderr)
             continue

@@ -41,6 +41,8 @@ for ip in ips:
     enc_settings[0]["MainFormat"][0]["Video"]["BitRate"] = 3072
     enc_settings[0]["MainFormat"][0]["Video"]["Quality"] = 6
     enc_settings[0]["MainFormat"][0]["Video"]["GOP"] = 6
+    #enc_settings[0]["MainFormat"][0]["Video"]["Compression"] = 'H.264'
+    #enc_settings[0]["MainFormat"][0]["Video"]["Compression"] = 'HEVC'
     enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'HD1'
     enc_settings[0]["ExtraFormat"][1]["Video"]["Resolution"] = 'WSVGA'
     enc_settings[0]["ExtraFormat"][2]["Video"]["Resolution"] = 'WSVGA'

@@ -234,7 +234,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Connect to and configure XM-based IP cameras.", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--ip", type=str, default="192.168.76.71-77", help="Target IP address or range.\nExamples:\n'192.168.76.71'\n'192.168.76.71-77'")
-    parser.add_argument("--codec", type=str, default="HEVC", choices=["H.264", "HEVC"], help="CLI MODE: Video codec to use. Default: HEVC")
+    parser.add_argument("--codec", type=str, default="H.265", choices=["H.264", "H.265"], help="CLI MODE: Video codec to use. Default: H.265")
     parser.add_argument("--gop", type=int, default=4, help="CLI MODE: GOP value. Must be >= 1. Default: 4")
     parser.add_argument("--bitrate", type=int, default=3072, help="CLI MODE: Video bitrate in kbps. Must be a positive integer. Default: 3072")
     parser.add_argument("--noreboot", action="store_true", help="CLI MODE: Do not reboot the camera after applying the configuration.")

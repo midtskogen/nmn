@@ -405,6 +405,58 @@ def overlay_video_with_image(video_path, overlay_path, output_path, verbose=Fals
         sys.exit(1)
     return output_path
 
+def handle_hevc_transcoding(video_path, verbose=False):
+    """
+    Checks if a video file uses the HEVC codec. If so, renames the original
+    to '_hevc.mp4' and creates a new H.264 version with the original name.
+    """
+    video_file = Path(video_path)
+    if not video_file.exists():
+        print(f"Warning: Video file {video_file} not found for HEVC check.", file=sys.stderr)
+        return
+
+    try:
+        print(f"-> Checking video codec for {video_file.name}...")
+        probe = ffmpeg.probe(str(video_file))
+        video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
+
+        if video_stream and video_stream.get('codec_name') == 'hevc':
+            print(f"   -> HEVC codec detected. Transcoding to H.264...")
+
+            # Define the new name for the original HEVC file
+            hevc_file_path = video_file.with_name(f"{video_file.stem}_hevc.mp4")
+
+            # Rename the original file
+            print(f"      - Renaming {video_file.name} to {hevc_file_path.name}")
+            shutil.move(str(video_file), str(hevc_file_path))
+
+            # Transcode the renamed file back to the original filename with H.264
+            print(f"      - Transcoding {hevc_file_path.name} to {video_file.name} (H.264)...")
+            try:
+                (
+                    ffmpeg
+                    .input(str(hevc_file_path))
+                    .output(str(video_file), vcodec='libx264', crf=23, preset='medium')
+                    .overwrite_output()
+                    .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
+                )
+                print(f"   ...Done: Transcoding complete.")
+            except ffmpeg.Error as e:
+                print("\n--- ERROR during HEVC to H.264 transcoding ---", file=sys.stderr)
+                print(f"FFmpeg stderr:\n{e.stderr.decode('utf8')}", file=sys.stderr)
+                # Attempt to move the file back if transcoding fails
+                print(f"      - Transcoding failed. Restoring original file name.", file=sys.stderr)
+                shutil.move(str(hevc_file_path), str(video_file))
+
+        else:
+            print(f"   ...Done: Codec is not HEVC.")
+
+    except ffmpeg.Error as e:
+        stderr_output = e.stderr.decode('utf8') if e.stderr else "No stderr output"
+        print(f"Warning: Could not probe video file {video_file.name}. FFmpeg error: {stderr_output}", file=sys.stderr)
+    except Exception as e:
+        print(f"An unexpected error occurred during HEVC check/transcode: {e}", file=sys.stderr)
+
 
 # --- Core Script Logic ---
 
@@ -987,6 +1039,10 @@ def main(args):
                 future_full_view.result() # Wait for full view pipeline to finish
 
         composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=args.verbose)
+
+    # --- HEVC Transcoding Step ---
+    print("\n--- Finalizing Videos ---")
+    handle_hevc_transcoding(filenames['full'], args.verbose)
 
     # Update event.txt before finishing
     update_event_file(event_data)

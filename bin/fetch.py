@@ -435,6 +435,7 @@ if (file_exists($webm_path)) {{
 <?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4">Gnomonisk</a><br> <?php }} ?>
 <?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.mp4">Gnomonisk med koordinater</a><br> <?php }} ?>
 <?php if (file_exists("{station}/{cam}/{station_ts}.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.mp4">Original</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}_hevc.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}_hevc.mp4">Original (HEVC)</a><br> <?php }} ?>
 <?php if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.mp4">Original med koordinater</a><br> <?php }} ?>
 </td></tr>
 <tr><td><b>Bilder:</b><br>

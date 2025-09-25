@@ -1,191 +1,230 @@
 #!/usr/bin/env python3
 
-# Telnet root password: xmhdipc
-
+import argparse
+import sys
 from dvrip import DVRIPCam
 from pprint import pprint
 
-ips = [ "192.168.76.71", "192.168.76.72", "192.168.76.73", "192.168.76.74", "192.168.76.75", "192.168.76.76", "192.168.76.77" ]
-#ips = [ "192.168.76.71" ]
+# Telnet root password: xmhdipc
 
-for ip in ips:
-    cam = DVRIPCam(ip, user='admin', password='')
-    cam.login()
-    cam.set_time()
+# A constant list of all settings to query when using the --dump option.
+SETTINGS_TO_DUMP = [
+    "fVideo.Tour", "fVideo.GUISet", "fVideo.WheelFunction", "fVideo.TVAdjust",
+    "fVideo.AudioInFormat", "fVideo.Play", "fVideo.VideoOut", "fVideo.OSDWidget",
+    "fVideo.Spot", "fVideo.Volume", "fVideo.LossShowStr", "fVideo.VideoOutPriority",
+    "fVideo.VideoSeque", "fVideo.VoColorAdjust", "fVideo.OSDInfo", "fVideo.OsdLogo",
+    "fVideo.VideoSignal", "fVideo.OEMChSeq", "fVideo.AudioSupportType", "Camera.Param",
+    "Camera.ParamEx", "Camera.FishEye", "Camera.ClearFog", "Camera.MotorCtrl",
+    "Camera.FishLensParam", "Camera.DistortionCorrect", "Camera.FishViCut",
+    "Camera.WhiteLight", "AVEnc.CombineEncodeParam", "AVEnc.EncodeStaticParam",
+    "AVEnc.Encode", "AVEnc.VideoWidget", "AVEnc.VideoColor", "AVEnc.CombineEncode",
+    "AVEnc.CombineEncodeParam", "AVEnc.WaterMark", "AVEnc.EncodeStaticParamV2",
+    "AVEnc.VideoColorCustom", "AVEnc.EncodeEx", "AVEnc.EncodeAddBeep"
+]
 
+
+def parse_ip_range(ip_string: str) -> list[str]:
+    """
+    Parses an IP range string (e.g., '192.168.1.10-15') into a list of IPs.
+    Also handles single IP addresses.
+    """
+    if '-' not in ip_string:
+        return [ip_string]
+
+    try:
+        parts = ip_string.split('-')
+        base_ip_parts = parts[0].split('.')
+        
+        if len(base_ip_parts) != 4:
+            raise ValueError("Invalid base IP format.")
+
+        start_octet = int(base_ip_parts[3])
+        end_octet = int(parts[1])
+        prefix = ".".join(base_ip_parts[0:3])
+
+        if not (0 <= start_octet <= 255 and 0 <= end_octet <= 255 and start_octet <= end_octet):
+             raise ValueError("Invalid octet range.")
+
+        return [f"{prefix}.{i}" for i in range(start_octet, end_octet + 1)]
+    except (ValueError, IndexError) as e:
+        sys.exit(f"Error: Invalid IP range format '{ip_string}'. Example: '192.168.76.71-77'. Details: {e}")
+
+
+def set_compression(data: dict | list, value: str):
+    """
+    Recursively finds and sets the video compression value in a settings dictionary.
+    """
+    if isinstance(data, dict):
+        if "Video" in data and "Compression" in data["Video"]:
+            data["Video"]["Compression"] = value
+        for v in data.values():
+            set_compression(v, value)
+    elif isinstance(data, list):
+        for item in data:
+            set_compression(item, value)
+
+
+def dump_camera_settings(cam: DVRIPCam, ip: str):
+    """
+    Connects to a camera and pretty-prints all its settings.
+    """
+    print(f"--- Dumping all settings for {ip} ---")
+    for setting in SETTINGS_TO_DUMP:
+        try:
+            print(f"\n#--- {setting} ---#")
+            pprint(cam.get_info(setting))
+        except Exception as e:
+            print(f"Could not retrieve setting '{setting}': {e}")
+    print(f"--- Finished dumping settings for {ip} ---")
+
+
+def configure_camera(cam: DVRIPCam, ip: str, codec: str, gop: int, bitrate: int, no_reboot: bool):
+    """
+    Applies a standard configuration to a camera.
+    """
+    print(f"Configuring camera at {ip}...")
+
+    # --- Set Camera Parameters ---
     cam_settings = cam.get_info("Camera.Param")
-    print(cam_settings)
-#    cam_settings[0]['EsShutter'] = '0x00000002'
-    cam_settings[0]['EsShutter'] = '0x00000000'
-    cam_settings[0]['DayNightColor'] = '0x00000001'
-    cam_settings[0]["GainParam"]["AutoGain"] = 1
-    cam_settings[0]["GainParam"]["Gain"] = 50
-    cam_settings[0]["BroadTrends"]["AutoGain"] = 0
-    cam_settings[0]["BroadTrends"]["Gain"] = 50
-    cam_settings[0]["ExposureParam"]["MostTime"] = '0x00010000'
-    cam_settings[0]["ExposureTime"] = '0x00000100'
-    cam_settings[0]["LowLuxMode"] = 0
-    cam_settings[0]["LightRestrainLevel"] = 16
-    cam_settings[0]['WhiteBalance'] = '0x00000000'
-    cam_settings[0]['AutomaticAdjustment'] = 3
-    cam_settings[0]['Day_nfLevel'] = 5
-    cam_settings[0]['Night_nfLevel'] = 5
-    cam_settings[0]['LowLuxMode'] = 0
-    cam_settings[0]['Ldc'] = 1
-
+    cam_settings[0].update({
+        'EsShutter': '0x00000000',
+        'DayNightColor': '0x00000001',
+        "GainParam": {"AutoGain": 1, "Gain": 50},
+        "BroadTrends": {"AutoGain": 0, "Gain": 50},
+        "ExposureParam": {"MostTime": '0x00010000'},
+        "ExposureTime": '0x00000100',
+        "LowLuxMode": 0,
+        "LightRestrainLevel": 16,
+        'WhiteBalance': '0x00000000',
+        'AutomaticAdjustment': 3,
+        'Day_nfLevel': 5,
+        'Night_nfLevel': 5,
+        'Ldc': 1
+    })
     cam.set_info("Camera.Param", cam_settings)
     cam.set_info("Camera.ParamEx", cam_settings)
-    
+    print("-> Camera parameters set.")
+
+    # --- Set Encoding Parameters ---
     enc_settings = cam.get_info("AVEnc.Encode")
+    # Main Stream
     enc_settings[0]["MainFormat"][0]["Video"]["Resolution"] = '1080P'
-    enc_settings[0]["MainFormat"][0]["Video"]["BitRate"] = 3072
+    enc_settings[0]["MainFormat"][0]["Video"]["BitRate"] = bitrate
     enc_settings[0]["MainFormat"][0]["Video"]["Quality"] = 6
-    enc_settings[0]["MainFormat"][0]["Video"]["GOP"] = 6
-    #enc_settings[0]["MainFormat"][0]["Video"]["Compression"] = 'H.264'
-    #enc_settings[0]["MainFormat"][0]["Video"]["Compression"] = 'HEVC'
+    enc_settings[0]["MainFormat"][0]["Video"]["GOP"] = gop
+    # Extra Streams
     enc_settings[0]["ExtraFormat"][0]["Video"]["Resolution"] = 'HD1'
     enc_settings[0]["ExtraFormat"][1]["Video"]["Resolution"] = 'WSVGA'
     enc_settings[0]["ExtraFormat"][2]["Video"]["Resolution"] = 'WSVGA'
+    # Apply compression setting to all streams
+    set_compression(enc_settings, codec)
     cam.set_info("AVEnc.Encode", enc_settings)
+    print(f"-> Encoding settings configured (Codec: {codec}, GOP: {gop}, Bitrate: {bitrate}).")
 
+    # --- Set OSD/Widget Parameters ---
     widget_settings = cam.get_info("AVEnc.VideoWidget")
     widget_settings[0]["ChannelTitle"]["Name"] = "NMN"
-    widget_settings[0]["ChannelTitleAttribute"]["RelativePos"] = [8192, 8192, 0, 0]
     widget_settings[0]["ChannelTitleAttribute"]["EncodeBlend"] = False
     widget_settings[0]["Covers"][0]["EncodeBlend"] = True
     widget_settings[0]["Covers"][0]["RelativePos"] = [0, 7930, 1320, 8130]
-#    widget_settings[0]["Covers"][0]["RelativePos"] = [0, 7930, 1540, 8140]
-    widget_settings[0]["TimeTitleAttribute"]["BackColor"] = "0xFF808080"
-    widget_settings[0]["TimeTitleAttribute"]["EncodeBlend"] = True
-    widget_settings[0]["TimeTitleAttribute"]["FrontColor"] = "0xFFFFFFFF"
-    widget_settings[0]["TimeTitleAttribute"]["PreviewBlend"] = True
-    widget_settings[0]["TimeTitleAttribute"]["RelativePos"] = [0, 8192, 0, 0]
-    widget_settings[0]["TimeTitleAttribute"]["RelativePos"] = [0, 8192, 0, 0]
+    widget_settings[0]["TimeTitleAttribute"].update({
+        "EncodeBlend": True,
+        "PreviewBlend": True,
+        "BackColor": "0xFF808080",
+        "FrontColor": "0xFFFFFFFF",
+        "RelativePos": [0, 8192, 0, 0]
+    })
     cam.set_info("AVEnc.VideoWidget", widget_settings)
-    cam.reboot()
+    print("-> Video widget (OSD) settings applied.")
 
+    # --- Reboot Camera to Apply Changes (if not disabled) ---
+    if not no_reboot:
+        print(f"-> Rebooting {ip} to apply changes.")
+        cam.reboot()
+    else:
+        print("-> --noreboot specified, skipping reboot.")
+
+
+def main():
+    """
+    Main function to parse arguments and orchestrate camera configuration.
+    """
+    parser = argparse.ArgumentParser(
+        description="Connect to and configure XM/DVRIP-based IP cameras.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
     
-#[[{'Enable': True,
-#   'TimeSection': '0 00:00:00-24:00:00',
-#   'VideoColorParam': {'Acutance': 3848,
-#                       'Brightness': 50,
-#                       'Contrast': 50,
-#                       'Gain': 0,
-#                       'Hue': 50,
-#                       'Saturation': 50,
-#                       'Whitebalance': 128}},
+    parser.add_argument(
+        "--ip",
+        type=str,
+        default="192.168.76.71-77",
+        help="Target IP address or range.\nExamples:\n'192.168.76.71'\n'192.168.76.71-77'"
+    )
+    parser.add_argument(
+        "--codec",
+        type=str,
+        default="HEVC",
+        choices=["H.264", "HEVC"],
+        help="Video codec to use. Default: HEVC"
+    )
+    parser.add_argument(
+        "--gop",
+        type=int,
+        default=4,
+        help="GOP (Group of Pictures) value. Must be >= 1. Default: 4"
+    )
+    parser.add_argument(
+        "--bitrate",
+        type=int,
+        default=3072,
+        help="Video bitrate in kbps. Must be a positive integer. Default: 3072"
+    )
+    parser.add_argument(
+        "--dump",
+        action="store_true",
+        help="Dump all current settings from the camera(s) instead of configuring them."
+    )
+    parser.add_argument(
+        "--noreboot",
+        action="store_true",
+        help="Do not reboot the camera after applying the configuration."
+    )
 
-exit()
+    args = parser.parse_args()
 
-settings = [ "fVideo.Tour", "fVideo.GUISet", "fVideo.WheelFunction", "fVideo.TVAdjust", "fVideo.AudioInFormat", "fVideo.Play", "fVideo.VideoOut", "fVideo.OSDWidget", "fVideo.Spot", "fVideo.Volume", "fVideo.LossShowStr", "fVideo.VideoOutPriority", "fVideo.VideoSeque", "fVideo.VoColorAdjust", "fVideo.OSDInfo", "fVideo.OsdLogo", "fVideo.VideoSignal", "fVideo.OEMChSeq", "fVideo.AudioSupportType", "Camera.Param", "Camera.ParamEx", "Camera.FishEye", "Camera.ClearFog", "Camera.MotorCtrl", "Camera.FishLensParam", "Camera.DistortionCorrect", "Camera.FishViCut", "Camera.WhiteLight", "AVEnc.CombineEncodeParam", "AVEnc.EncodeStaticParam", "AVEnc.Encode", "AVEnc.VideoWidget", "AVEnc.VideoColor", "AVEnc.CombineEncode", "AVEnc.CombineEncodeParam", "AVEnc.WaterMark", "AVEnc.EncodeStaticParamV2", "AVEnc.VideoColorCustom", "AVEnc.EncodeEx", "AVEnc.EncodeAddBeep" ]
+    # --- Input Validation ---
+    if args.gop < 1:
+        sys.exit("Error: --gop must be an integer of at least 1.")
+    if args.bitrate <= 0:
+        sys.exit("Error: --bitrate must be a positive integer.")
 
-for i in settings:
-    print("\n\n" + i + ":")
-    pprint(cam.get_info(i))
-exit()
-#pprint(cam.get_general_info())
-#pprint(cam.get_system_info())
-#pprint(cam.get_camera_info())
-#pprint(cam.get_system_capabilities())
-#pprint(cam.get_info("Camera"))
-#pprint(cam.get_info("Simplify.Encode"))
-#pprint(cam.get_info("NetWork.NetCommon"))
-#exit()
+    # --- Main Loop ---
+    ips = parse_ip_range(args.ip)
+    print(f"Targeting cameras: {ips}")
 
-# 'Param': [{'AeMeansure': 0,
-#            'AeSensitivity': 5,
-#            'ApertureMode': '0x00000000',
-#            'AutomaticAdjustment': 3,
-#            'BLCMode': '0x00000000',
-#            'BroadTrends': {'AutoGain': 0, 'Gain': 50},
-#            'CorridorMode': 0,
-#            'DayNightColor': '0x00000000',
-#            'Day_nfLevel': 3,
-#            'Dis': 0,
-#            'DncThr': 30,
-#            'ElecLevel': 50,
-#            'EsShutter': '0x00000000',
-#            'ExposureParam': {'LeastTime': '0x00000100',
-#                              'Level': 0,
-#                              'MostTime': '0x00010000'},
-#            'ExposureTime': '0x00000100',
-#            'GainParam': {'AutoGain': 1, 'Gain': 50},
-#            'IRCUTMode': 0,
-#            'IrcutSwap': 0,
-#            'Ldc': 0,
-#            'LightRestrainLevel': 16,
-#            'LowLuxMode': 0,
-#            'Night_nfLevel': 3,
-#            'PictureFlip': '0x00000000',
-#            'PictureMirror': '0x00000000',
-#            'PreventOverExpo': 0,
-#            'RejectFlicker': '0x00000000',
-#            'SoftPhotosensitivecontrol': 0,
-#            'Style': 'type1',
-#            'WhiteBalance': '0x00000000'}],
-# 'ParamEx': [{'AeMeansure': 0,
-#              'AutomaticAdjustment': 3,
-#              'BroadTrends': {'AutoGain': 0, 'Gain': 50},
-#              'CorridorMode': 0,
-#              'Dis': 0,
-#              'EsShutter': '0x00000000',
-#              'ExposureTime': '0x00000100',
-#              'Ldc': 0,
-#              'LightRestrainLevel': 16,
-#              'LowLuxMode': 0,
-#              'PreventOverExpo': 0,
-#              'SoftPhotosensitivecontrol': 0,
-#              'Style': 'type1'}],
+    for ip in ips:
+        cam = None  # Ensure cam is defined for the finally block
+        try:
+            print(f"\nConnecting to {ip}...")
+            cam = DVRIPCam(ip, user='admin', password='')
+            if not cam.login():
+                print(f"Error: Could not log in to {ip}. Check credentials and network. Skipping.")
+                continue
 
-#pprint(cam.get_info("Camera.Param"))
+            cam.set_time()
 
-#cam_settings = cam.get_info("Camera.ParamEx")
-#cam_settings[0]['BroadTrends']['AutoGain'] = 1
-#cam.set_info("Camera.ParamEx", cam_settings)
+            if args.dump:
+                dump_camera_settings(cam, ip)
+            else:
+                configure_camera(cam, ip, args.codec, args.gop, args.bitrate, args.noreboot)
 
-#pprint(cam_settings)
-#sleep(5)
-#cam_settings[0]['WhiteBalance'] = '0x00000000'
-#cam.set_info("Camera.Param", cam_settings)
-
-cam_text = cam.get_info("fVideo.OSDInfo")
-#pprint(cam_text)
-cam_text["OSDInfo"][0]["Info"] = ["", None]
-cam_text["OSDInfo"][0]["OSDInfoWidget"]["EncodeBlend"] = True
-cam_text["OSDInfo"][0]["OSDInfoWidget"]["BackColor"]= '0x80000000'
-cam_text["OSDInfo"][0]["OSDInfoWidget"]["FrontColor"]= '0xF0FFFF00'
-cam_text["OSDInfo"][0]["OSDInfoWidget"]["RelativePos"] = [0,0,0,0]
-cam.set_info("fVideo.OSDInfo", cam_text)
-
-cam_gui = cam.get_info("fVideo.GUISet")
-cam_gui["TimeTitleEnable"] = True
-cam.set_info("fVideo.GUISet", cam_gui)
-
-#cam_widget = cam.get_info("fVideo.OSDWidget")
-#pprint(cam_widget)
-#cam_widget[0]["AlarmInfo"]["EncodeBlend"] = True
-#cam.set_info("fVideo.OSDWidget", cam_widget)
-
-# 'OSDWidget': [{'AlarmInfo': {'BackColor': '0x60000000',
-#                              'EncodeBlend': True,
-#                              'FrontColor': '0xF0FFFFFF',
-#                              'PreviewBlend': True,
-#                              'RelativePos': [570, 2048, 255, 24]}}],
-
-# 'OsdLogo': {'BgTrans': 16, 'Enable': 1, 'FgTrans': 96, 'Left': 80, 'Top': 80},
+        except Exception as e:
+            print(f"An unexpected error occurred with camera {ip}: {e}")
+        finally:
+            if cam:
+                cam.close()
+                print(f"Connection to {ip} closed.")
 
 
-#cam.channel_title([""])
-
-pprint(cam.get_info("PreviewFunction"))
-
-enc_settings = cam.get_info("Simplify.Encode")
-#enc_settings[0]["MainFormat"]["Video"]["BitRate"] = 6144 # 6144
-#enc_settings[0]["MainFormat"]["Video"]["FPS"] = 25
-enc_settings[0]["MainFormat"]["Video"]["GOP"] = 4 # 6144
-#del enc_settings[0]["MainFormat"]["Video"]["Bitrate"]
-cam.set_info("Simplify.Encode", enc_settings)
-#pprint(enc_settings)
-
-# Disconnect
-cam.close()
+if __name__ == "__main__":
+    main()

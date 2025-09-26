@@ -6,7 +6,7 @@ A multi-purpose Python script for configuring DVRIP-based IP cameras.
 It supports three modes of operation:
 1. A command-line interface (CLI) for scripting and automation (--dump, --codec, etc.).
 2. A graphical user interface (GUI) built with Tkinter (--gui).
-3. A web-based interface built with Flask (--flask).
+3. A web-based interface built with Flask (--web).
 
 The script is architected to share core camera communication logic between all modes.
 """
@@ -144,14 +144,18 @@ class CameraController:
                 self.all_camera_data[ip] = error_data
                 return error_data
 
+    def invalidate_cache(self, ip):
+        """Removes an IP's data from the cache."""
+        with self.lock:
+            if ip in self.all_camera_data:
+                del self.all_camera_data[ip]
+
     def apply_settings(self, ip, subgroup, new_settings):
         try:
             cam = DVRIPCam(ip, user='admin', password='')
             if not cam.login(): raise ConnectionError("Login failed.")
             cam.set_info(subgroup, new_settings)
             cam.close()
-            if ip in self.all_camera_data and 'error' not in self.all_camera_data[ip]:
-                self.all_camera_data[ip][subgroup] = new_settings
             return {"success": True, "message": f"Settings for '{subgroup}' applied to {ip}."}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -238,12 +242,12 @@ def main():
     parser.add_argument("--gop", type=int, default=4, help="CLI MODE: GOP value. Must be >= 1. Default: 4")
     parser.add_argument("--bitrate", type=int, default=3072, help="CLI MODE: Video bitrate in kbps. Must be a positive integer. Default: 3072")
     parser.add_argument("--noreboot", action="store_true", help="CLI MODE: Do not reboot the camera after applying the configuration.")
-    parser.add_argument("--port", type=int, default=5001, help="FLASK MODE: Port for the web server. Default: 5001")
+    parser.add_argument("--port", type=int, default=5001, help="WEB MODE: Port for the web server. Default: 5001")
     
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--gui", action="store_true", help="Launch the Tkinter graphical user interface.")
     mode_group.add_argument("--dump", action="store_true", help="Dump all settings from the camera(s) to the console.")
-    mode_group.add_argument("--flask", action="store_true", help="Launch the Flask web server interface.")
+    mode_group.add_argument("--web", action="store_true", help="Launch the web server interface.")
     
     args = parser.parse_args()
     
@@ -438,15 +442,27 @@ def main():
                         row = self._populate_frame_with_widgets(parent, item, item_vars, row + 1, indent + 1, path_prefix=f"{path_prefix}.[{i}]", style_prefix=style_prefix)
                 return row
             def apply_settings(self):
-                subgroup = self.subgroup_var.get();
+                subgroup = self.subgroup_var.get()
                 if not subgroup: return
-                selected_ip = self.ip_var.get(); self._update_status(f"Applying '{subgroup}' to {selected_ip}...")
+                selected_ip = self.ip_var.get()
+                self._update_status(f"Applying '{subgroup}' to {selected_ip}...")
                 original_data = self.controller.all_camera_data[selected_ip][subgroup]
                 new_settings = self._reconstruct_settings(self.ui_variables, original_data)
                 result = self.controller.apply_settings(selected_ip, subgroup, new_settings)
                 if result["success"]:
-                    self.apply_button.config(state="disabled"); messagebox.showinfo("Success", result["message"]); self._update_status(f"Successfully applied settings to {selected_ip}.")
-                else: messagebox.showerror("Error", f"Failed to apply settings:\n{result['message']}"); self._update_status("Error: Failed to apply settings.")
+                    self._update_status(f"Settings applied. Reloading from {selected_ip} to verify...")
+                    self.controller.invalidate_cache(selected_ip)
+                    reloaded_data = self.controller.load_camera_data(selected_ip)
+                    if "error" in reloaded_data:
+                        messagebox.showwarning("Verification Failed", f"Settings applied successfully to {selected_ip}, but verification by reloading failed:\n{reloaded_data['error']}")
+                        self._update_status(f"Error: Could not verify settings for {selected_ip}.")
+                    else:
+                        messagebox.showinfo("Success", result["message"])
+                        self.display_setting_group()
+                        self._update_status(f"Successfully applied and verified settings for {selected_ip}.")
+                else:
+                    messagebox.showerror("Error", f"Failed to apply settings:\n{result['message']}")
+                    self._update_status("Error: Failed to apply settings.")
             def reboot_camera(self):
                 selected_ip = self.ip_var.get()
                 if not selected_ip: messagebox.showerror("Error", "No camera selected.")
@@ -486,13 +502,13 @@ def main():
         print("Launching GUI...")
         CamConfigGUI(controller)
 
-    elif args.flask:
+    elif args.web:
         try:
             from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
             import simplepam
             import os
         except ImportError:
-            sys.exit("Flask or simplepam is not available. Please install them to use --flask mode (pip install flask simplepam).")
+            sys.exit("Flask or simplepam is not available. Please install them to use --web mode (pip install flask simplepam).")
 
         app = Flask(__name__)
         app.secret_key = os.urandom(24)
@@ -539,23 +555,25 @@ def main():
             }
             function onSubgroupChange() {
                 const ip = ipSelect.value, subgroup = subgroupSelect.value;
+                settingsView.innerHTML = '';
+                applyBtn.disabled = true;
+                if (!subgroup) return;
                 originalSubgroupData = (cameraData[ip] || {})[subgroup];
                 isListWrapped = Array.isArray(originalSubgroupData);
                 const displayData = isListWrapped && originalSubgroupData.length > 0 ? originalSubgroupData[0] : originalSubgroupData;
                 renderSettings(displayData, subgroup);
             }
             function renderSettings(data, subgroup) {
-                settingsView.innerHTML = '';
                 if (!data || typeof data !== 'object') return;
                 let i = 0;
                 for (const key in data) {
                     const groupFrame = document.createElement('div');
                     groupFrame.className = `group-frame ${i++ % 2 ? 'odd' : 'even'}`;
-                    _renderValue(groupFrame, key, data[key], `${subgroup}.${key}`, 0);
+                    _renderValue(groupFrame, key, data[key], `${subgroup}.${key}`, 0, key);
                     settingsView.appendChild(groupFrame);
                 }
             }
-            function _renderValue(parent, key, value, fullPath, indent) {
+            function _renderValue(parent, key, value, fullPath, indent, relPath) {
                 const row = document.createElement('div');
                 row.className = `row row-indent-${indent}`;
                 const doc = DOCS[fullPath] || {};
@@ -570,26 +588,26 @@ def main():
                     row.appendChild(desc);
                     parent.appendChild(row);
                     if (Array.isArray(value)) {
-                        value.forEach((item, i) => { _renderValue(parent, `[${i}]`, item, `${fullPath}[${i}]`, indent + 1); });
+                        value.forEach((item, i) => { _renderValue(parent, `[${i}]`, item, `${fullPath}[${i}]`, indent + 1, `${relPath}.${i}`); });
                     } else {
-                        for (const subKey in value) { _renderValue(parent, subKey, value[subKey], `${fullPath}.${subKey}`, indent + 1); }
+                        for (const subKey in value) { _renderValue(parent, subKey, value[subKey], `${fullPath}.${subKey}`, indent + 1, `${relPath}.${subKey}`); }
                     }
                 } else {
                     const widgetContainer = document.createElement('div');
                     if (doc.type === "options") {
                         const select = document.createElement('select');
-                        select.dataset.key = key;
+                        select.dataset.path = relPath;
                         for (const opt in doc.map) { const option = document.createElement('option'); option.value = doc.map[opt]; option.textContent = opt; select.appendChild(option); }
                         select.value = value;
                         widgetContainer.appendChild(select);
                     } else if (typeof value === 'boolean') {
                         const checkbox = document.createElement('input');
-                        checkbox.type = 'checkbox'; checkbox.checked = value; checkbox.dataset.key = key;
+                        checkbox.type = 'checkbox'; checkbox.checked = value; checkbox.dataset.path = relPath;
                         widgetContainer.appendChild(checkbox);
                     } else if (typeof value === 'number' || (typeof value === 'string' && value.startsWith('0x'))) {
                         const isHex = typeof value === 'string' && value.startsWith('0x');
                         const spinbox = document.createElement('div'); spinbox.className = 'spinbox';
-                        const input = document.createElement('input'); input.type = 'text'; input.value = value; input.dataset.key = key;
+                        const input = document.createElement('input'); input.type = 'text'; input.value = value; input.dataset.path = relPath;
                         const upBtn = document.createElement('button'); upBtn.textContent = '+';
                         const downBtn = document.createElement('button'); downBtn.textContent = '-';
                         upBtn.onclick = () => adjustValue(input, 1, isHex);
@@ -597,7 +615,7 @@ def main():
                         spinbox.append(input, upBtn, downBtn);
                         widgetContainer.appendChild(spinbox);
                     } else {
-                        const input = document.createElement('input'); input.type = 'text'; input.value = value; input.dataset.key = key;
+                        const input = document.createElement('input'); input.type = 'text'; input.value = value; input.dataset.path = relPath;
                         widgetContainer.appendChild(input);
                     }
                     row.appendChild(widgetContainer);
@@ -624,30 +642,42 @@ def main():
             }
             async function applySettings() {
                 const ip = ipSelect.value, subgroup = subgroupSelect.value;
-                const displayData = isListWrapped && originalSubgroupData.length > 0 ? originalSubgroupData[0] : originalSubgroupData;
-                const newSettings = JSON.parse(JSON.stringify(displayData));
+                const newSettings = JSON.parse(JSON.stringify(originalSubgroupData));
+                const settingsToApply = isListWrapped ? newSettings[0] : newSettings;
                 
-                function updateNested(obj, path, value) {
-                    const keys = path.split('.'); let current = obj;
-                    for (let i = 0; i < keys.length - 1; i++) { if(current[keys[i]] === undefined) current[keys[i]] = {}; current = current[keys[i]]; }
-                    current[keys[keys.length-1]] = value;
+                function updateValueByPath(obj, path, value) {
+                    const keys = path.replace(/\\\[(\d+)\\\]/g, '.$1').split('.');
+                    let temp = obj;
+                    for (let i = 0; i < keys.length - 1; i++) {
+                        if (temp[keys[i]] === undefined) return;
+                        temp = temp[keys[i]];
+                    }
+                    const finalKey = keys[keys.length - 1];
+                    const originalValue = temp[finalKey];
+                    if (typeof originalValue === 'boolean') temp[finalKey] = value;
+                    else if (typeof originalValue === 'number' && !originalValue.toString().startsWith('0x')) temp[finalKey] = Number(value);
+                    else temp[finalKey] = value;
                 }
-                settingsView.querySelectorAll('[data-key]').forEach(el => {
-                    let value;
-                    if (el.type === 'checkbox') value = el.checked;
-                    else if (el.tagName === 'SELECT') value = el.value;
-                    else value = el.value;
-                    updateNested(newSettings, el.dataset.key, value);
+                settingsView.querySelectorAll('[data-path]').forEach(el => {
+                    let value = el.type === 'checkbox' ? el.checked : el.value;
+                    updateValueByPath(settingsToApply, el.dataset.path, value);
                 });
-                const payload = isListWrapped ? [newSettings] : newSettings;
+                
                 updateStatus(`Applying '${subgroup}' to ${ip}...`);
                 try {
-                    const response = await fetch(`/api/apply/${ip}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ subgroup: subgroup, settings: payload }) });
+                    const response = await fetch(`/api/apply/${ip}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ subgroup: subgroup, settings: newSettings }) });
                     const result = await response.json();
                     if (!result.success) throw new Error(result.message);
-                    updateStatus(result.message);
+                    
+                    if (result.reloaded_data) {
+                        cameraData[ip] = result.reloaded_data;
+                        updateStatus("Settings applied and verified successfully.");
+                    } else {
+                        delete cameraData[ip]; // Invalidate cache to force reload next time
+                        updateStatus("Settings applied, but verification by reloading failed. Data may be stale.");
+                    }
+                    onSubgroupChange();
                     applyBtn.disabled = true;
-                    cameraData[ip][subgroup] = payload;
                 } catch (e) { updateStatus(`Error: ${e.message}`); }
             }
             async function rebootCamera() {
@@ -710,7 +740,12 @@ def main():
             def apply_data(ip):
                 if not session.get('logged_in'): return jsonify({"error": "Unauthorized"}), 401
                 data = request.json
-                return jsonify(controller.apply_settings(ip, data['subgroup'], data['settings']))
+                result = controller.apply_settings(ip, data['subgroup'], data['settings'])
+                if result['success']:
+                    controller.invalidate_cache(ip)
+                    reloaded_data = controller.load_camera_data(ip)
+                    result['reloaded_data'] = None if 'error' in reloaded_data else reloaded_data
+                return jsonify(result)
             @app.route('/api/reboot/<ip>', methods=['POST'])
             def reboot(ip):
                 if not session.get('logged_in'): return jsonify({"error": "Unauthorized"}), 401
@@ -720,7 +755,7 @@ def main():
                 if not session.get('logged_in'): return jsonify({"error": "Unauthorized"}), 401
                 return jsonify(controller.set_camera_time(ip))
 
-            print(f"Flask server running. Open http://127.0.0.1:{port} in your browser.")
+            print(f"Web server running. Open http://127.0.0.1:{port} in your browser.")
             app.run(host='0.0.0.0', port=port)
         
         controller = CameraController(ips)

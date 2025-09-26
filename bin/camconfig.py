@@ -21,7 +21,7 @@ import json
 # Telnet root password: xmhdipc
 
 # Top-level setting groups used to discover all available subgroups on a camera.
-MAIN_GROUPS = ["fVideo", "Camera", "AVEnc"]
+MAIN_GROUPS = ["AVEnc", "Camera", "fVideo"]
 
 # A dictionary containing documentation for specific camera parameters.
 # Used by the GUI and Flask UIs to generate helpful descriptions and validate input.
@@ -285,44 +285,57 @@ def main():
                 default_font.configure(size=9)
                 self.italic_font = font.Font(family=default_font.cget("family"), size=default_font.cget("size"), slant="italic")
                 self.root.option_add("*Font", default_font)
-                top_frame = ttk.Frame(self.root, padding="5")
-                top_frame.pack(side="top", fill="x", pady=5)
+                
+                # --- Top Control Panel (Fixed) ---
+                top_frame = ttk.Frame(self.root, padding="5", relief=tk.RAISED, borderwidth=1)
+                top_frame.pack(side="top", fill="x", pady=0, padx=0)
                 top_frame.grid_columnconfigure(5, weight=1)
+
                 ttk.Label(top_frame, text="Camera IP:").grid(row=0, column=0, padx=(0, 5))
                 self.ip_var = tk.StringVar()
                 self.ip_dropdown = ttk.Combobox(top_frame, textvariable=self.ip_var, state="readonly", width=15)
                 self.ip_dropdown.grid(row=0, column=1, padx=5)
                 self.ip_dropdown.bind("<<ComboboxSelected>>", self.on_camera_select)
+                
                 ttk.Label(top_frame, text="Main Group:").grid(row=0, column=2, padx=(10, 5))
                 self.main_group_var = tk.StringVar()
                 self.main_group_dropdown = ttk.Combobox(top_frame, textvariable=self.main_group_var, values=MAIN_GROUPS, state="readonly", width=10)
                 self.main_group_dropdown.grid(row=0, column=3, padx=5)
                 self.main_group_dropdown.bind("<<ComboboxSelected>>", self.on_main_group_select)
+                
                 ttk.Label(top_frame, text="Subgroup:").grid(row=0, column=4, padx=(10, 5))
                 self.subgroup_var = tk.StringVar()
                 self.subgroup_dropdown = ttk.Combobox(top_frame, textvariable=self.subgroup_var, state="readonly", width=25)
                 self.subgroup_dropdown.grid(row=0, column=5, padx=5, sticky="ew")
                 self.subgroup_dropdown.bind("<<ComboboxSelected>>", self.display_setting_group)
+                
+                self.reload_button = ttk.Button(top_frame, text="Reload", command=self.reload_camera_data)
+                self.reload_button.grid(row=0, column=6, padx=(10, 5))
                 self.set_time_button = ttk.Button(top_frame, text="Set Time", command=self.set_time)
-                self.set_time_button.grid(row=0, column=6, padx=(10, 5))
+                self.set_time_button.grid(row=0, column=7, padx=(5, 5))
                 self.reboot_button = ttk.Button(top_frame, text="Reboot Camera", command=self.reboot_camera)
-                self.reboot_button.grid(row=0, column=7, padx=(5, 5))
-                self.exit_button = ttk.Button(top_frame, text="Exit", command=self.root.destroy)
-                self.exit_button.grid(row=0, column=8, padx=(5, 5))
+                self.reboot_button.grid(row=0, column=8, padx=(5, 5))
+
+                # --- Scrollable Settings Area ---
                 self.settings_outer_frame = ttk.Frame(self.root)
-                self.settings_outer_frame.pack(expand=True, fill="both", padx=5)
+                self.settings_outer_frame.pack(expand=True, fill="both", padx=5, pady=(5,0))
+
+                # --- Bottom Bar (Apply button and Status) ---
                 bottom_frame = ttk.Frame(self.root)
                 bottom_frame.pack(side="bottom", fill="x")
+                self.apply_button = ttk.Button(bottom_frame, text="Apply Changes", state="disabled", command=self.apply_settings)
+                self.apply_button.pack(side="top", fill="x", padx=5, pady=5)
                 self.status_var = tk.StringVar(value="Ready.")
                 status_bar = ttk.Label(bottom_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor='w', padding=2)
                 status_bar.pack(side="bottom", fill="x", padx=5, pady=(0,5))
-                self.apply_button = ttk.Button(bottom_frame, text="Apply Changes", state="disabled", command=self.apply_settings)
-                self.apply_button.pack(side="bottom", fill="x", padx=5, pady=5)
+                
+                # --- Initial Population ---
                 self.ip_dropdown['values'] = self.ips
                 if self.ips:
                     self.ip_dropdown.set(self.ips[0])
                     self.on_camera_select()
                 self.root.mainloop()
+
             def _update_status(self, text):
                 self.status_var.set(text)
                 self.root.update_idletasks()
@@ -344,6 +357,33 @@ def main():
                     else:
                         val = int(original_str); new_val = val + amount; var.set(str(new_val))
                 except ValueError: return
+            def reload_camera_data(self):
+                selected_ip = self.ip_var.get()
+                if not selected_ip:
+                    messagebox.showerror("Error", "No camera selected.")
+                    return
+
+                # Store current selections
+                current_subgroup = self.subgroup_var.get()
+
+                self._update_status(f"Reloading configuration for {selected_ip}...")
+                self.root.config(cursor="watch"), self.root.update()
+                
+                self.controller.invalidate_cache(selected_ip)
+                data = self.controller.load_camera_data(selected_ip)
+                
+                self.root.config(cursor="")
+
+                if "error" in data:
+                    messagebox.showerror("Connection Error", f"Could not reload settings for {selected_ip}:\n{data['error']}")
+                    self._update_status(f"Error: Failed to reload settings for {selected_ip}.")
+                    # On error, fall back to the default behavior
+                    self.on_camera_select()
+                else:
+                    self._update_status(f"Successfully reloaded settings for {selected_ip}.")
+                    # The main group is preserved, so just update the subgroups and try to restore selection
+                    self.update_subgroup_dropdown(preferred_subgroup=current_subgroup)
+
             def on_camera_select(self, event=None):
                 selected_ip = self.ip_var.get()
                 if not selected_ip: return
@@ -357,14 +397,20 @@ def main():
                 else: self._update_status(f"Successfully loaded settings for {selected_ip}.")
                 self.main_group_dropdown.set(MAIN_GROUPS[0]); self.update_subgroup_dropdown()
             def on_main_group_select(self, event=None): self.update_subgroup_dropdown()
-            def update_subgroup_dropdown(self):
+            def update_subgroup_dropdown(self, preferred_subgroup=None):
                 selected_ip = self.ip_var.get(); main_group = self.main_group_var.get()
                 camera_settings = self.controller.all_camera_data.get(selected_ip, {})
                 if "error" in camera_settings:
                     self.subgroup_dropdown['values'], self.subgroup_dropdown.set([], ''); self.clear_settings_frame(); return
                 subgroups = sorted([k for k, v in camera_settings.items() if k.startswith(main_group + '.') and v])
                 self.subgroup_dropdown['values'] = subgroups
-                self.subgroup_dropdown.set(subgroups[0] if subgroups else ''); self.display_setting_group()
+                
+                if preferred_subgroup and preferred_subgroup in subgroups:
+                    self.subgroup_dropdown.set(preferred_subgroup)
+                else:
+                    self.subgroup_dropdown.set(subgroups[0] if subgroups else '')
+                
+                self.display_setting_group()
             def clear_settings_frame(self):
                 for widget in self.settings_outer_frame.winfo_children(): widget.destroy()
             def display_setting_group(self, event=None):
@@ -521,12 +567,36 @@ def main():
 
         MAIN_TEMPLATE = """
         <!DOCTYPE html><html><head><title>Camera Config</title>
-        <style>body{font-family:sans-serif;margin:0;background:#f8f9fa;color:#333}.top-bar{background:#fff;padding:10px 20px;border-bottom:1px solid #ddd;display:flex;align-items:center;gap:15px}.top-bar label{font-weight:bold}.top-bar select,.top-bar button{padding:8px;border-radius:4px;border:1px solid #ccc}.content{padding:20px}#settings-view{background:white;border:1px solid #ddd;border-radius:4px}.group-frame{padding:10px;border-bottom:1px solid #ddd}.group-frame:last-child{border-bottom:none}.group-frame.even{background-color:#fff}.group-frame.odd{background-color:#f0f0f0}.row{display:grid;grid-template-columns:250px 1fr 2fr;align-items:center;gap:10px;padding:5px 0}.row-indent-1{margin-left:20px}.row-indent-2{margin-left:40px}.description{font-style:italic;color:#555;font-size:.9em}.spinbox{display:flex}.spinbox input{flex-grow:1}.spinbox button{width:30px}#status-bar{position:fixed;bottom:0;left:0;width:100%;background:#333;color:white;padding:5px 10px;font-size:.9em}</style></head>
-        <body><div class="top-bar"><label for="ip-select">Camera IP:</label><select id="ip-select">{% for ip in ips %}<option value="{{ ip }}">{{ ip }}</option>{% endfor %}</select><label for="main-group-select">Main Group:</label><select id="main-group-select">{% for group in main_groups %}<option value="{{ group }}">{{ group }}</option>{% endfor %}</select><label for="subgroup-select">Subgroup:</label><select id="subgroup-select"></select><button id="set-time-btn">Set Time</button><button id="reboot-btn">Reboot Camera</button><button id="apply-btn" disabled>Apply Changes</button></div><div class="content"><div id="settings-view"></div></div><div id="status-bar">Ready.</div>
+        <style>body{font-family:sans-serif;margin:0;background:#f8f9fa;color:#333}.top-bar{background:#fff;padding:10px 20px;border-bottom:1px solid #ddd;display:flex;align-items:center;gap:15px;position:sticky;top:0;z-index:1000}.top-bar label{font-weight:bold}.top-bar select,.top-bar button{padding:8px;border-radius:4px;border:1px solid #ccc}.content{padding:20px}#settings-view{background:white;border:1px solid #ddd;border-radius:4px}.group-frame{padding:10px;border-bottom:1px solid #ddd}.group-frame:last-child{border-bottom:none}.group-frame.even{background-color:#fff}.group-frame.odd{background-color:#f0f0f0}.row{display:grid;grid-template-columns:250px 1fr 2fr;align-items:center;gap:10px;padding:5px 0}.row-indent-1{margin-left:20px}.row-indent-2{margin-left:40px}.description{font-style:italic;color:#555;font-size:.9em}.spinbox{display:flex}.spinbox input{flex-grow:1}.spinbox button{width:30px}#status-bar{position:fixed;bottom:0;left:0;width:100%;background:#333;color:white;padding:5px 10px;font-size:.9em}</style></head>
+        <body><div class="top-bar"><label for="ip-select">Camera IP:</label><select id="ip-select">{% for ip in ips %}<option value="{{ ip }}">{{ ip }}</option>{% endfor %}</select><label for="main-group-select">Main Group:</label><select id="main-group-select">{% for group in main_groups %}<option value="{{ group }}">{{ group }}</option>{% endfor %}</select><label for="subgroup-select">Subgroup:</label><select id="subgroup-select"></select><button id="reload-btn">Reload</button><button id="set-time-btn">Set Time</button><button id="reboot-btn">Reboot Camera</button><button id="apply-btn" disabled>Apply Changes</button></div><div class="content"><div id="settings-view"></div></div><div id="status-bar">Ready.</div>
         <script>
-            const ipSelect = document.getElementById('ip-select'), mainGroupSelect = document.getElementById('main-group-select'), subgroupSelect = document.getElementById('subgroup-select'), settingsView = document.getElementById('settings-view'), applyBtn = document.getElementById('apply-btn'), rebootBtn = document.getElementById('reboot-btn'), setTimeBtn = document.getElementById('set-time-btn'), statusBar = document.getElementById('status-bar'), DOCS = JSON.parse('{{ docs | tojson | safe }}');
+            const ipSelect = document.getElementById('ip-select'), mainGroupSelect = document.getElementById('main-group-select'), subgroupSelect = document.getElementById('subgroup-select'), settingsView = document.getElementById('settings-view'), applyBtn = document.getElementById('apply-btn'), rebootBtn = document.getElementById('reboot-btn'), setTimeBtn = document.getElementById('set-time-btn'), reloadBtn = document.getElementById('reload-btn'), statusBar = document.getElementById('status-bar'), DOCS = JSON.parse('{{ docs | tojson | safe }}');
             let cameraData = {}, originalSubgroupData = {}, isListWrapped = false;
             function updateStatus(text) { statusBar.textContent = text; }
+            async function reloadCameraData() {
+                const ip = ipSelect.value;
+                if (!ip) return;
+
+                const currentSubgroup = subgroupSelect.value;
+
+                updateStatus(`Reloading configuration for ${ip}...`);
+                delete cameraData[ip];
+
+                try {
+                    const response = await fetch(`/api/data/${ip}`);
+                    const data = await response.json();
+                    if (data.error) throw new Error(data.error);
+                    cameraData[ip] = data;
+                    updateStatus(`Successfully reloaded settings for ${ip}.`);
+                    // On success, update UI preserving subgroup
+                    updateSubgroupSelect(currentSubgroup);
+                } catch (e) {
+                    cameraData[ip] = { error: e.message };
+                    updateStatus(`Error: Failed to reload settings for ${ip}.`);
+                    // On error, just update the UI which will show the error message
+                    updateSubgroupSelect();
+                }
+            }
             async function onIpSelectChange() {
                 const ip = ipSelect.value;
                 if (!ip) return;
@@ -545,12 +615,34 @@ def main():
                 }
                 updateSubgroupSelect();
             }
-            function updateSubgroupSelect() {
+            function updateSubgroupSelect(preferredSubgroup) {
                 const ip = ipSelect.value, mainGroup = mainGroupSelect.value, settings = cameraData[ip] || {};
                 subgroupSelect.innerHTML = '';
-                if (settings.error) { settingsView.innerHTML = `<p style="color:red;">${settings.error}</p>`; return; }
+                if (settings.error) { 
+                    settingsView.innerHTML = `<p style="color:red;">${settings.error}</p>`; 
+                    onSubgroupChange(); // Clear the view
+                    return; 
+                }
                 const subgroups = Object.keys(settings).filter(k => k.startsWith(mainGroup + '.') && settings[k]).sort();
-                subgroups.forEach(sg => { const option = document.createElement('option'); option.value = sg; option.textContent = sg; subgroupSelect.appendChild(option); });
+                
+                if (subgroups.length === 0) {
+                    onSubgroupChange(); // Clear the view
+                    return;
+                }
+
+                subgroups.forEach(sg => { 
+                    const option = document.createElement('option'); 
+                    option.value = sg; 
+                    option.textContent = sg; 
+                    subgroupSelect.appendChild(option); 
+                });
+
+                if (preferredSubgroup && subgroups.includes(preferredSubgroup)) {
+                    subgroupSelect.value = preferredSubgroup;
+                } else {
+                    subgroupSelect.value = subgroups[0];
+                }
+                
                 onSubgroupChange();
             }
             function onSubgroupChange() {
@@ -646,7 +738,7 @@ def main():
                 const settingsToApply = isListWrapped ? newSettings[0] : newSettings;
                 
                 function updateValueByPath(obj, path, value) {
-                    const keys = path.replace(/\\\[(\d+)\\\]/g, '.$1').split('.');
+                    const keys = path.replace(/\\[(\\d+)\\]/g, '.$1').split('.');
                     let temp = obj;
                     for (let i = 0; i < keys.length - 1; i++) {
                         if (temp[keys[i]] === undefined) return;
@@ -709,6 +801,7 @@ def main():
             applyBtn.addEventListener('click', applySettings);
             rebootBtn.addEventListener('click', rebootCamera);
             setTimeBtn.addEventListener('click', setTime);
+            reloadBtn.addEventListener('click', reloadCameraData);
             settingsView.addEventListener('input', () => applyBtn.disabled = false);
             settingsView.addEventListener('change', () => applyBtn.disabled = false);
             document.addEventListener('DOMContentLoaded', () => ipSelect.dispatchEvent(new Event('change')));
@@ -779,3 +872,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

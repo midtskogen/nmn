@@ -19,7 +19,10 @@ import subprocess
 import numpy as np
 import tkinter as tk
 import contextlib
+import signal
+import atexit
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
 from tkinter import ttk
 from datetime import datetime, timezone
@@ -377,7 +380,8 @@ def midpoint(az1, alt1, az2, alt2):
 
 class Zoom_Advanced(ttk.Frame):
     ''' Advanced zoom of the image '''
-    def __init__(self, mainframe, files, timestamps, pto_data, image_index):
+    def __init__(self, mainframe, files, timestamps, pto_data, image_index,
+                 is_calibrate_mode=False, hostname=None, cam_num=None, date_str=None):
         ttk.Frame.__init__(self, master=mainframe)
         self.master.title('Click Coords')
         self.overlay = []
@@ -437,9 +441,20 @@ class Zoom_Advanced(ttk.Frame):
         self.predicted_point = None
         self.last_click_to_highlight = None
         
+        # Store calibration mode info
+        self.is_calibrate_mode = is_calibrate_mode
+        self.hostname = hostname
+        self.cam_num = cam_num
+        self.date_str = date_str
+        
         self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
         
         self.canvas.update()
+
+        # If in calibrate mode, automatically run the initial plate solve.
+        if self.is_calibrate_mode:
+            self.master.after(100, self._auto_recalibrate)
+            
         self.show_image()
         
     def _image_coords_to_celestial(self, x, y):
@@ -552,6 +567,24 @@ class Zoom_Advanced(ttk.Frame):
         self._update_highlight_state()
         self.show_image()
         
+    def _auto_recalibrate(self):
+        """
+        Automatically opens the Recalibrate dialog, unchecks lens optimization,
+        and runs the solver. Intended for use with --calibrate mode.
+        """
+        print("Calibrate mode: Automatically running initial plate solve...")
+        # Create the dialog window as a Toplevel widget
+        dialog_root = tk.Toplevel(self.master)
+        dialog = RecalibrateDialog(dialog_root, self.image, self)
+
+        # Programmatically uncheck the "Optimize lens parameters" box
+        dialog.lens_optimize_var.set(False)
+        print("  - 'Optimize lens parameters' is unchecked for the initial solve.")
+
+        # Programmatically "click" the "Solve" button by calling its command
+        print("  - Initiating solve...")
+        dialog.recal()
+
     def moved(self, event):
         x, y = event.x / self.imscale + self.x, event.y / self.imscale + self.y
         x += self.offsetx
@@ -576,6 +609,54 @@ class Zoom_Advanced(ttk.Frame):
         else:
             self.mousepos = "\n  cursor pos = outside panorama"
         self.show_image()
+    
+    def _save_and_deploy_calibration(self, local_pto_path):
+        """In --calibrate mode, saves PTO to remote host and updates links."""
+        print("Deploying new calibration to remote host...")
+        try:
+            # Construct remote paths
+            remote_pto_dated = f"/meteor/cam{self.cam_num}/lens-{self.date_str}.pto"
+            remote_grid_dated = f"/meteor/cam{self.cam_num}/grid-{self.date_str}.png"
+            remote_pto_link = f"/meteor/cam{self.cam_num}/lens.pto"
+            remote_grid_link = f"/meteor/cam{self.cam_num}/grid.png"
+            drawgrid_script = "/home/meteor/bin/drawgrid.py"
+
+            # 1. SCP the new PTO file
+            remote_full_path = f"{self.hostname}:{remote_pto_dated}"
+            print(f"  - Copying {local_pto_path} to {remote_full_path}...")
+            subprocess.run(['scp', local_pto_path, remote_full_path], check=True, capture_output=True, text=True, errors='ignore')
+
+            # 2. Execute remote commands via SSH to generate grid and update links
+            remote_command = (
+                f"{drawgrid_script} {remote_pto_dated} {remote_grid_dated} && "
+                f"rm -f {remote_pto_link} {remote_grid_link} && "
+                f"ln -s {remote_pto_dated} {remote_pto_link} && "
+                f"ln -s {remote_grid_dated} {remote_grid_link}"
+            )
+            print("  - Running remote commands to update grid and links...")
+            print(f"    - Command: ssh {self.hostname} \"{remote_command}\"")
+
+            proc = subprocess.run(['ssh', self.hostname, remote_command], check=True, capture_output=True, text=True, errors='ignore')
+            print("  - Remote deployment successful.")
+            if proc.stdout:
+                print("    - Remote STDOUT:", proc.stdout)
+
+        except FileNotFoundError as e:
+            error_msg = f"Error: Command '{e.filename}' not found. Please ensure scp and ssh are in your PATH."
+            print(error_msg, file=sys.stderr)
+            messagebox.showerror("Deployment Error", error_msg)
+        except subprocess.CalledProcessError as e:
+            error_msg = (
+                f"Error deploying calibration to {self.hostname}:\n"
+                f"Command failed with exit code {e.returncode}.\n\n"
+                f"STDERR:\n{e.stderr}"
+            )
+            print(error_msg, file=sys.stderr)
+            messagebox.showerror("Deployment Error", error_msg)
+        except Exception as e:
+            error_msg = f"An unexpected error occurred during deployment: {e}"
+            print(error_msg, file=sys.stderr)
+            messagebox.showerror("Deployment Error", error_msg)
 
     def key(self, event):
         # Check for Control key modifier (mask 0x4)
@@ -631,10 +712,18 @@ class Zoom_Advanced(ttk.Frame):
             self.img_data = self.images_data[self.image_index]
         elif key_char == 'l':
             try:
+                # Always save to the local file first to capture the latest changes.
                 pto_mapper.write_pto_file(self.pto_data, args.ptofile)
-                print(f"Saved PTO file to {args.ptofile}")
+                
+                if self.is_calibrate_mode:
+                    # In calibrate mode, deploy to the remote server.
+                    self._save_and_deploy_calibration(args.ptofile)
+                else:
+                    # Original behavior for local mode.
+                    print(f"Saved PTO file to {args.ptofile}")
+
             except Exception as e:
-                print(f"Error saving PTO file: {e}", file=sys.stderr)
+                print(f"Error saving/deploying PTO file: {e}", file=sys.stderr)
         elif key_char == 'S': # Note: 'S' is already uppercase
             with open("centroid.txt","w") as f:
                 for l in self.centroid:
@@ -1607,6 +1696,33 @@ def extract_timestamps(files):
     return raw_timestamps
 
 
+def scp_file(hostname, remote_path):
+    """Uses scp to copy a remote file to a local temporary file."""
+    try:
+        # Create a temporary file to store the downloaded content
+        # The file is created in /tmp to avoid clutter
+        temp_f = tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=os.path.basename(remote_path))
+        local_path = temp_f.name
+        temp_f.close() # Close it so scp can write to it
+
+        remote_full_path = f"{hostname}:{remote_path}"
+        print(f"Copying {remote_full_path} to {local_path}...")
+
+        # Construct and run the scp command
+        proc = subprocess.run(['scp', remote_full_path, local_path], check=True, capture_output=True, text=True, errors='ignore')
+        print(f"Copy successful: {remote_full_path}")
+        return local_path
+    except FileNotFoundError:
+        sys.exit("Error: 'scp' command not found. Please ensure it is installed and in your PATH.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error copying file with scp from {remote_full_path}:", file=sys.stderr)
+        print(f"Stderr: {e.stderr}", file=sys.stderr)
+        # Clean up the empty temp file if it was created
+        if 'local_path' in locals() and os.path.exists(local_path):
+            os.remove(local_path)
+        return None
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Click on images to find coordinates.')
     parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
@@ -1616,13 +1732,129 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
     parser.add_argument('-s', dest='skip', help='Seconds of the initial video to skip (default: 0)', default=0.0, type=float)
     parser.add_argument('-t', dest='total', help='Total seconds of video to load after skipping. Applies to the first video only.', type=float, default=None)
+    parser.add_argument('--calibrate', dest='calibrate', help='Fetch files from a remote host. Format: HOST:CAM[:YYYYMMDD/HHmm]', type=str)
     parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
     parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
     parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
     parser.add_argument('--elevation', type=float, help='Observer elevation in meters. Required if --station is not used.')
-    parser.add_argument(action='store', dest='ptofile', help='input .pto or .json calibration file')
-    parser.add_argument(action='store', nargs="*", dest='imgfiles', help='input image or video files (.mp4 or image files)')
+    parser.add_argument('ptofile', nargs='?', default=None, help='input .pto or .json calibration file')
+    parser.add_argument('imgfiles', nargs='*', help='input image or video files (.mp4 or image files)')
     args = parser.parse_args()
+
+    # These lists will be populated with temp resources that need cleanup.
+    temp_files_to_clean = []
+    temp_dirs = []
+
+    def cleanup_temp_resources():
+        """Cleans up all temporary directories and files created by the script."""
+        print("\nPerforming cleanup...")
+        for d in temp_dirs:
+            # The TemporaryDirectory object's cleanup method handles removal.
+            try:
+                d.cleanup()
+            except Exception as e:
+                print(f"    - Error cleaning up directory: {e}", file=sys.stderr)
+        for f in temp_files_to_clean:
+            if os.path.exists(f):
+                try:
+                    print(f"  - Deleting temporary file: {f}")
+                    os.remove(f)
+                except OSError as e:
+                    print(f"    - Error removing file {f}: {e}", file=sys.stderr)
+        print("Cleanup complete.")
+
+    # Register the cleanup function to run on normal exit or unhandled exceptions.
+    atexit.register(cleanup_temp_resources)
+
+    # Define a handler for signals like Ctrl+C (SIGINT) and kill (SIGTERM).
+    def signal_handler(sig, frame):
+        # The atexit-registered function will be called automatically on sys.exit().
+        print(f"\nSignal {sig} received, exiting gracefully.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Validate arguments: ptofile and imgfiles are required unless --calibrate is used.
+    if not args.calibrate and (not args.ptofile or not args.imgfiles):
+        parser.error("ptofile and imgfiles are required when not using the --calibrate option.")
+    
+    calibrate_info = {
+        'is_calibrate_mode': False,
+        'hostname': None,
+        'cam_num': None,
+        'date_str': None
+    }
+
+    if args.calibrate:
+        parts = args.calibrate.split(':')
+        if len(parts) not in [2, 3]:
+            sys.exit(f"Error: Invalid format for --calibrate: '{args.calibrate}'. Expected HOST:CAM or HOST:CAM:YYYYMMDD/HHmm.")
+
+        hostname = parts[0]
+        cam_num = parts[1]
+
+        if len(parts) == 3:
+            date_time_str = parts[2]
+            match = re.match(r'(\d{8})/(\d{2})(\d{2})', date_time_str)
+            if not match:
+                sys.exit(f"Error: Invalid date/time format for --calibrate: '{date_time_str}'. Expected YYYYMMDD/HHmm.")
+            date_str, hour_str, minute_str = match.groups()
+        else:
+            # Default to today at 00:00
+            now = datetime.now()
+            date_str = now.strftime('%Y%m%d')
+            hour_str = "00"
+            minute_str = "00"
+            print(f"No date provided for --calibrate, defaulting to {date_str}/{hour_str}{minute_str}")
+
+        calibrate_info.update({
+            'is_calibrate_mode': True,
+            'hostname': hostname,
+            'cam_num': cam_num,
+            'date_str': date_str
+        })
+
+        # Imply -t 1 (load only the first second) if not already specified by the user.
+        if args.total is None:
+            print("Calibrate mode: Defaulting to loading only the first second of the video (-t 1).")
+            args.total = 1.0
+
+        # Construct remote paths
+        remote_cfg_path = "/etc/meteor.cfg"
+        remote_pto_path = f"/meteor/cam{cam_num}/lens.pto"
+        remote_video_path = f"/meteor/cam{cam_num}/{date_str}/{hour_str}/full_{minute_str}.mp4"
+
+        # --- Perform SCP copies in parallel ---
+        print("Copying remote files in parallel...")
+        files_to_copy = {
+            'station': remote_cfg_path,
+            'pto': remote_pto_path,
+            'video': remote_video_path
+        }
+        results = {}
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_key = {executor.submit(scp_file, hostname, path): key for key, path in files_to_copy.items()}
+            
+            for future in future_to_key:
+                key = future_to_key[future]
+                try:
+                    local_path = future.result()
+                    if not local_path:
+                        raise ValueError(f"scp_file for {key} returned None, indicating a failure.")
+                    results[key] = local_path
+                except Exception as e:
+                    print(f"Fatal error during parallel file download for '{key}': {e}", file=sys.stderr)
+                    sys.exit("Aborting due to scp failure.")
+
+        # Assign results to the correct variables and track for cleanup
+        args.station = results['station']
+        temp_files_to_clean.append(args.station)
+        args.ptofile = results['pto']
+        temp_files_to_clean.append(args.ptofile)
+        args.imgfiles = [results['video']]
+        temp_files_to_clean.append(args.imgfiles[0])
+
 
     # Establish observer location from command-line args or station file
     pos = ephem.Observer()
@@ -1645,9 +1877,6 @@ if __name__ == '__main__':
             sys.exit(f"Error reading station file '{args.station}': {e}")
     else:
         sys.exit("Error: Observer location not specified. Please use the -s/--station option, or --latitude, --longitude, and --elevation.")
-
-    # This list will hold paths to any temporary files that need to be deleted later
-    temp_files_to_clean = []
 
     # If input is a JSON file, convert it to an optimized PTO in memory
     if args.ptofile.lower().endswith('.json'):
@@ -1694,7 +1923,6 @@ if __name__ == '__main__':
             sys.exit("\nError: 'autooptimiser' command not found. Please ensure Hugin is installed.")
 
     # Process video files into image frames
-    temp_dirs = []
     images = []
     
     seconds_to_skip = args.skip
@@ -1788,16 +2016,8 @@ if __name__ == '__main__':
     # Launch the GUI
     window = tk.Tk()
     window.geometry("1600x960")
-    app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image)
+    app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image, **calibrate_info)
 
     if args.event_file:
         app.load_event_file(args.event_file)
     window.mainloop()
-
-    # Clean up all temporary directories and files
-    for d in temp_dirs:
-        d.cleanup()
-    for f in temp_files_to_clean:
-        if os.path.exists(f):
-            print(f"Cleaning up temporary file: {f}")
-            os.remove(f)

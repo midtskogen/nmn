@@ -60,7 +60,6 @@ CHUNK_DELAY_SECONDS = 5 # Not currently used.
 TRACK_CACHE_HOURS = 24 # How long to keep cached flight track data.
 REQUEST_RETRY_COUNT = 3 # Number of retries for failed API requests.
 REQUEST_RETRY_DELAY_S = 2 # Delay between retries.
-
 # --- WGS84 Ellipsoid Constants for ECEF coordinate conversion ---
 WGS84_A = 6378137.0 # Major axis (radius)
 WGS84_E2 = 0.00669437999014 # Eccentricity squared
@@ -79,6 +78,7 @@ def get_airport_db(task_id):
     url = "https://davidmegginson.github.io/ourairports-data/airports.csv"
     db = {}
     try:
+      
         response = requests.get(url); response.raise_for_status()
         csv_file = io.StringIO(response.text)
         csv_reader = csv.reader(csv_file)
@@ -165,6 +165,7 @@ def get_flight_track(task_id, icao24, time_within_flight, access_token):
     for attempt in range(REQUEST_RETRY_COUNT):
         try:
             response = requests.get(url, headers=headers, timeout=45)
+       
             if response.status_code == 404: return None # No track available for this flight.
             response.raise_for_status()
             data = response.json()
@@ -193,6 +194,7 @@ def interpolate_raw_track(path, max_interval_sec):
     for i in range(len(path) - 1):
         p1, p2 = path[i], path[i+1]
         time_diff = p2[0] - p1[0]
+   
         if time_diff > max_interval_sec:
             num_segments = math.ceil(time_diff / max_interval_sec)
             for j in range(1, int(num_segments)):
@@ -210,7 +212,8 @@ def interpolate_raw_track(path, max_interval_sec):
                         interp_point[9] = p1[9] + fraction * (p2[9] - p1[9]) # Geo Altitude
                     else:
                         interp_point[9] = p1[9] or p2[9]
-                new_path.append(interp_point)
+      
+                    new_path.append(interp_point)
         new_path.append(p2)
     return new_path
 
@@ -230,6 +233,7 @@ def fetch_and_process_track(args):
         # Pre-calculate station position in Earth-Centered, Earth-Fixed (ECEF) coordinates.
         lat_ref, lon_ref, alt_ref = station_info['astronomy']['latitude'], station_info['astronomy']['longitude'], station_info['astronomy']['elevation']
         lat_rad_ref, lon_rad_ref = map(math.radians, [lat_ref, lon_ref])
+       
         sin_lat_ref, cos_lat_ref = math.sin(lat_rad_ref), math.cos(lat_rad_ref)
         sin_lon_ref, cos_lon_ref = math.sin(lon_rad_ref), math.cos(lon_rad_ref)
         N_ref = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat_ref**2)
@@ -251,6 +255,7 @@ def fetch_and_process_track(args):
             
             x_ac = (N_ac + p_alt) * math.cos(lat_rad_ac) * math.cos(lon_rad_ac)
             y_ac = (N_ac + p_alt) * math.cos(lat_rad_ac) * math.sin(lon_rad_ac)
+         
             z_ac = (N_ac * (1 - WGS84_E2) + p_alt) * sin_lat_ac
             
             # Transform ECEF coordinates to the station's local East, North, Up (ENU) frame.
@@ -265,6 +270,7 @@ def fetch_and_process_track(args):
                     
                     is_in_view, _ = is_sky_coord_in_view(pto_data, az_deg, alt_deg)
                     if is_in_view:
+  
                         all_visible_points.append({"time": p_time, "lat": p_lat, "lon": p_lon, "az": az_deg, "alt": alt_deg, "station_id": station_id, "camera": cam_num, "station_code": station_info['station']['code']})
 
     if not all_visible_points: return None
@@ -278,6 +284,7 @@ def fetch_and_process_track(args):
             prev_diff = float('inf') if i == 0 else p['time'] - all_visible_points[i-1]['time']
             next_diff = float('inf') if i == len(all_visible_points) - 1 else all_visible_points[i+1]['time'] - p['time']
             if min(prev_diff, next_diff) <= 300: # 5 minutes
+          
                 filtered_points.append(p)
         all_visible_points = filtered_points
 
@@ -295,6 +302,7 @@ def fetch_and_process_track(args):
     station_sky_tracks = {}
     for p in all_visible_points:
         station_track = station_sky_tracks.setdefault(p['station_id'], [])
+        
         p_time_iso = datetime.fromtimestamp(p['time'], tz=timezone.utc).isoformat()
         if not station_track or station_track[-1]['time'] != p_time_iso:
              station_track.append({'alt': p['alt'], 'az': p['az'], 'time': p_time_iso})
@@ -320,6 +328,7 @@ def cleanup_old_cache(directory, max_age_hours):
     """Deletes files in a directory that are older than a specified age."""
     if not os.path.isdir(directory): return
     for filename in os.listdir(directory):
+  
         file_path = os.path.join(directory, filename)
         try:
             if os.path.isfile(file_path):
@@ -350,6 +359,7 @@ def find_all_crossings(task_id):
         flights_after_validation = []
         for flight in flight_list:
             dep_icao, arr_icao = flight.get('estDepartureAirport'), flight.get('estArrivalAirport')
+    
             if not dep_icao or not arr_icao or dep_icao == arr_icao: continue
             dep_airport, arr_airport = airport_db.get(dep_icao), airport_db.get(arr_icao)
             if not dep_airport or not arr_airport: continue
@@ -378,7 +388,7 @@ def find_all_crossings(task_id):
                 time.sleep(0.2) # Stagger process submission slightly.
             for i, future in enumerate(as_completed(futures)):
                 if result := future.result(): final_crossings.append(result)
-                update_status(status_file, "progress", {"step": 25 + int(((i + 1) / total_tasks) * 70), "message": f"Henter spor for fly {i + 1}/{total_tasks}..."})
+                update_status(status_file, "progress", {"step": 25 + int(((i + 1) / total_tasks) * 70), "message": f"status_fetching_aircraft_track|i={i + 1},total={total_tasks}"})
 
         final_crossings.sort(key=lambda p: p['earliest_camera_utc'], reverse=True)
 
@@ -392,9 +402,10 @@ def find_all_crossings(task_id):
             time_window_hours = round(duration_seconds / 3600)
 
         update_status(status_file, "complete", {"data": {"crossings": final_crossings, "time_window_hours": time_window_hours}})
+ 
     except Exception as e:
         logging.exception(f"An unhandled error occurred for task {task_id}")
-        update_status(status_file, "error", {"message": f"En intern feil oppstod: {e}"})
+        update_status(status_file, "error", {"message": "error_internal"})
 
 def main():
     """Parses command-line arguments and initiates the aircraft finding process."""
@@ -403,6 +414,7 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler(LOG_FILE)])
     logging.info(f"--- Script execution started for task {args.task_id} ---")
+    
     find_all_crossings(args.task_id)
 
 if __name__ == "__main__":

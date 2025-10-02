@@ -37,6 +37,7 @@ def fetch_grid_file(stream_task_id, station_id, camera_num):
     This allows the user to overlay a grid on the live video stream for reference.
     """
     log_prefix = f"GridFetch for {stream_task_id} -"
+   
     logging.info(f"{log_prefix} Request for {station_id} cam {camera_num}.")
     status_file = os.path.join(LOCK_DIR, f"{stream_task_id}.json")
     
@@ -64,13 +65,13 @@ def fetch_grid_file(stream_task_id, station_id, camera_num):
 
     except subprocess.TimeoutExpired:
         logging.error(f"{log_prefix} SCP timed out.")
-        return {"success": False, "error": "Tidsavbrudd ved henting av rutenettfil."}
+        return {"success": False, "error": "error_grid_fetch_timeout"}
     except subprocess.CalledProcessError as e:
         logging.error(f"{log_prefix} SCP failed. Stderr: {e.stderr.decode()}")
-        return {"success": False, "error": "Rutenettfil ikke funnet på stasjonen."}
+        return {"success": False, "error": "error_grid_not_found"}
     except Exception as e:
         logging.error(f"{log_prefix} Unexpected error: {e}", exc_info=True)
-        return {"success": False, "error": "En intern feil oppstod."}
+        return {"success": False, "error": "error_internal"}
 
 
 def _get_timeout_for_station(station_id, resolution, stations_data):
@@ -79,6 +80,7 @@ def _get_timeout_for_station(station_id, resolution, stations_data):
     if resolution == 'hires':
         return 60 if has_quota else 3 * 60 # 1 minute for quota, 3 for normal
     else: # lowres
+ 
         return 5 * 60 if has_quota else 15 * 60 # 5 minutes for quota, 15 for normal
 
 
@@ -88,6 +90,7 @@ def _check_stream_time_quota(user_ip, station_id, resolution, stations_data):
         with atomic_json_rw(STREAM_TIME_TRACKER_FILE) as tracker:
             today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             station_usage = tracker.get(today_str, {}).get(user_ip, {}).get(station_id, {})
+         
             lowres_used = station_usage.get('total_lowres_seconds', 0)
             hires_used = station_usage.get('total_hires_seconds', 0)
     except Exception as e:
@@ -99,9 +102,9 @@ def _check_stream_time_quota(user_ip, station_id, resolution, stations_data):
     limit_hires = STREAM_TIME_LIMITS_SECONDS[station_type]['hires']
 
     if resolution == 'lowres' and lowres_used >= limit_lowres:
-        return False, f"Daglig grense ({limit_lowres // 60} min) for lav oppløsning er nådd."
+        return False, f"error_stream_quota_lowres|limit={limit_lowres // 60}"
     if resolution == 'hires' and hires_used >= limit_hires:
-        return False, f"Daglig grense ({limit_hires // 60} min) for høy oppløsning er nådd."
+        return False, f"error_stream_quota_hires|limit={limit_hires // 60}"
     return True, ""
 
 
@@ -114,6 +117,7 @@ def _update_stream_time_tracker(user_ip, station_id, resolution, duration_second
         station_day = user_day.setdefault(station_id, {'total_lowres_seconds': 0, 'total_hires_seconds': 0})
         
         if resolution == 'lowres':
+        
             station_day['total_lowres_seconds'] += duration_seconds
         elif resolution == 'hires':
             station_day['total_hires_seconds'] += duration_seconds
@@ -159,6 +163,7 @@ def stop_stream_relay(task_id):
                 try: os.remove(f)
                 except OSError as e: logging.error(f"Error removing control file {f}: {e}")
         if os.path.exists(stream_dir):
+         
             shutil.rmtree(stream_dir, ignore_errors=True)
             logging.info(f"Removed stream directory: {stream_dir}")
 
@@ -172,6 +177,7 @@ def _cleanup_stale_stream_locks(log_prefix):
         if filename.endswith(".lock"):
             file_path = os.path.join(STREAM_DIR, filename)
             try:
+      
                 # If a lock file is older than one hour, it's considered stale.
                 if (now - os.path.getmtime(file_path)) > 3600: # 1 hour
                     logging.warning(f"{log_prefix} Removing stale stream lock: {filename}")
@@ -181,6 +187,7 @@ def _cleanup_stale_stream_locks(log_prefix):
                         try:
                             os.kill(pid, signal.SIGKILL)
                             logging.info(f"{log_prefix} Killed stale {pid_name} (PID: {pid}).")
+         
                         except OSError: pass
                     os.remove(file_path)
             except (IOError, OSError, json.JSONDecodeError) as e:
@@ -207,11 +214,10 @@ def _start_ssh_tunnel(station_id, camera_num):
     logging.info(f"{log_prefix} Attempting to establish tunnel on port {local_port} with command: {' '.join(ssh_command)}")
     process = subprocess.Popen(ssh_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     time.sleep(4) # Wait briefly to see if the process exits immediately.
-
     # If the SSH process has already terminated, the tunnel failed.
     if process.poll() is not None:
         stderr_output = process.stderr.read().decode('utf-8', errors='ignore').strip()
-        error_message = f"Kunne ikke etablere SSH-tunnel. Feilmelding: {stderr_output}" if stderr_output else "Kontakt med kamerastasjon brutt (SSH-prosessen avsluttet uventet)."
+        error_message = f"error_ssh_tunnel_failed_with_msg|error={stderr_output}" if stderr_output else "error_ssh_process_terminated"
         logging.error(f"{log_prefix} FAILED. {error_message}")
         raise RuntimeError(error_message)
 
@@ -233,7 +239,7 @@ def _start_ffmpeg_relay(local_port, resolution, stream_dir, hevc_supported, log_
         with socket.create_connection(("127.0.0.1", local_port), timeout=2):
             logging.info(f"{log_prefix} Port {local_port} is open. SSH tunnel is confirmed active.")
     except (socket.timeout, ConnectionRefusedError) as e:
-        raise RuntimeError(f"Den lokale videresendingstunnelen er ikke aktiv (port {local_port} utilgjengelig).")
+        raise RuntimeError(f"error_local_tunnel_inactive|port={local_port}")
 
     # Probes the video stream to detect its codec (HEVC or H.264).
     try:
@@ -245,6 +251,7 @@ def _start_ffmpeg_relay(local_port, resolution, stream_dir, hevc_supported, log_
         logging.error(f"{log_prefix} ffprobe failed to determine codec, defaulting to copy. Error: {e.stderr if hasattr(e, 'stderr') else e}")
         codec_name = 'h264'
 
+  
     video_opts = ["-c:v"]
     # If the source is HEVC but the user's browser doesn't support it, transcode to H.264.
     if codec_name.lower() == 'hevc' and not hevc_supported:
@@ -296,15 +303,16 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
     
     ssh_process, ffmpeg_process = None, None
     try:
-        update_status(status_file, "establishing_tunnel", {"message": "Kontakter kamerastasjon..."})
+        update_status(status_file, "establishing_tunnel", {"message": "status_contacting_station"})
+   
         ssh_process, local_port = _start_ssh_tunnel(station_id, camera_num)
 
-        update_status(status_file, "connecting_camera", {"message": "Kopler til kamera..."})
+        update_status(status_file, "connecting_camera", {"message": "status_connecting_camera"})
         ffmpeg_process, _ = _start_ffmpeg_relay(local_port, resolution, stream_dir, hevc_supported, log_prefix)
         
         timeout_seconds = _get_timeout_for_station(station_id, resolution, stations_data)
         update_data = {
-            "message": "Videostrømen er klar.", "pids": {"ssh_pid": ssh_process.pid, "ffmpeg_pid": ffmpeg_process.pid},
+            "message": "status_stream_ready", "pids": {"ssh_pid": ssh_process.pid, "ffmpeg_pid": ffmpeg_process.pid},
             "stream_dir": stream_dir, "station_id": station_id, "timeout_seconds": timeout_seconds, "resolution": resolution
         }
         update_status(status_file, "ready", update_data)
@@ -319,6 +327,7 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
             time.sleep(2)
 
     except Exception as e:
+ 
         logging.error(f"Error in stream task {task_id}: {e}")
         update_status(status_file, "camera_failed", {"message": str(e)})
     finally:

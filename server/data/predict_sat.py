@@ -50,7 +50,8 @@ TLE_UPDATE_INTERVAL_HOURS = 4 # How often to fetch fresh TLE data.
 PASS_CACHE_LIFETIME_MINUTES = 235 # How long to use cached pass predictions. Set just under TLE interval.
 SEARCH_DAYS = 7 # How many days into the past to search for passes.
 MAX_VISIBLE_MAGNITUDE = 5.0 # The faintest satellite magnitude to consider. Lower is brighter.
-MAXIMUM_SUN_ALT = -9 # The maximum sun altitude for a pass to be considered "dark enough". (-6 is civil twilight)
+MAXIMUM_SUN_ALT = -9 # The maximum sun altitude for a pass to be considered "dark enough".
+# (-6 is civil twilight)
 
 # A dictionary of specific satellites to track by name and NORAD catalog number.
 SATELLITES_OF_INTEREST = {
@@ -90,6 +91,7 @@ def trim_log_file(log_path, max_lines):
         with open(log_path, 'r') as f: lines = f.readlines()
         if len(lines) > max_lines:
             logging.info(f"Trimming log file {os.path.basename(log_path)} from {len(lines)} to {max_lines} lines.")
+          
             with open(log_path, 'w') as f: f.writelines(lines[-max_lines:])
     except Exception as e:
         logging.error(f"Could not trim log file {log_path}: {e}")
@@ -118,16 +120,19 @@ def get_tle_data(ts):
             req = urllib.request.Request(source_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30) as response:
                 lines = response.read().decode('utf-8').strip().splitlines()
+  
             # TLE data comes in 3-line sets (Name, Line 1, Line 2).
             for i in range(0, len(lines), 3):
                 if i + 2 >= len(lines): continue
                 name, line1, line2 = lines[i].strip(), lines[i+1].strip(), lines[i+2].strip()
                 try: satnum = int(line1[2:7])
                 except (ValueError, IndexError): continue
+             
                 # Keep the TLE if it's one of the satellites we are interested in.
                 if name in SATELLITES_OF_INTEREST or satnum in SATELLITES_OF_INTEREST.values():
                     temp_sat = EarthSatellite(line1, line2, name, ts)
                     tle_data[name] = {'satnum': satnum, 'line1': line1, 'line2': line2, 'inclination': temp_sat.model.inclo}
+       
         except Exception as e:
             logging.error(f"Could not process TLE from {source_url}: {e}")
             if cached_data: return cached_data # Return stale data if fresh download fails.
@@ -192,6 +197,7 @@ def process_station(args):
                 phase_factor = (np.sin(phi) + (np.pi - phi) * np.cos(phi)) / np.pi
                 est_mag = abs_mag + 5 * np.log10(r_km / 1000.0)
                 if phase_factor > 0: est_mag += -2.5 * np.log10(phase_factor)
+ 
                 if est_mag >= MAX_VISIBLE_MAGNITUDE: continue
 
                 # If all checks pass, calculate the detailed track for the pass.
@@ -214,6 +220,7 @@ def process_station(args):
                     pto_data = None
                     if PTO_MAPPER_AVAILABLE:
                         try: pto_data = get_pto_data_from_json(CAMERAS_FILE, f"{station_id.replace('ams', '')}:{cam_num}")
+                        
                         except Exception: continue
                     
                     in_view_start, in_view_end = None, None
@@ -222,6 +229,7 @@ def process_station(args):
                         is_in_view, _ = is_sky_coord_in_view(pto_data, az_degs[j], alt_degs[j]) if PTO_MAPPER_AVAILABLE else (True, None)
                         if is_in_view:
                             if in_view_start is None: in_view_start = t
+                      
                             in_view_end = t
                         elif in_view_start is not None:
                             # If the satellite leaves the view, finalize the camera view event.
@@ -230,6 +238,7 @@ def process_station(args):
                     if in_view_start is not None:
                         camera_views.append({"camera": cam_num, "station_code": station_info['station']['code'], "station_id": station_id, "start_utc": in_view_start.utc_iso(), "end_utc": in_view_end.utc_iso()})
 
+    
                 if camera_views:
                     # If the pass was visible to at least one camera, store its full data.
                     ground_track = [{'lat': lat, 'lon': lon, 'time': t.utc_iso()} for lat, lon, t in zip(ground_lat, ground_lon, pass_times)]
@@ -255,6 +264,7 @@ def _group_and_finalize_passes(all_passes_found):
 
     final_passes = []
     for group_id, passes_in_group in grouped_by_id.items():
+  
         passes_in_group.sort(key=lambda p: (p['magnitude'], p['camera_views'][0]['station_id']))
         master_pass = passes_in_group[0]
 
@@ -270,7 +280,6 @@ def _group_and_finalize_passes(all_passes_found):
             
             station_id = p['camera_views'][0]['station_id']
             station_sky_tracks[station_id] = p['sky_track'] # Store the station-specific sky track.
-
         rounded_ground_track = [
             {'lat': round(p['lat'], 5), 'lon': round(p['lon'], 5), 'time': p['time']}
             for p in master_pass['ground_track']
@@ -280,6 +289,7 @@ def _group_and_finalize_passes(all_passes_found):
             "pass_id": group_id,
             "satellite": master_pass['satellite'],
             "magnitude": round(min_magnitude, 1),
+      
             "ground_track": rounded_ground_track,
             "station_sky_tracks": station_sky_tracks,
             "camera_views": all_camera_views,
@@ -311,6 +321,7 @@ def find_all_passes_for_cron():
 
     logging.info("--- Starting cron pass prediction (cache invalid or missing) ---")
     try:
+  
         ts = load.timescale()
         with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
         tle_data = get_tle_data(ts)
@@ -319,6 +330,7 @@ def find_all_passes_for_cron():
             return
         all_passes_found = []
         
+      
         tasks = [(sid, sinfo, tle_data) for sid, sinfo in stations_data.items()]
         with ProcessPoolExecutor(initializer=init_worker) as executor:
             results = executor.map(process_station, tasks)
@@ -327,6 +339,7 @@ def find_all_passes_for_cron():
         
         final_passes = _group_and_finalize_passes(all_passes_found)
         result_data = {"passes": final_passes}
+   
         with open(PASS_CACHE_FILE, 'w') as f:
             json.dump({"satellites_in_cache": list(SATELLITES_OF_INTEREST.keys()), "data": result_data}, f, indent=2)
         logging.info(f"Cron prediction finished. Found {len(final_passes)} passes and updated cache.")
@@ -345,11 +358,13 @@ def find_all_passes(task_id):
             lifetime_seconds = PASS_CACHE_LIFETIME_MINUTES * 60
             if (datetime.now().timestamp() - mod_time) < lifetime_seconds:
                 with open(PASS_CACHE_FILE, 'r') as f:
+                    
                     cached_data = json.load(f)
                 if set(SATELLITES_OF_INTEREST.keys()) == set(cached_data.get("satellites_in_cache", [])):
                     logging.info(f"Task {task_id}: Found valid cache. Serving from cache.")
                     update_status(os.path.join(LOCK_DIR, f"{task_id}.json"), "complete", {"data": cached_data.get("data", {})})
                     return
+      
         except (IOError, json.JSONDecodeError):
             logging.warning(f"Task {task_id}: Cache file is invalid. Recalculating.")
 
@@ -360,6 +375,7 @@ def find_all_passes(task_id):
         with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
         tle_data = get_tle_data(ts)
         if "error" in tle_data:
+  
             update_status(status_file, "error", {"message": tle_data["error"]})
             return
         all_passes_found = []
@@ -367,7 +383,8 @@ def find_all_passes(task_id):
         tasks = [(sid, sinfo, tle_data) for sid, sinfo in stations_data.items()]
         total_stations = len(tasks)
         stations_processed = 0
-        update_status(status_file, "progress", {"step": 5, "total": 100, "message": "Beregner..."})
+        update_status(status_file, "progress", {"step": 5, "total": 100, "message": "status_calculating"})
+     
         with ProcessPoolExecutor(initializer=init_worker) as executor:
             futures = [executor.submit(process_station, task) for task in tasks]
             # As each worker process completes, update the overall progress.
@@ -376,13 +393,15 @@ def find_all_passes(task_id):
                     station_result = future.result()
                     all_passes_found.extend(station_result)
                 except Exception as exc:
+                    
                     logging.error(f'A station task generated an exception: {exc}')
                 stations_processed += 1
                 progress = 5 + int((stations_processed / total_stations) * 90)
-                message = f"Beregner for stasjon {stations_processed}/{total_stations}..."
+                message = f"status_calculating_for_station|processed={stations_processed},total={total_stations}"
                 update_status(status_file, "progress", {"step": progress, "total": 100, "message": message})
 
-        update_status(status_file, "progress", {"step": 95, "total": 100, "message": "Grupperer og ferdigstiller resultatet..."})
+        
+        update_status(status_file, "progress", {"step": 95, "total": 100, "message": "status_grouping_results"})
         final_passes = _group_and_finalize_passes(all_passes_found)
         result_data = {"passes": final_passes}
         with open(PASS_CACHE_FILE, 'w') as f:
@@ -391,7 +410,7 @@ def find_all_passes(task_id):
         update_status(status_file, "complete", {"data": result_data})
     except Exception as e:
         logging.exception(f"An unhandled error occurred during pass prediction for task {task_id}")
-        update_status(status_file, "error", {"message": "En intern feil oppstod."})
+        update_status(status_file, "error", {"message": "error_internal"})
 
 def main():
     """Parses command-line arguments to run in either on-demand or cron mode."""
@@ -425,6 +444,7 @@ Example cron job to run every 4 hours:
         logging.info("--- Script execution started ---")
         trim_log_file(LOG_FILE, MAX_LOG_LINES)
     else:
+        
         logging.basicConfig(level=logging.CRITICAL + 1)
 
     if args.cron:
@@ -435,7 +455,7 @@ Example cron job to run every 4 hours:
             find_all_passes(args.task_id)
         except Exception as e:
             logging.exception("A fatal error occurred at the top level of the script!")
-            update_status(status_file, "error", {"message": "En kritisk feil oppstod."})
+            update_status(status_file, "error", {"message": "error_internal"})
     else:
         parser.print_help()
         sys.exit(1)

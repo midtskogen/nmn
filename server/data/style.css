@@ -1,5 +1,6 @@
 /* --- CSS Variables --- */
-/* Defines a color palette for consistent styling across the application. */
+/* Defines a color palette for consistent styling across the application.
+ */
 :root {
     --primary-color: #003366; /* Deep blue for headers, buttons, etc. */
     --secondary-color: #f4f4f9; /* Light grey for backgrounds. */
@@ -7,6 +8,28 @@
     --success-color: #d4edda; /* Green for success states. */
     --error-color: #f8d7da; /* Red for error messages. */
     --text-color: #333; /* Dark grey for standard text. */
+}
+
+/* --- Language Selector --- */
+#language-selector {
+    position: absolute;
+    top: 10px;
+    right: 20px;
+    z-index: 1001;
+    display: flex;
+    gap: 10px;
+    background: rgba(255, 255, 255, 0.5);
+    padding: 5px 10px;
+    border-radius: 8px;
+}
+#language-selector span {
+    font-size: 24px; /* Controls the size of the flag emoji */
+    cursor: pointer;
+    transition: transform 0.2s;
+    line-height: 1; /* Prevents extra vertical space */
+}
+#language-selector span:hover {
+    transform: scale(1.2);
 }
 
 /* --- General Body and Layout --- */
@@ -26,7 +49,8 @@ body {
     padding: 20px;
     border-radius: 8px;
 }
-/* Removes extra padding and shadows from the top-level container for a flatter look. */
+/* Removes extra padding and shadows from the top-level container for a flatter look.
+ */
 body > .container {
     padding-top: 20px;
     border-radius: 0;
@@ -38,11 +62,13 @@ header h1 {
     text-align: center;
     margin-bottom: 20px;
     padding-top: 20px;
-    /* Applies a subtle text shadow to give the title an inset or "pressed" look. */
+    /* Applies a subtle text shadow to give the title an inset or "pressed" look.
+ */
     text-shadow: 1px 1px 1px #fff, -1px -1px 1px rgba(0,0,0,0.1);
 }
 
-/* The main layout is a CSS grid with two columns: one for the map and one for the controls. */
+/* The main layout is a CSS grid with two columns: one for the map and one for the controls.
+ */
 .main-content {
     display: grid;
     grid-template-columns: 2fr 1fr;
@@ -54,17 +80,21 @@ header h1 {
 
 
 /* --- Panel Styling (Neumorphism) --- */
-/* Defines the primary "neumorphic" or "soft UI" style for all panels. */
+/* Defines the primary "neumorphic" or "soft UI" style for all panels.
+ */
 #map-panel, #control-panel, #satellite-panel, #aircraft-panel, #lightning-panel, #results-panel {
     border: none;
-    border-radius: 15px; /* Softer corners */
+    border-radius: 15px;
+    /* Softer corners */
     padding: 20px;
     background: var(--secondary-color);
-    /* The 3D effect is created by two shadows: a dark one on the bottom-right and a light one on the top-left. */
+    /* The 3D effect is created by two shadows: a dark one on the bottom-right and a light one on the top-left.
+ */
     box-shadow: 12px 12px 18px #b1b5b9, -12px -12px 18px #ffffff;
 }
 
-/* Panels for satellite, aircraft, and lightning data are hidden by default. */
+/* Panels for satellite, aircraft, and lightning data are hidden by default.
+ */
 #satellite-panel-container, #aircraft-panel-container, #lightning-panel-container {
     display: none;
 }
@@ -82,7 +112,8 @@ h2 {
     border-bottom: 2px solid var(--primary-color);
 }
 
-/* A flex container for panel headers to align the title and reset button. */
+/* A flex container for panel headers to align the title and reset button.
+ */
 .panel-header-wrapper {
     display: flex;
     justify-content: space-between;
@@ -164,7 +195,8 @@ input[type="text"], input[type="date"], select {
     font-weight: normal;
 }
 
-/* Styles for the combined video/image and resolution/integration options. */
+/* Styles for the combined video/image and resolution/integration options.
+ */
 .combined-file-type {
     display: flex;
     align-items: center;
@@ -226,7 +258,8 @@ button:hover:not(:disabled) {
     min-height: 22px;
     max-height: 120px;
     overflow-y: auto;
-    /* Applies an inset shadow to give the element a "pressed in" look. */
+    /* Applies an inset shadow to give the element a "pressed in" look.
+ */
     box-shadow: inset 3px 3px 7px #b1b5b9, inset -3px -3px 7px #ffffff;
 }
 
@@ -319,7 +352,8 @@ button:hover:not(:disabled) {
     justify-content: center;
 }
 
-/* Styles the container for a thumbnail to allow for overlaying a play icon. */
+/* Styles the container for a thumbnail to allow for overlaying a play icon.
+ */
 .thumbnail-container {
     position: relative;
     display: inline-block;
@@ -495,13 +529,15 @@ button:hover:not(:disabled) {
     border-bottom: 1px solid var(--border-color);
 }
 
-/* Highlights the selected pass/crossing in the side panel. */
+/* Highlights the selected pass/crossing in the side panel.
+ */
 .satellite-group.selected-pass {
     background-color: #f8d7da;
     border-left: 4px solid #721c24;
 }
 
-/* Alternating row colors for readability. */
+/* Alternating row colors for readability.
+ */
 .satellite-group.pass-even { background-color: transparent; }
 .satellite-group.pass-odd { background-color: rgba(0,0,0,0.02); }
 
@@ -555,7 +591,8 @@ button:hover:not(:disabled) {
     color: white;
 }
 
-/* Styles for the timestamp labels drawn on map tracks. */
+/* Styles for the timestamp labels drawn on map tracks.
+ */
 .ground-track-label {
     background: rgba(255, 255, 255, 0.7);
     border: 1px solid #aaa;
@@ -599,7 +636,8 @@ button:hover:not(:disabled) {
 .strike-type-indicator.cg { color: #FFC051; } /* Cloud-to-Ground */
 .strike-type-indicator.ic { color: #666; } /* Intra-Cloud */
 
-/* Styles for the custom HTML-based lightning icons on the map. */
+/* Styles for the custom HTML-based lightning icons on the map.
+ */
 .lightning-icon {
     display: flex;
     justify-content: center;
@@ -616,7 +654,8 @@ button:hover:not(:disabled) {
 
 /* --- Responsive Layout --- */
 @media (max-width: 1280px) {
-    /* On smaller screens, stack the map and controls vertically. */
+    /* On smaller screens, stack the map and controls vertically.
+ */
     .main-content {
         grid-template-columns: 1fr;
         grid-template-areas:
@@ -632,7 +671,8 @@ button:hover:not(:disabled) {
 }
 
 @media (min-width: 1441px) {
-    /* On very wide screens, give the control column a fixed width. */
+    /* On very wide screens, give the control column a fixed width.
+ */
     .container, .full-width-container .chart-container {
         max-width: 95%;
     }
@@ -656,7 +696,8 @@ button:hover:not(:disabled) {
     background-color: #fff; /* Ensure it looks like an active input */
 }
 
-/* Hides the actual <input type="date"> but keeps it functional and layered on top. */
+/* Hides the actual <input type="date"> but keeps it functional and layered on top.
+ */
 #date {
     position: absolute;
     top: 0;
@@ -679,7 +720,8 @@ button:hover:not(:disabled) {
 }
 
 .map-tiler-satellite {
-    /* Slightly increases the brightness of the base satellite map layer. */
+    /* Slightly increases the brightness of the base satellite map layer.
+ */
     filter: brightness(149%);
 }
 
@@ -717,7 +759,8 @@ button:hover:not(:disabled) {
     color: #155724;
 }
 
-/* The semi-transparent backdrop for the modal. */
+/* The semi-transparent backdrop for the modal.
+ */
 #video-modal-backdrop {
     position: fixed;
     top: 0;
@@ -805,7 +848,8 @@ button:hover:not(:disabled) {
     align-items: center;
     gap: 5px;
 }
-/* Overrides the default full-width button style for buttons inside the modal. */
+/* Overrides the default full-width button style for buttons inside the modal.
+ */
 #video-modal-content #fullscreen-btn,
 #video-modal-content #video-close-button {
     width: auto;

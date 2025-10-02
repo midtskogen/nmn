@@ -1,0 +1,1809 @@
+<!doctype html>
+<html lang="no">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Meld fra om meteor</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    
+    <style>
+      /* General body and layout styling */
+      body {
+        background-color: #f8f9fa;
+      }
+      .navbar-brand img {
+        max-height: 40px;
+      } 
+      .card {
+        margin-bottom: 1.5rem;
+      }
+      
+      /* Utility to disable text selection during drag */
+      .no-select {
+        -webkit-user-select: none; /* Safari */
+        -ms-user-select: none;     /* IE 10+ and Edge */
+        user-select: none;         /* Standard syntax */
+      }
+      
+      /* Map styling */
+      #map { 
+        height: 50vh; 
+        width: 100%; 
+        border-radius: 0.375rem; 
+        border: 1px solid #dee2e6; 
+        cursor: crosshair; 
+      }
+      
+      #hidden-map-container {
+	  position: absolute;
+	  left: -8192px; /* Position it far off-screen */
+	  width: 800px;  /* Define a fixed size for consistent output */
+	  height: 600px;
+	  z-index: -1;   /* Ensure it's not accidentally interactive */
+      }
+
+      #map.leaflet-grabbing {
+        cursor: grabbing;
+      }
+      
+      #sky-panorama { 
+        position: relative; 
+        width: 100%; 
+        border-radius: 0.375rem; 
+        border: 1px solid #dee2e6; 
+        overflow: hidden; 
+        cursor: crosshair;
+        touch-action: none; /* Disable default browser touch actions like scroll/zoom */
+      }
+      
+      /* Markers and path for the fireball trajectory */
+      .sky-marker { 
+        position: absolute; 
+        width: 40px; /* Larger invisible touch area */
+        height: 40px;
+        transform: translate(-50%, -50%); 
+        cursor: move; 
+        z-index: 10; 
+      }
+      .sky-marker-visual {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 15px; /* Visible element */
+        height: 15px; 
+        background-color: #ffdd00; 
+        border: 2px solid #fff; 
+        border-radius: 50%; 
+        transform: translate(-50%, -50%); 
+        box-shadow: 0 0 10px #ffdd00;
+        pointer-events: none; /* The visual part doesn't capture events */
+      }
+      .sky-label { 
+        position: absolute; 
+        color: white; 
+        background-color: rgba(0,0,0,0.5); 
+        padding: 2px 5px; 
+        border-radius: 3px; 
+        font-size: 12px; 
+        transform: translate(-50%, 20px); /* Adjusted for larger parent */
+        pointer-events: none; 
+      }
+
+      /* Styling for disabled steps to guide the user */
+      .step-disabled { 
+        opacity: 0.5; 
+        pointer-events: none; 
+      }
+
+      /* Celestial objects (stars, planets) styling */
+      #celestial-container {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 2;
+      }
+      .celestial-object { 
+        position: absolute; 
+        pointer-events: none; 
+      }
+      .celestial-object > span {
+        position: absolute;
+        transform: translate(-50%, -50%);
+      }
+      .celestial-icon {
+        font-size: 1.5em;
+        color: white;
+        text-shadow: 0 0 3px black;
+      }
+      .celestial-label {
+        position: absolute;
+        transform: translate(4px, -50%);
+        color: white;
+        text-shadow: 0 0 3px black;
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      .star-dot {
+        display: block;
+        border-radius: 50%;
+        background-color: white;
+        box-shadow: 0 0 6px white;
+      }
+
+      /* PiP Map Styling */
+      #pip-container {
+        position: absolute;
+        top: 15px;
+        left: 15px;
+        width: 8em; /* Base size in em */
+        height: 8em;
+        font-size: 10px; /* Default font size, JS will adjust this */
+        border-radius: 50%;
+        background-color: rgba(0, 0, 0, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.4);
+        z-index: 20;
+        box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        pointer-events: none;
+      }
+      .pip-line {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 50%;
+        height: 0.2em; /* Use em */
+        transform-origin: left center;
+        display: none;
+      }
+      #pip-start-line { background-color: #90ee90; }
+      #pip-end-line { background-color: #ff7f7f; }
+      .pip-center-dot {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 0.6em; /* Use em */
+        height: 0.6em;
+        background-color: white;
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+      }
+      .pip-label {
+        position: absolute;
+        color: white;
+        font-size: 1em; /* Use em */
+        font-weight: bold;
+        text-shadow: 0 0 2px black;
+      }
+      .pip-label.north { top: 0.2em; left: 50%; transform: translateX(-50%); }
+      .pip-label.east { top: 50%; right: 0.5em; transform: translateY(-50%); }
+      .pip-label.south { bottom: 0.2em; left: 50%; transform: translateX(-50%); }
+      .pip-label.west { top: 50%; left: 0.5em; transform: translateY(-50%); }
+
+      /* Landmark styling */
+      #landmark-container {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        height: 30px;
+        z-index: 3;
+        pointer-events: none;
+        overflow: hidden;
+      }
+      .landmark-label {
+        position: absolute;
+        bottom: 5px;
+        color: yellow;
+        font-size: 12px;
+        text-shadow: 0 0 3px black, 0 0 5px black;
+        transform: translateX(-50%);
+        white-space: nowrap;
+      }
+      #submission-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0,0,0,0.5);
+        z-index: 10000;
+        display: none;
+        justify-content: center;
+        align-items: center;
+        color: white;
+        font-size: 1.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hidden-map-container"></div>
+    <div id="main-content">
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+          <div class="container-fluid">
+            <a class="navbar-brand" href="#">
+              <img src="/nmn_white.png" alt="NMN Logo">
+              Norsk meteornettverk
+            </a>
+          </div>
+        </nav>
+
+        <div class="container-fluid mt-4">
+          <div class="text-center mb-4">
+            <h1>Meld fra om en meteor</h1>
+            <p class="lead">Følg stega under for å gi en nøyaktig rapport.</p>
+          </div>
+
+          <form id="reportForm">
+            <div class="card" id="step-1">
+              <div class="card-header">
+                <h5><strong>Steg 1: Tidspunkt for observasjon (norsk, lokal tid)</strong></h5>
+              </div>
+              <div class="card-body">
+                <div class="row">
+                  <div class="col-md-6 mb-3">
+                    <label for="sighting_date_display" class="form-label">Dato</label>
+                    <div class="input-group position-relative">
+                        <input type="text" class="form-control" id="sighting_date_display" placeholder="dd/mm/åååå" required readonly style="pointer-events: none;">
+                        <span class="input-group-text" aria-hidden="true"><i class="bi bi-calendar"></i></span>
+                        <input type="date" id="sighting_date_picker_native" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;">
+                    </div>
+                    <input type="hidden" id="sighting_date" name="sighting_date">
+                    <input type="hidden" id="sighting_time" name="sighting_time">
+                  </div>
+                  <div class="col-md-6 mb-3">
+                    <label for="sighting_hour" class="form-label">Klokkeslett</label>
+                    <div class="input-group">
+                      <select class="form-select" id="sighting_hour" name="sighting_hour" required>
+                        <option value="">Time</option>
+                      </select>
+                      <span class="input-group-text">:</span>
+                      <select class="form-select" id="sighting_minute" name="sighting_minute" required>
+                        <option value="">Minutt</option>
+                      </select>
+                      <span class="input-group-text">:</span>
+                      <select class="form-select" id="sighting_second" name="sighting_second">
+                        <option value="">Sek</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                
+                <div class="mt-3">
+                  <label class="form-label">Hvor sikker er du på tidspunktet?</label>
+                  <div id="time-accuracy-options">
+                    <div class="form-check form-check-inline">
+                      <input class="form-check-input" type="radio" name="time_accuracy" id="acc_unknown" value="unknown" checked>
+                      <label class="form-check-label" for="acc_unknown">Veit ikke</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                      <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm1" value="pm1">
+                      <label class="form-check-label" for="acc_pm1">±1 minutt</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                      <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm5" value="pm5">
+                      <label class="form-check-label" for="acc_pm5">±5 minutt</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                      <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm15" value="pm15">
+                      <label class="form-check-label" for="acc_pm15">±15 minutt</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                      <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm30" value="pm30">
+                      <label class="form-check-label" for="acc_pm30">±30 minutt</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                      <input class="form-check-input" type="radio" name="time_accuracy" id="acc_gt30" value="gt30">
+                      <label class="form-check-label" for="acc_gt30">mer enn 30 minutts usikkerhet</label>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="time-display" class="form-text text-center fw-bold mt-2"></div>
+                <div id="time-error" class="text-danger text-center mt-2"></div>
+              </div>
+            </div>
+
+            <div class="card" id="step-2">
+              <div class="card-header">
+                <h5><strong>Steg 2: Hvor var du da du så meteoren?</strong></h5>
+              </div>
+              <div class="card-body">
+                <p>Plasser en markør på kartet som viser nøyaktig hvor du stod.  Du kan zoome og panorere.</p>
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <label for="obs_lat" class="form-label">Breddegrad</label>
+                    <input type="number" step="any" class="form-control" id="obs_lat" name="latitude" required>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="obs_lon" class="form-label">Lengdegrad</label>
+                    <input type="number" step="any" class="form-control" id="obs_lon" name="longitude" required>
+                  </div>
+                </div>
+                <div id="map"></div>
+              </div>
+            </div>
+
+            <div class="card" id="step-3">
+              <div class="card-header">
+                <h5><strong>Steg 3: Vis meteorens bane over himmelen</strong></h5>
+              </div>
+              <div class="card-body">
+                <p>Plasser et start- og sluttpunkt for meteoren.  Du kan zoome og panorere.  Kontroller retningene i kartet over.  På en mobiltelefon kan det hjelpe å vende den 90°.</p>
+                <div id="sky-panorama">
+                  <canvas id="sky-grid-canvas"></canvas>
+                  <div id="celestial-container"></div>
+                  <div id="landmark-container"></div>
+                  <div id="pip-container">
+                    <div class="pip-line" id="pip-start-line"></div>
+                    <div class="pip-line" id="pip-end-line"></div>
+                    <div class="pip-center-dot"></div>
+                    <span class="pip-label north">N</span>
+                    <span class="pip-label east">Ø</span>
+                    <span class="pip-label south">S</span>
+                    <span class="pip-label west">V</span>
+                  </div>
+                </div>
+                 <div class="row mt-3">
+                  <div class="col-md-6">
+                    <h6>Startpunkt</h6>
+                    <div class="input-group mb-2">
+                      <span class="input-group-text" style="width: 80px;">Retning</span>
+                      <input type="number" step="any" class="form-control" id="start_az" name="bearing1" required>
+                      <span class="input-group-text">°</span>
+                    </div>
+                    <div class="input-group">
+                      <span class="input-group-text" style="width: 80px;">Høgde</span>
+                      <input type="number" step="any" class="form-control" id="start_alt" name="alt1" required>
+                      <span class="input-group-text">°</span>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <h6>Sluttpunkt</h6>
+                    <div class="input-group mb-2">
+                      <span class="input-group-text" style="width: 80px;">Retning</span>
+                      <input type="number" step="any" class="form-control" id="end_az" name="bearing2" required>
+                      <span class="input-group-text">°</span>
+                    </div>
+                    <div class="input-group">
+                      <span class="input-group-text" style="width: 80px;">Høgde</span>
+                      <input type="number" step="any" class="form-control" id="end_alt" name="alt2" required>
+                      <span class="input-group-text">°</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div class="card" id="step-4">
+                <div class="card-header">
+                    <h5><strong>Steg 4: Andre opplysninger</strong></h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label class="form-label"><strong>Dominerende farge:</strong></label>
+                        <div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_unknown" value="unknown" checked>
+                                <label class="form-check-label" for="color_unknown">Usikker</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_white" value="white">
+                                <label class="form-check-label" for="color_white">hvit</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_green" value="green">
+                                <label class="form-check-label" for="color_green">grønn</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_blue" value="blue">
+                                <label class="form-check-label" for="color_blue">blå</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_yellow" value="yellow">
+                                <label class="form-check-label" for="color_yellow">gul</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_orange" value="orange">
+                                <label class="form-check-label" for="color_orange">oransje</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_red" value="red">
+                                <label class="form-check-label" for="color_red">rød</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="dominant_color" id="color_other" value="other">
+                                <label class="form-check-label" for="color_other">annen</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><strong>Største lysstyrke:</strong></label>
+                        <div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="brightness" id="bright_unknown" value="unknown" checked>
+                                <label class="form-check-label" for="bright_unknown">Usikker</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="brightness" id="bright_stars" value="stars">
+                                <label class="form-check-label" for="bright_stars">som de klareste stjernene</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="brightness" id="bright_brighter" value="brighter">
+                                <label class="form-check-label" for="bright_brighter">litt sterkere enn stjernene</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="brightness" id="bright_muchbrighter" value="muchbrighter">
+                                <label class="form-check-label" for="bright_muchbrighter">mye sterkere enn stjernene men terrenge lyste ikke opp</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="brightness" id="bright_lit" value="lit">
+                                <label class="form-check-label" for="bright_lit">terrenget lyste opp</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="brightness" id="bright_daylight" value="daylight">
+                                <label class="form-check-label" for="bright_daylight">nesten som daglys</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="brightness" id="bright_fulldaylight" value="fulldaylight">
+                                <label class="form-check-label" for="bright_fulldaylight">fullt daglys</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><strong>Hvor lenge var meteoren synlig:</strong></label>
+                        <div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="duration" id="dur_unknown" value="unknown" checked>
+                                <label class="form-check-label" for="dur_unknown">Usikker</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="duration" id="dur_lt2" value="lt2">
+                                <label class="form-check-label" for="dur_lt2">under 2 sekund</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="duration" id="dur_2_4" value="2-4">
+                                <label class="form-check-label" for="dur_2_4">2 - 4 sekund</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="duration" id="dur_4_8" value="4-8">
+                                <label class="form-check-label" for="dur_4_8">4 - 8 sekund</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="duration" id="dur_8_16" value="8-16">
+                                <label class="form-check-label" for="dur_8_16">8 - 16 sekund</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="duration" id="dur_gt16" value="gt16">
+                                <label class="form-check-label" for="dur_gt16">mer enn 16 sekund</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><strong>Annet</strong></label>
+                        <div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_afterglow" value="afterglow">
+                                <label class="form-check-label" for="other_afterglow">etterglød</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_smoke" value="smoke">
+                                <label class="form-check-label" for="other_smoke">røykspor</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_fragmentation" value="fragmentation">
+                                <label class="form-check-label" for="other_fragmentation">oppsplitting</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_explosion" value="explosion">
+                                <label class="form-check-label" for="other_explosion">eksplosjon</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_sound" value="sound">
+                                <label class="form-check-label" for="other_sound">lyd/drønn</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="sound-delay-section" class="mb-3 p-3 border rounded bg-light" style="display: none;">
+                        <label class="form-label fw-bold"><strong>Hvor lang tid gikk det fra du så meteoren til du hørte noe?</strong></label>
+                        <div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="sound_delay" id="delay_unknown" value="unknown" checked>
+                                <label class="form-check-label" for="delay_unknown">Usikker</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="sound_delay" id="delay_lt30s" value="lt30s">
+                                <label class="form-check-label" for="delay_lt30s">mindre enn 30 sekund</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="sound_delay" id="delay_30s_1m" value="30s-1m">
+                                <label class="form-check-label" for="delay_30s_1m">30 sekund til ett minutt</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="sound_delay" id="delay_1m_1.5m" value="1m-1.5m">
+                                <label class="form-check-label" for="delay_1m_1.5m">ett minutt til halvannet minutt</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="sound_delay" id="delay_1.5m_2m" value="1.5m-2m">
+                                <label class="form-check-label" for="delay_1.5m_2m">halvannet minutt til to minutt</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="sound_delay" id="delay_gt2m" value="gt2m">
+                                <label class="form-check-label" for="delay_gt2m">mer enn to minutt</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="more_info" class="form-label"><strong>Fortell gjerne mer om observasjonen:</strong></label>
+                        <textarea class="form-control" id="more_info" name="more_info" rows="4"></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" id="step-5">
+                <div class="card-header">
+                    <h5><strong>Steg 5: Kontaktinformasjon (frivillig)</strong></h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="contact_name" class="form-label"><strong>Navn:</strong></label>
+                        <input type="text" class="form-control" id="contact_name" name="contact_name">
+                    </div>
+                    <div class="mb-3">
+                        <label for="contact_phone" class="form-label"><strong>Telefonnummer:</strong></label>
+                        <input type="tel" class="form-control" id="contact_phone" name="contact_phone" pattern="[+0-9\s]+">
+                        <div class="invalid-feedback">Vennligst oppgi et gyldig telefonnummer (kun tall, +, og mellomrom).</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="contact_email" class="form-label"><strong>E-post:</strong></label>
+                        <input type="email" class="form-control" id="contact_email" name="contact_email">
+                        <div class="invalid-feedback">Vennligst oppgi en gyldig e-postadresse.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" id="step-6">
+                <div class="card-header">
+                    <h5><strong>Steg 6: Last opp bilder eller videoer</strong></h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <input class="form-control" type="file" id="file-input-main" multiple accept="image/*,video/*">
+                        <small class="form-text text-muted">Velg éi eller flere filer. Maks 10 filer, 50 MB totalt.</small>
+                    </div>
+                    <div id="file-list" class="list-group"></div>
+                    <div id="file-limit-error" class="text-danger mt-2" style="display: none;">
+                        Du kan maksimalt laste opp 10 filer.
+                    </div>
+                    <div id="file-size-error" class="text-danger mt-2" style="display: none;">
+                        Total filstørrelse overstiger 50 MB. Vennligst fjern en fil for å fortsette.
+                    </div>
+                </div>
+            </div>
+
+            <div id="form-error" class="alert alert-danger mt-3" role="alert" style="display: none;"></div>
+            <div class="d-grid mt-4">
+              <button type="button" class="btn btn-primary btn-lg" id="submit-btn">Send rapport</button>
+            </div>
+          </form>
+
+          <div class="card mt-5" id="sjekkliste">
+            <div class="card-header">
+                <h5><strong>Sjekkliste</strong></h5>
+            </div>
+            <div class="card-body">
+                <p>Følgende sjekkliste kan være nyttig for å vurdere om du har sett ei ildkule (kraftig meteor). Er ikke disse tingene oppfylt, har du antakelig sett noe annet (fyrverkeri, nødbluss, kinesisk lykt, satellitt, fly, ordinært stjerneskudd, osv).</p>
+                <ul>
+                    <li> <i>Beveger seg raskt over himmelen, langt raskere enn et fly.</i></li>
+                    <li> <i>Beveger seg i rett linje, svinger ikke, snur ikke.</i></li>
+                    <li> <i>Lyser kraftigere enn noen stjerne eller planet på himmelen.</i></li>
+                    <li> <i>Er ikke synlig foran terreng/trær/tett skydekke.</i></li>
+                    <li> <i>Er synlig i mindre enn et halvminutt, oftest 1 - 10 sekund.</i></li>
+                </ul>
+                <p>Andre observasjoner kan være av interesse, også om du ikke så noen ildkule direkte:</p>
+                <ul>
+                    <li> <i>Plutselig opplysning av terrenget (så skygger kommer til syne om det er klarvær).</i></li>
+                    <li> <i>Lysende stripe eller flekk på himmelen som gradvis blir svakere.</i></li>
+                    <li> <i>Drønn eller smell som ikke kan tilskrives torden eller menneskelig aktivitet.</i></li>
+                </ul>
+                <p>Merk: Mens torden følger få sekund etter et lyn, vil det vanligvis gå minst et minutt før et drønn kan høres etter ei ildkule.</p>
+            </div>
+          </div>
+
+        </div>
+
+        <footer class="text-center text-muted py-4">Norsk meteornettverk</footer>
+    </div>
+    <div id="submission-overlay">
+        <div class="spinner-border text-light" role="status">
+          <span class="visually-hidden">Loading...</span>
+        </div>
+        <span class="ms-3">Sender rapport...</span>
+    </div>
+
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
+      // /js/leaflet.js
+    </script>
+    <script src="/js/astronomy.browser.min.js">
+      // https://cdn.jsdelivr.net/npm/astronomy-engine@2.1.19/astronomy.browser.min.js
+    </script> 
+    <script src="/js/html2canvas.min.js">
+      // https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+    </script>
+    <script src="/js/stars.js">
+    </script>
+
+    <script>
+        const step2 = document.getElementById('step-2');
+        const step3 = document.getElementById('step-3');
+        const dateDisplayInput = document.getElementById('sighting_date_display');
+        const datePickerNative = document.getElementById('sighting_date_picker_native');
+        const dateHiddenInput = document.getElementById('sighting_date');
+        const hourSelect = document.getElementById('sighting_hour');
+        const minuteSelect = document.getElementById('sighting_minute');
+        const secondSelect = document.getElementById('sighting_second');
+        const timeHiddenInput = document.getElementById('sighting_time');
+        const timeDisplay = document.getElementById('time-display');
+        const latInput = document.getElementById('obs_lat');
+        const lonInput = document.getElementById('obs_lon');
+        const panorama = document.getElementById('sky-panorama');
+        const gridCanvas = document.getElementById('sky-grid-canvas');
+        const gridCtx = gridCanvas.getContext('2d');
+
+        // Az/Alt inputs
+        const startAzInput = document.getElementById('start_az');
+        const startAltInput = document.getElementById('start_alt');
+        const endAzInput = document.getElementById('end_az');
+        const endAltInput = document.getElementById('end_alt');
+        
+        // Step 4 inputs
+        const soundCheckbox = document.getElementById('other_sound');
+        const soundDelaySection = document.getElementById('sound-delay-section');
+
+        // File upload inputs
+        const mainFileInput = document.getElementById('file-input-main');
+        const fileListContainer = document.getElementById('file-list');
+        const fileSizeError = document.getElementById('file-size-error');
+        const fileLimitError = document.getElementById('file-limit-error');
+        const formErrorDiv = document.getElementById('form-error');
+        let uploadedFiles = [];
+        const MAX_FILES = 10;
+        const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50 MB
+
+
+        let observerMarker;
+        let startDirectionLine, endDirectionLine;
+        let startPoint = {};
+        let endPoint = {};
+        let skyStartMarker, skyEndMarker;
+        let draggedMarker = null;
+        let resizeTimer;
+        let skyZoom = 1.8;
+        let centerAz = 180;
+        let centerAlt = 25;
+        const MIN_ZOOM = 1.0;
+        const MAX_ZOOM = 20.0;
+        let isPanning = false;
+        let hasPanned = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        let landmarkFetchTimer;
+        let currentLandmarks = [];
+        
+        // Touch state variables
+        const DRAG_THRESHOLD = 5; // pixels
+        let initialPinchDistance = null;
+        let initialTouchX = null;
+        let initialTouchY = null;
+        let lastTouchX = null;
+        let lastTouchY = null;
+        
+        step2.classList.add('step-disabled'); 
+        step3.classList.add('step-disabled');
+
+        for (let i = 0; i < 24; i++) hourSelect.add(new Option(i.toString().padStart(2, '0'), i.toString().padStart(2, '0')));
+        for (let i = 0; i < 60; i++) minuteSelect.add(new Option(i.toString().padStart(2, '0'), i.toString().padStart(2, '0')));
+        for (let i = 0; i < 60; i++) secondSelect.add(new Option(i.toString().padStart(2, '0'), i.toString().padStart(2, '0')));
+        
+        secondSelect.value = '00'; // Set default seconds to 00
+
+        datePickerNative.addEventListener('change', (e) => {
+            if (e.target.value) {
+                dateHiddenInput.value = e.target.value;
+                const parts = e.target.value.split('-');
+                dateDisplayInput.value = `${parts[2]}/${parts[1]}/${parts[0]}`;
+                checkTimeStep();
+            }
+        });
+        hourSelect.addEventListener('change', checkTimeStep);
+        minuteSelect.addEventListener('change', checkTimeStep);
+        secondSelect.addEventListener('change', checkTimeStep);
+
+        function checkTimeStep() {
+            const timeErrorDiv = document.getElementById('time-error');
+            timeErrorDiv.textContent = '';
+            dateDisplayInput.classList.remove('is-invalid');
+            hourSelect.classList.remove('is-invalid');
+            minuteSelect.classList.remove('is-invalid');
+
+            if (hourSelect.value && minuteSelect.value && dateHiddenInput.value) {
+                const seconds = secondSelect.value || '00';
+                timeHiddenInput.value = `${hourSelect.value}:${minuteSelect.value}:${seconds}`;
+                const selectedDate = new Date(`${dateHiddenInput.value}T${timeHiddenInput.value}`);
+                const now = new Date();
+
+                if (selectedDate > now) {
+                    timeErrorDiv.textContent = 'Tidspunktet kan ikke være i framtida.';
+                    dateDisplayInput.classList.add('is-invalid');
+                    hourSelect.classList.add('is-invalid');
+                    minuteSelect.classList.add('is-invalid');
+                    step2.classList.add('step-disabled');
+                    step3.classList.add('step-disabled');
+                    timeDisplay.innerHTML = "";
+                    return; 
+                }
+                
+                step2.classList.remove('step-disabled');
+                updateTimeDisplay(selectedDate);
+                if (observerMarker) redrawSkyView();
+
+            } else {
+                timeHiddenInput.value = "";
+                step2.classList.add('step-disabled');
+                step3.classList.add('step-disabled');
+                timeDisplay.innerHTML = "";
+            }
+        }
+
+        function updateTimeDisplay(localDate) {
+            const pad = (n) => n.toString().padStart(2,'0');
+            const monthNames = ["januar","februar","mars","april","mai","juni","juli","august","september","oktober","november","desember"];
+            const utcDateString = `${localDate.getUTCDate()}. ${monthNames[localDate.getUTCMonth()]} ${localDate.getUTCFullYear()}`;
+            const utcTimeString = `${pad(localDate.getUTCHours())}:${pad(localDate.getUTCMinutes())}:${pad(localDate.getUTCSeconds())} UTC`;
+            timeDisplay.innerHTML = `Observasjonstid: ${utcDateString} kl. ${utcTimeString}`;
+        }
+
+        const map = L.map('map').setView([62, 9], 5);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+            crossOrigin: 'anonymous'
+        }).addTo(map);
+        
+        map.on('click', e => updateObserverPosition(e.latlng));
+
+        function updateObserverPosition(coords) {
+            latInput.value = coords.lat.toFixed(5); 
+            lonInput.value = coords.lng.toFixed(5);
+            if (!observerMarker) {
+                observerMarker = L.marker(coords, { draggable: true }).addTo(map);
+                observerMarker.on('dragend', e => updateObserverPosition(e.target.getLatLng()));
+            } else {
+                observerMarker.setLatLng(coords);
+            }
+            step3.classList.remove('step-disabled');
+
+            clearTimeout(landmarkFetchTimer);
+            landmarkFetchTimer = setTimeout(() => {
+                fetchAndDisplayLandmarks(coords);
+            }, 500);
+
+            if (startDirectionLine && startPoint.azimuth !== undefined) {
+                startDirectionLine.setLatLngs([coords, getDestinationPoint(coords, startPoint.azimuth, 200)]);
+            }
+            if (endDirectionLine && endPoint.azimuth !== undefined) {
+                endDirectionLine.setLatLngs([coords, getDestinationPoint(coords, endPoint.azimuth, 200)]);
+            }
+
+            if (dateHiddenInput.value && timeHiddenInput.value) redrawSkyView();
+        }
+
+        function redrawSkyView() {
+            if (!observerMarker || !dateHiddenInput.value || !timeHiddenInput.value) return;
+
+            const date = new Date(`${dateHiddenInput.value}T${timeHiddenInput.value}`);
+            if (isNaN(date.getTime())) return;
+            const observer = new Astronomy.Observer(parseFloat(latInput.value), parseFloat(lonInput.value), 0);
+            
+            let sunAltitude = -90;
+            try {
+                const sunEqu = Astronomy.Equator('Sun', date, observer, true, true);
+                const sunHor = Astronomy.Horizon(date, observer, sunEqu.ra, sunEqu.dec);
+                sunAltitude = sunHor.altitude;
+            } catch (e) {}
+
+            const skyDarkness = Math.max(0, Math.min(1, sunAltitude / -12.0));
+            
+            updateSkyBackground(1 - skyDarkness);
+            drawGrid();
+            drawCelestialObjects(date, observer, sunAltitude);
+            drawSkyElements();
+            drawLandmarks();
+        }
+        
+        function updatePipSize() {
+            const panoramaWidth = panorama.offsetWidth;
+            if (panoramaWidth > 0) {
+                const baseSize = Math.max(6, Math.min(12, panoramaWidth / 80));
+                document.getElementById('pip-container').style.fontSize = `${baseSize}px`;
+            }
+        }
+
+        function resizeSkyView() {
+            const panoramaWidth = panorama.offsetWidth;
+            if (panoramaWidth === 0) return;
+            let targetHeight = Math.min(panoramaWidth / 2.5, window.innerHeight * 0.6);
+            panorama.style.height = `${targetHeight}px`;
+            gridCanvas.width = panorama.offsetWidth;
+            gridCanvas.height = targetHeight;
+            updatePipSize();
+            redrawSkyView();
+        }
+
+        function getScreenCoordsFromAzAlt(azimuth, altitude) {
+            const hFov = 360 / skyZoom;
+            const vFov = 90 / skyZoom;
+            let deltaAz = azimuth - centerAz;
+            if (deltaAz > 180) deltaAz -= 360;
+            if (deltaAz < -180) deltaAz += 360;
+            const x = ((deltaAz + hFov / 2) / hFov) * panorama.offsetWidth;
+            const y = (((centerAlt + vFov / 2) - altitude) / vFov) * panorama.offsetHeight;
+            return { x, y };
+        }
+
+        function getPointFromEvent(e) {
+            const rect = panorama.getBoundingClientRect();
+            const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+            const y = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+            const hFov = 360 / skyZoom;
+            const vFov = 90 / skyZoom;
+            const viewAzStart = centerAz - hFov / 2;
+            const viewAltTop = centerAlt + vFov / 2;
+            let azimuth = viewAzStart + (x / rect.width) * hFov;
+            const altitude = viewAltTop - (y / rect.height) * vFov;
+            azimuth = (azimuth + 360) % 360;
+            return { x, y, azimuth, altitude: Math.max(0, Math.min(89, altitude)) };
+        }
+
+        function updateSkyBackground(skyBrightness) {
+            const HORIZON_DAY = [212, 232, 255];
+            const MID_SKY_DAY = [68, 102, 170];
+            const ZENITH_DAY = [17, 34, 68];
+
+            const DARKNESS_FACTOR = 0.4;
+            const HORIZON_NIGHT = HORIZON_DAY.map(c => c * DARKNESS_FACTOR);
+            const MID_SKY_NIGHT = MID_SKY_DAY.map(c => c * DARKNESS_FACTOR);
+            const ZENITH_NIGHT = ZENITH_DAY.map(c => c * DARKNESS_FACTOR);
+            
+            const lerp = (a, b, t) => a + t * (b - a);
+
+            const HORIZON = HORIZON_NIGHT.map((c, i) => lerp(c, HORIZON_DAY[i], skyBrightness));
+            const MID_SKY = MID_SKY_NIGHT.map((c, i) => lerp(c, MID_SKY_DAY[i], skyBrightness));
+            const ZENITH = ZENITH_NIGHT.map((c, i) => lerp(c, ZENITH_DAY[i], skyBrightness));
+            
+            const lerpColor = (c1, c2, t) => [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
+            
+            const getColorForAltitude = (alt) => {
+                const t = Math.max(0, Math.min(1, alt / 90));
+                const color = t < 0.5 ? lerpColor(HORIZON, MID_SKY, t * 2) : lerpColor(MID_SKY, ZENITH, (t - 0.5) * 2);
+                return `rgb(${color.map(Math.round).join(',')})`;
+            };
+
+            const vFov = 90 / skyZoom;
+            const topAlt = centerAlt + vFov / 2;
+            const bottomAlt = centerAlt - vFov / 2;
+            
+            panorama.style.background = `linear-gradient(to top, ${getColorForAltitude(bottomAlt)}, ${getColorForAltitude(topAlt)})`;
+        }
+
+        function drawGrid() {
+            gridCtx.clearRect(0, 0, gridCanvas.width, gridCanvas.height);
+            gridCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            gridCtx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+            gridCtx.font = '12px sans-serif';
+            gridCtx.textAlign = 'center';
+            gridCtx.textBaseline = 'middle';
+
+            const azStep = skyZoom < 3 ? 30 : (skyZoom < 8 ? 10 : 5);
+            const altStep = skyZoom < 4 ? 10 : 5;
+            const cardinalPoints = {0: 'N', 90: 'Ø', 180: 'S', 270: 'V'};
+
+            for (let az = 0; az < 360; az += azStep) {
+                const { x } = getScreenCoordsFromAzAlt(az, 0);
+                if (x > -gridCanvas.width && x < gridCanvas.width * 2) {
+                    gridCtx.beginPath();
+                    gridCtx.moveTo(x, 0);
+                    gridCtx.lineTo(x, gridCanvas.height);
+                    gridCtx.stroke();
+                    const label = cardinalPoints[az] !== undefined ? `${az}° ${cardinalPoints[az]}` : `${az}°`;
+                    if (x > 0 && x < gridCanvas.width) gridCtx.fillText(label, x, 10);
+                }
+            }
+            for (let alt = 0; alt <= 90; alt += altStep) {
+                const { y } = getScreenCoordsFromAzAlt(0, alt);
+                 if (y > 0 && y < gridCanvas.height) {
+                    gridCtx.beginPath();
+                    gridCtx.moveTo(0, y);
+                    gridCtx.lineTo(gridCanvas.width, y);
+                    gridCtx.stroke();
+                    gridCtx.fillText(`${alt}°`, 20, y);
+                }
+            }
+        }
+        
+        function julianDay(date) {
+            const Y = date.getUTCFullYear();
+            const M = date.getUTCMonth() + 1;
+            const D = date.getUTCDate() +
+                date.getUTCHours() / 24 +
+                date.getUTCMinutes() / (24 * 60) +
+                date.getUTCSeconds() / (24 * 3600);
+            let y = Y, m = M;
+            if (m <= 2) { y -= 1; m += 12; }
+            const A = Math.floor(y / 100);
+            const B = 2 - A + Math.floor(A / 4);
+            return Math.floor(365.25 * (y + 4716)) + Math.floor(30.6001 * (m + 1)) + D + B - 1524.5;
+        }
+
+        function precessJ2000ToDate(raDeg, decDeg, date) {
+            'use strict';
+            const yearsSinceJ2000 = (julianDay(date) - 2451545.0) / 365.25;
+            const m_deg_per_year = 0.012812333;
+            const n_deg_per_year = 0.00556753;
+            const raRad = raDeg * Math.PI / 180.0;
+            const decRad = decDeg * Math.PI / 180.0;
+            const annualRaChange = m_deg_per_year + n_deg_per_year * Math.sin(raRad) * Math.tan(decRad);
+            const annualDecChange = n_deg_per_year * Math.cos(raRad);
+            const totalRaCorrection = yearsSinceJ2000 * annualRaChange;
+            const totalDecCorrection = yearsSinceJ2000 * annualDecChange;
+            let newRaDeg = raDeg + totalRaCorrection;
+            let newDecDeg = decDeg + totalDecCorrection;
+            newRaDeg = (newRaDeg % 360 + 360) % 360;
+            if (newDecDeg > 90) newDecDeg = 90;
+            if (newDecDeg < -90) newDecDeg = -90;
+            return { ra: newRaDeg, dec: newDecDeg };
+        }
+
+        function interpolateGreatCircle(start, end, segments) {
+            const toRad = Math.PI / 180;
+            const toDeg = 180 / Math.PI;
+
+            const az1 = start.azimuth * toRad;
+            const alt1 = start.altitude * toRad;
+            const az2 = end.azimuth * toRad;
+            const alt2 = end.altitude * toRad;
+
+            const v1 = {
+                x: Math.cos(alt1) * Math.sin(az1),
+                y: Math.cos(alt1) * Math.cos(az1),
+                z: Math.sin(alt1)
+            };
+            const v2 = {
+                x: Math.cos(alt2) * Math.sin(az2),
+                y: Math.cos(alt2) * Math.cos(az2),
+                z: Math.sin(alt2)
+            };
+
+            const points = [];
+            const dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+            
+            if (dot > 0.99999) {
+                for (let i = 0; i <= segments; i++) {
+                    const t = i / segments;
+                    points.push({
+                        azimuth: start.azimuth + t * (end.azimuth - start.azimuth),
+                        altitude: start.altitude + t * (end.altitude - start.altitude)
+                    });
+                }
+                return points;
+            }
+
+            const omega = Math.acos(dot);
+            const sinOmega = Math.sin(omega);
+
+            for (let i = 0; i <= segments; i++) {
+                const t = i / segments;
+                const s1 = Math.sin((1 - t) * omega) / sinOmega;
+                const s2 = Math.sin(t * omega) / sinOmega;
+
+                const x = s1 * v1.x + s2 * v2.x;
+                const y = s1 * v1.y + s2 * v2.y;
+                const z = s1 * v1.z + s2 * v2.z;
+
+                const altRad = Math.asin(z);
+                let azRad = Math.atan2(x, y);
+
+                if (azRad < 0) azRad += 2 * Math.PI;
+
+                points.push({
+                    azimuth: azRad * toDeg,
+                    altitude: altRad * toDeg
+                });
+            }
+            return points;
+        }
+
+        function drawCelestialObjects(date, observer, sunAltitude) {
+            const container = document.getElementById('celestial-container');
+            if (!container || typeof Astronomy === 'undefined' || typeof starData === 'undefined') return;
+            container.innerHTML = '';
+            
+            let daylightMagLimit;
+            if (sunAltitude >= 0) {
+                daylightMagLimit = -1.5;
+            } else if (sunAltitude <= -12) {
+                daylightMagLimit = 6.0;
+            } else {
+                daylightMagLimit = -1.5 - (sunAltitude * 7.5) / 12.0;
+            }
+
+            let screenMagLimit = 6.0;
+            const panoramaWidth = panorama.offsetWidth;
+            if (panoramaWidth > 0 && panoramaWidth < 512) {
+                const baseLimit = 3.0;
+                const fullLimit = 6.0;
+                screenMagLimit = baseLimit + ( (panoramaWidth - 320) / (512 - 320) ) * (fullLimit - baseLimit);
+                screenMagLimit = Math.max(baseLimit, Math.min(fullLimit, screenMagLimit));
+            }
+            
+            const finalVisibilityMagLimit = Math.min(daylightMagLimit, screenMagLimit);
+            const labelMagLimitZoom = 2.3 + ((skyZoom - MIN_ZOOM) * (5.0 - 2.3)) / (MAX_ZOOM - MIN_ZOOM);
+            const finalLabelMagLimit = Math.min(finalVisibilityMagLimit, labelMagLimitZoom);
+            
+            const skyDarkness = Math.max(0, Math.min(1, sunAltitude / -12.0));
+            const sunOpacityFactor = 0.4 + (skyDarkness * 0.6);
+
+            const solarSystemBodies = ['Sun', 'Moon', 'Venus', 'Mars', 'Jupiter', 'Saturn'];
+            for (const name of solarSystemBodies) {
+                try {
+                    const equ = Astronomy.Equator(name, date, observer, true, true);
+                    const hor = Astronomy.Horizon(date, observer, equ.ra, equ.dec);
+                    if (hor.altitude <= 0) continue;
+
+                    let mag = 0;
+                    if (name === 'Sun') mag = -26.7;
+                    else if (name === 'Moon') mag = -12.7;
+                    else mag = Astronomy.Illumination(name, date).mag;
+                    
+                    if (mag <= finalVisibilityMagLimit) {
+                        let displayName = name;
+                        let icon = null;
+                        if (name === 'Moon') {
+                            displayName = 'Månen';
+                            icon = getMoonIcon(Astronomy.MoonPhase(date));
+                        } else if (name === 'Sun') {
+                            displayName = 'Sola';
+                            icon = '☀️';
+                        }
+                        renderCelestialObject(displayName, hor, icon, mag, mag <= finalLabelMagLimit, sunOpacityFactor);
+                    }
+                } catch (e) {}
+            }
+            
+            const visibleStars = [];
+            for (const name in starData) {
+                const star = starData[name];
+                if (star.mag > finalVisibilityMagLimit) continue;
+                try {
+                    const prec = precessJ2000ToDate(star.ra, star.dec, date);
+                    const ra_hours = prec.ra / 15.0;
+                    const dec_deg  = prec.dec;
+                    const hor = Astronomy.Horizon(date, observer, ra_hours, dec_deg);
+                    if (hor.altitude > 0) {
+                        visibleStars.push({ name, hor, mag: star.mag });
+                    }
+                } catch (e) {}
+            }
+
+            visibleStars.sort((a, b) => a.mag - b.mag);
+            const placedLabelBounds = [];
+
+            visibleStars.forEach(star => {
+                let showLabel = star.mag <= finalLabelMagLimit;
+                if(showLabel) {
+                    const { x, y } = getScreenCoordsFromAzAlt(star.hor.azimuth, star.hor.altitude);
+                    const labelWidth = star.name.length * 7;
+                    const labelHeight = 12;
+                    const bounds = {
+                        left: x - labelWidth / 2,
+                        right: x + labelWidth / 2,
+                        top: y + 10,
+                        bottom: y + 10 + labelHeight
+                    };
+                    const hasOverlap = placedLabelBounds.some(b => 
+                        (bounds.left < b.right && bounds.right > b.left && bounds.top < b.bottom && bounds.bottom > b.top)
+                    );
+                    if (hasOverlap) {
+                        showLabel = false;
+                    } else {
+                        placedLabelBounds.push(bounds);
+                    }
+                }
+                renderCelestialObject(star.name, star.hor, null, star.mag, showLabel, sunOpacityFactor);
+            });
+
+
+            function getMoonIcon(phaseAngle) {
+                const a = phaseAngle;
+                if (a < 22.5) return '🌑'; if (a < 67.5) return '🌒'; if (a < 112.5) return '🌓';
+                if (a < 157.5) return '🌔'; if (a < 202.5) return '🌕'; if (a < 247.5) return '🌖';
+                if (a < 292.5) return '🌗'; if (a < 337.5) return '🌘'; return '🌑';
+            }
+
+            function renderCelestialObject(name, hor, icon, mag, showName = true, sunOpacityFactor) {
+                const { x, y } = getScreenCoordsFromAzAlt(hor.azimuth, hor.altitude);
+                if (x < -50 || x > panorama.offsetWidth + 50 || y < -50 || y > panorama.offsetHeight + 50) return;
+
+                const obj = document.createElement('div');
+                obj.className = 'celestial-object';
+                obj.style.left = `${x}px`;
+                obj.style.top = `${y}px`;
+
+                const visualElement = document.createElement('span');
+                let finalOpacity;
+
+                if (icon) {
+                    visualElement.className = 'celestial-icon';
+                    visualElement.innerHTML = icon;
+                    finalOpacity = 1.0; 
+                } else {
+                    visualElement.className = 'star-dot';
+                    const clampedMag = Math.max(-1.5, Math.min(6.0, mag));
+                    const magnitudeOpacity = 1.0 - ((clampedMag + 1.5) / 7.5) * 0.7;
+                    finalOpacity = magnitudeOpacity * sunOpacityFactor;
+                    
+                    const size = Math.round(7 - ((clampedMag + 1.5) / 7.5) * 6);
+                    visualElement.style.width = `${size}px`;
+                    visualElement.style.height = `${size}px`;
+                }
+                
+                obj.style.opacity = finalOpacity.toFixed(2);
+                obj.appendChild(visualElement);
+
+                if (showName) {
+                    const label = document.createElement('div');
+                    label.className = 'celestial-label';
+                    label.textContent = name;
+                    obj.appendChild(label);
+                }
+                
+                container.appendChild(obj);
+            }
+        }
+
+        function drawSkyElements() {
+            if (startPoint.azimuth !== undefined) {
+                if (!skyStartMarker) {
+                    skyStartMarker = document.createElement("div");
+                    skyStartMarker.className = "sky-marker";
+                    skyStartMarker.dataset.point = "start";
+                    skyStartMarker.innerHTML = '<div class="sky-marker-visual"></div><div class="sky-label">Start</div>';
+                    panorama.appendChild(skyStartMarker);
+                    skyStartMarker.addEventListener("mousedown", e => { draggedMarker = "start"; document.body.classList.add('no-select'); e.stopPropagation(); });
+                }
+                const startCoords = getScreenCoordsFromAzAlt(startPoint.azimuth, startPoint.altitude);
+                skyStartMarker.style.left = `${startCoords.x}px`;
+                skyStartMarker.style.top = `${startCoords.y}px`;
+            } else if (skyStartMarker) {
+                skyStartMarker.remove();
+                skyStartMarker = null;
+            }
+
+            if (endPoint.azimuth !== undefined) {
+                if (!skyEndMarker) {
+                    skyEndMarker = document.createElement("div");
+                    skyEndMarker.className = "sky-marker";
+                    skyEndMarker.dataset.point = "end";
+                    skyEndMarker.innerHTML = '<div class="sky-marker-visual"></div><div class="sky-label">Slutt</div>';
+                    panorama.appendChild(skyEndMarker);
+                    skyEndMarker.addEventListener("mousedown", e => { draggedMarker = "end"; document.body.classList.add('no-select'); e.stopPropagation(); });
+                }
+                const endCoords = getScreenCoordsFromAzAlt(endPoint.azimuth, endPoint.altitude);
+                skyEndMarker.style.left = `${endCoords.x}px`;
+                skyEndMarker.style.top = `${endCoords.y}px`;
+            } else if (skyEndMarker) {
+                skyEndMarker.remove();
+                skyEndMarker = null;
+            }
+
+            if (startPoint.azimuth !== undefined && endPoint.azimuth !== undefined) {
+                let segments = 128;
+                let pathPoints = interpolateGreatCircle(startPoint, endPoint, segments);
+                if (pathPoints.some(p => p.altitude > 70)) {
+                    segments = 256;
+                    pathPoints = interpolateGreatCircle(startPoint, endPoint, segments);
+                }
+                if (pathPoints.some(p => p.altitude > 80)) {
+                    segments = 512;
+                    pathPoints = interpolateGreatCircle(startPoint, endPoint, segments);
+                }
+                const screenPoints = pathPoints.map(p => getScreenCoordsFromAzAlt(p.azimuth, p.altitude));
+                
+                gridCtx.beginPath();
+                gridCtx.moveTo(screenPoints[0].x, screenPoints[0].y);
+
+                for (let i = 1; i < screenPoints.length; i++) {
+                    const p1 = screenPoints[i - 1];
+                    const p2 = screenPoints[i];
+                    if (Math.abs(p1.x - p2.x) > panorama.offsetWidth * 0.75) {
+                        gridCtx.moveTo(p2.x, p2.y);
+                    } else {
+                        gridCtx.lineTo(p2.x, p2.y);
+                    }
+                }
+                
+                gridCtx.strokeStyle = 'rgba(255, 221, 0, 0.7)';
+                gridCtx.lineWidth = 3;
+                gridCtx.shadowColor = '#ffdd00';
+                gridCtx.shadowBlur = 10;
+                gridCtx.stroke();
+                
+                gridCtx.shadowBlur = 0;
+                gridCtx.shadowColor = 'transparent';
+                gridCtx.lineWidth = 1; 
+            }
+
+            const pipStartLine = document.getElementById('pip-start-line');
+            const pipEndLine = document.getElementById('pip-end-line');
+            if (startPoint.azimuth !== undefined) {
+                pipStartLine.style.display = 'block';
+                pipStartLine.style.transform = `rotate(${startPoint.azimuth - 90}deg)`;
+            } else {
+                pipStartLine.style.display = 'none';
+            }
+            if (endPoint.azimuth !== undefined) {
+                pipEndLine.style.display = 'block';
+                pipEndLine.style.transform = `rotate(${endPoint.azimuth - 90}deg)`;
+            } else {
+                pipEndLine.style.display = 'none';
+            }
+        }
+
+        function calculateBearing(lat1, lon1, lat2, lon2) {
+            const toRad = Math.PI / 180;
+            const lat1R = lat1 * toRad;
+            const lon1R = lon1 * toRad;
+            const lat2R = lat2 * toRad;
+            const lon2R = lon2 * toRad;
+            const y = Math.sin(lon2R - lon1R) * Math.cos(lat2R);
+            const x = Math.cos(lat1R) * Math.sin(lat2R) - Math.sin(lat1R) * Math.cos(lat2R) * Math.cos(lon2R - lon1R);
+            return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        }
+        
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371; // Radius of the Earth in km
+            const toRad = Math.PI / 180;
+            const dLat = (lat2 - lat1) * toRad;
+            const dLon = (lon2 - lon1) * toRad;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c; // Distance in km
+        }
+
+        async function fetchAndDisplayLandmarks(coords) {
+            const query = `[out:json][timeout:25];(node(around:20000,${coords.lat},${coords.lng})["natural"="peak"];node(around:20000,${coords.lat},${coords.lng})["place"~"city|town|village"];);out body;>;out skel qt;`;
+            const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                currentLandmarks = data.elements.filter(e => e.tags && e.tags.name).map(e => ({
+                    name: e.tags.name,
+                    az: calculateBearing(coords.lat, coords.lng, e.lat, e.lon),
+                    dist: calculateDistance(coords.lat, coords.lng, e.lat, e.lon)
+                }));
+                redrawSkyView();
+            } catch (error) {
+                console.error("Error fetching landmarks:", error);
+                currentLandmarks = [];
+                redrawSkyView();
+            }
+        }
+
+        function drawLandmarks() {
+            const container = document.getElementById('landmark-container');
+            container.innerHTML = '';
+            if (currentLandmarks.length === 0) return;
+
+            currentLandmarks.sort((a, b) => a.dist - b.dist);
+
+            const placedLabelBounds = [];
+            
+            currentLandmarks.forEach(landmark => {
+                const { x } = getScreenCoordsFromAzAlt(landmark.az, 0);
+                
+                const labelWidth = landmark.name.length * 7 + 10; 
+                const currentBounds = { left: x - labelWidth / 2, right: x + labelWidth / 2 };
+
+                const hasOverlap = placedLabelBounds.some(b => 
+                    (currentBounds.left < b.right && currentBounds.right > b.left)
+                );
+                
+                if (!hasOverlap && x > 0 && x < panorama.offsetWidth) {
+                    placedLabelBounds.push(currentBounds);
+
+                    const label = document.createElement('div');
+                    label.className = 'landmark-label';
+                    label.textContent = landmark.name;
+                    label.style.left = `${x}px`;
+                    container.appendChild(label);
+                }
+            });
+        }
+
+        function updateSkyInputs() {
+            startAzInput.value = startPoint.azimuth !== undefined ? startPoint.azimuth.toFixed(1) : "";
+            startAltInput.value = startPoint.altitude !== undefined ? startPoint.altitude.toFixed(1) : "";
+            endAzInput.value = endPoint.azimuth !== undefined ? endPoint.azimuth.toFixed(1) : "";
+            endAltInput.value = endPoint.altitude !== undefined ? endPoint.altitude.toFixed(1) : "";
+        }
+
+        function getDestinationPoint(start, bearing, distance) {
+            const R = 6371;
+            const brng = bearing * Math.PI / 180;
+            const lat1 = start.lat * Math.PI / 180;
+            const lon1 = start.lng * Math.PI / 180;
+            const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance / R) + Math.cos(lat1) * Math.sin(distance / R) * Math.cos(brng));
+            const lon2 = lon1 + Math.atan2(Math.sin(brng) * Math.sin(distance / R) * Math.cos(lat1), Math.cos(distance / R) - Math.sin(lat1) * Math.sin(lat2));
+            return L.latLng(lat2 * 180 / Math.PI, lon2 * 180 / Math.PI);
+        }
+        
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(resizeSkyView, 100);
+        });
+
+        // --- Mouse and Touch Handlers ---
+        
+        function panView(dx, dy) {
+            const hFov = 360 / skyZoom;
+            const vFov = 90 / skyZoom;
+            centerAz = (centerAz - (dx / panorama.offsetWidth) * hFov + 360) % 360;
+            centerAlt = Math.max(vFov / 2, Math.min(89 - vFov / 2, centerAlt + (dy / panorama.offsetHeight) * vFov));
+            redrawSkyView();
+        }
+
+        function zoomView(zoomFactor, anchorX, anchorY) {
+            const rect = panorama.getBoundingClientRect();
+            const hFov_before = 360 / skyZoom;
+            const vFov_before = 90 / skyZoom;
+            const az_before = (centerAz - hFov_before / 2) + (anchorX / rect.width) * hFov_before;
+            const alt_before = (centerAlt + vFov_before / 2) - (anchorY / rect.height) * vFov_before;
+
+            const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, skyZoom * zoomFactor));
+
+            if (newZoom !== skyZoom) {
+                skyZoom = newZoom;
+                const hFov_after = 360 / skyZoom;
+                const vFov_after = 90 / skyZoom;
+                centerAz = az_before - ((anchorX / rect.width) - 0.5) * hFov_after;
+                centerAlt = alt_before + ((anchorY / rect.height) - 0.5) * vFov_after;
+                centerAlt = Math.max(vFov_after / 2, Math.min(89 - vFov_after / 2, centerAlt));
+                centerAz = (centerAz + 360) % 360;
+                redrawSkyView();
+            }
+        }
+
+        panorama.addEventListener("mousedown", e => {
+            if (e.target.classList.contains("sky-marker")) {
+                draggedMarker = e.target.dataset.point;
+                document.body.classList.add('no-select');
+                e.stopPropagation();
+            } else {
+                isPanning = true;
+                hasPanned = false;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                panorama.style.cursor = 'grabbing';
+                document.body.classList.add('no-select');
+            }
+        });
+
+        document.addEventListener("mouseup", e => {
+            if (isPanning && !hasPanned && !e.target.classList.contains("sky-marker")) {
+                const point = getPointFromEvent(e);
+                if (startPoint.azimuth === undefined || endPoint.azimuth !== undefined) {
+                    startPoint = point;
+                    endPoint = {};
+                    if(startDirectionLine) map.removeLayer(startDirectionLine);
+                    if(endDirectionLine) map.removeLayer(endDirectionLine);
+                    if(observerMarker) startDirectionLine = L.polyline([observerMarker.getLatLng(), getDestinationPoint(observerMarker.getLatLng(), startPoint.azimuth, 200)], {color: 'green', weight: 2}).addTo(map);
+                } else {
+                    endPoint = point;
+                    if(endDirectionLine) map.removeLayer(endDirectionLine);
+                    if(observerMarker) endDirectionLine = L.polyline([observerMarker.getLatLng(), getDestinationPoint(observerMarker.getLatLng(), endPoint.azimuth, 200)], {color: 'red', weight: 2}).addTo(map);
+                }
+                updateSkyInputs();
+                redrawSkyView();
+            }
+            draggedMarker = null;
+            isPanning = false;
+            panorama.style.cursor = 'crosshair';
+            document.body.classList.remove('no-select');
+        });
+
+        document.addEventListener("mousemove", e => {
+            if (draggedMarker) {
+                hasPanned = true;
+                const point = getPointFromEvent(e);
+                const obsLatLng = observerMarker.getLatLng();
+                if (draggedMarker === "start") {
+                    startPoint = point;
+                    if (startDirectionLine) startDirectionLine.setLatLngs([obsLatLng, getDestinationPoint(obsLatLng, point.azimuth, 200)]);
+                } else if (draggedMarker === "end") {
+                    endPoint = point;
+                    if (endDirectionLine) endDirectionLine.setLatLngs([obsLatLng, getDestinationPoint(obsLatLng, point.azimuth, 200)]);
+                }
+                updateSkyInputs();
+                redrawSkyView();
+            } else if (isPanning) {
+                hasPanned = true;
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                panView(dx, dy);
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            }
+        });
+        
+        panorama.addEventListener('wheel', e => {
+            e.preventDefault();
+            const zoomFactor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+            const rect = panorama.getBoundingClientRect();
+            zoomView(zoomFactor, e.clientX - rect.left, e.clientY - rect.top);
+        }, { passive: false });
+        
+        panorama.addEventListener('touchstart', e => {
+            e.preventDefault();
+            document.body.classList.add('no-select');
+            if (e.target.classList.contains('sky-marker')) {
+                draggedMarker = e.target.dataset.point;
+                isPanning = false;
+                hasPanned = false;
+            } else if (e.touches.length === 1) {
+                isPanning = true;
+                hasPanned = false;
+                initialTouchX = e.touches[0].clientX;
+                initialTouchY = e.touches[0].clientY;
+                lastTouchX = e.touches[0].clientX;
+                lastTouchY = e.touches[0].clientY;
+            } else if (e.touches.length === 2) {
+                isPanning = false;
+                draggedMarker = null;
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                initialPinchDistance = Math.sqrt(dx*dx + dy*dy);
+            }
+        }, { passive: false });
+
+        panorama.addEventListener('touchmove', e => {
+            e.preventDefault();
+            if (draggedMarker) {
+                hasPanned = true;
+                const point = getPointFromEvent(e.touches[0]);
+                const obsLatLng = observerMarker.getLatLng();
+                 if (draggedMarker === "start") {
+                    startPoint = point;
+                    if (startDirectionLine) startDirectionLine.setLatLngs([obsLatLng, getDestinationPoint(obsLatLng, point.azimuth, 200)]);
+                } else if (draggedMarker === "end") {
+                    endPoint = point;
+                    if (endDirectionLine) endDirectionLine.setLatLngs([obsLatLng, getDestinationPoint(obsLatLng, point.azimuth, 200)]);
+                }
+                updateSkyInputs();
+                redrawSkyView();
+            } else if (e.touches.length === 1 && isPanning) {
+                const dFromStart = Math.sqrt(Math.pow(e.touches[0].clientX - initialTouchX, 2) + Math.pow(e.touches[0].clientY - initialTouchY, 2));
+                if (dFromStart > DRAG_THRESHOLD) {
+                    hasPanned = true;
+                }
+                if (hasPanned) {
+                    const dx = e.touches[0].clientX - lastTouchX;
+                    const dy = e.touches[0].clientY - lastTouchY;
+                    panView(dx, dy);
+                }
+                lastTouchX = e.touches[0].clientX;
+                lastTouchY = e.touches[0].clientY;
+            } else if (e.touches.length === 2 && initialPinchDistance !== null) {
+                hasPanned = true;
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const newDist = Math.sqrt(dx*dx + dy*dy);
+                const zoomFactor = newDist / initialPinchDistance;
+                const rect = panorama.getBoundingClientRect();
+                const anchorX = ((e.touches[0].clientX + e.touches[1].clientX) / 2) - rect.left;
+                const anchorY = ((e.touches[0].clientY + e.touches[1].clientY) / 2) - rect.top;
+                zoomView(zoomFactor, anchorX, anchorY);
+                initialPinchDistance = newDist;
+            }
+        }, { passive: false });
+
+        panorama.addEventListener('touchend', e => {
+            e.preventDefault();
+            if (isPanning && !hasPanned) {
+                 const point = getPointFromEvent(e.changedTouches[0]);
+                if (startPoint.azimuth === undefined || endPoint.azimuth !== undefined) {
+                    startPoint = point;
+                    endPoint = {};
+                    if(startDirectionLine) map.removeLayer(startDirectionLine);
+                    if(endDirectionLine) map.removeLayer(endDirectionLine);
+                    if(observerMarker) startDirectionLine = L.polyline([observerMarker.getLatLng(), getDestinationPoint(observerMarker.getLatLng(), startPoint.azimuth, 200)], {color: 'green', weight: 2}).addTo(map);
+                } else {
+                    endPoint = point;
+                    if(endDirectionLine) map.removeLayer(endDirectionLine);
+                    if(observerMarker) endDirectionLine = L.polyline([observerMarker.getLatLng(), getDestinationPoint(observerMarker.getLatLng(), endPoint.azimuth, 200)], {color: 'red', weight: 2}).addTo(map);
+                }
+                updateSkyInputs();
+                redrawSkyView();
+            }
+            draggedMarker = null;
+            isPanning = false;
+            hasPanned = false;
+            initialPinchDistance = null;
+            lastTouchX = null;
+            initialTouchX = null;
+            initialTouchY = null;
+            document.body.classList.remove('no-select');
+        }, { passive: false });
+
+        // --- Input Field Handlers ---
+        function updateFromLatLonInputs() {
+            const lat = parseFloat(latInput.value);
+            const lon = parseFloat(lonInput.value);
+            if (!isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+                updateObserverPosition(L.latLng(lat, lon));
+            }
+        }
+        
+        function updateFromAzAltInputs() {
+            const startAz = parseFloat(startAzInput.value);
+            const startAlt = parseFloat(startAltInput.value);
+            const endAz = parseFloat(endAzInput.value);
+            const endAlt = parseFloat(endAltInput.value);
+            const obsCoords = observerMarker ? observerMarker.getLatLng() : null;
+
+            if (!isNaN(startAz) && !isNaN(startAlt)) {
+                startPoint = { azimuth: startAz, altitude: startAlt };
+                if (obsCoords) {
+                    if (startDirectionLine) startDirectionLine.setLatLngs([obsCoords, getDestinationPoint(obsCoords, startAz, 200)]);
+                    else startDirectionLine = L.polyline([obsCoords, getDestinationPoint(obsCoords, startAz, 200)], {color: 'green', weight: 2}).addTo(map);
+                }
+            }
+            if (!isNaN(endAz) && !isNaN(endAlt)) {
+                endPoint = { azimuth: endAz, altitude: endAlt };
+                if (obsCoords) {
+                    if (endDirectionLine) endDirectionLine.setLatLngs([obsCoords, getDestinationPoint(obsCoords, endAz, 200)]);
+                    else endDirectionLine = L.polyline([obsCoords, getDestinationPoint(obsCoords, endAz, 200)], {color: 'red', weight: 2}).addTo(map);
+                }
+            }
+            redrawSkyView();
+        }
+
+        latInput.addEventListener('change', updateFromLatLonInputs);
+        lonInput.addEventListener('change', updateFromLatLonInputs);
+        startAzInput.addEventListener('change', updateFromAzAltInputs);
+        startAltInput.addEventListener('change', updateFromAzAltInputs);
+        endAzInput.addEventListener('change', updateFromAzAltInputs);
+        endAltInput.addEventListener('change', updateFromAzAltInputs);
+        
+        // --- Step 4 Logic ---
+        soundCheckbox.addEventListener('change', () => {
+            if (soundCheckbox.checked) {
+                soundDelaySection.style.display = 'block';
+            } else {
+                soundDelaySection.style.display = 'none';
+            }
+        });
+
+        // --- File Upload Logic ---
+        function formatBytes(bytes, decimals = 2) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+        }
+
+        function renderFileList() {
+            fileListContainer.innerHTML = '';
+            let totalSize = 0;
+            
+            uploadedFiles.forEach((file, index) => {
+                totalSize += file.size;
+                const fileItem = document.createElement('div');
+                fileItem.className = 'list-group-item d-flex justify-content-between align-items-center';
+                fileItem.innerHTML = `
+                    <span>${file.name} (${formatBytes(file.size)})</span>
+                    <button type="button" class="btn-close" aria-label="Fjern" data-index="${index}"></button>
+                `;
+                fileListContainer.appendChild(fileItem);
+            });
+
+            document.querySelectorAll('.btn-close').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const indexToRemove = parseInt(e.target.getAttribute('data-index'));
+                    uploadedFiles.splice(indexToRemove, 1);
+                    renderFileList();
+                });
+            });
+            
+            fileSizeError.style.display = totalSize > MAX_TOTAL_SIZE ? 'block' : 'none';
+            fileLimitError.style.display = uploadedFiles.length > MAX_FILES ? 'block' : 'none';
+            mainFileInput.disabled = uploadedFiles.length >= MAX_FILES;
+        }
+
+        mainFileInput.addEventListener('change', (e) => {
+            const newFiles = Array.from(e.target.files);
+            let currentTotalSize = uploadedFiles.reduce((acc, file) => acc + file.size, 0);
+
+            for (const file of newFiles) {
+                if (uploadedFiles.length >= MAX_FILES) {
+                    fileLimitError.style.display = 'block';
+                    break;
+                }
+                if (currentTotalSize + file.size > MAX_TOTAL_SIZE) {
+                    fileSizeError.style.display = 'block';
+                    break; 
+                }
+                
+                uploadedFiles.push(file);
+                currentTotalSize += file.size;
+            }
+            
+            e.target.value = ''; // Clear the input so user can add more
+            renderFileList();
+        });
+
+
+        // --- Form Submission ---
+document.getElementById("submit-btn").addEventListener("click", async (e) => {
+    formErrorDiv.style.display = 'none';
+
+    if (!timeHiddenInput.value || !latInput.value || !lonInput.value || !startAzInput.value || !endAzInput.value) {
+        formErrorDiv.textContent = 'Vennligst fullfør steg 1, 2 og 3 før du sender inn rapporten.';
+        formErrorDiv.style.display = 'block';
+        if (!timeHiddenInput.value) document.getElementById('step-1').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        else if (!latInput.value) document.getElementById('step-2').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        else document.getElementById('step-3').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+    }
+
+    const form = document.getElementById("reportForm");
+    form.classList.add("was-validated");
+
+    if (!form.checkValidity()) {
+        const firstInvalid = form.querySelector(':invalid');
+        if (firstInvalid) firstInvalid.closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+    }
+
+    document.getElementById('submission-overlay').style.display = 'flex';
+
+    try {
+        const formData = new FormData(form);
+
+        uploadedFiles.forEach(file => formData.append('file_uploads[]', file));
+
+        const skyCanvas = await html2canvas(document.getElementById('sky-panorama'), { useCORS: true });
+        formData.append('sky_view_image', skyCanvas.toDataURL('image/png'));
+        
+        const hiddenMapContainer = document.getElementById('hidden-map-container');
+        const obsLat = parseFloat(latInput.value);
+        const obsLng = parseFloat(lonInput.value);
+        const observerLatLng = L.latLng(obsLat, obsLng);
+
+        const hiddenMap = L.map('hidden-map-container', { zoomControl: false }).setView(observerLatLng, 10);
+        const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(hiddenMap);
+
+        const earthRadius = 6371e3;
+        const latRad = obsLat * Math.PI / 180;
+        const distance = 25000;
+        const lonDelta = (distance / (earthRadius * Math.cos(latRad))) * (180 / Math.PI);
+        const bounds = L.latLngBounds(L.latLng(obsLat, obsLng - lonDelta), L.latLng(obsLat, obsLng + lonDelta));
+        hiddenMap.fitBounds(bounds);
+
+        const mapCanvas = await new Promise((resolve, reject) => {
+            tileLayer.on('load', () => {
+                setTimeout(async () => {
+                    try {
+                        // Step 1: Hide overlays and capture the base map tiles
+                        const overlayPane = hiddenMapContainer.querySelector('.leaflet-overlay-pane');
+                        const markerPane = hiddenMapContainer.querySelector('.leaflet-marker-pane');
+                        if (overlayPane) overlayPane.style.visibility = 'hidden';
+                        if (markerPane) markerPane.style.visibility = 'hidden';
+
+                        const baseMapCanvas = await html2canvas(hiddenMapContainer, { useCORS: true, logging: false });
+
+                        // Restore visibility
+                        if (overlayPane) overlayPane.style.visibility = 'visible';
+                        if (markerPane) markerPane.style.visibility = 'visible';
+
+                        // Step 2: Create a new canvas to compose the final image
+                        const finalCanvas = document.createElement('canvas');
+                        finalCanvas.width = 800;
+                        finalCanvas.height = 600;
+                        const ctx = finalCanvas.getContext('2d');
+                        ctx.drawImage(baseMapCanvas, 0, 0);
+
+                        // Step 3: Draw the overlays manually using Leaflet's coordinate conversion
+                        const markerPoint = hiddenMap.latLngToContainerPoint(observerLatLng);
+
+                        // Draw Start Line
+                        if (startPoint.azimuth !== undefined) {
+                            const dest = getDestinationPoint(observerLatLng, startPoint.azimuth, 200);
+                            const destPoint = hiddenMap.latLngToContainerPoint(dest);
+                            ctx.beginPath();
+                            ctx.moveTo(markerPoint.x, markerPoint.y);
+                            ctx.lineTo(destPoint.x, destPoint.y);
+                            ctx.strokeStyle = '#28a745'; // Green
+                            ctx.lineWidth = 3;
+                            ctx.stroke();
+                        }
+                        // Draw End Line
+                        if (endPoint.azimuth !== undefined) {
+                            const dest = getDestinationPoint(observerLatLng, endPoint.azimuth, 200);
+                            const destPoint = hiddenMap.latLngToContainerPoint(dest);
+                            ctx.beginPath();
+                            ctx.moveTo(markerPoint.x, markerPoint.y);
+                            ctx.lineTo(destPoint.x, destPoint.y);
+                            ctx.strokeStyle = '#dc3545'; // Red
+                            ctx.lineWidth = 3;
+                            ctx.stroke();
+                        }
+                        // Draw Marker on top of lines
+                        ctx.fillStyle = '#3388ff';
+                        ctx.strokeStyle = '#ffffff';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.arc(markerPoint.x, markerPoint.y, 8, 0, 2 * Math.PI);
+                        ctx.fill();
+                        ctx.stroke();
+
+                        resolve(finalCanvas);
+                    } catch (err) { reject(err); }
+                }, 500);
+            });
+            setTimeout(() => reject(new Error("Map tile loading timed out")), 10000);
+        });
+        
+        hiddenMap.remove();
+        formData.append('generated_map_image', mapCanvas.toDataURL('image/png'));
+
+        // Create a Date object from the local time input values.
+        const localObservationDate = new Date(`${dateHiddenInput.value}T${timeHiddenInput.value}`);
+
+        // Extract the UTC components.
+        const utcYear = localObservationDate.getUTCFullYear();
+        const utcMonth = String(localObservationDate.getUTCMonth() + 1).padStart(2, '0'); // Month is 0-indexed
+        const utcDay = String(localObservationDate.getUTCDate()).padStart(2, '0');
+        const utcHours = String(localObservationDate.getUTCHours()).padStart(2, '0');
+        const utcMinutes = String(localObservationDate.getUTCMinutes()).padStart(2, '0');
+        const utcSeconds = String(localObservationDate.getUTCSeconds()).padStart(2, '0');
+
+        // Format the UTC date and time strings.
+        const utcDateString = `${utcYear}-${utcMonth}-${utcDay}`;
+        const utcTimeString = `${utcHours}:${utcMinutes}:${utcSeconds}`;
+
+        // Append the correct UTC values to the form data for the backend.
+        formData.append('sighting_date_full', utcDateString);
+        formData.append('sighting_time_full', utcTimeString);
+
+        const response = await fetch('report.php', { method: 'POST', body: formData });
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        
+        document.body.innerHTML = await response.text();
+
+    } catch (error) {
+        console.error('Submission failed:', error);
+        document.getElementById('submission-overlay').style.display = 'none';
+        alert('Beklager, det skjedde en feil under innsending. Vennligst sjekk nettverkstilkoplinga og prøv igjen.');
+    }
+		    });
+
+        setTimeout(resizeSkyView, 10);
+    </script>
+  </body>
+</html>

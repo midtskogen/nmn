@@ -1,4 +1,4 @@
-#!/Usr/bin/env python3
+#!/usr/bin/env python3
 
 import sys
 import json
@@ -74,12 +74,16 @@ HTML_TEMPLATE = """
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <link rel="stylesheet" href="style.css">
 </head><body>
-<div id="language-selector">
-    <span data-lang="nb_NO" title="Norsk">🇳🇴</span>
-    <span data-lang="en_GB" title="English">🇬🇧</span>
-    <span data-lang="de_DE" title="Deutsch">🇩🇪</span>
-</div><div class="container">
-    <header><h1>__{{page_title}}__</h1></header>
+<div class="container">
+    <header>
+        <div id="language-selector">
+            <span data-lang="nb_NO" title="Norsk">🇳🇴</span>
+            <span data-lang="en_GB" title="English">🇬🇧</span>
+            <span data-lang="de_DE" title="Deutsch">🇩🇪</span>
+            <span data-lang="cs_CZ" title="Čeština">🇨🇿</span>
+        </div>
+        <h1>__{{page_title}}__</h1>
+    </header>
     <main class="main-content">
         <div id="map-panel">
             <h2>__{{map_panel_title}}__</h2>

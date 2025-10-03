@@ -33,7 +33,7 @@ function get_user_ip() {
  * @return string The determined and validated language code.
  */
 function get_language($default_lang) {
-    $supported_langs = ['nb_NO', 'en_GB', 'de_DE'];
+    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ'];
     $lang = $_COOKIE['lang'] ?? substr($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? $default_lang, 0, 5);
     $lang = str_replace('-', '_', $lang);
     if (in_array($lang, $supported_langs)) {

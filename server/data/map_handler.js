@@ -1,4 +1,4 @@
-import { createEl, TO_RAD } from './utils.js';
+import { createEl, TO_RAD, TO_DEG } from './utils.js';
 import { calculateBearing, destinationPoint } from './calculations.js';
 
 // --- Module-scoped variables to hold map state ---
@@ -14,6 +14,38 @@ export const blueIcon = new L.Icon({ iconUrl: 'https://cdnjs.cloudflare.com/ajax
 export const redIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 export const yellowIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 const createLightningIcon = (color, size) => L.divIcon({ className: `lightning-icon lightning-icon-${color} icon-size-${size}`, html: '⚡', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+
+/**
+ * Calculates the sun's altitude for a given time and location.
+ * @param {Date} date The date object for the calculation.
+ * @param {number} lat Latitude in degrees.
+ * @param {number} lon Longitude in degrees.
+ * @returns {number} The sun's altitude in degrees.
+ */
+function getSunAltitude(date, lat, lon) {
+    const dayOfYear = (Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - Date.UTC(date.getUTCFullYear(), 0, 0)) / 864e5;
+    const latRad = lat * TO_RAD;
+
+    const solarDeclination = (0.006918 - 0.399912 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        + 0.070257 * Math.sin(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.006758 * Math.cos(4 * Math.PI * (dayOfYear - 1) / 365.24)
+        + 0.000907 * Math.sin(4 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.002697 * Math.cos(6 * Math.PI * (dayOfYear - 1) / 365.24)
+        + 0.00148 * Math.sin(6 * Math.PI * (dayOfYear - 1) / 365.24));
+
+    const eqtime = 229.18 * (0.000075 + 0.001868 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.032077 * Math.sin(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.014615 * Math.cos(4 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.040849 * Math.sin(4 * Math.PI * (dayOfYear - 1) / 365.24));
+    
+    const timeOffset = eqtime + 4 * lon;
+    const trueSolarTime = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60 + timeOffset;
+    const hourAngle = (trueSolarTime / 4) - 180;
+    const hourAngleRad = hourAngle * TO_RAD;
+
+    const sinAltitude = Math.sin(latRad) * Math.sin(solarDeclination) + Math.cos(latRad) * Math.cos(solarDeclination) * Math.cos(hourAngleRad);
+    return TO_DEG * Math.asin(sinAltitude);
+}
 
 // --- Custom Leaflet Layer Extensions ---
 L.TileLayer.WhiteToTransparent = L.TileLayer.extend({

@@ -28,23 +28,76 @@ function get_user_ip() {
 }
 
 /**
- * Determines the desired language from cookies or headers, validates it, and returns the language code.
+ * Determines the desired language through a prioritized process:
+ * 1. User's language cookie (explicit choice).
+ * 2. User's browser 'Accept-Language' header.
+ * 3. User's country via IP address (GeoIP lookup).
+ * 4. Hardcoded default language.
  * @param string $default_lang The default language code to use as a fallback.
  * @return string The determined and validated language code.
  */
 function get_language($default_lang) {
     $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ'];
-    $lang = $_COOKIE['lang'] ?? substr($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? $default_lang, 0, 5);
-    $lang = str_replace('-', '_', $lang);
-    if (in_array($lang, $supported_langs)) {
-        return $lang;
+
+    // Priority 1: Check for an existing language cookie.
+    if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
+        return $_COOKIE['lang'];
     }
-    // Fallback for partial codes like 'en'
-    foreach ($supported_langs as $supported) {
-        if (substr($supported, 0, 2) === substr($lang, 0, 2)) {
-            return $supported;
+
+    // Priority 2: Check the browser's Accept-Language header.
+    if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
+        $browser_lang_code = substr($_SERVER['HTTP_ACCEPT_LANGUAGE'], 0, 5);
+        $browser_lang_code = str_replace('-', '_', $browser_lang_code);
+        if (in_array($browser_lang_code, $supported_langs)) {
+            return $browser_lang_code;
+        }
+        // Fallback for partial codes like 'en'
+        $short_code = substr($browser_lang_code, 0, 2);
+        foreach ($supported_langs as $supported) {
+            if (substr($supported, 0, 2) === $short_code) {
+                return $supported;
+            }
         }
     }
+
+    // Priority 3: Check the user's country via their IP address.
+    $country_to_lang_map = [
+        // Norwegian & Scandinavian countries
+        'NO' => 'nb_NO', // Norway
+        'SE' => 'nb_NO', // Sweden
+        'DK' => 'nb_NO', // Denmark
+        
+        // English-speaking countries
+        'GB' => 'en_GB', // United Kingdom
+        'US' => 'en_GB', // United States
+        'CA' => 'en_GB', // Canada
+        'AU' => 'en_GB', // Australia
+        'NZ' => 'en_GB', // New Zealand
+        'IE' => 'en_GB', // Ireland
+
+        // German-speaking countries
+        'DE' => 'de_DE', // Germany
+        'AT' => 'de_DE', // Austria
+        'CH' => 'de_DE', // Switzerland
+
+        // Czech & Slovak
+        'CZ' => 'cs_CZ', // Czech Republic
+        'SK' => 'cs_CZ', // Slovakia
+    ];
+
+    $user_ip = get_user_ip();
+    // Use a free GeoIP API to get the country code.
+    // Note: In a production environment, you might consider a more robust service or a local database (like MaxMind GeoLite2).
+    // The '@' suppresses errors if the API call fails.
+    $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
+    if ($geo_data_json) {
+        $geo_data = json_decode($geo_data_json);
+        if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
+            return $country_to_lang_map[$geo_data->countryCode];
+        }
+    }
+
+    // Priority 4: Return the hardcoded default language.
     return $default_lang;
 }
 
@@ -236,3 +289,4 @@ switch ($action) {
         break;
 }
 ?>
+

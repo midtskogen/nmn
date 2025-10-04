@@ -79,10 +79,6 @@
     "status_contacting_station": "Kontaktuji kamerovou stanici...",
     "status_connecting_camera": "Připojuji se ke kameře...",
     "status_stream_ready": "Živé vysílání je připravo.",
-    "status_getting_token": "Ověřování u poskytovatele letových dat...",
-    "status_getting_airport_db": "Načítání databáze letišť...",
-    "status_updating_flight_db": "Aktualizace databáze letů (může to chvíli trvat)...",
-    "status_filtering_flights": "Filtrování letů podle blízkosti...",
     "status_fetching_aircraft_track": "Načítám dráhu letadla {i} z {total}...",
     "status_calculating": "Počítám...",
     "status_calculating_for_station": "Počítám pro stanici {processed} z {total}...",
@@ -120,5 +116,10 @@
     "progress_please_wait": "Počkejte prosím... ({message})",
     "progress_calculating": "Počítám...",
     "waiting_for_response": "Čekám na odpověď...",
-    "live_stream_title": "Živé vysílání ze stanice {station_code}:"
+    "live_stream_title": "Živé vysílání ze stanice {station_code}:",
+    "status_authenticating": "Ověřování...",
+    "status_loading_databases": "Načítání databází...",
+    "status_fetching_flights": "Načítám letová data...",
+    "status_filtering_flights": "Filtrování letů..."
 }
+

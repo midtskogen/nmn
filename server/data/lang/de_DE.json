@@ -79,10 +79,6 @@
     "status_contacting_station": "Kontaktiere Kamerastation...",
     "status_connecting_camera": "Verbinde mit Kamera...",
     "status_stream_ready": "Videostream ist bereit.",
-    "status_getting_token": "Authentifizierung beim Flugdatenanbieter...",
-    "status_getting_airport_db": "Lade Flughafendatenbank...",
-    "status_updating_flight_db": "Aktualisiere Flugdatenbank (dies kann einen Moment dauern)...",
-    "status_filtering_flights": "Filtere Flüge nach Nähe...",
     "status_fetching_aircraft_track": "Rufe Spur für Flugzeug {i} von {total} ab...",
     "status_calculating": "Berechne...",
     "status_calculating_for_station": "Berechne für Station {processed} von {total}...",
@@ -120,5 +116,10 @@
     "progress_please_wait": "Bitte warten... ({message})",
     "progress_calculating": "Berechne...",
     "waiting_for_response": "Warte auf Antwort...",
-    "live_stream_title": "Live-Video von {station_code}:"
+    "live_stream_title": "Live-Video von {station_code}:",
+    "status_authenticating": "Authentifizierung...",
+    "status_loading_databases": "Lade Datenbanken...",
+    "status_fetching_flights": "Rufe Flugdaten ab...",
+    "status_filtering_flights": "Filtere Flüge..."
 }
+

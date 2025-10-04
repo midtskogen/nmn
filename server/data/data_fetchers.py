@@ -154,28 +154,27 @@ def get_air_pressure(lat, lon, dt_utc):
     auth = f'{client_id}:{client_secret}'
     headers = {'Authorization': f'Basic {base64.b64encode(auth.encode()).decode()}', 'User-Agent': 'NorskMeteornettverk-Interface/1.0'}
     
-    tried_stations = []
-    # Try up to 2 different nearby stations
-    for i in range(2):
-        exclude_str = f"&ids=-{','.join(tried_stations)}" if tried_stations else ""
-        sources_url = f"https://frost.met.no/sources/v0.jsonld?types=SensorSystem&geometry=nearest(POINT({lon}%20{lat})){exclude_str}&elements=air_pressure_at_sea_level"
-        
-        station_id = None
-        try:
-            req = urllib.request.Request(sources_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                sources_data = json.load(response)
-            if sources_data.get('data'):
-                station_id = sources_data['data'][0]['id']
-        except Exception as e:
-            logging.error(f"API error finding nearest station (attempt {i+1}): {e}")
-            continue
+    # Get up to three closest stations in one request
+    sources_url = f"https://frost.met.no/sources/v0.jsonld?types=SensorSystem&geometry=nearest(POINT({lon}%20{lat}))&nearestmaxcount=3&elements=air_pressure_at_sea_level"
+    logging.info(f"Frost API URL for stations: {sources_url}")
 
-        if not station_id:
-            break 
+    nearby_stations = []
+    try:
+        req = urllib.request.Request(sources_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            sources_data = json.load(response)
+        if sources_data.get('data'):
+            nearby_stations = [s['id'] for s in sources_data['data']]
+    except Exception as e:
+        logging.error(f"API error finding nearest stations: {e}")
+        return None
 
-        tried_stations.append(station_id)
+    if not nearby_stations:
+        logging.warning(f"No nearby weather stations found for ({lat}, {lon}).")
+        return None
 
+    # Iterate through the fetched stations and try to get data
+    for station_id in nearby_stations:
         # Try a narrow 2-hour window, then a wider 12-hour window
         for hours in [2, 12]:
             start_time = dt_utc - timedelta(hours=hours/2)
@@ -195,7 +194,7 @@ def get_air_pressure(lat, lon, dt_utc):
                 logging.warning(f"Failed to fetch pressure for {station_id} with {hours}h window: {e}")
                 continue
     
-    logging.warning(f"All attempts to fetch pressure for ({lat}, {lon}) failed.")
+    logging.warning(f"All attempts to fetch pressure for ({lat}, {lon}) failed for stations {nearby_stations}.")
     return None
 
 
@@ -356,3 +355,4 @@ def get_camera_fovs():
     with open(CAMERA_FOV_CACHE_FILE, 'w') as f: json.dump(fov_data, f)
     logging.info("Finished generating camera FOV cache.")
     return fov_data
+

@@ -79,10 +79,6 @@
     "status_contacting_station": "Kontakter kamerastasjon...",
     "status_connecting_camera": "Kopler til kamera...",
     "status_stream_ready": "Videostrømen er klar.",
-    "status_getting_token": "Autentiserer med flydataleverandør...",
-    "status_getting_airport_db": "Laster flyplassdatabase...",
-    "status_updating_flight_db": "Oppdaterer flydatabase (dette kan ta ei stund)...",
-    "status_filtering_flights": "Filtrerer flygninger...",
     "status_fetching_aircraft_track": "Henter spor for fly {i}/{total}...",
     "status_calculating": "Beregner...",
     "status_calculating_for_station": "Beregner for stasjon {processed}/{total}...",
@@ -120,5 +116,10 @@
     "progress_please_wait": "Vent litt... ({message})",
     "progress_calculating": "Beregner...",
     "waiting_for_response": "Venter på svar...",
-    "live_stream_title": "Se direkte video fra {station_code}:"
+    "live_stream_title": "Se direkte video fra {station_code}:",
+    "status_authenticating": "Autentiserer...",
+    "status_loading_databases": "Laster databaser...",
+    "status_fetching_flights": "Henter flydata...",
+    "status_filtering_flights": "Filtrerer fly..."
 }
+

@@ -243,6 +243,8 @@ def fetch_and_process_track(args):
     needs_correction = any(len(p) > 3 and p[3] is not None for p in track_data['path']) and \
                        not all(len(p) > 9 and p[9] is not None for p in track_data['path'])
     
+    warned_about_fallback = False
+    
     if needs_correction:
         mid_point = track_data['path'][len(track_data['path']) // 2]
         p_time, p_lat, p_lon = mid_point[0], mid_point[1], mid_point[2]
@@ -252,11 +254,9 @@ def fetch_and_process_track(args):
             pressure_hpa = get_air_pressure(p_lat, p_lon, dt_utc)
             logging.info(f"Worker {os.getpid()}: get_air_pressure returned: {pressure_hpa}")
 
-    if needs_correction and pressure_hpa is None:
-        logging.warning(f"Worker {os.getpid()}: Using standard pressure 1013.25 hPa as fallback for {flight_info['icao24']}.")
-
     interpolated_path = interpolate_raw_track(track_data['path'], 15)
     all_visible_points = []
+    altitude_corrections = []
     
     for station_id, station_info in stations_data.items():
         lat_ref, lon_ref, alt_ref = station_info['astronomy']['latitude'], station_info['astronomy']['longitude'], station_info['astronomy']['elevation']
@@ -290,13 +290,16 @@ def fetch_and_process_track(args):
                     # If the API call failed, use standard pressure (1013.25 hPa).
                     # This results in a zero correction, a safe fallback.
                     pressure_to_use = pressure_hpa if pressure_hpa is not None else 1013.25
+                    if pressure_hpa is None and needs_correction and not warned_about_fallback:
+                        logging.warning(f"Worker {os.getpid()}: Using standard pressure 1013.25 hPa as fallback for {flight_info['icao24']}.")
+                        warned_about_fallback = True
 
                     pressure_deviation = 1013.25 - pressure_to_use
                     altitude_correction = pressure_deviation * 8.23
                     p_alt_for_plot = baro_alt + altitude_correction
                     
                     if pressure_hpa is not None:
-                         logging.info(f"Worker {os.getpid()}: Correcting altitude for {flight_info['icao24']}. Original: {baro_alt:.1f}m, Corrected: {p_alt_for_plot:.1f}m")
+                        altitude_corrections.append(p_alt_for_plot - baro_alt)
 
                 lat_rad_ac, lon_rad_ac = map(math.radians, [p_lat, p_lon])
                 sin_lat_ac = math.sin(lat_rad_ac)
@@ -314,6 +317,14 @@ def fetch_and_process_track(args):
                     is_in_view, _ = is_sky_coord_in_view(pto_data, az_deg, alt_deg)
                     if is_in_view:
                         all_visible_points.append({"time": p_time, "lat": p_lat, "lon": p_lon, "az": az_deg, "alt": alt_deg, "station_id": station_id, "camera": cam_num, "station_code": station_info['station']['code']})
+    
+    if altitude_corrections:
+        num_corrections = len(altitude_corrections)
+        avg_corr = sum(altitude_corrections) / num_corrections
+        min_corr = min(altitude_corrections)
+        max_corr = max(altitude_corrections)
+        logging.info(f"Worker {os.getpid()}: Corrected altitude for {flight_info['icao24']}. {num_corrections} points corrected. "
+                     f"Avg correction: {avg_corr:.1f}m, Min: {min_corr:.1f}m, Max: {max_corr:.1f}m.")
 
     if not all_visible_points:
         logging.info(f"Worker {os.getpid()}: Finished {flight_info['icao24']}. No visible points found.")
@@ -387,14 +398,16 @@ def find_all_crossings(task_id):
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     try:
         cleanup_old_cache(TRACK_CACHE_DIR, TRACK_CACHE_HOURS)
+        update_status(status_file, "progress", {"step": 5, "message": "status_authenticating"})
         with open(CREDENTIALS_FILE, 'r') as f: creds = json.load(f)
-        update_status(status_file, "progress", {"step": 5, "message": "status_getting_token"})
         access_token = get_opensky_token(task_id, creds['clientId'], creds['clientSecret'])
         if not access_token: raise ValueError("Failed to obtain OpenSky access token.")
+        
+        update_status(status_file, "progress", {"step": 10, "message": "status_loading_databases"})
         with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
-        update_status(status_file, "progress", {"step": 10, "message": "status_getting_airport_db"})
         airport_db = get_airport_db(task_id)
-        update_status(status_file, "progress", {"step": 15, "message": "status_updating_flight_db"})
+        
+        update_status(status_file, "progress", {"step": 15, "message": "status_fetching_flights"})
         flight_list, _ = update_and_get_flight_database(task_id, access_token)
         if not flight_list:
             update_status(status_file, "complete", {"data": {"crossings": []}}); return
@@ -462,5 +475,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

@@ -30,6 +30,23 @@ CAMERA_FOV_CACHE_FILE = os.path.join(CACHE_DIR, 'camera_fov_cache.json')
 # Defines the path to the meteor data directory, which is located outside the web application's root.
 METEOR_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'meteor'))
 
+# A cache for API credentials and the nearest weather station lookup to avoid repeated API calls
+FROST_API_CREDS = None
+NEAREST_STATION_CACHE = {}
+
+def _load_frost_api_creds():
+    """Loads and caches Frost API credentials from config.json."""
+    global FROST_API_CREDS
+    if FROST_API_CREDS is not None:
+        return FROST_API_CREDS
+    try:
+        with open(os.path.join(BASE_DIR, 'config.json'), 'r') as f:
+            config = json.load(f)
+        FROST_API_CREDS = (config['frost_api']['client_id'], config['frost_api']['client_secret'])
+        return FROST_API_CREDS
+    except (IOError, KeyError, json.JSONDecodeError) as e:
+        logging.error(f"CRITICAL: Could not load Frost API credentials from config.json: {e}")
+        return None
 
 def get_kp_data():
     """
@@ -50,7 +67,8 @@ def get_kp_data():
 def get_meteor_data():
     """
     Scans the local meteor data directory for observation files from the last 7 days.
-    It parses the trajectory result files to extract the start and end points of observed meteors.
+    It parses the trajectory result files to extract the start and
+    end points of observed meteors.
     """
     logging.info("Starting meteor data scan...")
     meteors = []
@@ -87,17 +105,20 @@ def get_meteor_data():
                     res_file_path = os.path.join(event_path, filename)
                     try:
                         with open(res_file_path, 'r') as f: lines = f.readlines()
+    
                         # The .res file format contains start and end coordinates on the first two lines.
                         if len(lines) >= 2:
                             start_parts, end_parts = lines[0].split(), lines[1].split()
                             timestamp_str = f"{date_dir[0:4]}-{date_dir[4:6]}-{date_dir[6:8]}T{time_dir[0:2]}:{time_dir[2:4]}:{time_dir[4:6]}Z"
                             meteor_trajectory = {
-                                'timestamp': timestamp_str,
+     
+                               'timestamp': timestamp_str,
                                 'lat1': float(start_parts[1]), 'lon1': float(start_parts[0]), 'h1': float(start_parts[4]),
                                 'lat2': float(end_parts[1]), 'lon2': float(end_parts[0]), 'h2': float(end_parts[4])
                             }
                         break 
                     except (IOError, IndexError, ValueError) as e:
+                    
                         logging.warning(f"Could not parse meteor file {res_file_path}: {e}")
             
             if not meteor_trajectory: continue
@@ -115,8 +136,67 @@ def haversine(lat1, lon1, lat2, lon2):
     """Calculates the great-circle distance between two points on Earth."""
     R = 6371  # Earth radius in kilometers
     dLat, dLon, lat1, lat2 = map(math.radians, [lat2 - lat1, lon2 - lon1, lat1, lat2])
+    
     a = math.sin(dLat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dLon / 2)**2
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+
+
+def get_air_pressure(lat, lon, dt_utc):
+    """
+    Fetches the air pressure at mean sea level for a given location and time from the Frost API.
+    Returns pressure in hPa.
+    """
+    creds = _load_frost_api_creds()
+    if not creds:
+        return None
+
+    client_id, client_secret = creds
+    auth = f'{client_id}:{client_secret}'
+    headers = {'Authorization': f'Basic {base64.b64encode(auth.encode()).decode()}', 'User-Agent': 'NorskMeteornettverk-Interface/1.0'}
+    
+    tried_stations = []
+    # Try up to 2 different nearby stations
+    for i in range(2):
+        exclude_str = f"&ids=-{','.join(tried_stations)}" if tried_stations else ""
+        sources_url = f"https://frost.met.no/sources/v0.jsonld?types=SensorSystem&geometry=nearest(POINT({lon}%20{lat})){exclude_str}&elements=air_pressure_at_sea_level"
+        
+        station_id = None
+        try:
+            req = urllib.request.Request(sources_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                sources_data = json.load(response)
+            if sources_data.get('data'):
+                station_id = sources_data['data'][0]['id']
+        except Exception as e:
+            logging.error(f"API error finding nearest station (attempt {i+1}): {e}")
+            continue
+
+        if not station_id:
+            break 
+
+        tried_stations.append(station_id)
+
+        # Try a narrow 2-hour window, then a wider 12-hour window
+        for hours in [2, 12]:
+            start_time = dt_utc - timedelta(hours=hours/2)
+            end_time = dt_utc + timedelta(hours=hours/2)
+            time_range = f"{start_time.strftime('%Y-%m-%dT%H:%M:%SZ')}/{end_time.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            
+            obs_url = f"https://frost.met.no/observations/v0.jsonld?sources={station_id}&referencetime={time_range}&elements=air_pressure_at_sea_level"
+            try:
+                req = urllib.request.Request(obs_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    obs_data = json.load(response)
+                if obs_data.get('data'):
+                    pressure = float(obs_data['data'][0]['observations'][0]['value'])
+                    logging.info(f"Successfully fetched pressure {pressure} hPa from {station_id} using {hours}h window.")
+                    return pressure
+            except Exception as e:
+                logging.warning(f"Failed to fetch pressure for {station_id} with {hours}h window: {e}")
+                continue
+    
+    logging.warning(f"All attempts to fetch pressure for ({lat}, {lon}) failed.")
+    return None
 
 
 def get_lightning_data(end_date_str):
@@ -128,13 +208,12 @@ def get_lightning_data(end_date_str):
     end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
     
     # Loads API credentials from a configuration file.
-    try:
-        with open(os.path.join(BASE_DIR, 'config.json'), 'r') as f: config = json.load(f)
-        CLIENT_ID, CLIENT_SECRET = config['frost_api']['client_id'], config['frost_api']['client_secret']
-    except (IOError, KeyError, json.JSONDecodeError) as e:
-        logging.error(f"CRITICAL: Could not load Frost API credentials from config.json: {e}")
+    creds = _load_frost_api_creds()
+    if not creds:
+        logging.error("CRITICAL: Could not load Frost API credentials from config.json.")
         return {"error": "Server API credentials are not configured."}
 
+    CLIENT_ID, CLIENT_SECRET = creds
     auth = f'{CLIENT_ID}:{CLIENT_SECRET}'
     headers = {'Authorization': f'Basic {base64.b64encode(auth.encode()).decode()}', 'User-Agent': 'NorskMeteornettverk-Interface/1.0'}
 
@@ -153,6 +232,7 @@ def get_lightning_data(end_date_str):
             url = f"https://frost.met.no/lightning/v0.ualf?referencetime={time_param}"
             try:
                 logging.info(f"Fetching lightning data from: {url}")
+                
                 req = urllib.request.Request(url, headers=headers)
                 with urllib.request.urlopen(req, timeout=30) as response:
                     lines = response.read().decode('utf-8').strip().splitlines()
@@ -175,7 +255,8 @@ def get_lightning_data(end_date_str):
             parsed_strikes.append({'dt': dt, 'lat': float(parts[8]), 'lon': float(parts[9]), 'type': 'ic' if int(float(parts[20])) == 1 else 'cg', 'full_time': f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{int(parts[7]):09d}Z"})
         except (ValueError, IndexError): continue
     
-    # The API can return multiple reports for a single lightning event. This logic
+    # The API can return multiple reports for a single lightning event.
+    # This logic
     # groups strikes by the second they occurred and removes any that are within
     # 0.5 km of an already-kept strike in that same second, effectively de-duplicating the data.
     grouped_by_second = {}
@@ -189,6 +270,7 @@ def get_lightning_data(end_date_str):
     for _, strikes_in_second in grouped_by_second.items():
         kept_strikes = []
         for strike in strikes_in_second:
+            
             is_duplicate = any(haversine(strike['lat'], strike['lon'], kept['lat'], kept['lon']) < 0.5 for kept in kept_strikes)
             if not is_duplicate:
                 kept_strikes.append(strike)
@@ -214,7 +296,8 @@ def get_lightning_data(end_date_str):
 
 def get_camera_fovs():
     """
-    Calculates and caches the center azimuth and horizontal Field of View (FOV) for all cameras.
+    Calculates and caches
+    the center azimuth and horizontal Field of View (FOV) for all cameras.
     It uses the pto_mapper library to transform pixel coordinates at the edges of an image
     to panoramic (azimuth/altitude) coordinates, thereby determining the FOV.
     """
@@ -236,7 +319,8 @@ def get_camera_fovs():
         logging.error(f"Could not load cameras.json to calculate FOVs: {e}")
         return {}
 
-    # Iterates through each camera defined in the calibration file.
+    # Iterates through 
+    # each camera defined in the calibration file.
     for station_id, station_cams in cameras_data.items():
         station_num = station_id.replace('ams', '')
         fov_data[station_id] = {}
@@ -244,12 +328,14 @@ def get_camera_fovs():
             if not cam_name.startswith('cam') or 'calibration' not in cam_info: continue
             try:
                 cam_num = cam_name.replace('cam', '')
+     
                 pto_data = get_pto_data_from_json(CAMERAS_FILE, f"{station_num}:{cam_num}")
                 
                 img_params = pto_data[1][0]
                 sw, sh = img_params.get('w'), img_params.get('h')
                 if not sw or not sh: continue
 
+          
                 # Maps the center, left-horizon, and right-horizon points of the image to the panorama.
                 center_pano, left_pano, right_pano = map_image_to_pano(pto_data, 0, sw / 2, sh / 2), map_image_to_pano(pto_data, 0, 0, sh / 2), map_image_to_pano(pto_data, 0, sw, sh / 2)
 

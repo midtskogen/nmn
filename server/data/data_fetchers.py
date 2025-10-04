@@ -109,17 +109,23 @@ def get_meteor_data():
                         # The .res file format contains start and end coordinates on the first two lines.
                         if len(lines) >= 2:
                             start_parts, end_parts = lines[0].split(), lines[1].split()
-                            timestamp_str = f"{date_dir[0:4]}-{date_dir[4:6]}-{date_dir[6:8]}T{time_dir[0:2]}:{time_dir[2:4]}:{time_dir[4:6]}Z"
-                            meteor_trajectory = {
-     
-                               'timestamp': timestamp_str,
-                                'lat1': float(start_parts[1]), 'lon1': float(start_parts[0]), 'h1': float(start_parts[4]),
-                                'lat2': float(end_parts[1]), 'lon2': float(end_parts[0]), 'h2': float(end_parts[4])
-                            }
+                            
+                            # Parse start and end altitudes in km
+                            start_altitude_km = float(start_parts[4])
+                            end_altitude_km = float(end_parts[4])
+
+                            # Apply the altitude filter
+                            if start_altitude_km <= 150 and end_altitude_km >= 10:
+                                timestamp_str = f"{date_dir[0:4]}-{date_dir[4:6]}-{date_dir[6:8]}T{time_dir[0:2]}:{time_dir[2:4]}:{time_dir[4:6]}Z"
+                                meteor_trajectory = {
+                                    'timestamp': timestamp_str,
+                                    'lat1': float(start_parts[1]), 'lon1': float(start_parts[0]), 'h1': start_altitude_km,
+                                    'lat2': float(end_parts[1]), 'lon2': float(end_parts[0]), 'h2': end_altitude_km
+                                }
                         break 
                     except (IOError, IndexError, ValueError) as e:
-                    
-                        logging.warning(f"Could not parse meteor file {res_file_path}: {e}")
+                
+                         logging.warning(f"Could not parse meteor file {res_file_path}: {e}")
             
             if not meteor_trajectory: continue
 

@@ -388,14 +388,18 @@ def find_all_crossings(task_id):
     try:
         cleanup_old_cache(TRACK_CACHE_DIR, TRACK_CACHE_HOURS)
         with open(CREDENTIALS_FILE, 'r') as f: creds = json.load(f)
+        update_status(status_file, "progress", {"step": 5, "message": "status_getting_token"})
         access_token = get_opensky_token(task_id, creds['clientId'], creds['clientSecret'])
         if not access_token: raise ValueError("Failed to obtain OpenSky access token.")
         with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
+        update_status(status_file, "progress", {"step": 10, "message": "status_getting_airport_db"})
         airport_db = get_airport_db(task_id)
+        update_status(status_file, "progress", {"step": 15, "message": "status_updating_flight_db"})
         flight_list, _ = update_and_get_flight_database(task_id, access_token)
         if not flight_list:
             update_status(status_file, "complete", {"data": {"crossings": []}}); return
 
+        update_status(status_file, "progress", {"step": 20, "message": "status_filtering_flights"})
         station_coords = [(s['astronomy']['latitude'], s['astronomy']['longitude']) for s in stations_data.values()]
         flights_after_validation = []
         for flight in flight_list:
@@ -458,4 +462,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

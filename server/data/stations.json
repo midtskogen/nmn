@@ -1,0 +1,174 @@
+{
+  "ams119": {
+    "astronomy": {
+      "latitude": 59.85112,
+      "longitude": 8.65566,
+      "elevation": 1846,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "gaustatoppen",
+      "code": "GAU"
+    }
+  },
+  "ams123": {
+    "astronomy": {
+      "latitude": 58.0945324,
+      "longitude": 7.96403523,
+      "elevation": 40,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "kristiansand",
+      "code": "KRI",
+      "quota": true
+    }
+  },
+  "ams135": {
+    "astronomy": {
+      "latitude": 62.18627,
+      "longitude": 6.23419,
+      "elevation": 111,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "orsta",
+      "code": "ORS",
+      "quota": true
+    }
+  },
+  "ams171": {
+    "astronomy": {
+      "latitude": 63.420586,
+      "longitude": 10.428267,
+      "elevation": 128,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "trondheim",
+      "code": "TRO"
+    }
+  },
+  "ams172": {
+    "astronomy": {
+      "latitude": 69.141802,
+      "longitude": 18.132711,
+      "elevation": 42,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "sorreisa",
+      "code": "SOR"
+    }
+  },
+  "ams173": {
+    "astronomy": {
+      "latitude": 59.97048,
+      "longitude": 10.64927,
+      "elevation": 348,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "voksenlia",
+      "code": "OSL"
+    }
+  },
+  "ams174": {
+    "astronomy": {
+      "latitude": 60.2119374,
+      "longitude": 10.7517887,
+      "elevation": 590,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "harestua",
+      "code": "HAR"
+    }
+  },
+  "ams175": {
+    "astronomy": {
+      "latitude": 59.435213,
+      "longitude": 10.664113,
+      "elevation": 31,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "moss",
+      "code": "MOS"
+    }
+  },
+  "ams176": {
+    "astronomy": {
+      "latitude": 59.090854,
+      "longitude": 10.098182,
+      "elevation": 60,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "larvik",
+      "code": "LAR"
+    }
+  },
+  "ams177": {
+    "astronomy": {
+      "latitude": 69.3481,
+      "longitude": 20.3633,
+      "elevation": 125,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "skibotn",
+      "code": "SKI"
+    }
+  },
+  "ams178": {
+    "astronomy": {
+      "latitude": 60.73471,
+      "longitude": 11.53971,
+      "elevation": 309,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "loten",
+      "code": "LOT",
+      "quota": true
+    }
+  },
+  "ams179": {
+    "astronomy": {
+      "latitude": 60.6,
+      "longitude": 10.56916,
+      "elevation": 506,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "hagar",
+      "code": "HGR"
+    }
+  },
+  "ams180": {
+    "astronomy": {
+      "latitude": 61.05661,
+      "longitude": 12.60255,
+      "elevation": 314,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "finnskogen",
+      "code": "FIN"
+    }
+  }
+}

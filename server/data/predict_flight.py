@@ -252,6 +252,9 @@ def fetch_and_process_track(args):
             pressure_hpa = get_air_pressure(p_lat, p_lon, dt_utc)
             logging.info(f"Worker {os.getpid()}: get_air_pressure returned: {pressure_hpa}")
 
+    if needs_correction and pressure_hpa is None:
+        logging.warning(f"Worker {os.getpid()}: Using standard pressure 1013.25 hPa as fallback for {flight_info['icao24']}.")
+
     interpolated_path = interpolate_raw_track(track_data['path'], 15)
     all_visible_points = []
     
@@ -287,8 +290,6 @@ def fetch_and_process_track(args):
                     # If the API call failed, use standard pressure (1013.25 hPa).
                     # This results in a zero correction, a safe fallback.
                     pressure_to_use = pressure_hpa if pressure_hpa is not None else 1013.25
-                    if pressure_hpa is None and needs_correction:
-                        logging.warning(f"Worker {os.getpid()}: Using standard pressure 1013.25 hPa as fallback for {flight_info['icao24']}.")
 
                     pressure_deviation = 1013.25 - pressure_to_use
                     altitude_correction = pressure_deviation * 8.23
@@ -457,3 +458,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

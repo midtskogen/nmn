@@ -656,19 +656,35 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
         start_time = time.time()
         while time.time() - start_time < 1800: # 30 min timeout
             all_done, total_steps_done, total_steps_overall = True, 0, 0
+            aggregated_files_so_far = {}
+            aggregated_errors_so_far = []
             for task_id, task_info in sub_tasks.items():
                 s_file = os.path.join(LOCK_DIR, f"{task_id}.json")
+                station_code = valid_stations.get(task_info['station_id'], {}).get('station', {}).get('code', 'UNKNOWN')
+
                 if not os.path.exists(s_file):
                     all_done = False
                     continue
-                with open(s_file, 'r') as f: s_data = json.load(f)
+                try:
+                    with open(s_file, 'r') as f: s_data = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    all_done = False
+                    continue
+
                 if s_data.get("status") != "complete": all_done = False
-                total_steps_done += s_data.get("step", 0);
+                total_steps_done += s_data.get("step", 0)
                 total_steps_overall += s_data.get("total", 1)
-            
+                if s_data.get("files"): aggregated_files_so_far[station_code] = s_data["files"]
+                if s_data.get("errors"): aggregated_errors_so_far.extend(f"{station_code}: {e}" for e in s_data["errors"])
+
             # Update the main task's progress based on the aggregated progress of all workers.
             percentage_done = (total_steps_done / total_steps_overall) * 100 if total_steps_overall > 0 else (100 if all_done else 0)
-            update_status(status_file, "progress", {"step": percentage_done, "total": 100, "message": f"status_processing_files|done={int(total_steps_done)},total={int(total_steps_overall)}"})
+            update_status(status_file, "progress", {
+                "step": percentage_done, "total": 100,
+                "message": f"status_processing_files|done={int(total_steps_done)},total={int(total_steps_overall)}",
+                "files": aggregated_files_so_far,
+                "errors": aggregated_errors_so_far
+            })
             
             if all_done: break
             time.sleep(1)

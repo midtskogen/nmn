@@ -8,6 +8,7 @@ import math
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+import json
 
 # --- Try to import from pto_mapper.py ---
 # This attempts to import the necessary functions for camera calibration transformations.
@@ -18,6 +19,29 @@ try:
     PTO_MAPPER_AVAILABLE = True
 except ImportError:
     PTO_MAPPER_AVAILABLE = False
+
+# --- Airline Code Lookup ---
+_airline_codes = None
+
+def get_airline_codes():
+    """Loads and caches airline ICAO-to-IATA code mappings from a JSON file."""
+    global _airline_codes
+    if _airline_codes is not None:
+        return _airline_codes
+
+    # The controller.py script runs from the 'cgi-bin' directory.
+    # We assume airline_codes.json is in that same directory.
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        codes_file_path = os.path.join(base_dir, 'airline_codes.json')
+        with open(codes_file_path, 'r') as f:
+            data = json.load(f)
+        # Create a mapping from ICAO -> {iata, name}, filtering out entries without an IATA code.
+        _airline_codes = {k: {"iata": v["IATA"], "name": v["Name"]} for k, v in data.items() if v.get("IATA")}
+    except (IOError, json.JSONDecodeError):
+        logging.warning("airline_codes.json not found or is invalid. Falling back to ICAO callsigns for overlays.")
+        _airline_codes = {} # Cache empty dict to prevent reload attempts
+    return _airline_codes
 
 
 def get_sun_altitude(dt_utc, lat, lon):
@@ -52,7 +76,6 @@ def stack_images(image_paths, output_path, task_id):
     """
     if not image_paths:
         logging.warning(f"Task {task_id} - stack_images called with no images.")
-     
         return False
     try:
         logging.info(f"Task {task_id} - Stacking {len(image_paths)} images into {os.path.basename(output_path)}.")
@@ -62,12 +85,10 @@ def stack_images(image_paths, output_path, task_id):
         for path in image_paths:
             try:
                 with Image.open(path) as img:
-         
                     img_rgb = img.convert('RGB')
                     img_np = np.array(img_rgb)
                     
                     if stacked_np is None:
-                      
                         # Initialize the stacked image array with the first image.
                         stacked_np = img_np
                     else:
@@ -89,7 +110,6 @@ def stack_images(image_paths, output_path, task_id):
             return True
         else:
             logging.error(f"Task {task_id} - Failed to stack any images (all inputs may have failed).")
-   
             return False
 
     except Exception as e:
@@ -181,7 +201,6 @@ def draw_track_on_image(pto_data, pass_info, output_path, target_w=None, target_
             for t_int in range(17):
                 t = t_int / 16
                 point = 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t**2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t**3)
-     
                 segment_curve_points.append(tuple(point))
             draw.line(segment_curve_points, fill=track_color, width=line_width, joint="curve")
 
@@ -207,10 +226,13 @@ def draw_track_on_image(pto_data, pass_info, output_path, target_w=None, target_
             elif text_angle_deg < -90:
                 text_angle_deg += 180
                 side_multiplier = -1.0
-            
+          
             time_str = "    " + dt.strftime("%H:%M:%S")
-            try: bbox = font.getbbox(time_str); text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            except AttributeError: text_w, text_h = draw.textsize(time_str, font=font)
+            try:
+                bbox = font.getbbox(time_str)
+                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except AttributeError:
+                text_w, text_h = draw.textsize(time_str, font=font)
                 
             # Draw the rotated text on a temporary canvas.
             canvas_size = int(math.sqrt(text_w**2 + text_h**2)) * 2
@@ -230,20 +252,35 @@ def draw_track_on_image(pto_data, pass_info, output_path, target_w=None, target_
     
     # If it's a flight, add the callsign to the corner of the image.
     if is_flight:
-        callsign = pass_info.get('satellite', '')
-        if callsign:
+        callsign_raw = pass_info.get('flight_info', {}).get('callsign', '').strip()
+        label_text = callsign_raw # Default to the original callsign
+
+        if callsign_raw and len(callsign_raw) > 3:
+            icao_code = callsign_raw[:3].upper()
+            flight_num = callsign_raw[3:]
+            
+            airline_codes = get_airline_codes()
+            airline_info = airline_codes.get(icao_code)
+            
+            if airline_info:
+                label_text = f"{airline_info['iata']}{flight_num}" # Use IATA + flight number
+        
+        if label_text:
             try: font = ImageFont.truetype("DejaVuSans-Bold.ttf", 24)
             except IOError: font = ImageFont.load_default()
             
             margin = 10
-            try: bbox = font.getbbox(callsign); text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            except AttributeError: text_w, text_h = draw.textsize(callsign, font=font)
+            try:
+                bbox = font.getbbox(label_text)
+                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except AttributeError:
+                text_w, text_h = draw.textsize(label_text, font=font)
             
             x_pos = final_w - text_w - margin
             y_pos = final_h - text_h - margin
             
             draw.rectangle((x_pos - 5, y_pos - 5, x_pos + text_w + 5, y_pos + text_h + 5), fill=(0, 0, 0, 128))
-            draw.text((x_pos, y_pos), callsign, font=font, fill=(255, 255, 255, 255))
+            draw.text((x_pos, y_pos), label_text, font=font, fill=(255, 255, 255, 255))
 
     img.save(output_path, 'PNG')
 
@@ -256,7 +293,6 @@ def apply_ffmpeg_overlay(base_media_path, overlay_path, output_path):
     base, ext = os.path.splitext(output_path)
     temp_output_path = f"{base}.tmp{ext}"
     try:
- 
         is_video = base_media_path.lower().endswith('.mp4')
         is_hevc_output = output_path.lower().endswith('_hevc.mp4')
         
@@ -269,7 +305,6 @@ def apply_ffmpeg_overlay(base_media_path, overlay_path, output_path):
         audio_codec_opts = ["-c:a", "copy"] if is_video else []
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", base_media_path,
-      
             "-i", overlay_path, "-filter_complex", "[0:v][1:v]overlay",
             *video_codec_opts, *audio_codec_opts, "-y", temp_output_path
         ]
@@ -279,7 +314,6 @@ def apply_ffmpeg_overlay(base_media_path, overlay_path, output_path):
         logging.info(f"Successfully applied overlay to {os.path.basename(output_path)}")
         return True
     except subprocess.CalledProcessError as e:
-        
         logging.error(f"ffmpeg overlay FAILED for {os.path.basename(base_media_path)}.")
         logging.error(f"ffmpeg stderr: {e.stderr.decode('utf-8', errors='ignore')}")
         if os.path.exists(temp_output_path): os.remove(temp_output_path)
@@ -304,32 +338,31 @@ def create_thumbnail(task_id, path, file_type, station_code, cam_num, has_overla
         thumb_path = f"{os.path.splitext(path)[0]}_thumb.jpg"
         
         if file_type.startswith('image'):
-      
             # For images, use Pillow for resizing.
             with Image.open(path) as img:
                 img.thumbnail((512, 512), Image.Resampling.LANCZOS)
                 img = img.convert('RGB') if img.mode != 'RGB' else img
                 img.save(thumb_path, "jpeg", quality=85)
         else:
-     
             # For videos, use ffmpeg to extract the first frame, which is much faster.
             subprocess.run(["ffmpeg", "-i", path, "-ss", "00:00:01", "-vframes", "1", "-vf", "scale=512:-1", "-y", thumb_path], check=True, capture_output=True)
         
         # Add text labels to the generated thumbnail.
         if os.path.exists(thumb_path):
             with Image.open(thumb_path) as thumb_img:
-         
                 thumb_img = thumb_img.convert('RGBA') if thumb_img.mode != 'RGBA' else thumb_img
                 txt_overlay = Image.new('RGBA', thumb_img.size, (255,255,255,0))
                 draw = ImageDraw.Draw(txt_overlay)
                 try: font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18)
                 except IOError: font = ImageFont.load_default()
        
-                 
                 # Draw station and camera label with a semi-transparent background.
                 station_text = f"{station_code}:{cam_num}"
-                try: bbox = font.getbbox(station_text); w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                except AttributeError: w, h = draw.textsize(station_text, font=font)
+                try:
+                    bbox = font.getbbox(station_text)
+                    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                except AttributeError:
+                    w, h = draw.textsize(station_text, font=font)
                 
                 img_w, img_h = thumb_img.size
                 sx, sy = (img_w - w) / 2, 10
@@ -340,8 +373,11 @@ def create_thumbnail(task_id, path, file_type, station_code, cam_num, has_overla
                 # If the image has an overlay, add a label indicating it.
                 if has_overlay:
                     track_text = flight_track_text if is_flight else sat_track_text
-                    try: bbox = font.getbbox(track_text); w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                    except AttributeError: w, h = draw.textsize(track_text, font=font)
+                    try:
+                        bbox = font.getbbox(track_text)
+                        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                    except AttributeError:
+                        w, h = draw.textsize(track_text, font=font)
                     tx, ty = (img_w - w) / 2, img_h - h - 10
                     draw.rectangle((tx - 5, ty - 5, tx + w + 5, ty + h + 5), fill=(0, 0, 0, 128))
                     draw.text((tx, ty), track_text, font=font, fill="white")

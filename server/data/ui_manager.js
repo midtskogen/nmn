@@ -1,14 +1,19 @@
 import { createEl, isHevcSupported } from './utils.js';
 import { getSunTimes, calculateBearing } from './calculations.js';
 import * as api from './api.js';
+import { airlineCodes } from './airline_codes.js';
 
 // --- Module-scoped variables ---
 let dom = {}; // A cache for frequently accessed DOM elements.
 let t = (key) => key; // The translation function, initialized to a fallback.
-let hls = null; // Holds the HLS.js instance for playing HLS video streams.
-let streamCountdownInterval = null; // Interval ID for the stream timeout countdown.
-let activeStreamTaskId = null; // The task ID of the currently active stream.
-let stopStreamTimeout = null; // Timeout ID to automatically close the modal.
+let hls = null;
+// Holds the HLS.js instance for playing HLS video streams.
+let streamCountdownInterval = null;
+// Interval ID for the stream timeout countdown.
+let activeStreamTaskId = null;
+// The task ID of the currently active stream.
+let stopStreamTimeout = null;
+// Timeout ID to automatically close the modal.
 let streamStatusPoller = null; // Interval ID for polling the stream's status.
 let onFullscreenChange = null; // Holds the fullscreen change event handler.
 
@@ -26,6 +31,7 @@ function initFormControls() {
         const limit = (id === 'hour') ? 24 : 60;
         const start = (id === 'length' || id === 'interval') ? 1 : 0;
         
+
         for (let i = start; i < (start === 1 ? limit + 1 : limit); i++) {
             select.add(new Option(String(i).padStart(2, '0'), i));
         }
@@ -45,7 +51,6 @@ export function initUIManager(domCache, onResetClick, translationFunc) {
     t = translationFunc;
     initFormControls();
     setDefaultFormValues();
-    
     const controlPanelHeader = document.querySelector('#control-panel h2');
     const headerWrapper = createEl('div', { className: 'panel-header-wrapper' });
     const formResetButton = createEl('button', {
@@ -108,6 +113,7 @@ export function setUIState(state) {
             if (cooldown < 0) {
                 clearInterval(cooldownInterval);
                 setUIState('ready');
+           
             }
         }, 1000);
     }
@@ -151,7 +157,6 @@ function updateLastNightButtonState(selectedStations, stationsData) {
 
     const yesterdayTimes = getSunTimes(yesterday, station.astronomy.latitude, station.astronomy.longitude, -6);
     const todayTimes = getSunTimes(today, station.astronomy.latitude, station.astronomy.longitude, -6);
-    
     lastNightButton.disabled = yesterdayTimes.type === 'polar_day' || todayTimes.type === 'polar_day';
 }
 
@@ -170,7 +175,6 @@ function updateLiveStreamUI(selectedStations, stationsData, onStreamLinkClick) {
         const title = createEl('legend', { textContent: t('live_stream_title', { station_code: stationCode }) });
         const sdContainer = createEl('div', { className: 'live-stream-res-group' });
         const hdContainer = createEl('div', { className: 'live-stream-res-group' });
-        
         for (let i = 1; i <= 7; i++) {
             const sdLink = createEl('span', { className: 'live-stream-link', textContent: `SD${i}`, onclick: () => onStreamLinkClick(stationId, i, 'lowres') });
             sdContainer.appendChild(sdLink);
@@ -201,12 +205,14 @@ export function displayAllPasses(passData, { onHeaderClick, onDownloadClick, onE
         const earliestTime = new Date(pass.earliest_camera_utc);
         const formattedTimestamp = earliestTime.toISOString().slice(0, 19).replace('T', ' ');
         const headerHTML = t('pass_header', { satellite: pass.satellite, timestamp: formattedTimestamp }) +
-                         ` <span class="magnitude">${t('pass_magnitude', { magnitude: pass.magnitude.toFixed(1) })}</span>`;
+                     
+            ` <span class="magnitude">${t('pass_magnitude', { magnitude: pass.magnitude.toFixed(1) })}</span>`;
         const header = createEl('h6', { innerHTML: headerHTML, dataset: { passId: pass.pass_id }});
         header.addEventListener('click', () => onHeaderClick(pass.pass_id, 'satellite'));
 
         const downloadAllBtn = createEl('button', { textContent: t('download_all_button'), className: 'download-all-btn' });
-        downloadAllBtn.onclick = (e) => { e.stopPropagation(); onHeaderClick(pass.pass_id, 'satellite'); onDownloadClick(pass.pass_id, 'satellite'); };
+        downloadAllBtn.onclick = (e) => { e.stopPropagation(); onHeaderClick(pass.pass_id, 'satellite'); onDownloadClick(pass.pass_id, 'satellite');
+        };
 
         const headerContainer = createEl('div', { className: 'satellite-group-header' });
         headerContainer.append(header, downloadAllBtn);
@@ -230,9 +236,9 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
     const aircraftList = document.getElementById('aircraft-list');
     const headerEl = document.querySelector('#aircraft-panel h2');
     headerEl.textContent = aircraftData.time_window_hours 
-        ? t('aircraft_panel_title_dynamic', { hours: aircraftData.time_window_hours })
+        ?
+        t('aircraft_panel_title_dynamic', { hours: aircraftData.time_window_hours })
         : t('aircraft_panel_title');
-
     if (!aircraftData.crossings || aircraftData.crossings.length === 0) {
         aircraftList.innerHTML = `<p style="color: #6c757d; margin: 0;">${t('no_visible_aircraft')}</p>`;
         return;
@@ -242,17 +248,31 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
         const crossingDiv = createEl('div', { className: `satellite-group ${index % 2 === 0 ? 'pass-even' : 'pass-odd'}` });
         const earliestTime = new Date(crossing.earliest_camera_utc);
         const formattedTimestamp = earliestTime.toISOString().slice(0, 19).replace('T', ' ');
+        
         const { callsign, origin, destination } = crossing.flight_info;
-        const headerHTML = t('aircraft_header', { callsign: (callsign || '????'), origin: (origin || '?'), destination: (destination || '?'), timestamp: formattedTimestamp });
+        let flightIdentifier = (callsign || '????').trim();
+
+        if (flightIdentifier && flightIdentifier.length > 3) {
+            const icao = flightIdentifier.substring(0, 3).toUpperCase();
+            const flightNumber = flightIdentifier.substring(3);
+            const airlineInfo = airlineCodes[icao];
+
+            if (airlineInfo) {
+                flightIdentifier = `${airlineInfo.iata}${flightNumber} (${airlineInfo.name})`;
+            }
+        }
+
+        const headerHTML = t('aircraft_header', { callsign: flightIdentifier, origin: (origin || '?'), destination: (destination || 
+        '?'), timestamp: formattedTimestamp });
         const header = createEl('h6', { innerHTML: headerHTML, dataset: { crossingId: crossing.crossing_id }});
         header.addEventListener('click', () => onHeaderClick(crossing.crossing_id, 'aircraft'));
 
         const downloadAllBtn = createEl('button', { textContent: t('download_all_button'), className: 'download-all-btn' });
-        downloadAllBtn.onclick = (e) => { e.stopPropagation(); onHeaderClick(crossing.crossing_id, 'aircraft'); onDownloadClick(crossing.crossing_id, 'aircraft'); };
+        downloadAllBtn.onclick = (e) => { e.stopPropagation(); onHeaderClick(crossing.crossing_id, 'aircraft');
+        onDownloadClick(crossing.crossing_id, 'aircraft'); };
 
         const headerContainer = createEl('div', { className: 'satellite-group-header' });
         headerContainer.append(header, downloadAllBtn);
-
         const eventsContainer = createEl('div', { className: 'events-container' });
         crossing.camera_views.forEach(event => {
             const eventSpan = createEl('span', { className: 'event-link', textContent: `${event.station_code}-${event.camera}`, dataset: { stationId: event.station_id, camera: event.camera } });
@@ -274,7 +294,8 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
  */
 export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hFilter, onStrikeClick) {
     const lightningList = document.getElementById('lightning-list');
-    document.querySelector('#lightning-panel h2').textContent = is24hFilter ? t('lightning_panel_title_24h') : t('lightning_panel_title');
+    document.querySelector('#lightning-panel h2').textContent = is24hFilter ?
+        t('lightning_panel_title_24h') : t('lightning_panel_title');
 
     let filteredStrikes = strikes;
     if (is24hFilter) {
@@ -296,12 +317,14 @@ export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hF
      
         let stationText = '';
         if (nearestStation) {
-            const inViewCams = getCamerasInView(nearestStation, strike, cameraFovs);
+            const inViewCams = 
+                getCamerasInView(nearestStation, strike, cameraFovs);
             const bearing = calculateBearing(nearestStation.astronomy.latitude, nearestStation.astronomy.longitude, strike.lat, strike.lon);
             const strikeTypeText = strike.type === 'cg' ? t('lightning_type_cg') : t('lightning_type_ic');
             const params = {
                 station_code: nearestStation.station.code,
                 dist: strike.dist.toFixed(1),
+          
                 bearing: Math.round(bearing),
                 type: strikeTypeText
             };
@@ -337,16 +360,19 @@ export function displayResults(resultData, dom, hevcSupported) {
             const timeGroupedFiles = stationResults[stationCode];
             const startHour = parseInt(dom.hourSelect.value, 10);
             
-            const getSortKey = (key) => {
+            const getSortKey 
+            = (key) => {
                 const isRange = key.includes(' - ');
                 const timePart = isRange ? key.split(' - ')[1] : key;
                 const hour = parseInt(timePart.split(':')[0], 10);
                
+                
                 const normalizedHour = hour < startHour ? hour + 24 : hour;
                 return `${String(normalizedHour).padStart(2, '0')}:${timePart.split(':')[1]}:${isRange ? '1' : '0'}`;
             };
             Object.keys(timeGroupedFiles).sort((a, b) => getSortKey(a).localeCompare(getSortKey(b))).forEach((time, timeIndex) => {
-                const timeSetDiv = createEl('div', { className: `time-set ${timeIndex % 2 === 0 ? 'time-set-even' : 'time-set-odd'}` });
+                const timeSetDiv = createEl('div', { className: `time-set ${timeIndex % 2 === 0 ?
+                    'time-set-even' : 'time-set-odd'}` });
                 timeSetDiv.appendChild(createEl('h6', { textContent: t('time_results_title', { time: time }) }));
                 const ul = createEl('ul', { className: 'result-list' });
                 timeGroupedFiles[time].forEach(file => {
@@ -354,18 +380,22 @@ export function displayResults(resultData, dom, hevcSupported) {
                     const isVideo = file.url.endsWith('.mp4');
                     
                     if (file.thumb_url) {
+  
                         const link = createEl('a', { href: file.url, target: '_blank', title: file.name });
                         const thumbContainer = createEl('div', { className: `thumbnail-container${isVideo ? ' video' : ''}` });
-                        thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 'thumbnail-preview' }));
+                        thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 
+                            'thumbnail-preview' }));
   
                         link.appendChild(thumbContainer);
                         li.appendChild(link);
                     } else {
-                        li.appendChild(createEl('a', { href: file.url, target: '_blank', textContent: file.name, title: file.name }));
+                        li.appendChild(createEl('a', { href: 
+                            file.url, target: '_blank', textContent: file.name, title: file.name }));
                     }
 
                     const linksContainer = createEl('div', { className: 'alternate-links' });
-                    const allFilesForThisThumb = [{ url: file.url, name: file.name }, ...(file.alternatives || [])];
+                    const allFilesForThisThumb = [{ url: file.url, name: file.name }, ...(file.alternatives ||
+                        [])];
                     const preferredLinks = {};
                     
                     const getShortName = (filename) => {
@@ -374,8 +404,10 @@ export function displayResults(resultData, dom, hevcSupported) {
                         const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
                         let baseType = filename;
                         let isOverlay = false;
-                        if (baseType.includes('_flight_overlay')) { isOverlay = true; baseType = baseType.replace('_flight_overlay', ''); }
-                        else if (baseType.includes('_overlay')) { isOverlay = true; baseType = baseType.replace('_overlay', ''); }
+                        if (baseType.includes('_flight_overlay')) { isOverlay = true; baseType = baseType.replace('_flight_overlay', '');
+                        }
+                        else if (baseType.includes('_overlay')) { isOverlay = true;
+                            baseType = baseType.replace('_overlay', ''); }
                         for (const key in typeMap) {
                             if (baseType.endsWith(key)) return typeMap[key] + (isOverlay ? 's' : '');
                         }
@@ -387,12 +419,15 @@ export function displayResults(resultData, dom, hevcSupported) {
                         const isHevc = f.name.includes('_hevc.mp4');
                         const existing = preferredLinks[shortName];
                 
+ 
                         if (!existing) {
                             preferredLinks[shortName] = f;
                        
+                     
                         } else {
                             const existingIsHevc = existing.name.includes('_hevc.mp4');
                             if (hevcSupported) { if (isHevc && !existingIsHevc) preferredLinks[shortName] = f; }
+                          
                             else { if (!isHevc && existingIsHevc) preferredLinks[shortName] = f; }
                         }
                     });
@@ -452,12 +487,10 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
     modalContent.append(statusEl, videoContainer, controlsContainer, closeButton);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
-    
     videoEl.addEventListener('loadedmetadata', () => {
         if (videoEl.videoHeight > 0) videoContainer.style.aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
     });
     gridCheckbox.addEventListener('change', () => { gridOverlay.style.opacity = gridCheckbox.checked ? '0.3' : '0'; });
-    
     // Pan and Zoom logic
     let scale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
@@ -468,7 +501,6 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
     };
     videoEl.style.transformOrigin = '0 0';
     gridOverlay.style.transformOrigin = '0 0';
-    
     const onWheel = e => {
         if (document.fullscreenElement) return;
         e.preventDefault();
@@ -492,7 +524,6 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
         updateTransform();
         if (videoEl.paused) videoEl.play().catch(() => {});
     };
-    
     const onMouseMove = e => {
         if (!isPanning) return;
         const newPanX = startPanX + (e.clientX - panOriginX);
@@ -503,7 +534,6 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
         panY = clamp(newPanY, minPanY, 0);
         updateTransform();
     };
-    
     const onMouseUp = () => {
         isPanning = false;
         videoContainer.style.cursor = 'grab';
@@ -531,12 +561,13 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
         clearTimeout(cursorIdleTimer);
         cursorIdleTimer = setTimeout(() => { videoContainer.style.cursor = 'none'; }, 2000);
     };
-    
     onFullscreenChange = () => {
         const isFullscreen = !!document.fullscreenElement;
-        fullscreenButton.textContent = isFullscreen ? t('modal_exit_fullscreen_button') : t('modal_fullscreen_button');
+        fullscreenButton.textContent = isFullscreen ?
+            t('modal_exit_fullscreen_button') : t('modal_fullscreen_button');
         if (isFullscreen) {
-            scale = 1; panX = 0; panY = 0;
+            scale = 1;
+            panX = 0; panY = 0;
             updateTransform();
             videoContainer.addEventListener('mousemove', handleIdleCursor);
             handleIdleCursor();
@@ -554,7 +585,6 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
             document.exitFullscreen();
         }
     });
-    
     videoContainer.addEventListener('wheel', onWheel);
     videoContainer.addEventListener('mousedown', onMouseDown);
     document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -567,17 +597,20 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
             if (statusEl) statusEl.textContent = translateMessage(data.message) || t('modal_status_ready');
             const playlistUrl = `streams/${data.station_id}_${cameraNum}_${data.resolution}/playlist.m3u8`;
 
+          
             if (Hls.isSupported()) {
                 hls = new Hls({ maxBufferLength: 2, maxMaxBufferLength: 4, highBufferWatchdogPeriod: 2 });
                 hls.loadSource(playlistUrl);
                 hls.attachMedia(videoEl);
                 hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play());
             } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+   
                 videoEl.src = playlistUrl;
                 videoEl.addEventListener('canplay', () => videoEl.play());
             }
 
-            const timeoutSeconds = data.timeout_seconds || 300;
+            const timeoutSeconds = data.timeout_seconds ||
+                300;
             let timeLeft = timeoutSeconds;
             stopStreamTimeout = setTimeout(hideVideoModal, timeLeft * 1000);
             streamCountdownInterval = setInterval(() => {
@@ -585,6 +618,7 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
                 const minutes = Math.floor(timeLeft / 60);
                 const seconds = timeLeft % 60;
                 const currentText = (statusEl.textContent || '').split(' | ')[0];
+               
                 statusEl.textContent = `${currentText} | ${t('modal_stream_stops_in', { minutes: minutes, seconds: String(seconds).padStart(2, '0') })}`;
                 if (timeLeft <= 0) clearInterval(streamCountdownInterval);
             }, 1000);
@@ -602,6 +636,7 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
                 gridToggleContainer.style.display = 'flex';
             }
         })
+       
         .catch(err => console.error("Could not fetch grid overlay:", err));
 }
 
@@ -653,9 +688,11 @@ export function getCamerasInView(station, strike, cameraFovs) {
                 upperBound = fov.centerAzimuth + halfFov,
                 inFov = false;
             if (lowerBound < 0) {
-                inFov = (bearing >= lowerBound + 360 && bearing <= 360) || (bearing >= 0 && bearing <= upperBound);
+                inFov = (bearing >= lowerBound + 360 && bearing <= 360) ||
+                    (bearing >= 0 && bearing <= upperBound);
             } else if (upperBound > 360) {
-                inFov = (bearing >= lowerBound && bearing <= 360) || (bearing >= 0 && bearing <= upperBound - 360);
+                inFov = (bearing >= lowerBound && bearing <= 360) ||
+                    (bearing >= 0 && bearing <= upperBound - 360);
             } else {
                 inFov = bearing >= lowerBound && bearing <= upperBound;
             }
@@ -679,7 +716,6 @@ export function updateFormFromSelection(dom, selectedStations, currentId, item, 
     const selectedCameraViews = [];
     const checkedCameras = document.querySelectorAll('input[name="cameras"]:checked');
     const currentStationId = selectedStations.values().next().value;
-    
     document.querySelectorAll('.event-link').forEach(link => {
         const linkParent = link.closest('.satellite-group');
         if (!linkParent) return;
@@ -687,7 +723,8 @@ export function updateFormFromSelection(dom, selectedStations, currentId, item, 
         if (linkId === currentId) {
             const camNum = parseInt(link.dataset.camera, 10);
             const stationId = link.dataset.stationId;
-            const isChecked = Array.from(checkedCameras).some(cb => parseInt(cb.value, 10) === camNum && stationId === currentStationId);
+            const isChecked = Array.from(checkedCameras).some(cb => parseInt(cb.value, 10) === camNum 
+                && stationId === currentStationId);
             link.classList.toggle('selected', isChecked);
             if (isChecked) {
                 const view = item.camera_views.find(cv => cv.camera === camNum && cv.station_id === stationId);
@@ -695,6 +732,7 @@ export function updateFormFromSelection(dom, selectedStations, currentId, item, 
             }
         } else {
    
+ 
             link.classList.remove('selected');
         }
     });
@@ -708,7 +746,6 @@ export function updateFormFromSelection(dom, selectedStations, currentId, item, 
         if (start < earliestStart) earliestStart = start;
         if (end > latestEnd) latestEnd = end;
     });
-    
     dom.dateInput.value = earliestStart.toISOString().slice(0, 10);
     dom.hourSelect.value = earliestStart.getUTCHours();
     dom.minuteSelect.value = earliestStart.getUTCMinutes();
@@ -778,12 +815,14 @@ export function showPanel(panelType) {
     document.getElementById(`${panelType}-panel-container`).style.display = 'block';
 }
 
-/** Hides a side panel. */
+/** Hides a side panel.
+ */
 export function hidePanel(panelType) {
     document.getElementById(`${panelType}-panel-container`).style.display = 'none';
 }
 
-/** Displays an error message inside a panel's list area. */
+/** Displays an error message inside a panel's list area.
+ */
 export function showPanelError(panelType, message) {
     const listEl = document.getElementById(`${panelType}-list`);
     if (listEl) {

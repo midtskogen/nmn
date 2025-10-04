@@ -2,7 +2,6 @@ import { createEl, isHevcSupported } from './utils.js';
 import { getSunTimes, calculateBearing } from './calculations.js';
 import * as api from './api.js';
 import { airlineCodes } from './airline_codes.js';
-
 // --- Module-scoped variables ---
 let dom = {}; // A cache for frequently accessed DOM elements.
 let t = (key) => key; // The translation function, initialized to a fallback.
@@ -16,7 +15,6 @@ let stopStreamTimeout = null;
 // Timeout ID to automatically close the modal.
 let streamStatusPoller = null; // Interval ID for polling the stream's status.
 let onFullscreenChange = null; // Holds the fullscreen change event handler.
-
 // --- Private Helper Functions ---
 
 /**
@@ -236,8 +234,7 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
     const aircraftList = document.getElementById('aircraft-list');
     const headerEl = document.querySelector('#aircraft-panel h2');
     headerEl.textContent = aircraftData.time_window_hours 
-        ?
-        t('aircraft_panel_title_dynamic', { hours: aircraftData.time_window_hours })
+        ? t('aircraft_panel_title_dynamic', { hours: aircraftData.time_window_hours })
         : t('aircraft_panel_title');
     if (!aircraftData.crossings || aircraftData.crossings.length === 0) {
         aircraftList.innerHTML = `<p style="color: #6c757d; margin: 0;">${t('no_visible_aircraft')}</p>`;
@@ -252,18 +249,19 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
         const { callsign, origin, destination } = crossing.flight_info;
         let flightIdentifier = (callsign || '????').trim();
 
-        if (flightIdentifier && flightIdentifier.length > 3) {
+   
+         if (flightIdentifier && flightIdentifier.length > 3) {
             const icao = flightIdentifier.substring(0, 3).toUpperCase();
             const flightNumber = flightIdentifier.substring(3);
             const airlineInfo = airlineCodes[icao];
 
             if (airlineInfo) {
                 flightIdentifier = `${airlineInfo.iata}${flightNumber} (${airlineInfo.name})`;
-            }
+          
+           }
         }
 
-        const headerHTML = t('aircraft_header', { callsign: flightIdentifier, origin: (origin || '?'), destination: (destination || 
-        '?'), timestamp: formattedTimestamp });
+        const headerHTML = t('aircraft_header', { callsign: flightIdentifier, origin: (origin || '?'), destination: (destination || '?'), timestamp: formattedTimestamp });
         const header = createEl('h6', { innerHTML: headerHTML, dataset: { crossingId: crossing.crossing_id }});
         header.addEventListener('click', () => onHeaderClick(crossing.crossing_id, 'aircraft'));
 
@@ -294,8 +292,7 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
  */
 export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hFilter, onStrikeClick) {
     const lightningList = document.getElementById('lightning-list');
-    document.querySelector('#lightning-panel h2').textContent = is24hFilter ?
-        t('lightning_panel_title_24h') : t('lightning_panel_title');
+    document.querySelector('#lightning-panel h2').textContent = is24hFilter ? t('lightning_panel_title_24h') : t('lightning_panel_title');
 
     let filteredStrikes = strikes;
     if (is24hFilter) {
@@ -323,7 +320,8 @@ export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hF
             const strikeTypeText = strike.type === 'cg' ? t('lightning_type_cg') : t('lightning_type_ic');
             const params = {
                 station_code: nearestStation.station.code,
-                dist: strike.dist.toFixed(1),
+           
+             dist: strike.dist.toFixed(1),
           
                 bearing: Math.round(bearing),
                 type: strikeTypeText
@@ -366,13 +364,13 @@ export function displayResults(resultData, dom, hevcSupported) {
                 const timePart = isRange ? key.split(' - ')[1] : key;
                 const hour = parseInt(timePart.split(':')[0], 10);
                
-                
+    
                 const normalizedHour = hour < startHour ? hour + 24 : hour;
                 return `${String(normalizedHour).padStart(2, '0')}:${timePart.split(':')[1]}:${isRange ? '1' : '0'}`;
             };
             Object.keys(timeGroupedFiles).sort((a, b) => getSortKey(a).localeCompare(getSortKey(b))).forEach((time, timeIndex) => {
-                const timeSetDiv = createEl('div', { className: `time-set ${timeIndex % 2 === 0 ?
-                    'time-set-even' : 'time-set-odd'}` });
+         
+               const timeSetDiv = createEl('div', { className: `time-set ${timeIndex % 2 === 0 ? 'time-set-even' : 'time-set-odd'}` });
                 timeSetDiv.appendChild(createEl('h6', { textContent: t('time_results_title', { time: time }) }));
                 const ul = createEl('ul', { className: 'result-list' });
                 timeGroupedFiles[time].forEach(file => {
@@ -383,19 +381,18 @@ export function displayResults(resultData, dom, hevcSupported) {
   
                         const link = createEl('a', { href: file.url, target: '_blank', title: file.name });
                         const thumbContainer = createEl('div', { className: `thumbnail-container${isVideo ? ' video' : ''}` });
-                        thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 
-                            'thumbnail-preview' }));
+                        thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 'thumbnail-preview' }));
   
                         link.appendChild(thumbContainer);
                         li.appendChild(link);
-                    } else {
-                        li.appendChild(createEl('a', { href: 
-                            file.url, target: '_blank', textContent: file.name, title: file.name }));
+                   
+                     } else {
+                        li.appendChild(createEl('a', { href: file.url, target: '_blank', textContent: file.name, title: file.name }));
                     }
 
-                    const linksContainer = createEl('div', { className: 'alternate-links' });
-                    const allFilesForThisThumb = [{ url: file.url, name: file.name }, ...(file.alternatives ||
-                        [])];
+               
+                     const linksContainer = createEl('div', { className: 'alternate-links' });
+                    const allFilesForThisThumb = [{ url: file.url, name: file.name }, ...(file.alternatives || [])];
                     const preferredLinks = {};
                     
                     const getShortName = (filename) => {
@@ -404,10 +401,8 @@ export function displayResults(resultData, dom, hevcSupported) {
                         const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
                         let baseType = filename;
                         let isOverlay = false;
-                        if (baseType.includes('_flight_overlay')) { isOverlay = true; baseType = baseType.replace('_flight_overlay', '');
-                        }
-                        else if (baseType.includes('_overlay')) { isOverlay = true;
-                            baseType = baseType.replace('_overlay', ''); }
+                        if (baseType.includes('_flight_overlay')) { isOverlay = true; baseType = baseType.replace('_flight_overlay', ''); }
+                        else if (baseType.includes('_overlay')) { isOverlay = true; baseType = baseType.replace('_overlay', ''); }
                         for (const key in typeMap) {
                             if (baseType.endsWith(key)) return typeMap[key] + (isOverlay ? 's' : '');
                         }
@@ -423,14 +418,17 @@ export function displayResults(resultData, dom, hevcSupported) {
                         if (!existing) {
                             preferredLinks[shortName] = f;
                        
-                     
+                    
+                         
                         } else {
                             const existingIsHevc = existing.name.includes('_hevc.mp4');
                             if (hevcSupported) { if (isHevc && !existingIsHevc) preferredLinks[shortName] = f; }
-                          
+    
+                                                   
                             else { if (!isHevc && existingIsHevc) preferredLinks[shortName] = f; }
                         }
-                    });
+                 
+                   });
                     Object.entries(preferredLinks).sort((a, b) => a[0].localeCompare(b[0])).forEach(([shortName, linkInfo]) => {
                         linksContainer.appendChild(createEl('a', { href: linkInfo.url, target: '_blank', textContent: shortName }));
                     });
@@ -443,11 +441,15 @@ export function displayResults(resultData, dom, hevcSupported) {
         });
     }
     
-    if (resultData.errors && resultData.errors.length > 0) {
+    const errorData = resultData.errors || {};
+    if (Object.keys(errorData).length > 0) {
         dom.resultsLog.appendChild(createEl('h4', { textContent: t('error_messages_title') }));
-        const errorUl = createEl('ul');
-        resultData.errors.forEach(error => errorUl.appendChild(createEl('li', { className: 'error-msg', textContent: translateMessage(error) })));
-        dom.resultsLog.appendChild(errorUl);
+        Object.entries(errorData).forEach(([stationCode, errors]) => {
+            dom.resultsLog.appendChild(createEl('h5', { textContent: t('station_results_title', { station_code: stationCode }) }));
+            const errorUl = createEl('ul');
+            errors.forEach(error => errorUl.appendChild(createEl('li', { className: 'error-msg', textContent: translateMessage(error) })));
+            dom.resultsLog.appendChild(errorUl);
+        });
     }
     
     if (dom.resultsLog.innerHTML === '' && resultData.status === 'complete') {
@@ -563,8 +565,7 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
     };
     onFullscreenChange = () => {
         const isFullscreen = !!document.fullscreenElement;
-        fullscreenButton.textContent = isFullscreen ?
-            t('modal_exit_fullscreen_button') : t('modal_fullscreen_button');
+        fullscreenButton.textContent = isFullscreen ? t('modal_exit_fullscreen_button') : t('modal_fullscreen_button');
         if (isFullscreen) {
             scale = 1;
             panX = 0; panY = 0;
@@ -603,14 +604,14 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
                 hls.loadSource(playlistUrl);
                 hls.attachMedia(videoEl);
                 hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play());
-            } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+         
+               } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
    
                 videoEl.src = playlistUrl;
                 videoEl.addEventListener('canplay', () => videoEl.play());
             }
 
-            const timeoutSeconds = data.timeout_seconds ||
-                300;
+            const timeoutSeconds = data.timeout_seconds || 300;
             let timeLeft = timeoutSeconds;
             stopStreamTimeout = setTimeout(hideVideoModal, timeLeft * 1000);
             streamCountdownInterval = setInterval(() => {
@@ -688,11 +689,9 @@ export function getCamerasInView(station, strike, cameraFovs) {
                 upperBound = fov.centerAzimuth + halfFov,
                 inFov = false;
             if (lowerBound < 0) {
-                inFov = (bearing >= lowerBound + 360 && bearing <= 360) ||
-                    (bearing >= 0 && bearing <= upperBound);
+                inFov = (bearing >= lowerBound + 360 && bearing <= 360) || (bearing >= 0 && bearing <= upperBound);
             } else if (upperBound > 360) {
-                inFov = (bearing >= lowerBound && bearing <= 360) ||
-                    (bearing >= 0 && bearing <= upperBound - 360);
+                inFov = (bearing >= lowerBound && bearing <= 360) || (bearing >= 0 && bearing <= upperBound - 360);
             } else {
                 inFov = bearing >= lowerBound && bearing <= upperBound;
             }
@@ -729,7 +728,8 @@ export function updateFormFromSelection(dom, selectedStations, currentId, item, 
             if (isChecked) {
                 const view = item.camera_views.find(cv => cv.camera === camNum && cv.station_id === stationId);
                 if (view) selectedCameraViews.push(view);
-            }
+         
+           }
         } else {
    
  

@@ -89,7 +89,7 @@ HTML_TEMPLATE = """
             <h2>__{{map_panel_title}}__</h2>
             <div id="map"></div>
             <p class="map-description">
-                __{{map_description_archive}}__ __{{map_description_lightning_source}}__
+                 __{{map_description_archive}}__ __{{map_description_lightning_source}}__
             </p>
         </div>
         <div id="control-panel">
@@ -97,17 +97,17 @@ HTML_TEMPLATE = """
             <form id="download-form">
                 <div class="form-group">
                     <h6>__{{selected_stations_label}}__</h6>
-                    <div id="station-list-container">
+                     <div id="station-list-container">
                         <p style="color: #6c757d; margin: 0;">__{{no_station_selected}}__</p>
                         <ul id="station-list" style="display: none;"></ul>
                     </div>
                 </div>
                 <div class="form-group">
-                    <div class="toggle-wrapper"><label class="checkbox-label-inline"><input type="checkbox" id="cloud-toggle"> __{{toggle_clouds}}__</label></div>
+                     <div class="toggle-wrapper"><label class="checkbox-label-inline"><input type="checkbox" id="cloud-toggle"> __{{toggle_clouds}}__</label></div>
                     <div class="toggle-wrapper"><label class="checkbox-label-inline"><input type="checkbox" id="aurora-toggle"> __{{toggle_aurora}}__</label></div>
                     <div class="toggle-wrapper"><label class="checkbox-label-inline"><input type="checkbox" id="terminator-toggle"> __{{toggle_terminator}}__</label></div>
                     <div class="toggle-wrapper"><label class="checkbox-label-inline"><input type="checkbox" id="satellite-toggle"> __{{toggle_satellites}}__</label></div>
-                    <div class="toggle-wrapper"><label class="checkbox-label-inline"><input type="checkbox" id="aircraft-toggle"> __{{toggle_aircraft}}__</label></div>
+                     <div class="toggle-wrapper"><label class="checkbox-label-inline"><input type="checkbox" id="aircraft-toggle"> __{{toggle_aircraft}}__</label></div>
                     <div class="toggle-wrapper">
                         <label class="checkbox-label-inline"><input type="checkbox" id="lightning-toggle"> __{{toggle_lightning}}__</label>
                         <label class="checkbox-label-inline" id="lightning-filter-label" style="display: none; margin-left: 15px;">
@@ -124,7 +124,7 @@ HTML_TEMPLATE = """
                    </div>
                    <button type="button" id="last-night-btn" title="__{{last_night_button_title}}__">__{{last_night_button}}__</button>
                    <button type="button" id="now-button" title="__{{now_button_title}}__">__{{now_button}}__</button>
-               </div>
+                </div>
                 <div class="form-group time-group"><div><label for="hour">__{{hour_label}}__</label><select id="hour" name="hour" required><option value="" disabled selected>--</option></select></div>
                 <div><label for="minute">__{{minute_label}}__</label><select id="minute" name="minute" required><option value="" disabled selected>--</option></select></div></div>
                 <div class="form-group time-group">
@@ -133,14 +133,14 @@ HTML_TEMPLATE = """
                 </div>
                 <fieldset class="form-group">
                     <legend>__{{camera_legend}}__</legend>
-                    <div class="checkbox-group">
+                     <div class="checkbox-group">
                         <label><input type="checkbox" name="cameras" value="1" checked> 1</label>
                         <label><input type="checkbox" name="cameras" value="2" checked> 2</label>
                         <label><input type="checkbox" name="cameras" value="3" checked> 3</label>
-                        <label><input type="checkbox" name="cameras" value="4" checked> 4</label>
+                         <label><input type="checkbox" name="cameras" value="4" checked> 4</label>
                         <label><input type="checkbox" name="cameras" value="5" checked> 5</label>
                         <label><input type="checkbox" name="cameras" value="6" checked> 6</label>
-                        <label><input type="checkbox" name="cameras" value="7" checked> 7</label>
+                         <label><input type="checkbox" name="cameras" value="7" checked> 7</label>
                     </div>
                 </fieldset>
                 <fieldset class="form-group combined-file-type">
@@ -154,7 +154,7 @@ HTML_TEMPLATE = """
                     </div>
                 </fieldset>
                 <div class="button-group">
-                    <button type="submit" id="download-button">__{{download_button_start}}__</button>
+                     <button type="submit" id="download-button">__{{download_button_start}}__</button>
                     <button type="button" id="cancel-button" style="display: none;">__{{cancel_button}}__</button>
                 </div>
                 <div id="form-error" class="error-msg" style="margin-top: 10px;"></div>
@@ -247,7 +247,8 @@ class FileProcessor:
             self.output_filepath = os.path.join(DOWNLOAD_DIR, f"{base_name_with_type}.jpg")
             self.overlay_filepath = os.path.join(DOWNLOAD_DIR, f"{base_name_with_type}{overlay_suffix}.jpg")
         else:
-         
+       
+          
             # Define paths for both H.264 and HEVC video formats.
             self.output_filepath_h264 = os.path.join(DOWNLOAD_DIR, f"{base_name_with_type}.mp4")
             self.overlay_filepath_h264 = os.path.join(DOWNLOAD_DIR, f"{base_name_with_type}{overlay_suffix}.mp4")
@@ -283,9 +284,9 @@ class FileProcessor:
     def _ensure_base_media_exists(self):
         """
        Ensures the requested media file exists locally, downloading it if necessary.
-        Handles transcoding from HEVC to H.264 if the user's browser lacks HEVC support.
-        For "long integration" images, it downloads the source video and stacks it.
-        """
+       Handles transcoding from HEVC to H.264 if the user's browser lacks HEVC support.
+       For "long integration" images, it downloads the source video and stacks it.
+       """
         # For images, the logic is simple: just check if the file or its overlay version exists.
         if self.is_image:
             if os.path.exists(self.output_filepath) or os.path.exists(self.overlay_filepath): return self.output_filepath
@@ -296,10 +297,10 @@ class FileProcessor:
             if os.path.exists(preferred_path): return preferred_path
             # If preferred (H.264) doesn't exist but the HEVC version does, transcode it.
             if not self.hevc_supported and os.path.exists(self.output_filepath_hevc) and not os.path.exists(self.output_filepath_h264):
-                 if self._transcode_to_h264_blocking(self.output_filepath_hevc, self.output_filepath_h264):
-               
+                if self._transcode_to_h264_blocking(self.output_filepath_hevc, self.output_filepath_h264):
                     return self.output_filepath_h264
-            # If any version exists, return its path. The overlay logic will handle the rest.
+            # If any version exists, return its path.
+            # The overlay logic will handle the rest.
             if os.path.exists(self.output_filepath_h264): return self.output_filepath_h264
             if os.path.exists(self.output_filepath_hevc): return self.output_filepath_hevc
 
@@ -342,6 +343,7 @@ class FileProcessor:
             if not base_media_path or not os.path.exists(base_media_path):
                 self.errors.append(f"error_source_file|cam={self.cam},time={self.time_utc.strftime('%H:%M')}")
                 return
+    
             # If the file corresponds to a pass, prepare to generate an overlay.
             if self.relevant_pass:
                 is_flight = 'flight_info' in self.relevant_pass
@@ -390,7 +392,6 @@ class FileProcessor:
             logging.error(f"Processing error: {e}", exc_info=True)
 
     def get_final_result(self, final_filepath, is_flight=False):
- 
         """Gathers the final result dictionary for a processed file, including thumbnails and alternatives."""
         if not os.path.exists(final_filepath): return None
         final_filename = os.path.basename(final_filepath)
@@ -449,6 +450,7 @@ def download_for_single_station(task_id, station_id, json_payload_str):
         total_bytes += proc.total_bytes_downloaded
         if proc.is_blending_job and job:
          
+  
             # If the job is a non-blocking overlay blend, add it to a list to wait for later.
             job['time_key'], job['processor'] = item['time'].strftime('%H:%M'), proc
             blending_jobs.append(job)
@@ -487,6 +489,7 @@ def download_for_single_station(task_id, station_id, json_payload_str):
                         'path': os.path.join(DOWNLOAD_DIR, file_info['name']),
                         'time': datetime.fromisoformat(file_info['utc_time_iso'])
                     })
+        
                 except (IndexError, ValueError): continue
         
  
@@ -503,11 +506,12 @@ def download_for_single_station(task_id, station_id, json_payload_str):
                 output_filepath = os.path.join(DOWNLOAD_DIR, output_filename)
                 
                 if stack_images([img['path'] for img in images], output_filepath, task_id):
-               
+      
                     stacked_result = {
                         "url": f"download/{output_filename}", "name": output_filename,
                         "utc_time_iso": images[0]['time'].isoformat(), "alternatives": []
-                    }
+               
+                     }
                    
                     if thumb := create_thumbnail(task_id, output_filepath, 'image', stations[station_id]['station']['code'], cam_num):
                         stacked_result["thumb_url"] = f"download/{thumb}"
@@ -558,7 +562,7 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
     # Determine the final list of station IDs to process.
     station_ids = list(set(v['station_id'] for v in active_pass_data.get('camera_views', []))) if active_pass_data else data.get("stations", [])
     
-    aggregated_errors = []
+    aggregated_errors = {}
     stations_to_process = []
     
     try:
@@ -570,7 +574,6 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
         for sid in station_ids:
             if sid not in valid_stations: raise ValueError(f"error_invalid_station_id|sid={sid}")
         
-      
         file_type = data.get('file_type', 'lowres')
         if file_type not in FILE_TYPE_LIMITS: raise ValueError(f"error_invalid_file_type|file_type={file_type}")
         
@@ -581,7 +584,7 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
             num_files = sum(round((datetime.fromisoformat(v['end_utc']) - datetime.fromisoformat(v['start_utc'])).total_seconds() / 60) + 1 for v in active_pass_data.get('camera_views', []))
         else:
              # For manual downloads, calculate based on form inputs.
-            num_files = len(station_ids) * len(data.get('cameras', [])) * int(data.get('length', 1))
+             num_files = len(station_ids) * len(data.get('cameras', [])) * int(data.get('length', 1))
 
         if num_files > limit: raise ValueError(f"error_too_many_files|num_files={num_files},limit={limit}")
         
@@ -593,8 +596,10 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
         quota_tracker = {}
         if os.path.exists(QUOTA_TRACKER_FILE):
             with open(QUOTA_TRACKER_FILE, 'r') as f:
-                try: quota_tracker = json.load(f)
-                except json.JSONDecodeError: logging.warning(f"Task {master_task_id} - Could not parse quota_tracker.json.")
+                try:
+                    quota_tracker = json.load(f)
+                except json.JSONDecodeError:
+                    logging.warning(f"Task {master_task_id} - Could not parse quota_tracker.json.")
         
         today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     
@@ -607,12 +612,11 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
             station_code = station_info.get("station", {}).get("code", station_id)
 
             if station_info.get("station", {}).get("quota"):
-         
                 station_usage_today = todays_usage.get(station_id, {"total": 0, "sites": {}})
-                if isinstance(station_usage_today, int): station_usage_today = {"total": station_usage_today, "sites": {}}
+                if isinstance(station_usage_today, int):
+                    station_usage_today = {"total": station_usage_today, "sites": {}}
                 total_usage_bytes = station_usage_today.get("total", 0)
                 site_usage_bytes = station_usage_today.get("sites", {}).get(user_ip, 0)
-            
             
                 # Estimate the size of the current request.
                 avg_size_bytes = AVG_FILE_SIZES_MB.get(file_type, 2) * 1024 * 1024
@@ -621,10 +625,10 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
 
                 # Check against both per-user and total station quotas.
                 if site_usage_bytes + estimated_request_size > per_site_quota_bytes:
-                    aggregated_errors.append(f"error_user_quota_exceeded|limit={PER_SITE_QUOTA_LIMIT_MB},station_code={station_code}")
+                    aggregated_errors.setdefault(station_code, []).append(f"error_user_quota_exceeded|limit={PER_SITE_QUOTA_LIMIT_MB},station_code={station_code}")
                     continue
                 if total_usage_bytes + estimated_request_size > total_quota_bytes:
-                    aggregated_errors.append(f"error_total_quota_exceeded|limit={TOTAL_QUOTA_LIMIT_MB},station_code={station_code}")
+                    aggregated_errors.setdefault(station_code, []).append(f"error_total_quota_exceeded|limit={TOTAL_QUOTA_LIMIT_MB},station_code={station_code}")
                     continue
         
             stations_to_process.append(station_id)
@@ -635,7 +639,6 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
 
     if not stations_to_process:
         update_status(status_file, "complete", {"files": {}, "errors": aggregated_errors})
-        
         logging.info(f"Coordinator {master_task_id} - No stations to process after quota check.")
         return
 
@@ -657,7 +660,7 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
         while time.time() - start_time < 1800: # 30 min timeout
             all_done, total_steps_done, total_steps_overall = True, 0, 0
             aggregated_files_so_far = {}
-            aggregated_errors_so_far = []
+            aggregated_errors_so_far = {}
             for task_id, task_info in sub_tasks.items():
                 s_file = os.path.join(LOCK_DIR, f"{task_id}.json")
                 station_code = valid_stations.get(task_info['station_id'], {}).get('station', {}).get('code', 'UNKNOWN')
@@ -666,17 +669,19 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
                     all_done = False
                     continue
                 try:
-                    with open(s_file, 'r') as f: s_data = json.load(f)
+                     with open(s_file, 'r') as f: s_data = json.load(f)
                 except (json.JSONDecodeError, IOError):
                     all_done = False
                     continue
 
+                
                 if s_data.get("status") != "complete": all_done = False
                 total_steps_done += s_data.get("step", 0)
                 total_steps_overall += s_data.get("total", 1)
                 if s_data.get("files"): aggregated_files_so_far[station_code] = s_data["files"]
-                if s_data.get("errors"): aggregated_errors_so_far.extend(f"{station_code}: {e}" for e in s_data["errors"])
+                if s_data.get("errors"): aggregated_errors_so_far.setdefault(station_code, []).extend(s_data["errors"])
 
+            # 
             # Update the main task's progress based on the aggregated progress of all workers.
             percentage_done = (total_steps_done / total_steps_overall) * 100 if total_steps_overall > 0 else (100 if all_done else 0)
             update_status(status_file, "progress", {
@@ -698,7 +703,7 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
                 station_code = all_stations_data.get(task_info['station_id'], {}).get('station', {}).get('code', 'UNKNOWN')
          
                 if s_data.get("files"): aggregated_files[station_code] = s_data["files"]
-                if s_data.get("errors"): aggregated_errors.extend(f"{station_code}: {e}" for e in s_data["errors"])
+                if s_data.get("errors"): aggregated_errors.setdefault(station_code, []).extend(s_data["errors"])
                 if s_data.get("total_bytes_downloaded", 0) > 0: quota_updates[task_info['station_id']] = quota_updates.get(task_info['station_id'], 0) + s_data["total_bytes_downloaded"]
     finally:
         # Final cleanup and status update.

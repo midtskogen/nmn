@@ -53,17 +53,20 @@ LOG_FILE = os.path.join(LOG_DIR, 'find_aircraft.log')
 TOKEN_CACHE_FILE = os.path.join(CACHE_DIR, 'opensky_token.json')
 AIRPORT_DB_FILE = os.path.join(CACHE_DIR, 'airports.json')
 FLIGHT_DB_FILE = os.path.join(CACHE_DIR, 'flight_database.json')
+AIRCRAFT_CACHE_FILE = os.path.join(CACHE_DIR, 'aircraft_crossings_cache.json')
 
 # --- Script settings ---
 MAX_LOG_LINES = 10000
 # Distance from a station to consider a flight path for further processing.
 SHORTLIST_VICINITY_KM = 50
-DETAILED_VICINITY_KM = 25 # Not currently used, but intended for more precise filtering.
+DETAILED_VICINITY_KM = 20 # A more precise filter based on the actual flight path.
 PROCESSING_CHUNK_SIZE = 50 # Limits how many flights are processed in a single run to manage load.
 CHUNK_DELAY_SECONDS = 5 # Not currently used.
 TRACK_CACHE_HOURS = 24 # How long to keep cached flight track data.
 REQUEST_RETRY_COUNT = 3 # Number of retries for failed API requests.
 REQUEST_RETRY_DELAY_S = 2 # Delay between retries.
+AIRCRAFT_CACHE_LIFETIME_MINUTES = 15 # How long to use the main results cache.
+FLIGHT_DB_UPDATE_INTERVAL_MINUTES = 15 # Minimum time between fetching new flight lists.
 # --- WGS84 Ellipsoid Constants for ECEF coordinate conversion ---
 WGS84_A = 6378137.0 # Major axis (radius)
 WGS84_E2 = 0.00669437999014 # Eccentricity squared
@@ -111,6 +114,7 @@ def get_opensky_token(task_id, client_id, client_secret):
             # close to expiring.
             if time.time() < token_data.get('expires_at', 0) - 60: return token_data.get('access_token')
         except (json.JSONDecodeError, KeyError): pass
+    
     logging.info(f"Task {task_id}: Fetching new OpenSky access token.")
     try:
         response = requests.post("https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token", data={"grant_type": "client_credentials"}, headers={"Content-Type": "application/x-www-form-urlencoded"}, auth=HTTPBasicAuth(client_id, client_secret), timeout=20)
@@ -126,16 +130,27 @@ def get_opensky_token(task_id, client_id, client_secret):
 def update_and_get_flight_database(task_id, access_token):
     """
     Maintains a local JSON database of flights from the last 24 hours.
-    It prunes old entries and fetches new data since the last update.
+    It prunes old entries and fetches new data since the last update, but only if
+    the database is older than a defined interval.
     """
     now_ts = int(datetime.now(timezone.utc).timestamp())
     full_24h_ago = now_ts - (24 * 3600)
     flight_db = {}
+    db_data = {}
     if os.path.exists(FLIGHT_DB_FILE):
         try:
             with open(FLIGHT_DB_FILE, 'r') as f: db_data = json.load(f)
             if isinstance(db_data, dict) and 'flights' in db_data: flight_db = db_data.get('flights', {})
         except (IOError, json.JSONDecodeError): pass
+
+    # If the database was updated recently, skip the API fetch to reduce load.
+    last_update_ts = db_data.get('last_update_ts', 0)
+    if (now_ts - last_update_ts) < (FLIGHT_DB_UPDATE_INTERVAL_MINUTES * 60):
+        logging.info(f"Task {task_id}: Flight database is recent (updated {now_ts - last_update_ts}s ago). Skipping API fetch.")
+        pruned_db = {k: v for k, v in flight_db.items() if isinstance(v, dict) and v.get('lastSeen', 0) >= full_24h_ago}
+        fetch_start_ts = max(full_24h_ago, max((v['lastSeen'] for v in pruned_db.values()), default=0) - 3600) if pruned_db else full_24h_ago
+        return list(pruned_db.values()), fetch_start_ts
+        
     # Prune flights that were last seen more than
     # 24 hours ago.
     pruned_db = {k: v for k, v in flight_db.items() if isinstance(v, dict) and v.get('lastSeen', 0) >= full_24h_ago}
@@ -255,6 +270,46 @@ def fetch_and_process_track(args):
             logging.info(f"Worker {os.getpid()}: get_air_pressure returned: {pressure_hpa}")
 
     interpolated_path = interpolate_raw_track(track_data['path'], 15)
+    
+    # This block filters out slow-moving segments from the flight path,
+    # such as ground taxiing, to avoid processing unrealistic data.
+    if len(interpolated_path) >= 2:
+        filtered_path = [interpolated_path[0]] # Always include the first point
+        for i in range(1, len(interpolated_path)):
+            p1 = interpolated_path[i-1]
+            p2 = interpolated_path[i]
+
+            # Ensure points have valid time, lat, and lon data
+            if not all([p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]]):
+                continue
+
+            time_diff_sec = p2[0] - p1[0]
+            if time_diff_sec > 0:
+                distance_km = haversine_distance(p1[1], p1[2], p2[1], p2[2])
+                speed_kmh = (distance_km / time_diff_sec) * 3600
+                
+                # Only include the point if the speed to reach it was above the threshold.
+                if speed_kmh >= 100:
+                    filtered_path.append(p2)
+        interpolated_path = filtered_path
+
+    # This secondary filter checks if any point of the actual flight path is within the detailed vicinity of any station.
+    is_within_detailed_vicinity = False
+    for point in interpolated_path:
+        p_lat, p_lon = point[1], point[2]
+        if not p_lat or not p_lon: continue
+        for station in stations_data.values():
+            dist_km = haversine_distance(p_lat, p_lon, station['astronomy']['latitude'], station['astronomy']['longitude'])
+            if dist_km < DETAILED_VICINITY_KM:
+                is_within_detailed_vicinity = True
+                break
+        if is_within_detailed_vicinity:
+            break
+
+    if not is_within_detailed_vicinity:
+        logging.info(f"Worker {os.getpid()}: Skipping flight {flight_info['icao24']} as its track never entered the {DETAILED_VICINITY_KM} km detailed vicinity of any station.")
+        return None
+        
     all_visible_points = []
     altitude_corrections = []
     
@@ -312,11 +367,16 @@ def fetch_and_process_track(args):
                 e, n, u = -sin_lon_ref * dx + cos_lon_ref * dy, -sin_lat_ref * cos_lon_ref * dx - sin_lat_ref * sin_lon_ref * dy + cos_lat_ref * dz, cos_lat_ref * cos_lon_ref * dx + cos_lat_ref * sin_lon_ref * dy + sin_lat_ref * dz
                 az_deg, alt_deg = enu_to_az_alt(e, n, u)
 
+                # Calculates the opacity of the track segment based on its line-of-sight distance to the station.
+                slant_dist_km = math.sqrt(e**2 + n**2 + u**2) / 1000.0
+                clamped_dist = max(0, min(slant_dist_km, DETAILED_VICINITY_KM))
+                opacity = 0.5 - (0.5 * clamped_dist / DETAILED_VICINITY_KM)
+
                 for cam_num in range(1, 8):
                     pto_data = get_pto_data_from_json(CAMERAS_FILE, f"{station_id.replace('ams', '')}:{cam_num}") if PTO_MAPPER_AVAILABLE else None
                     is_in_view, _ = is_sky_coord_in_view(pto_data, az_deg, alt_deg)
                     if is_in_view:
-                        all_visible_points.append({"time": p_time, "lat": p_lat, "lon": p_lon, "az": az_deg, "alt": alt_deg, "station_id": station_id, "camera": cam_num, "station_code": station_info['station']['code']})
+                        all_visible_points.append({"time": p_time, "lat": p_lat, "lon": p_lon, "az": az_deg, "alt": alt_deg, "station_id": station_id, "camera": cam_num, "station_code": station_info['station']['code'], "opacity": opacity})
     
     if altitude_corrections:
         num_corrections = len(altitude_corrections)
@@ -358,7 +418,7 @@ def fetch_and_process_track(args):
         station_track = station_sky_tracks.setdefault(p['station_id'], [])
         p_time_iso = datetime.fromtimestamp(p['time'], tz=timezone.utc).isoformat()
         if not station_track or station_track[-1]['time'] != p_time_iso:
-             station_track.append({'alt': p['alt'], 'az': p['az'], 'time': p_time_iso})
+             station_track.append({'alt': p['alt'], 'az': p['az'], 'time': p_time_iso, 'opacity': p['opacity']})
 
     all_visible_points.sort(key=lambda x: (x['station_id'], x['camera'], x['time']))
     camera_views = []
@@ -392,10 +452,27 @@ def cleanup_old_cache(directory, max_age_hours):
 
 def find_all_crossings(task_id):
     """
-    Main orchestrator function. Fetches flight data, filters for candidates,
+    Main orchestrator function.
+    Fetches flight data, filters for candidates,
     and uses a process pool to calculate visibility for each candidate flight.
     """
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
+    
+    # This block checks for a fresh, complete cache of recent results. If found,
+    # it serves the cached data immediately to avoid re-computation.
+    try:
+        if os.path.exists(AIRCRAFT_CACHE_FILE):
+            mod_time = os.path.getmtime(AIRCRAFT_CACHE_FILE)
+            cache_age_seconds = time.time() - mod_time
+            if cache_age_seconds < (AIRCRAFT_CACHE_LIFETIME_MINUTES * 60):
+                logging.info(f"Task {task_id}: Found fresh main results cache (age: {cache_age_seconds:.0f}s). Serving from cache.")
+                with open(AIRCRAFT_CACHE_FILE, 'r') as f:
+                    cached_data = json.load(f)
+                update_status(status_file, "complete", cached_data)
+                return
+    except (IOError, json.JSONDecodeError) as e:
+        logging.warning(f"Task {task_id}: Could not read aircraft cache file: {e}. Recalculating.")
+        
     try:
         cleanup_old_cache(TRACK_CACHE_DIR, TRACK_CACHE_HOURS)
         update_status(status_file, "progress", {"step": 5, "message": "status_authenticating"})
@@ -410,7 +487,8 @@ def find_all_crossings(task_id):
         update_status(status_file, "progress", {"step": 15, "message": "status_fetching_flights"})
         flight_list, _ = update_and_get_flight_database(task_id, access_token)
         if not flight_list:
-            update_status(status_file, "complete", {"data": {"crossings": []}}); return
+            update_status(status_file, "complete", {"data": {"crossings": []}});
+            return
 
         update_status(status_file, "progress", {"step": 20, "message": "status_filtering_flights"})
         station_coords = [(s['astronomy']['latitude'], s['astronomy']['longitude']) for s in stations_data.values()]
@@ -454,8 +532,14 @@ def find_all_crossings(task_id):
             now = datetime.now(timezone.utc)
             duration_seconds = (now - oldest_pass_time).total_seconds()
             time_window_hours = round(duration_seconds / 3600)
+            
+        result_data = {"data": {"crossings": final_crossings, "time_window_hours": time_window_hours}}
+        
+        # After a successful calculation, the final results are saved to the main cache file.
+        with open(AIRCRAFT_CACHE_FILE, 'w') as f:
+            json.dump(result_data, f)
 
-        update_status(status_file, "complete", {"data": {"crossings": final_crossings, "time_window_hours": time_window_hours}})
+        update_status(status_file, "complete", result_data)
  
     except Exception as e:
         logging.exception(f"An unhandled error occurred for task {task_id}")
@@ -475,4 +559,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

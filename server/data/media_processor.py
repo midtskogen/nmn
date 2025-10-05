@@ -145,11 +145,7 @@ def draw_track_on_image(pto_data, pass_info, output_path, target_w=None, target_
     img = Image.new('RGBA', (final_w, final_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # Create a lookup map for ground track points to find sun altitude later.
-    ground_track = pass_info.get('ground_track', [])
-    ground_track_map = {p['time']: {'lat': p['lat'], 'lon': p['lon']} for p in ground_track}
-    
-    line_points, time_points, altitude_points = [], [], []
+    line_points, time_points, altitude_points, opacity_points = [], [], [], []
     # Extend the track slightly to help with Catmull-Rom spline calculations at the ends.
     extended_sky_track = [sky_track[0]] + sky_track + [sky_track[-1]] if len(sky_track) > 1 else sky_track
     
@@ -165,6 +161,7 @@ def draw_track_on_image(pto_data, pass_info, output_path, target_w=None, target_
                 line_points.append(scaled_point)
                 time_points.append(point['time'])
                 altitude_points.append(point['alt'])
+                opacity_points.append(point.get('opacity'))
 
     if len(line_points) > 1:
         line_width = max(1, int(final_w / 128.0))
@@ -174,27 +171,21 @@ def draw_track_on_image(pto_data, pass_info, output_path, target_w=None, target_
         # Draw the track segment by segment using Catmull-Rom splines for a smooth curve.
         for i in range(1, len(padded_points) - 2):
             p0, p1, p2, p3 = (np.array(p) for p in [padded_points[i-1], padded_points[i], padded_points[i+1], padded_points[i+2]])
-            avg_alt = (altitude_points[i-1] + altitude_points[i]) / 2.0
             alpha = 0
+            base_color_rgb = (255, 255, 255) # Track color is white for both satellites and flights.
 
-            # Determine the transparency of the track based on whether it's a flight and the sun's position.
+            # Determine the transparency of the track segment.
             if is_flight:
-                night_alpha, day_alpha = int(255 * 0.10), int(255 * 0.35)
-                alpha = night_alpha
-                segment_time_str = time_points[i-1]
-                dt_utc = datetime.fromisoformat(segment_time_str.replace('Z', '+00:00'))
-                gt_point = ground_track_map.get(segment_time_str)
-  
-                if gt_point:
-                    sun_alt = get_sun_altitude(dt_utc, gt_point['lat'], gt_point['lon'])
-                    # Line is more opaque during the day for better visibility.
-                    if sun_alt >= -6: alpha = day_alpha
-                    elif sun_alt > -18: alpha = int(night_alpha + (sun_alt + 18) / 12.0 * (day_alpha - night_alpha))
-            else: # For satellites, transparency is based on altitude in the sky.
+                # For flights, use the pre-calculated distance-based opacity.
+                opacity_float = opacity_points[i-1] if opacity_points[i-1] is not None else 0.5
+                alpha = int(opacity_float * 255)
+            else: 
+                # For satellites, transparency is based on altitude in the sky.
+                avg_alt = (altitude_points[i-1] + altitude_points[i]) / 2.0
                 transparency_percent = 5.0 + max(0, 15.0 - (90.0 - avg_alt) / 3.5)
                 alpha = int(128 * (transparency_percent / 100.0))
 
-            track_color = (255, 255, 255, alpha)
+            track_color = (*base_color_rgb, alpha)
             
             # Calculate points along the Catmull-Rom spline segment.
             segment_curve_points = []

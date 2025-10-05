@@ -1,277 +1,493 @@
-import { createEl } from './utils.js';
+import { createEl, TO_RAD, TO_DEG } from './utils.js';
+import { calculateBearing, destinationPoint } from './calculations.js';
 
-// --- Module-scoped variables ---
+// --- Module-scoped variables to hold map state ---
 let map;
-let t = (key) => key; // Translation function fallback
-let passData = {}, aircraftData = {}, meteorData = [], lightningData = [];
-let stationMarkers = {};
-
-// Layer Groups for managing map features
-const layerGroups = {
-    stations: L.layerGroup(),
-    groundTracks: L.layerGroup(),
-    skyTracks: L.layerGroup(),
-    meteors: L.layerGroup(),
-    lightning: L.layerGroup(),
-    bearingLines: L.layerGroup(),
-    timeLayers: { // Layers that depend on the selected time
-        terminator: null,
-        cloud: null,
-        aurora: null
-    }
-};
+let cloudLayer = null, auroraLayer = null, terminatorLayer = null;
+let lightningLayer = null, selectedLightningMarker = null, meteorLayer = null;
+let stationMarkers = {}, groundTrackLayers = {}, bearingLineLayer = null;
+let passData = {}, aircraftData = {}, lightningData = [], meteorData = [];
 
 // --- Icon Definitions ---
-const createIcon = (color) => new L.Icon({
-    iconUrl: `https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-${color}.png`,
-    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-    iconSize: [25, 41],
-    iconAnchor: [12, 41],
-    popupAnchor: [1, -34],
-    shadowSize: [41, 41]
-});
-
-export const blueIcon = createIcon('blue');
-export const redIcon = createIcon('red');
-export const yellowIcon = createIcon('yellow');
-
-// --- Initialization ---
+const iconOptions = { iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] };
+export const blueIcon = new L.Icon({ iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+export const redIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+export const yellowIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+const createLightningIcon = (color, size) => L.divIcon({ className: `lightning-icon lightning-icon-${color} icon-size-${size}`, html: '⚡', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
 /**
- * Initializes the Leaflet map, adds tile layers, controls, and event listeners.
- * @param {string} mapId - The ID of the div element for the map.
- * @param {function} onMoveEnd - Callback for when the map finishes moving.
- * @param {function} onZoomEnd - Callback for when the map finishes zooming.
- * @param {function} translationFunc - The main translation function.
+ * Calculates the sun's altitude for a given time and location.
+ * @param {Date} date The date object for the calculation.
+ * @param {number} lat Latitude in degrees.
+ * @param {number} lon Longitude in degrees.
+ * @returns {number} The sun's altitude in degrees.
  */
-export function initMap(mapId, onMoveEnd, onZoomEnd, translationFunc) {
-    t = translationFunc;
-    map = L.map(mapId, {
-        center: [64.7, 13.0],
-        zoom: 5,
-        worldCopyJump: true
-    });
+function getSunAltitude(date, lat, lon) {
+    const dayOfYear = (Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - Date.UTC(date.getUTCFullYear(), 0, 0)) / 864e5;
+    const latRad = lat * TO_RAD;
 
-    const baseLayers = {
-        "Street": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        }).addTo(map),
-        "Satellite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles &copy; Esri'
-        })
-    };
+    const solarDeclination = (0.006918 - 0.399912 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        + 0.070257 * Math.sin(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.006758 * Math.cos(4 * Math.PI * (dayOfYear - 1) / 365.24)
+        + 0.000907 * Math.sin(4 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.002697 * Math.cos(6 * Math.PI * (dayOfYear - 1) / 365.24)
+        + 0.00148 * Math.sin(6 * Math.PI * (dayOfYear - 1) / 365.24));
 
-    L.control.layers(baseLayers).addTo(map);
-    Object.values(layerGroups).forEach(lg => {
-        if (lg && typeof lg.addTo === 'function') lg.addTo(map);
+    const eqtime = 229.18 * (0.000075 + 0.001868 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.032077 * Math.sin(2 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.014615 * Math.cos(4 * Math.PI * (dayOfYear - 1) / 365.24)
+        - 0.040849 * Math.sin(4 * Math.PI * (dayOfYear - 1) / 365.24));
+    
+    const timeOffset = eqtime + 4 * lon;
+    const trueSolarTime = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60 + timeOffset;
+    const hourAngle = (trueSolarTime / 4) - 180;
+    const hourAngleRad = hourAngle * TO_RAD;
+
+    const sinAltitude = Math.sin(latRad) * Math.sin(solarDeclination) + Math.cos(latRad) * Math.cos(solarDeclination) * Math.cos(hourAngleRad);
+    return TO_DEG * Math.asin(sinAltitude);
+}
+
+// --- Custom Leaflet Layer Extensions ---
+L.TileLayer.WhiteToTransparent = L.TileLayer.extend({
+    createTile: function (coords, done) {
+        const tile = document.createElement('canvas');
+        const size = this.getTileSize();
+        tile.width = size.x*2;
+        tile.height = size.y*2;
+        const ctx = tile.getContext('2d');
+        const img = document.createElement('img');
+
+        img.onload = () => {
+            ctx.drawImage(img, 0, 0);
+            const imageData = ctx.getImageData(0, 0, size.x*2, size.y*2);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                data[i] = data[i + 1] = data[i + 2] = data[i + 3] = 255 - data[i];
+            }
+            ctx.putImageData(imageData, 0, 0);
+            done(null, tile);
+        };
+        img.onerror = () => done(new Error('Tile load error'), tile);
+        img.crossOrigin = "Anonymous";
+        img.src = this.getTileUrl(coords);
+        return tile;
+    }
+});
+
+L.GridLayer.Terminator = L.GridLayer.extend({
+    options: { date: null },
+    createTile: function (coords) {
+        const tile = L.DomUtil.create('canvas', 'leaflet-tile');
+        const size = this.getTileSize();
+        tile.width = size.x;
+        tile.height = size.y;
+        const ctx = tile.getContext('2d');
+        const date = this.options.date;
+        if (!date) return tile;
+
+        const nwPoint = coords.scaleBy(size);
+        const map = this._map;
+        const MAX_RESOLUTION = 64, MIN_RESOLUTION = 2;
+
+        const getAltitude = (x, y) => map.unproject(nwPoint.add(L.point(x, y)), coords.z);
+        const getAltitudeZone = (alt) => {
+            if (alt >= 0) return 0;      // Day
+            if (alt >= -6) return 1;     // Civil Twilight
+            if (alt >= -12) return 2;    // Nautical Twilight
+            if (alt >= -18) return 3;    // Astronomical Twilight
+            return 4;                    // Full Night
+        };
+        
+        const getFillStyleForZone = (zone) => {
+            switch(zone) {
+                case 1: return 'rgba(0, 0, 50, 0.15)';
+                case 2: return 'rgba(0, 0, 50, 0.30)';
+                case 3: return 'rgba(0, 0, 50, 0.45)';
+                case 4: return 'rgba(0, 0, 50, 0.60)';
+                default: return null;
+            }
+        };
+        
+        const renderBlock = (x, y, size) => {
+            const p = getAltitude(x, y);
+            const zone_tl = getAltitudeZone(getSunAltitude(date, p.lat, p.lng));
+            if (size <= MIN_RESOLUTION) {
+                const fill = getFillStyleForZone(zone_tl);
+                if (fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, size, size); }
+                return;
+            }
+            const p_tr = getAltitude(x + size, y), p_bl = getAltitude(x, y + size), p_br = getAltitude(x + size, y + size);
+            const zone_tr = getAltitudeZone(getSunAltitude(date, p_tr.lat, p_tr.lng));
+            const zone_bl = getAltitudeZone(getSunAltitude(date, p_bl.lat, p_bl.lng));
+            const zone_br = getAltitudeZone(getSunAltitude(date, p_br.lat, p_br.lng));
+            if (zone_tl === zone_tr && zone_tl === zone_bl && zone_tl === zone_br) {
+                const fill = getFillStyleForZone(zone_tl);
+                if (fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, size, size); }
+            } else {
+                const newSize = size / 2;
+                renderBlock(x, y, newSize); renderBlock(x + newSize, y, newSize);
+                renderBlock(x, y + newSize, newSize); renderBlock(x + newSize, y + newSize, newSize);
+            }
+        };
+        
+        for (let y = 0; y < size.y; y += MAX_RESOLUTION) {
+            for (let x = 0; x < size.x; x += MAX_RESOLUTION) { renderBlock(x, y, MAX_RESOLUTION); }
+        }
+        return tile;
+    },
+    setDate: function(date) { this.options.date = date; this.redraw(); }
+});
+
+// --- Public API ---
+
+export function initMap(mapId, onMoveEnd, onZoomEnd, t) {
+    const defaultMapView = [[64.7, 13.0], 5];
+    map = L.map(mapId, { maxZoom: 12, minZoom: 3 }).setView(...defaultMapView);
+    
+    L.tileLayer(`https://api.maptiler.com/maps/satellite/{z}/{x}/{y}.jpg?key=2gLVEsGCx9JWRMUG7191`, {
+        attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">&copy; MapTiler</a> <a href="https://www.openstreetmap.org/copyright" target="_blank">&copy; OpenStreetMap contributors</a>',
+        className: 'map-tiler-satellite'
+    }).addTo(map);
+    
+    map.createPane('labels').style.zIndex = 650;
+    map.getPane('labels').style.pointerEvents = 'none';
+    map.createPane('meteorTooltipPane').style.zIndex = 651;
+
+    new L.TileLayer.WhiteToTransparent(`https://api.maptiler.com/maps/backdrop/{z}/{x}/{y}@2x.png?key=2gLVEsGCx9JWRMUG7191`, {
+        attribution: '', tileSize: 512, zoomOffset: -1
+    }).addTo(map);
+    
+    L.Control.ResetView = L.Control.extend({
+        options: { position: 'topright' },
+        onAdd: (map) => createEl('button', { className: 'leaflet-reset-view-control', innerHTML: t('reset_button'), onclick: (e) => { e.stopPropagation(); map.setView(...defaultMapView); } })
     });
+    new L.Control.ResetView().addTo(map);
 
     map.on('moveend', onMoveEnd);
     map.on('zoomend', onZoomEnd);
+    return map;
 }
 
 // --- Data Setters ---
-export const setPassData = (data) => { passData = data; };
-export const setAircraftData = (data) => { aircraftData = data; };
-export const setMeteorData = (data) => { meteorData = data; };
-export const setLightningData = (data) => { lightningData = data; };
+export function setPassData(data) { passData = data; }
+export function setAircraftData(data) { aircraftData = data; }
+export function setLightningData(data) { lightningData = data; }
+export function setMeteorData(data) { meteorData = data; }
 
-// --- Getters ---
-export const getMap = () => map;
-export const getStationMarkers = () => stationMarkers;
-
-// --- Feature Drawing & Management ---
-
-/**
- * Adds a station marker to the map.
- * @param {string} id - The station ID.
- * @param {object} station - The station data object.
- * @param {function} onClick - The click event handler for the marker.
- */
-export function addStationMarker(id, station, onClick) {
-    const { latitude, longitude } = station.astronomy;
-    const marker = L.marker([latitude, longitude], { icon: blueIcon })
-        .bindPopup(`<b>${station.station.name} (${station.station.code})</b>`)
-        .addTo(layerGroups.stations);
-    marker.stationId = id;
-    marker.on('click', onClick);
-    stationMarkers[id] = marker;
+// --- Marker Management ---
+export function addStationMarker(stationId, station, onClick) {
+    const marker = L.marker([station.astronomy.latitude, station.astronomy.longitude], { icon: blueIcon }).addTo(map);
+    marker.stationId = stationId;
+    marker.bindTooltip(`<b>${station.station.code}</b><br>${station.station.name}`).on('click', onClick);
+    stationMarkers[stationId] = marker;
+    return marker;
 }
+export function updateStationMarkerIcon(stationId, icon) { if (stationMarkers[stationId]) stationMarkers[stationId].setIcon(icon); }
+export function getStationMarkers() { return stationMarkers; }
 
-/**
- * Updates the icon for a specific station marker.
- * @param {string} id - The station ID.
- * @param {L.Icon} icon - The new Leaflet icon to apply.
- */
-export function updateStationMarkerIcon(id, icon) {
-    if (stationMarkers[id]) {
-        stationMarkers[id].setIcon(icon);
-    }
-}
+// --- Layer & Drawing Functions ---
 
-/**
- * Draws the ground track for a selected satellite or aircraft pass.
- * This is the function that now handles variable transparency for aircraft.
- * @param {string|null} id - The ID of the pass/crossing to highlight.
- * @param {string} type - 'satellite' or 'aircraft'.
- */
-export function highlightTrack(id, type) {
-    layerGroups.groundTracks.clearLayers();
-    if (!id) return;
+const drawTimeMarkers = (item, color = '#FF0000') => {
+    const layer = L.layerGroup();
+    if (!item.ground_track || item.ground_track.length === 0) return layer;
 
-    const sourceData = type === 'satellite' ? passData.passes : aircraftData.crossings;
-    const idKey = type === 'satellite' ? 'pass_id' : 'crossing_id';
-    const item = sourceData?.find(p => p[idKey] === id);
-    if (!item || !item.ground_track) return;
+    const minPixelDistance = 100;
+    let lastLabelPoint = null;
 
-    const groundPoints = item.ground_track.map(p => [p.lat, p.lon]);
+    item.ground_track.forEach(point => {
+        const latLng = L.latLng(point.lat, point.lon);
+        const currentPoint = map.latLngToContainerPoint(latLng);
 
-    if (type === 'aircraft' && item.station_sky_tracks) {
-        // --- Aircraft Track with Variable Transparency ---
-        // This logic draws the aircraft track as a series of small segments,
-        // each colored with the opacity value calculated by the backend.
-        const firstStationId = Object.keys(item.station_sky_tracks)[0];
-        const skyTrack = item.station_sky_tracks[firstStationId];
-
-        // Create a quick lookup map from timestamp to opacity
-        const timeToOpacityMap = new Map(skyTrack.map(p => [p.time, p.opacity]));
-
-        for (let i = 0; i < item.ground_track.length - 1; i++) {
-            const point1 = item.ground_track[i];
-            const point2 = item.ground_track[i + 1];
-            const opacity = timeToOpacityMap.get(point1.time) ?? 1.0;
-
-            L.polyline(
-                [[point1.lat, point1.lon], [point2.lat, point2.lon]],
-                { color: '#ff00ff', weight: 3, opacity: opacity }
-            ).addTo(layerGroups.groundTracks);
+        let shouldDrawLabel = false;
+        if (lastLabelPoint === null) {
+            shouldDrawLabel = true;
+        } else {
+            const distance = currentPoint.distanceTo(lastLabelPoint);
+            if (distance > minPixelDistance) {
+                shouldDrawLabel = true;
+            }
         }
-    } else {
-        // --- Satellite Track with Uniform Transparency ---
-        L.polyline(groundPoints, { color: '#ffff00', weight: 3, opacity: 0.8 }).addTo(layerGroups.groundTracks);
-    }
 
-    // Add start/end labels and fit map to bounds
-    const startPoint = groundPoints[0];
-    const endPoint = groundPoints[groundPoints.length - 1];
-    const startTime = new Date(item.ground_track[0].time).toUTCString().substring(17, 22);
-    const endTime = new Date(item.ground_track[item.ground_track.length - 1].time).toUTCString().substring(17, 22);
-
-    L.marker(startPoint, { icon: L.divIcon({ className: 'ground-track-label', html: `S: ${startTime}` }) }).addTo(layerGroups.groundTracks);
-    L.marker(endPoint, { icon: L.divIcon({ className: 'ground-track-label', html: `E: ${endTime}` }) }).addTo(layerGroups.groundTracks);
-
-    map.flyToBounds(L.latLngBounds(groundPoints), { padding: [50, 50], maxZoom: 7 });
-}
-
-/**
- * Toggles the visibility of the meteor layer.
- * @param {boolean} show - Whether to show or hide the layer.
- * @param {function} onClick - Click handler for meteor tracks.
- * @param {function} onMouseover - Mouseover handler.
- * @param {function} onMouseout - Mouseout handler.
- */
-export function toggleMeteorLayer(show, onClick, onMouseover, onMouseout) {
-    if (show) {
-        displayMeteors(onClick, onMouseover, onMouseout);
-    } else {
-        layerGroups.meteors.clearLayers();
-    }
-}
-
-/**
- * Draws all meteor tracks on the map.
- */
-export function displayMeteors(onClick, onMouseover, onMouseout) {
-    layerGroups.meteors.clearLayers();
-    meteorData.forEach(meteor => {
-        const polyline = L.polyline([
-            [meteor.lat1, meteor.lon1],
-            [meteor.lat2, meteor.lon2]
-        ], { color: 'orange', weight: 2 });
-
-        polyline.on('click', () => onClick(meteor));
-        polyline.on('mouseover', () => onMouseover(meteor));
-        polyline.on('mouseout', () => onMouseout(meteor));
-        polyline.addTo(layerGroups.meteors);
+        if (shouldDrawLabel) {
+            const date = new Date(point.time);
+            const timeString = `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}:${String(date.getUTCSeconds()).padStart(2, '0')}`;
+            L.circleMarker([point.lat, point.lon], { radius: 3, color: color, fillColor: color, fillOpacity: 1 }).addTo(layer);
+            L.marker([point.lat, point.lon], {
+                icon: L.divIcon({ className: 'ground-track-label', html: `<span>${timeString}</span>`, iconSize: [80, 12], iconAnchor: [-5, 6] })
+            }).addTo(layer);
+            lastLabelPoint = currentPoint;
+        }
     });
-}
+    return layer;
+};
 
-/**
- * Draws all lightning strikes on the map.
- * @param {boolean} is24hFilter - Whether to filter for the last 24 hours.
- * @param {function} onStrikeClick - Click handler for strikes.
- */
-export function displayLightningStrikes(is24hFilter, onStrikeClick) {
-    layerGroups.lightning.clearLayers();
-    let filtered = lightningData;
-    if (is24hFilter) {
-        const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000;
-        filtered = lightningData.filter(s => new Date(s.time).getTime() >= twentyFourHoursAgo);
+const createSegmentedPolyline = (groundTrack, style) => {
+    const featureGroup = L.featureGroup();
+    if (!groundTrack || groundTrack.length < 2) {
+        return featureGroup;
     }
 
-    filtered.forEach(strike => {
-        const iconClass = strike.type === 'cg' ? 'lightning-icon-yellow' : 'lightning-icon-white';
-        const icon = L.divIcon({
-            className: `lightning-icon ${iconClass} icon-size-18`,
-            html: '⚡'
+    let currentSegment = [[groundTrack[0].lat, groundTrack[0].lon]];
+    const fifteenMinutesInMs = 15 * 60 * 1000;
+
+    for (let i = 1; i < groundTrack.length; i++) {
+        const prevPoint = groundTrack[i - 1];
+        const currentPoint = groundTrack[i];
+        const prevTime = new Date(prevPoint.time).getTime();
+        const currentTime = new Date(currentPoint.time).getTime();
+        if (currentTime - prevTime > fifteenMinutesInMs) {
+            if (currentSegment.length > 1) {
+                L.polyline(currentSegment, style).addTo(featureGroup);
+            }
+            currentSegment = [];
+        }
+        currentSegment.push([currentPoint.lat, currentPoint.lon]);
+    }
+
+    if (currentSegment.length > 1) {
+        L.polyline(currentSegment, style).addTo(featureGroup);
+    }
+
+    return featureGroup;
+};
+
+export function drawBearingLines(item, events, stationsData) {
+    if (bearingLineLayer) map.removeLayer(bearingLineLayer);
+    bearingLineLayer = L.layerGroup().addTo(map);
+    events.forEach(event => {
+        const station = stationsData[event.station_id];
+        if (!station) return;
+        const stationCoords = [station.astronomy.latitude, station.astronomy.longitude];
+        
+        let startPoint = item.ground_track[0], endPoint = item.ground_track[item.ground_track.length - 1];
+        let minStartDiff = Infinity, minEndDiff = Infinity;
+        const startTime = new Date(event.start_utc).getTime(), endTime = new Date(event.end_utc).getTime();
+        item.ground_track.forEach(p => {
+            const pointTime = new Date(p.time).getTime();
+            const startDiff = Math.abs(pointTime - startTime), endDiff = Math.abs(pointTime - endTime);
+            if(startDiff < minStartDiff) { minStartDiff = startDiff; startPoint = p; }
+            if(endDiff < minEndDiff) { minEndDiff = endDiff; endPoint = p; }
         });
-        const marker = L.marker([strike.lat, strike.lon], { icon: icon });
-        marker.on('click', () => onStrikeClick(strike, true));
-        marker.strikeData = strike;
-        marker.addTo(layerGroups.lightning);
+        
+        L.polyline([stationCoords, [startPoint.lat, startPoint.lon]], { color: '#FFFF00', weight: 2, dashArray: '5, 5' }).addTo(bearingLineLayer);
+        L.polyline([stationCoords, [endPoint.lat, endPoint.lon]], { color: '#FFFF00', weight: 2, dashArray: '5, 5' }).addTo(bearingLineLayer);
     });
 }
 
-/**
- * Highlights a specific lightning strike on the map.
- * @param {object} selectedStrike - The strike data object.
- * @param {boolean} shouldPan - Whether to pan the map to the strike.
- */
-export function selectLightningStrikeOnMap(selectedStrike, shouldPan) {
-    layerGroups.lightning.eachLayer(marker => {
-        const isSelected = marker.strikeData.time === selectedStrike.time;
-        const iconClass = marker.strikeData.type === 'cg' ? 'lightning-icon-yellow' : 'lightning-icon-white';
-        const newClass = isSelected ? 'lightning-icon lightning-icon-red icon-size-24' : `lightning-icon ${iconClass} icon-size-18`;
-        marker.getElement().className = newClass;
+export function clearBearingLines() {
+    if (bearingLineLayer) {
+        map.removeLayer(bearingLineLayer);
+        bearingLineLayer = null;
+    }
+}
+
+export function highlightTrack(id, type, isSatView, isAircraftView) {
+    Object.values(groundTrackLayers).forEach(layer => { if (layer) map.removeLayer(layer); });
+    if (bearingLineLayer) map.removeLayer(bearingLineLayer);
+    groundTrackLayers = {};
+    bearingLineLayer = null;
+    
+    if (passData.passes) {
+        passData.passes.forEach(pass => {
+            const isHighlighted = isSatView && pass.pass_id === id;
+            const style = { color: isHighlighted ? 'red' : 'grey', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6 };
+            const track = createSegmentedPolyline(pass.ground_track, style);
+            const timeMarkers = drawTimeMarkers(pass, 'red');
+            groundTrackLayers[pass.pass_id] = track;
+            groundTrackLayers[pass.pass_id + '_markers'] = timeMarkers;
+            if (isSatView) {
+                track.addTo(map);
+                if (isHighlighted) timeMarkers.addTo(map);
+            }
+        });
+    }
+
+    if (aircraftData.crossings) {
+        aircraftData.crossings.forEach(crossing => {
+            const isHighlighted = isAircraftView && crossing.crossing_id === id;
+            const style = { color: isHighlighted ? 'yellow' : '#a0522d', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6 };
+            const track = createSegmentedPolyline(crossing.ground_track, style);
+            const timeMarkers = drawTimeMarkers(crossing, 'yellow');
+            groundTrackLayers[crossing.crossing_id] = track;
+            groundTrackLayers[crossing.crossing_id + '_markers'] = timeMarkers;
+            if (isAircraftView) {
+                track.addTo(map);
+                if (isHighlighted) {
+                    timeMarkers.addTo(map);
+                }
+            }
+        });
+    }
+}
+
+export function displayLightningStrikes(is24hFilter, onStrikeSelect) {
+    if (lightningLayer) map.removeLayer(lightningLayer);
+    lightningLayer = L.layerGroup();
+    
+    const strikes = lightningData.filter(strike => {
+        if (!is24hFilter) return true;
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        return new Date(strike.time) >= twentyFourHoursAgo;
     });
-    if (shouldPan) {
-        map.flyTo([selectedStrike.lat, selectedStrike.lon], Math.max(map.getZoom(), 8));
+    
+    strikes.forEach((strike, index) => {
+        const { type, dist, lat, lon } = strike;
+        const iconColor = type === 'ic' ? 'white' : 'yellow', iconSize = type === 'ic' ? 14 : 18;
+        const opacity = Math.max(0.1, 1.0 - (dist / 30.0));
+        const marker = L.marker([lat, lon], { icon: createLightningIcon(iconColor, iconSize), opacity: opacity });
+        strike.id = `lightning-${index}`;
+        marker.strike = strike;
+        marker.bindTooltip(`${new Date(strike.time).toISOString().slice(0,19).replace('T',' ')} UTC`);
+        marker.on('click', () => onStrikeSelect(strike, false));
+        lightningLayer.addLayer(marker);
+    });
+    
+    if (document.getElementById('lightning-toggle').checked) {
+        lightningLayer.addTo(map);
     }
 }
 
-/**
- * Manages time-dependent overlays like terminator, clouds, and aurora.
- */
-export function updateTimeDependentLayers(date, hour, minute) {
-    if (layerGroups.timeLayers.terminator) {
-        map.removeLayer(layerGroups.timeLayers.terminator);
-        const time = new Date(`${date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`);
-        layerGroups.timeLayers.terminator = L.terminator({ time: time }).addTo(map);
+export function selectLightningStrikeOnMap(strike, shouldPan) {
+    if (selectedLightningMarker) {
+        const { type } = selectedLightningMarker.strike;
+        selectedLightningMarker.setIcon(createLightningIcon(type === 'ic' ? 'white' : 'yellow', type === 'ic' ? 14 : 18));
     }
-    // Logic for other time-dependent layers can be added here
-}
-
-/**
- * Generic function to toggle a map layer.
- * @param {string} layerName - The name of the layer to toggle ('terminator', 'cloud', 'aurora').
- * @param {boolean} show - Whether to show or hide.
- */
-export function toggleLayer(layerName, show, ...args) {
-    const layer = layerGroups.timeLayers[layerName];
-    if (layer) {
-        map.removeLayer(layer);
-        layerGroups.timeLayers[layerName] = null;
+    
+    let markerToSelect;
+    if (lightningLayer) {
+        lightningLayer.eachLayer(marker => {
+            if (marker.strike.id === strike.id) {
+                markerToSelect = marker;
+            }
+        });
     }
 
-    if (show) {
-        if (layerName === 'terminator') {
-            const [date, hour, minute] = args;
-            const time = new Date(`${date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`);
-            layerGroups.timeLayers.terminator = L.terminator({ time: time }).addTo(map);
+    if (markerToSelect) {
+        markerToSelect.setIcon(createLightningIcon('red', 24));
+        selectedLightningMarker = markerToSelect;
+        if (shouldPan) {
+            map.setView([markerToSelect.strike.lat, markerToSelect.strike.lon], 8);
         }
     }
 }
 
-// Functions for bearing lines (placeholders, as they depend on ui_manager)
-export function drawBearingLines() { /* Logic would be added here */ }
-export function clearBearingLines() { layerGroups.bearingLines.clearLayers(); }
+export function displayMeteors(onMeteorClick, onMeteorMouseover, onMeteorMouseout) {
+    if (meteorLayer) map.removeLayer(meteorLayer);
+    meteorLayer = L.layerGroup();
+    const zoom = map.getZoom();
+    const metersPerPixel = 40075016.686 * Math.abs(Math.cos(map.getCenter().lat * TO_RAD)) / Math.pow(2, zoom + 8);
+    
+    const getWidthInMeters = (h, isEnd = false) => (1 + (1 - (Math.min(100, Math.max(0, h)) / 100)) * 4 + (isEnd ? 3 : 0)) * metersPerPixel;
+    
+    meteorData.forEach(meteor => {
+        const width1_m = getWidthInMeters(meteor.h1), width2_m = getWidthInMeters(meteor.h2, true);
+        const bearing = calculateBearing(meteor.lat1, meteor.lon1, meteor.lat2, meteor.lon2);
+        
+        const perpBearing1 = (bearing + 90) % 360, perpBearing2 = (bearing - 90 + 360) % 360;
+        const p1_left = destinationPoint(meteor.lat1, meteor.lon1, width1_m / 2, perpBearing2);
+        const p1_right = destinationPoint(meteor.lat1, meteor.lon1, width1_m / 2, perpBearing1);
+        const p2_left = destinationPoint(meteor.lat2, meteor.lon2, width2_m / 2, perpBearing2);
+        const p2_right = destinationPoint(meteor.lat2, meteor.lon2, width2_m / 2, perpBearing1);
+        const meteorPolygon = L.polygon([p1_left, p1_right, p2_right, p2_left], { color: '#ff9900', fillColor: '#ff9900', weight: 0, fillOpacity: 0.7 });
+        
+        const endCap = L.circle([meteor.lat2, meteor.lon2], { radius: width2_m / 2, color: '#ff9900', fillColor: '#ff9900', weight: 0, fillOpacity: 0.7 });
+        const meteorShape = L.featureGroup([meteorPolygon, endCap]);
+        meteorShape.bindTooltip(`Meteor: ${meteor.timestamp.replace('T', ' ').replace('Z', ' UTC')}`, { pane: 'meteorTooltipPane' });
+        meteorShape.on('click', () => onMeteorClick(meteor));
+        meteorShape.on('mouseover', () => onMeteorMouseover(meteor));
+        meteorShape.on('mouseout', () => onMeteorMouseout(meteor));
+        meteorShape.addTo(meteorLayer);
+    });
+    meteorLayer.addTo(map);
+}
+
+export function toggleMeteorLayer(isChecked, onMeteorClick, onMeteorMouseover, onMeteorMouseout) {
+    if (isChecked) {
+        displayMeteors(onMeteorClick, onMeteorMouseover, onMeteorMouseout);
+    } else {
+        if (meteorLayer && map.hasLayer(meteorLayer)) {
+            map.removeLayer(meteorLayer);
+        }
+    }
+}
+
+export function getMap() { return map; }
+
+function getTerminatorLayer() { 
+    if (!terminatorLayer) terminatorLayer = new L.GridLayer.Terminator();
+    return terminatorLayer;
+}
+
+function getCloudLayer(date) { 
+    if (cloudLayer && cloudLayer.wmsParams.time === date) return cloudLayer;
+    if (cloudLayer) map.removeLayer(cloudLayer);
+    cloudLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_CorrectedReflectance_TrueColor', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}` });
+    cloudLayer.setOpacity(0.5);
+    return cloudLayer;
+}
+
+function getAuroraLayer(date) { 
+    if (auroraLayer && auroraLayer.wmsParams.time === date) return auroraLayer;
+    if (auroraLayer) map.removeLayer(auroraLayer);
+    auroraLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}` });
+    auroraLayer.setOpacity(0.5);
+    return auroraLayer;
+}
+
+export function toggleLayer(layerType, isChecked, date, hour, minute) {
+    if (layerType === 'lightning') {
+        if (isChecked) {
+            if (lightningLayer && !map.hasLayer(lightningLayer)) {
+                map.addLayer(lightningLayer);
+            }
+        } else {
+            if (lightningLayer && map.hasLayer(lightningLayer)) {
+                map.removeLayer(lightningLayer);
+            }
+        }
+        return;
+    }
+    
+    const layerGetters = {
+        cloud: () => getCloudLayer(date),
+        aurora: () => getAuroraLayer(date),
+        terminator: () => getTerminatorLayer()
+    };
+    const activeLayers = {
+        cloud: cloudLayer,
+        aurora: auroraLayer,
+        terminator: terminatorLayer
+    };
+    
+    let layer = activeLayers[layerType];
+
+    if (isChecked) {
+        if (!layerGetters[layerType]) return;
+        layer = layerGetters[layerType]();
+        
+        if (layerType === 'terminator') {
+            const currentTime = new Date(`${date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`);
+            layer.setDate(currentTime);
+        }
+
+        if (!map.hasLayer(layer)) {
+            map.addLayer(layer);
+        }
+    } else {
+        if (layer && map.hasLayer(layer)) {
+            map.removeLayer(layer);
+        }
+    }
+}
+
+export function updateTimeDependentLayers(date, hour, minute) {
+    if (document.getElementById('cloud-toggle').checked) {
+        toggleLayer('cloud', true, date);
+    }
+    if (document.getElementById('aurora-toggle').checked) {
+        toggleLayer('aurora', true, date);
+    }
+    if (document.getElementById('terminator-toggle').checked) {
+        toggleLayer('terminator', true, date, hour, minute);
+    }
+}

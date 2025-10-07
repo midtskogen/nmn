@@ -7,6 +7,7 @@ import logging
 import argparse
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Manager
 import math
 import time
 import io
@@ -163,11 +164,11 @@ def update_and_get_flight_database(task_id, access_token):
         chunk_end = min(chunk_start + 7200, now_ts)
         if chunk_end - chunk_start < 60: continue
         try:
-            response = requests.get(f"https://opensky-network.org/api/flights/all?begin={chunk_start}&end={chunk_end}", headers={"Authorization": f"Bearer {access_token}"}, timeout=90)
+            # Reduced timeout from 90 to 30 as 90 is excessive.
+            response = requests.get(f"https://opensky-network.org/api/flights/all?begin={chunk_start}&end={chunk_end}", headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
             response.raise_for_status()
             all_new_flights.extend(response.json())
-            time.sleep(2) # Be courteous to the
-            # API.
+            # Removed time.sleep(2) as it was adding ~24s of artificial delay.
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
             logging.error(f"Task {task_id}: Could not fetch flight data chunk. Error: {e}")
             return list(pruned_db.values()), fetch_start_ts
@@ -191,7 +192,22 @@ def get_flight_track(task_id, icao24, time_within_flight, access_token):
             if response.status_code == 404: return None # No track available for this flight.
             response.raise_for_status()
             data = response.json()
-            with open(cache_file, 'w') as f: json.dump(data, f)
+
+            # To make the cached JSON human-readable, we will append the UTC timestamp
+            # as a new value at the end of each point list in the path.
+            if data.get('path'):
+                for point in data['path']:
+                    ts = point[0] if point and len(point) > 0 else None
+                    if ts is not None:
+                        utc_time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                        point.append(utc_time_str)
+                    else:
+                        point.append(None)
+            
+            # Write the augmented data to the cache file with pretty-printing (indent=4).
+            with open(cache_file, 'w') as f:
+                json.dump(data, f, indent=4)
+            
             return data
         except requests.exceptions.RequestException as e:
             if e.response and e.response.status_code == 500 and attempt < REQUEST_RETRY_COUNT - 1:
@@ -209,32 +225,94 @@ def enu_to_az_alt(e, n, u):
     return az, alt
 
 def interpolate_raw_track(path, max_interval_sec):
-    """Fills in gaps in a raw flight track from OpenSky by linear interpolation."""
+    """
+    Fills in gaps in a raw flight track by linear interpolation, but avoids
+    interpolating across significant altitude or heading changes.
+    """
     if not path or len(path) < 2:
         return path
     new_path = [path[0]]
     for i in range(len(path) - 1):
         p1, p2 = path[i], path[i+1]
         time_diff = p2[0] - p1[0]
-        if time_diff > max_interval_sec:
+        
+        # Determine if we should interpolate based on altitude and heading changes.
+        should_interpolate = True
+        
+        # 1. Check for significant altitude changes.
+        # Prefer geometric altitude (index 9), fall back to barometric (index 3).
+        alt1 = p1[9] if len(p1) > 9 and p1[9] is not None else p1[3] if len(p1) > 3 and p1[3] is not None else None
+        alt2 = p2[9] if len(p2) > 9 and p2[9] is not None else p2[3] if len(p2) > 3 and p2[3] is not None else None
+
+        if alt1 is not None and alt2 is not None:
+            # Allow interpolation at low altitudes (e.g., on ground, takeoff, landing) regardless of ratio.
+            # A threshold of 300 meters (~1000 ft) is used.
+            if not (alt1 < 300 and alt2 < 300):
+                # For higher altitudes, check if one altitude is more than double the other.
+                if min(alt1, alt2) > 0:  # Avoid division by zero
+                    if max(alt1, alt2) / min(alt1, alt2) > 2.0:
+                        should_interpolate = False
+                elif max(alt1, alt2) > 0:  # One is zero/negative, the other is positive.
+                    should_interpolate = False
+        
+        # 2. If altitude check passed, check for significant heading changes.
+        if should_interpolate:
+            heading1 = p1[4] if len(p1) > 4 and p1[4] is not None else None
+            heading2 = p2[4] if len(p2) > 4 and p2[4] is not None else None
+
+            if heading1 is not None and heading2 is not None:
+                # Calculate the shortest angle between the two headings to handle the 0/360 wrap-around.
+                angle_diff = abs(heading1 - heading2)
+                if angle_diff > 180:
+                    angle_diff = 360 - angle_diff
+                
+                if angle_diff > 45:
+                    should_interpolate = False
+        
+        if time_diff > max_interval_sec and should_interpolate:
             num_segments = math.ceil(time_diff / max_interval_sec)
             for j in range(1, int(num_segments)):
                 fraction = j / num_segments
-                interp_point = [None] * len(p1)
+                # Initialize the new point with a length that can accommodate all potential fields.
+                interp_point = [None] * max(len(p1), len(p2))
+                
+                # --- Interpolate core values (always present) ---
                 interp_point[0] = p1[0] + fraction * time_diff
                 interp_point[1] = p1[1] + fraction * (p2[1] - p1[1])
                 interp_point[2] = p1[2] + fraction * (p2[2] - p1[2])
                 
-                if p1[3] is not None and p2[3] is not None:
-                    interp_point[3] = p1[3] + fraction * (p2[3] - p1[3])
-                else:
-                    interp_point[3] = p1[3] or p2[3]
+                # --- Interpolate optional values safely ---
                 
-                if len(p1) > 9 and len(p2) > 9:
-                    if p1[9] is not None and p2[9] is not None:
-                        interp_point[9] = p1[9] + fraction * (p2[9] - p1[9])
+                # Barometric Altitude (index 3)
+                if len(interp_point) > 3:
+                    p1_baro = p1[3] if len(p1) > 3 else None
+                    p2_baro = p2[3] if len(p2) > 3 else None
+                    if p1_baro is not None and p2_baro is not None:
+                        interp_point[3] = p1_baro + fraction * (p2_baro - p1_baro)
                     else:
-                        interp_point[9] = p1[9] or p2[9]
+                        interp_point[3] = p1_baro or p2_baro
+                
+                # Heading (index 4)
+                if len(interp_point) > 4:
+                    p1_head = p1[4] if len(p1) > 4 else None
+                    p2_head = p2[4] if len(p2) > 4 else None
+                    if p1_head is not None and p2_head is not None:
+                        h1, h2 = p1_head, p2_head
+                        diff = h2 - h1
+                        if diff > 180: diff -= 360
+                        if diff < -180: diff += 360
+                        interp_point[4] = (h1 + fraction * diff + 360) % 360
+                    else:
+                        interp_point[4] = p1_head or p2_head
+                
+                # Geometric Altitude (index 9)
+                if len(interp_point) > 9:
+                    p1_geo = p1[9] if len(p1) > 9 else None
+                    p2_geo = p2[9] if len(p2) > 9 else None
+                    if p1_geo is not None and p2_geo is not None:
+                        interp_point[9] = p1_geo + fraction * (p2_geo - p1_geo)
+                    else:
+                        interp_point[9] = p1_geo or p2_geo
                 
                 new_path.append(interp_point)
         new_path.append(p2)
@@ -246,28 +324,13 @@ def fetch_and_process_track(args):
     Takes a flight, fetches its full track,
     and calculates if/when it was visible to any of the camera stations.
     """
-    flight_info, stations_data, task_id, access_token = args
+    flight_info, stations_data, task_id, access_token, pressure_cache = args
     logging.info(f"Worker {os.getpid()}: Starting processing for flight ICAO {flight_info['icao24']}.")
 
     track_data = get_flight_track(task_id, flight_info['icao24'], flight_info['firstSeen'], access_token)
     if not track_data or not track_data.get('path'):
         logging.warning(f"Worker {os.getpid()}: No track data found for {flight_info['icao24']}.")
         return None
-
-    pressure_hpa = None
-    needs_correction = any(len(p) > 3 and p[3] is not None for p in track_data['path']) and \
-                       not all(len(p) > 9 and p[9] is not None for p in track_data['path'])
-    
-    warned_about_fallback = False
-    
-    if needs_correction:
-        mid_point = track_data['path'][len(track_data['path']) // 2]
-        p_time, p_lat, p_lon = mid_point[0], mid_point[1], mid_point[2]
-        if p_lat and p_lon:
-            dt_utc = datetime.fromtimestamp(p_time, tz=timezone.utc)
-            logging.info(f"Worker {os.getpid()}: Calling get_air_pressure for lat={p_lat}, lon={p_lon}, time={dt_utc}")
-            pressure_hpa = get_air_pressure(p_lat, p_lon, dt_utc)
-            logging.info(f"Worker {os.getpid()}: get_air_pressure returned: {pressure_hpa}")
 
     interpolated_path = interpolate_raw_track(track_data['path'], 15)
     
@@ -310,6 +373,31 @@ def fetch_and_process_track(args):
         logging.info(f"Worker {os.getpid()}: Skipping flight {flight_info['icao24']} as its track never entered the {DETAILED_VICINITY_KM} km detailed vicinity of any station.")
         return None
         
+    # --- OPTIMIZATION: Only fetch air pressure if the flight is a real candidate ---
+    pressure_hpa = None
+    needs_correction = any(len(p) > 3 and p[3] is not None for p in track_data['path']) and \
+                       not all(len(p) > 9 and p[9] is not None for p in track_data['path'])
+    
+    warned_about_fallback = False
+    
+    if needs_correction:
+        mid_point = track_data['path'][len(track_data['path']) // 2]
+        p_time, p_lat, p_lon = mid_point[0], mid_point[1], mid_point[2]
+        if p_lat and p_lon:
+            dt_utc = datetime.fromtimestamp(p_time, tz=timezone.utc)
+            # Create a cache key: (rounded lat, rounded lon, YYYY-MM-DD-HH)
+            cache_key = (round(p_lat), round(p_lon), dt_utc.strftime('%Y-%m-%d-%H'))
+            
+            if cache_key in pressure_cache:
+                pressure_hpa = pressure_cache[cache_key]
+                logging.info(f"Worker {os.getpid()}: Found cached pressure for {cache_key}: {pressure_hpa} hPa")
+            else:
+                logging.info(f"Worker {os.getpid()}: Calling get_air_pressure for lat={p_lat}, lon={p_lon}, time={dt_utc}")
+                pressure_hpa = get_air_pressure(p_lat, p_lon, dt_utc)
+                if pressure_hpa is not None:
+                    pressure_cache[cache_key] = pressure_hpa # Store successful result in cache
+                logging.info(f"Worker {os.getpid()}: get_air_pressure returned: {pressure_hpa}")
+
     all_visible_points = []
     altitude_corrections = []
     
@@ -513,15 +601,19 @@ def find_all_crossings(task_id):
              candidate_flights = candidate_flights[:PROCESSING_CHUNK_SIZE]
 
         final_crossings, total_tasks = [], len(candidate_flights)
-        tasks = [(flight, stations_data, task_id, access_token) for flight in candidate_flights]
-        with ProcessPoolExecutor() as executor:
-            futures = []
-            for task in tasks:
-                futures.append(executor.submit(fetch_and_process_track, task))
-                time.sleep(1) # Add a 1-second delay to stagger API requests
-            for i, future in enumerate(as_completed(futures)):
-                if result := future.result(): final_crossings.append(result)
-                update_status(status_file, "progress", {"step": 25 + int(((i + 1) / total_tasks) * 70), "message": f"status_fetching_aircraft_track|i={i + 1},total={total_tasks}"})
+        
+        with Manager() as manager:
+            pressure_cache = manager.dict()
+            tasks = [(flight, stations_data, task_id, access_token, pressure_cache) for flight in candidate_flights]
+
+            with ProcessPoolExecutor() as executor:
+                futures = []
+                for task in tasks:
+                    futures.append(executor.submit(fetch_and_process_track, task))
+                    time.sleep(1) # Add a 1-second delay to stagger API requests
+                for i, future in enumerate(as_completed(futures)):
+                    if result := future.result(): final_crossings.append(result)
+                    update_status(status_file, "progress", {"step": 25 + int(((i + 1) / total_tasks) * 70), "message": f"status_fetching_aircraft_track|i={i + 1},total={total_tasks}"})
 
         final_crossings.sort(key=lambda p: p['earliest_camera_utc'], reverse=True)
 
@@ -559,3 +651,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

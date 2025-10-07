@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-timestamp2.py
+timestamp.py
 
 Reads timestamps from image and video files.
 
@@ -321,6 +321,7 @@ def _process_image_array(img_array: np.ndarray, robust: bool, debug: bool, model
 def get_timestamp(source: ImgSource, robust: bool = False, debug: bool = False, model: Optional[str] = None) -> Optional[datetime]:
     """
     Main callable function. Reads a timestamp from an image or video source.
+    If processing fails, it will automatically retry with robust mode if not already enabled.
 
     Args:
         source: Path to an image/video, a PIL Image, or a NumPy array.
@@ -362,7 +363,27 @@ def get_timestamp(source: ImgSource, robust: bool = False, debug: bool = False, 
     # Convert to grayscale and then to a NumPy array for processing.
     img_gray = img.convert('L')
     img_array = np.array(img_gray, dtype=np.uint8)
-    return _process_image_array(img_array, robust, debug, model)
+
+    # --- Encapsulated Retry Logic ---
+    timestamp = None
+    try:
+        # First attempt with the user-specified 'robust' setting.
+        timestamp = _process_image_array(img_array, robust, debug, model)
+    except ValueError:
+        # A ValueError during date parsing is a common failure for the non-robust mode.
+        # We'll ignore it and let the retry logic below handle it.
+        pass
+
+    # If the first attempt failed (returned None or raised ValueError)
+    # and it wasn't already in robust mode, try again with robust mode enabled.
+    if timestamp is None and not robust:
+        try:
+            timestamp = _process_image_array(img_array, robust=True, debug=debug, model=model)
+        except ValueError:
+            # If the robust attempt also fails, we give up.
+            return None
+
+    return timestamp
 
 # --- Command-Line Interface ---
 def create_arg_parser() -> argparse.ArgumentParser:
@@ -395,37 +416,21 @@ def main():
 
     exit_code = 0
     for path in args.input_paths:
-        timestamp = None
-        final_exception = None
-
-        # Initial attempt using the provided command-line arguments.
         try:
+            # The get_timestamp function now contains the automatic retry logic.
             timestamp = get_timestamp(path, robust=args.robust, debug=args.debug, model=args.model)
-        except (FileNotFoundError, ValueError, ImportError, TypeError) as e:
-            final_exception = e
-
-        # If the initial attempt failed (either returned None or raised an exception)
-        # and robust mode was not already enabled, retry with robust mode.
-        if (timestamp is None or final_exception) and not args.robust:
-            timestamp = None
-            final_exception = None
-            try:
-                timestamp = get_timestamp(path, robust=True, debug=args.debug, model=args.model)
-            except (FileNotFoundError, ValueError, ImportError, TypeError) as e:
-                final_exception = e
-
-        # Report the final result after all attempts.
-        if timestamp:
-            output_str = timestamp.isoformat() if args.iso else str(int(timestamp.timestamp()))
-            if len(args.input_paths) > 1:
-                print(f"{path}: {output_str}")
+            if timestamp:
+                output_str = timestamp.isoformat() if args.iso else str(int(timestamp.timestamp()))
+                # Add filename prefix only when processing multiple files.
+                if len(args.input_paths) > 1:
+                    print(f"{path}: {output_str}")
+                else:
+                    print(output_str)
             else:
-                print(output_str)
-        elif final_exception:
-            print(f"CRITICAL: An error occurred while processing {path}: {final_exception}", file=sys.stderr)
-            exit_code = 1
-        else:  # No timestamp found, but no exception was raised.
-            print(f"ERROR: Could not extract a valid timestamp from {path}.", file=sys.stderr)
+                print(f"ERROR: Could not extract a valid timestamp from {path}.", file=sys.stderr)
+                exit_code = 1
+        except (FileNotFoundError, ValueError, ImportError, TypeError) as e:
+            print(f"CRITICAL: An error occurred while processing {path}: {e}", file=sys.stderr)
             exit_code = 1
 
     sys.exit(exit_code)

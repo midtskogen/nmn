@@ -395,20 +395,37 @@ def main():
 
     exit_code = 0
     for path in args.input_paths:
+        timestamp = None
+        final_exception = None
+
+        # Initial attempt using the provided command-line arguments.
         try:
             timestamp = get_timestamp(path, robust=args.robust, debug=args.debug, model=args.model)
-            if timestamp:
-                output_str = timestamp.isoformat() if args.iso else str(int(timestamp.timestamp()))
-                # Add filename prefix only when processing multiple files.
-                if len(args.input_paths) > 1:
-                    print(f"{path}: {output_str}")
-                else:
-                    print(output_str)
-            else:
-                print(f"ERROR: Could not extract a valid timestamp from {path}.", file=sys.stderr)
-                exit_code = 1
         except (FileNotFoundError, ValueError, ImportError, TypeError) as e:
-            print(f"CRITICAL: An error occurred while processing {path}: {e}", file=sys.stderr)
+            final_exception = e
+
+        # If the initial attempt failed (either returned None or raised an exception)
+        # and robust mode was not already enabled, retry with robust mode.
+        if (timestamp is None or final_exception) and not args.robust:
+            timestamp = None
+            final_exception = None
+            try:
+                timestamp = get_timestamp(path, robust=True, debug=args.debug, model=args.model)
+            except (FileNotFoundError, ValueError, ImportError, TypeError) as e:
+                final_exception = e
+
+        # Report the final result after all attempts.
+        if timestamp:
+            output_str = timestamp.isoformat() if args.iso else str(int(timestamp.timestamp()))
+            if len(args.input_paths) > 1:
+                print(f"{path}: {output_str}")
+            else:
+                print(output_str)
+        elif final_exception:
+            print(f"CRITICAL: An error occurred while processing {path}: {final_exception}", file=sys.stderr)
+            exit_code = 1
+        else:  # No timestamp found, but no exception was raised.
+            print(f"ERROR: Could not extract a valid timestamp from {path}.", file=sys.stderr)
             exit_code = 1
 
     sys.exit(exit_code)

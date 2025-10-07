@@ -627,9 +627,18 @@ def find_all_crossings(task_id):
             
         result_data = {"data": {"crossings": final_crossings, "time_window_hours": time_window_hours}}
         
-        # After a successful calculation, the final results are saved to the main cache file.
-        with open(AIRCRAFT_CACHE_FILE, 'w') as f:
-            json.dump(result_data, f)
+        # Atomically write to the main cache file to prevent race conditions.
+        # Write to a temporary file first, then rename it to the final destination.
+        # This ensures that any process reading the cache file will always get a complete JSON.
+        temp_cache_file = AIRCRAFT_CACHE_FILE + f".{os.getpid()}.tmp"
+        try:
+            with open(temp_cache_file, 'w') as f:
+                json.dump(result_data, f)
+            os.rename(temp_cache_file, AIRCRAFT_CACHE_FILE)
+        finally:
+            # Ensure the temporary file is removed if it still exists (e.g., on error)
+            if os.path.exists(temp_cache_file):
+                os.remove(temp_cache_file)
 
         update_status(status_file, "complete", result_data)
  

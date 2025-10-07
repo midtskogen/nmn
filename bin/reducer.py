@@ -979,15 +979,18 @@ class Zoom_Advanced(ttk.Frame):
             return
             
         with open("event.txt", "w") as f:
+            # --- Trail Section ---
             print("[trail]", file=f)
             print(f"frames = {len(centroid2)}", file=f)
-            print(f"duration = {round(float(centroid2[-1].split(' ')[1]) - float(centroid2[0].split(' ')[1]), 2)}", file=f)
+            
+            duration_val = round(float(centroid2[-1].split(' ')[1]) - float(centroid2[0].split(' ')[1]), 2)
+            print(f"duration = {duration_val}", file=f)
             
             pos_str = " ".join([f"{p['current'][0]:.2f},{p['current'][1]:.2f}" for p in valid_positions])
             print(f"positions = {pos_str}", file=f)
 
-            coord_str = " ".join([f"{i.split(' ')[3]},{i.split(' ')[2]}" for i in centroid2])
-            print(f"coordinates = {coord_str}", file=f)
+            coord_str_list = [f"{i.split(' ')[3]},{i.split(' ')[2]}" for i in centroid2]
+            print(f"coordinates = {' '.join(coord_str_list)}", file=f)
 
             ts_str = " ".join([str(self.timestamps[int(i.split(' ')[0])]) for i in centroid2])
             print(f"timestamps = {ts_str}", file=f)
@@ -1005,6 +1008,7 @@ class Zoom_Advanced(ttk.Frame):
             print("manual = 1", file=f)
             print(file=f)
 
+            # --- Video Section ---
             print("[video]", file=f)
             start_info = " ".join(centroid2[0].split(" ")[6:])
             start_ts = self.timestamps[int(centroid2[0].split(" ")[0])]
@@ -1016,7 +1020,20 @@ class Zoom_Advanced(ttk.Frame):
             
             print(f"width = {self.width}", file=f)
             print(f"height = {self.height}", file=f)
-        
+            print(file=f)
+
+            # --- Summary Section ---
+            print("[summary]", file=f)
+            print(f"timestamp = {start_info} ({start_ts})", file=f)
+            
+            startpos = coord_str_list[0].replace(',', ' ')
+            print(f"startpos = {startpos}", file=f)
+
+            endpos = coord_str_list[-1].replace(',', ' ')
+            print(f"endpos = {endpos}", file=f)
+
+            print(f"duration = {duration_val}", file=f)
+
         print("Saved event data to event.txt")
 
     def load_event_file(self, filepath):

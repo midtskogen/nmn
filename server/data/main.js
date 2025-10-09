@@ -168,7 +168,25 @@ function initializeApp() {
         const type = isSatView ? 'satellite' : 'aircraft';
         mapHandler.highlightTrack(id, type, isSatView, isAircraftView);
         if (document.getElementById('meteor-toggle').checked) {
-            mapHandler.displayMeteors(handleMeteorClick, handleMeteorMouseover, handleMeteorMouseout);
+	    mapHandler.displayMeteors(handleMeteorClick, handleMeteorMouseover, handleMeteorMouseout);
+	}
+
+	// Redraw bearing lines if a pass/crossing and station are selected
+	if (id && activeStationForSelection) {
+	    const dataSource = isSatView ? passData.passes : aircraftData.crossings;
+	    const idKey = isSatView ? 'pass_id' : 'crossing_id';
+	    const item = dataSource?.find(p => p[idKey] === id);
+	    
+	    if (item) {
+		const checkedCameras = [...document.querySelectorAll('input[name="cameras"]:checked')].map(cb => parseInt(cb.value, 10));
+		const selectedCameraViews = item.camera_views.filter(cv =>
+		    cv.station_id === activeStationForSelection && checkedCameras.includes(cv.camera)
+		);
+		
+		if (selectedCameraViews.length > 0) {
+		    mapHandler.drawBearingLines(item, selectedCameraViews, stationsData);
+		}
+	    }
         }
     }
 

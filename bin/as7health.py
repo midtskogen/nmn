@@ -100,6 +100,8 @@ class ErrorCatalog:
         "WD_LOG_ERROR": {"type": "failure", "description": "An error was found in the recent watch-dog log entries.", "reason": "The log file itself contains error messages, indicating active problems like camera streams being down.", "fix": "Read the log file ('cat /tmp/wd.txt') to see the specific errors and address them directly."},
         # Captures
         "NO_RECENT_CAPTURES": {"type": "failure", "description": "No recent video captures were found for one or more cameras.", "reason": "The system is not saving new video files. This is a primary indicator that the video capture has failed.", "fix": "This is a critical error. Check camera connectivity and the FFMPEG running process for the affected cameras."},
+        "FPS_TOO_LOW": {"type": "warning", "description": "A recent video file has an FPS below 10 ({fps:.1f} FPS).", "reason": "Low FPS indicates a problem with the capture stream, camera settings, or system performance, leading to choppy video.", "fix": "Check camera's stream settings. Ensure the 'ffmpeg' command specifies a stable FPS and that the system is not overloaded."},
+        "FPS_INCONSISTENT": {"type": "warning", "description": "Recent {stream_type} video files show high FPS variation (min: {min_fps:.1f}, max: {max_fps:.1f}).", "reason": "Inconsistent frame rates suggest an unstable capture process, which can corrupt video files or cause issues with analysis.", "fix": "This is often linked to an unstable camera connection or an overloaded CPU. Check 'ffmpeg' processes and system load."},
         # Corrupt Files
         "CORRUPT_FILE_FOUND": {"type": "failure", "description": "A likely corrupt (very small) video file was found.", "reason": "The system is creating empty or tiny video files, pointing to a problem with the 'ffmpeg' stream capture.", "fix": "This is often linked to an unstable camera connection or failing 'ffmpeg' process. Check network cables and power."},
         # Processing Queue
@@ -178,6 +180,8 @@ class AS7Diagnostic:
         if error_code == "FFMPEG_DOWN": return f"FFMPEG process for camera '{context.get('cam_key')}' ({context.get('stream')}) is NOT running"
         if error_code == "STALE_PROCESS_FOUND": return f"Found multiple ({context.get('count')}) running instances of '{context.get('proc')}'"
         if error_code == "NO_RECENT_CAPTURES": return f"No recent {context.get('stream_type')} captures for camera '{context.get('cam_key')}'"
+        if error_code == "FPS_TOO_LOW": return f"Recent {context.get('stream_type')} file has low FPS: {context.get('fps'):.1f} FPS for {os.path.basename(context.get('file',''))}"
+        if error_code == "FPS_INCONSISTENT": return f"High FPS variation for {context.get('stream_type')} captures (Cam: {context.get('cam_key')}). Min: {context.get('min_fps'):.1f}, Max: {context.get('max_fps'):.1f}"
         if error_code == "CORRUPT_FILE_FOUND": return f"Corrupt video file found: {os.path.basename(context.get('file',''))}"
         if error_code == "CRON_JOB_MISSING": return f"Expected cron job is missing: {context.get('job')}"
         if error_code == "WASABI_CREDS_INSECURE": return f"Wasabi credentials file has insecure permissions ({context.get('perms')})"
@@ -209,6 +213,7 @@ class AS7Diagnostic:
         self.check_running_processes()
         self.check_log_files_and_status()
         self.check_recent_captures()
+        self.check_video_fps()
         self.check_for_corrupt_files()
         self.check_processing_health()
         self.check_cron_jobs()
@@ -828,6 +833,121 @@ class AS7Diagnostic:
                         else: self.log_success(f"Recent {stream_type} captures found for camera '{cam_key}' ({cams_id}).")
                     except Exception: pass
 
+    def check_video_fps(self):
+        """Checks the FPS of recent video files for consistency and minimums."""
+        print("\n--- Checking Video File FPS ---")
+        ffprobe_path = which('ffprobe')
+        if not ffprobe_path:
+            # check_camera_health or check_dependencies will already flag this
+            self.log_success("'ffprobe' not found, skipping FPS check.")
+            return
+
+        as6_data = self.config_data.get("/home/ams/amscams/conf/as6.json", {})
+        for cam_key, cam_info in as6_data.get('cameras', {}).items():
+            cams_id = cam_info.get('cams_id')
+            if not cams_id:
+                continue
+            
+            self.log_success(f"Checking FPS for camera '{cam_key}' ({cams_id})...", indent=1)
+
+            for stream_type, path in [("SD", "/mnt/ams2/SD"), ("HD", "/mnt/ams2/HD")]:
+                if not os.path.isdir(path):
+                    continue
+                
+                # 1. Find the 10 most recent files for this cam/stream
+                # We search only in the last day for performance.
+                cmd = [
+                    'find', path, 
+                    '-name', f"*{cams_id}*.mp4", 
+                    '-mmin', '-1440',  # Only look at files from the last 24h
+                    '-type', 'f',
+                    '-printf', '%T@ %p\n'
+                ]
+                try:
+                    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    if not res.stdout:
+                        self.log_success(f"No recent {stream_type} files found to check for '{cam_key}'.", indent=2)
+                        continue
+                    
+                    # Sort by timestamp (first column) descending, take top 10
+                    sorted_files = sorted(
+                        res.stdout.strip().split('\n'), 
+                        key=lambda x: float(x.split(' ', 1)[0]), 
+                        reverse=True
+                    )
+                    files_to_check = [line.split(' ', 1)[1] for line in sorted_files[:10]]
+
+                except subprocess.CalledProcessError:
+                    self.log_success(f"No recent {stream_type} files found to check for '{cam_key}'.", indent=2)
+                    continue
+                except Exception as e:
+                    self.log_issue("PERMISSION_DENIED", {'check': f"finding video files in {path}: {e}"}, indent=2)
+                    continue
+
+                # 2. Get FPS for each file
+                fps_list = []
+                low_fps_errors_found = False
+                for f in files_to_check:
+                    try:
+                        cmd_ffprobe = [
+                            ffprobe_path, '-v', 'error', 
+                            '-select_streams', 'v:0', 
+                            '-show_entries', 'stream=r_frame_rate', 
+                            '-of', 'default=noprint_wrappers=1:nokey=1',
+                            f
+                        ]
+                        res = subprocess.run(cmd_ffprobe, capture_output=True, text=True, check=True, timeout=5)
+                        fps_str = res.stdout.strip()
+                        if '/' in fps_str:
+                            num, den = map(float, fps_str.split('/'))
+                            if den == 0: continue
+                            fps = num / den
+                            fps_list.append(fps)
+                            
+                            # 3a. Check for low FPS
+                            if fps < 10.0:
+                                self.log_issue("FPS_TOO_LOW", {'stream_type': stream_type, 'fps': fps, 'file': f}, indent=3)
+                                low_fps_errors_found = True
+                        elif fps_str:
+                             # Not a fraction, might be a single number
+                            fps = float(fps_str)
+                            fps_list.append(fps)
+                            if fps < 10.0:
+                                self.log_issue("FPS_TOO_LOW", {'stream_type': stream_type, 'fps': fps, 'file': f}, indent=3)
+                                low_fps_errors_found = True
+
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+                        # File might be corrupt or unreadable, skip it.
+                        pass 
+                    except Exception:
+                        pass # General catch-all
+
+                if not fps_list:
+                    self.log_success(f"Could not determine FPS for any recent {stream_type} files for '{cam_key}'.", indent=2)
+                    continue
+                
+                if not low_fps_errors_found:
+                     self.log_success(f"No files with FPS < 10.0 found for {stream_type}.", indent=3)
+
+                # 3b. Check for variation
+                min_fps = min(fps_list)
+                max_fps = max(fps_list)
+                
+                if min_fps == 0: # Avoid division by zero
+                    continue
+
+                variation_percent = (max_fps - min_fps) / min_fps
+                
+                if variation_percent > 0.10: # More than 10% variation
+                    self.log_issue("FPS_INCONSISTENT", {
+                        'stream_type': stream_type,
+                        'cam_key': cam_key,
+                        'min_fps': min_fps,
+                        'max_fps': max_fps
+                    }, indent=3)
+                else:
+                    self.log_success(f"FPS for {stream_type} is stable (Min: {min_fps:.1f}, Max: {max_fps:.1f}).", indent=3)
+
     def check_for_corrupt_files(self):
         """Searches for recently created video files that are unusually small."""
         print("\n--- Checking for Corrupt Video Files ---")
@@ -944,6 +1064,8 @@ class AS7Diagnostic:
                          details = f"file: '{ctx.get('file')}', size: {ctx.get('size')} bytes"
                      elif code == "PERMISSION_DENIED":
                          details = f"{ctx.get('check')}"
+                     elif code == "FPS_TOO_LOW":
+                         details = f"file: '{ctx.get('file')}', fps: {ctx.get('fps'):.1f}"
                      print(f"   - Affected Item: {details}")
                 else:
                     print("   - Affected Items:")
@@ -952,6 +1074,8 @@ class AS7Diagnostic:
                             details = f"file: '{ctx.get('file')}', size: {ctx.get('size')} bytes"
                         elif code == "PERMISSION_DENIED":
                             details = f"{ctx.get('check')}"
+                        elif code == "FPS_TOO_LOW":
+                            details = f"file: '{ctx.get('file')}', fps: {ctx.get('fps'):.1f}"
                         else:
                             details = ", ".join(f"{k}: '{v}'" for k, v in ctx.items() if v)
                         print(f"     - {details}")

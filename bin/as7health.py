@@ -72,6 +72,11 @@ class ErrorCatalog:
         "SWAP_IN_USE_OK_RAM": {"type": "warning", "description": "Swap usage is high ({percent:.1f}%), but sufficient RAM is available.", "reason": "The system experienced memory pressure in the past. The data in swap may not be actively used, so performance impact is likely minimal at present.", "fix": "This is a low-priority warning. Monitor for signs of recurring memory pressure. No immediate action is required."},
         "HIGH_LOAD_AVG": {"type": "warning", "description": "System 5-minute load average ({load:.2f}) is high for {cores} CPU cores.", "reason": "The CPU is consistently struggling to keep up with the workload. This can lead to a growing backlog of videos to process.", "fix": "Use 'htop' to identify processes causing high load. If it's the capture/processing scripts, the hardware may be underpowered."},
         "IO_ERROR_DETECTED": {"type": "failure", "description": "I/O errors detected in the kernel log.", "reason": "The operating system is reporting errors when reading from or writing to a storage device. This is a strong indicator of a failing disk.", "fix": "This is a critical hardware warning. Back up your data immediately. Use tools like 'smartctl' to diagnose the disk and prepare to replace it."},
+        "FS_READ_ONLY": {"type": "failure", "description": "A filesystem was remounted as read-only.", "reason": "This is a critical kernel protection measure, usually triggered by severe filesystem corruption or disk failure. The system cannot write any new data.", "fix": "Check 'dmesg' for details. Reboot the system and run 'fsck' on the affected partition. Prepare to replace the disk."},
+        "OOM_KILLER_ACTIVE": {"type": "failure", "description": "The Out-of-Memory (OOM) killer was activated.", "reason": "The system ran out of available RAM and was forced to kill processes to survive. This can silently stop video capture or processing.", "fix": "Use 'htop' or 'free -m' to check memory usage. Identify the memory-hungry process. The system may need a RAM upgrade or swap adjustment."},
+        "SEGFAULT_DETECTED": {"type": "failure", "description": "A segmentation fault was detected in the system log.", "reason": "A key program (like 'ffmpeg', 'python', or 's3fs') crashed due to a critical memory error. This indicates software instability or hardware issues.", "fix": "Note the program that segfaulted from the log line. Ensure your software is up to date. If it persists, it could be a sign of faulty RAM."},
+        "NTP_LOG_ERRORS": {"type": "warning", "description": "NTP time synchronization errors found in the log.", "reason": "The log shows a history of failures to contact time servers, even if the system is currently synced. This indicates an unstable network connection or bad NTP config.", "fix": "Verify network connectivity. Check '/etc/systemd/timesyncd.conf' or 'ntp.conf' to ensure valid time servers are listed."},
+        "USB_ERROR_DETECTED": {"type": "warning", "description": "USB device errors detected in the log.", "reason": "The kernel is reporting errors communicating with a USB device (e.g., disconnects, failed enumeration). This can indicate faulty hardware, bad cables, or insufficient power.", "fix": "Check all USB connections and cables. If a USB hub is used, ensure it has its own power supply. Check 'dmesg' for more details."},
         # Disk Space
         "DISK_CRITICAL": {"type": "failure", "description": "Disk space on {path} is critically low ({percent_free:.2f}% free).", "reason": "If the disk fills up completely, video recording will stop, and the system may become unstable.", "fix": "Delete old, unneeded files from '/mnt/ams2/SD/' and '/mnt/ams2/HD/'. Consider archiving old meteor data."},
         "DISK_LOW": {"type": "warning", "description": "Disk space on {path} is low ({percent_free:.2f}% free).", "reason": "This is an early warning that the video storage drive is filling up.", "fix": "Proactively clean up old video files to prevent the disk from becoming full."},
@@ -170,6 +175,10 @@ class AS7Diagnostic:
         if error_code == "AS6_JSON_SITE_KEY_MISSING": return f"Site key '{context.get('key')}' is missing"
         if error_code == "AS6_JSON_BAD_IP": return f"Camera '{context.get('cam_key')}' has an invalid IP"
         if error_code == "AS6_JSON_LAT_LNG_OUT_OF_RANGE": return f"Lat/Lng for station is out of range ({context.get('lat')}, {context.get('lng')})"
+        
+        if error_code in ["FS_READ_ONLY", "OOM_KILLER_ACTIVE", "SEGFAULT_DETECTED", "NTP_LOG_ERRORS", "USB_ERROR_DETECTED"]:
+             return f"Found {context.get('count', 0)} log entries. Last: \"{context.get('last_error', '')}\""
+        
         if error_code == "PYTHON_PKG_MISSING": return f"Python package is missing: {context.get('pkg')}"
         if error_code == "SYS_PKG_MISSING": return f"System command '{context.get('pkg')}' is not installed"
         if error_code == "SCRIPT_MISSING": return f"Script is missing or not executable: {context.get('path')}"
@@ -201,6 +210,7 @@ class AS7Diagnostic:
         self.check_system_health()
         self.check_system_resources()
         self.check_filesystem_health()
+        self.check_syslog()
         self.check_disk_space()
         self.check_ntp_sync()
         self.check_dependencies()
@@ -276,7 +286,7 @@ class AS7Diagnostic:
                     if pwd.getpwuid(os.stat(d).st_uid).pw_name != 'ams':
                         self.log_issue("BAD_OWNER", {'path': d})
                 except PermissionError:
-                    self.log_issue("PERMISSION_DENIED", {'check': f"ownership of {d}"})
+                    self.log_issue("PERMISSION_ DENIED", {'check': f"ownership of {d}"})
                 except KeyError: pass
             else:
                 self.log_issue("DIR_MISSING", {'path': d})
@@ -549,6 +559,55 @@ class AS7Diagnostic:
                 self.log_success("No critical I/O errors found in kernel log.")
         except Exception: pass
 
+    def check_syslog(self):
+        """Scans /var/log/syslog for critical system-level errors."""
+        print("\n--- Checking System Log (/var/log/syslog) ---")
+        if not self.is_root:
+            self.log_issue("PERMISSION_DENIED", {'check': "reading system logs. Run as root."})
+            return
+
+        log_files = ["/var/log/syslog", "/var/log/syslog.1"]
+        
+        checks = {
+            "FS_READ_ONLY": r'Remounting filesystem read-only',
+            "OOM_KILLER_ACTIVE": r'(Out of memory: Kill process|oom-killer)',
+            "SEGFAULT_DETECTED": r'segfault at',
+            "NTP_LOG_ERRORS": r'(ntpd|systemd-timesyncd|chrony).*(fail|timeout|error)',
+            "USB_ERROR_DETECTED": r'usb .*: (error|disconnect|failed enumeration)',
+        }
+        
+        found_issues = {code: [] for code in checks}
+        scanned_files = False
+
+        for log_path in log_files:
+            if not os.path.exists(log_path):
+                continue
+            
+            scanned_files = True
+            try:
+                with open(log_path, 'r') as f:
+                    for line in f:
+                        for code, pattern in checks.items():
+                            if re.search(pattern, line, re.IGNORECASE):
+                                # Limit stored line length
+                                found_issues[code].append(line.strip()[:200]) 
+                                break # Move to next line
+            except Exception as e:
+                self.log_issue("PERMISSION_DENIED", {'check': f"reading {log_path}: {e}"})
+
+        if not scanned_files:
+            self.log_issue("PERMISSION_DENIED", {'check': "reading /var/log/syslog (file not found or accessible)."})
+            return
+
+        if not any(found_issues.values()):
+            self.log_success("No critical errors found in recent system logs.")
+        else:
+            for code, lines in found_issues.items():
+                if lines:
+                    count = len(lines)
+                    last_error = lines[-1]
+                    self.log_issue(code, {'count': count, 'last_error': last_error})
+
     def check_disk_space(self):
         """Checks the available disk space on the primary video storage mount."""
         print("\n--- Checking Disk Space ---")
@@ -810,7 +869,8 @@ class AS7Diagnostic:
             age = time.time() - os.path.getmtime(wd_log)
             if age > 360:
                 self.log_issue("WD_LOG_STALE")
-            else: self.log_success(f"Watch-dog log was recently updated.")
+            else:
+                self.log_success(f"Watch-dog log was recently updated.")
             
             try:
                 with open(wd_log, 'r') as f: last_lines = f.readlines()[-20:]
@@ -1076,6 +1136,8 @@ class AS7Diagnostic:
                             details = f"{ctx.get('check')}"
                         elif code == "FPS_TOO_LOW":
                             details = f"file: '{ctx.get('file')}', fps: {ctx.get('fps'):.1f}"
+                        elif code in ["FS_READ_ONLY", "OOM_KILLER_ACTIVE", "SEGFAULT_DETECTED", "NTP_LOG_ERRORS", "USB_ERROR_DETECTED"]:
+                            details = f"log entry: \"{ctx.get('last_error')}\""
                         else:
                             details = ", ".join(f"{k}: '{v}'" for k, v in ctx.items() if v)
                         print(f"     - {details}")

@@ -21,7 +21,7 @@ import tkinter as tk
 import contextlib
 import signal
 import atexit
-import threading  # <-- ADDED
+import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
@@ -32,6 +32,186 @@ from brightstar import brightstar
 from recalibrate import recalibrate
 from timestamp import get_timestamp
 import pto_mapper
+
+# --- Globals for temp file cleanup ---
+# Moved to global scope to be accessible by the new LauncherDialog
+temp_files_to_clean = []
+temp_dirs = []
+
+def cleanup_temp_resources():
+    """Cleans up all temporary directories and files created by the script."""
+    print("\nPerforming cleanup...")
+    for d in temp_dirs:
+        # The TemporaryDirectory object's cleanup method handles removal.
+        try:
+            d.cleanup()
+        except Exception as e:
+            print(f"    - Error cleaning up directory: {e}", file=sys.stderr)
+    for f in temp_files_to_clean:
+        if os.path.exists(f):
+            try:
+                print(f"  - Deleting temporary file: {f}")
+                os.remove(f)
+            except OSError as e:
+                print(f"    - Error removing file {f}: {e}", file=sys.stderr)
+    print("Cleanup complete.")
+
+# Define a handler for signals like Ctrl+C (SIGINT) and kill (SIGTERM).
+def signal_handler(sig, frame):
+    # The atexit-registered function will be called automatically on sys.exit().
+    print(f"\nSignal {sig} received, exiting gracefully.")
+    sys.exit(0)
+# --- End Globals ---
+
+
+class LauncherDialog:
+    """
+    A dialog window shown when the script is run without arguments.
+    Prompts the user for station, camera, and time to fetch files.
+    """
+    def __init__(self, toplevel_root, main_tk_root):
+        self.root = toplevel_root       # This is the Toplevel window
+        self.main_tk = main_tk_root     # This is the hidden main Tk window
+        self.root.title("Reducer Launcher")
+        
+        self.station_map = {
+            "ams119 (Gaustatoppen)": "ams119",
+            "ams123 (Kristiansand)": "ams123",
+            "ams135 (Ørsta)": "ams135",
+            "ams171 (Trondheim)": "ams171",
+            "ams172 (Sørreisa)": "ams172",
+            "ams173 (Oslo)": "ams173",
+            "ams174 (Harestua)": "ams174",
+            "ams175 (Moss)": "ams175",
+            "ams176 (Larvik)": "ams176",
+            "ams177 (Skibotn)": "ams177",
+            "ams178 (Løten)": "ams178",
+            "ams179 (Hågår)": "ams179",
+            "ams180 (Finnskogen)": "ams180",
+        }
+        
+        frame = ttk.Frame(self.root, padding="10")
+        frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Station
+        ttk.Label(frame, text="Station:").grid(column=0, row=0, sticky=tk.W, pady=5)
+        self.station_var = tk.StringVar()
+        station_combo = ttk.Combobox(frame, textvariable=self.station_var, width=25)
+        station_combo['values'] = sorted(list(self.station_map.keys()))
+        station_combo.grid(column=1, row=0, sticky=(tk.W, tk.E))
+        
+        # Camera
+        ttk.Label(frame, text="Camera:").grid(column=0, row=1, sticky=tk.W, pady=5)
+        self.cam_var = tk.StringVar()
+        cam_combo = ttk.Combobox(frame, textvariable=self.cam_var, width=5)
+        cam_combo['values'] = ['1', '2', '3', '4', '5', '6', '7']
+        cam_combo.grid(column=1, row=1, sticky=tk.W)
+        
+        # Date/Time
+        now = datetime.now()
+        ttk.Label(frame, text="Date (YYYYMMDD):").grid(column=0, row=2, sticky=tk.W, pady=5)
+        self.date_var = tk.StringVar(value=now.strftime('%Y%m%d'))
+        ttk.Entry(frame, textvariable=self.date_var, width=10).grid(column=1, row=2, sticky=tk.W)
+        
+        ttk.Label(frame, text="Hour (hh):").grid(column=0, row=3, sticky=tk.W, pady=5)
+        self.hour_var = tk.StringVar(value="00")
+        ttk.Entry(frame, textvariable=self.hour_var, width=4).grid(column=1, row=3, sticky=tk.W)
+
+        ttk.Label(frame, text="Minute (mm):").grid(column=0, row=4, sticky=tk.W, pady=5)
+        self.min_var = tk.StringVar(value="00")
+        ttk.Entry(frame, textvariable=self.min_var, width=4).grid(column=1, row=4, sticky=tk.W)
+
+        # Status Label
+        self.status_label = ttk.Label(frame, text="")
+        self.status_label.grid(column=0, row=5, columnspan=2, sticky=tk.W, pady=10)
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(column=0, row=6, columnspan=2, sticky=tk.E, pady=10)
+        
+        self.fetch_button = ttk.Button(btn_frame, text="Fetch", command=self.fetch_files)
+        self.fetch_button.grid(column=1, row=0, padx=5)
+        
+        cancel_button = ttk.Button(btn_frame, text="Cancel", command=self.cancel)
+        cancel_button.grid(column=0, row=0, padx=5)
+
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+
+    def cancel(self):
+        # We must destroy the main Tk window to stop the script
+        self.main_tk.destroy()
+        sys.exit(0)
+
+    def fetch_files(self):
+        # 1. Get and validate inputs
+        station_display = self.station_var.get()
+        cam_num = self.cam_var.get()
+        date_str = self.date_var.get()
+        hour_str = self.hour_var.get()
+        min_str = self.min_var.get()
+
+        if not station_display or not cam_num:
+            messagebox.showerror("Error", "Please select a station and camera.")
+            return
+
+        if not re.match(r'^\d{8}$', date_str):
+            messagebox.showerror("Error", "Invalid Date format. Must be YYYYMMDD.")
+            return
+
+        if not re.match(r'^\d{2}$', hour_str) or not re.match(r'^\d{2}$', min_str):
+            messagebox.showerror("Error", "Invalid Hour/Minute format. Must be hh/mm.")
+            return
+
+        hostname = self.station_map[station_display]
+        self.fetch_button.config(state=tk.DISABLED) # Prevent double-click
+
+        # 2. Construct remote paths
+        remote_cfg_path = "/etc/meteor.cfg"
+        remote_pto_path = f"/meteor/cam{cam_num}/lens.pto"
+        remote_video_path = f"/meteor/cam{cam_num}/{date_str}/{hour_str}/full_{min_str}.mp4"
+        self.upload_target = f"{hostname}:/meteor/cam{cam_num}"
+
+        # 3. Fetch files
+        try:
+            self.status_label.config(text=f"Fetching config from {hostname}...")
+            self.root.update_idletasks()
+            local_cfg = scp_file(hostname, remote_cfg_path)
+            if local_cfg:
+                temp_files_to_clean.append(local_cfg) # Add to global cleanup list
+            else:
+                raise Exception(f"Failed to fetch config file: {remote_cfg_path}")
+
+            self.status_label.config(text=f"Fetching PTO from {hostname}...")
+            self.root.update_idletasks()
+            local_pto = scp_file(hostname, remote_pto_path)
+            if local_pto:
+                temp_files_to_clean.append(local_pto)
+            else:
+                raise Exception(f"Failed to fetch PTO file: {remote_pto_path}")
+
+            self.status_label.config(text=f"Fetching video from {hostname}...")
+            self.root.update_idletasks()
+            local_video = scp_file(hostname, remote_video_path)
+            if local_video:
+                temp_files_to_clean.append(local_video)
+            else:
+                raise Exception(f"Failed to fetch video file: {remote_video_path}")
+
+            # 4. Success! Store results and close.
+            self.status_label.config(text="Success! Launching...")
+            self.fetched_files = {
+                'config': local_cfg,
+                'pto': local_pto,
+                'video': local_video
+            }
+            # We must destroy the main Tk window to terminate root.mainloop()
+            self.main_tk.destroy()
+
+        except Exception as e:
+            messagebox.showerror("Fetch Failed", str(e))
+            self.status_label.config(text="Fetch failed. Please try again.")
+            self.fetch_button.config(state=tk.NORMAL)
+
 
 class RecalibrateDialog:
     def __init__(self, parent, image, zoom_instance):
@@ -1082,6 +1262,7 @@ class Zoom_Advanced(ttk.Frame):
 
         print(f"Saved event data to {filepath}") # <-- MODIFIED
 
+    # --- ADDED NEW METHOD ---
     def save_centroid_txt(self, filepath="centroid.txt"):
         """Saves the current centroid data to the specified file."""
         try:
@@ -1091,7 +1272,9 @@ class Zoom_Advanced(ttk.Frame):
             print(f"Saved centroid data to {filepath}")
         except Exception as e:
             print(f"Error saving centroid file '{filepath}': {e}", file=sys.stderr)
+    # --- END NEW METHOD ---
 
+    # --- ADDED NEW METHOD (with auto-deploy logic) ---
     def upload_data(self, event=None):
         """
         Handles the 'u' key press. Creates a new window and launches the
@@ -1131,6 +1314,7 @@ class Zoom_Advanced(ttk.Frame):
             
             # --- NEW: Check if we can infer calibration deployment info ---
             auto_calibrate_mode = False
+            match = None
             # We only do this if --calibrate was not *already* specified
             if not self.is_calibrate_mode:
                 log_to_window("Checking for auto-deployment mode...")
@@ -1141,7 +1325,7 @@ class Zoom_Advanced(ttk.Frame):
                         log_to_window(f"  - Path matched. Will auto-deploy to cam{cam_num} on {self.upload_hostname}.")
                         auto_calibrate_mode = True # Flag to set members later
                     else:
-                        log_to_window("  - Path does not match /meteor/camX. Skipping auto-deployment.")
+                        log_to_window(f"  - Path '{self.upload_dir}' does not match /meteor/camX. Skipping auto-deployment.")
                 else:
                     log_to_window("  - Upload target not specified. Skipping auto-deployment.")
             # --- END NEW ---
@@ -1273,6 +1457,7 @@ class Zoom_Advanced(ttk.Frame):
 
         # Start the task in a new thread
         threading.Thread(target=_upload_task, daemon=True).start()
+    # --- END NEW METHOD ---
 
     def load_event_file(self, filepath):
         """
@@ -1981,40 +2166,96 @@ def scp_file(hostname, remote_path):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Click on images to find coordinates.')
-    parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
-    parser.add_argument('-f', '--fps', dest='fps', help='frames per second (default: 10 or extracted from images)', default=10, type=int)
-    parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
-    parser.add_argument('-c', '--config', dest='station', help='station config file', type=str)
-    parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
-    parser.add_argument('-s', dest='skip', help='Seconds of the initial video to skip (default: 0)', default=0.0, type=float)
-    parser.add_argument('-t', dest='total', help='Total seconds of video to load after skipping. Applies to the first video only.', type=float, default=None)
-    parser.add_argument('--calibrate', dest='calibrate', help='Fetch files from a remote host. Format: HOST:CAM[:YYYYMMDD/HHmm]', type=str)
-    parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
     
-    # --- ADDED ARGUMENT ---
-    parser.add_argument('--upload-target', dest='upload_target', 
-                        help='Remote upload destination in format HOST:DIR (e.g., user@server:/path/to/uploads)', 
-                        type=str, default=None)
-    # --- END ADDED ARGUMENT ---
+    # --- Register cleanup and signal handlers AT THE TOP ---
+    atexit.register(cleanup_temp_resources)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    # --- End handler registration ---
 
-    parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
-    parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
-    parser.add_argument('--elevation', type=float, help='Observer elevation in meters. Required if --station is not used.')
-    parser.add_argument('ptofile', nargs='?', default=None, help='input .pto or .json calibration file')
-    parser.add_argument('imgfiles', nargs='*', help='input image or video files (.mp4 or image files)')
-    args = parser.parse_args()
+    args = None
+    
+    # --- NEW: Check for no-argument launch ---
+    if len(sys.argv) == 1:
+        print("No arguments detected, launching GUI selector...")
+        root = tk.Tk()
+        root.withdraw() # Hide the main root window
+        
+        # --- MODIFIED DIALOG LAUNCH ---
+        # Pass the Toplevel AND the main root window
+        dialog_toplevel = tk.Toplevel(root)
+        dialog = LauncherDialog(dialog_toplevel, root)
+        root.mainloop() # This blocks until main_tk.destroy() is called
+        # --- END MODIFICATION ---
 
-    # --- NEW LOGIC TO FIX THE ERROR ---
-    # Handle the case where the upload target is given as the final positional
-    # argument instead of using the --upload-target flag.
-    if args.upload_target is None and args.imgfiles and ':' in args.imgfiles[-1]:
-        potential_target = args.imgfiles[-1]
-        # If the argument doesn't exist as a local file, assume it's the target
-        if not os.path.exists(potential_target):
-            args.upload_target = args.imgfiles.pop(-1) # Remove from imgfiles list
-            print(f"Note: Last argument '{args.upload_target}' interpreted as upload target (use --upload-target flag for clarity).")
-    # --- END NEW LOGIC ---
+        # After mainloop, check if the dialog succeeded
+        if not hasattr(dialog, 'fetched_files'):
+            print("Launcher cancelled. Exiting.")
+            sys.exit(0)
+        
+        # If it succeeded, manually populate the 'args' namespace
+        # as if argparse had run.
+        parser = argparse.ArgumentParser() # Create a dummy parser to get a namespace
+        args = parser.parse_args([]) # Get an empty namespace
+        
+        args.station = dialog.fetched_files['config']
+        args.ptofile = dialog.fetched_files['pto']
+        args.imgfiles = [dialog.fetched_files['video']]
+        args.upload_target = dialog.upload_target
+        
+        # Set defaults for other args that argparse would normally handle
+        args.image = 0
+        args.fps = 10
+        args.name = "NUL" # This will be overridden by the config file anyway
+        args.start = None
+        args.skip = 0.0
+        args.total = None
+        args.calibrate = None
+        args.event_file = None
+        args.latitude = None
+        args.longitude = None
+        args.elevation = None
+
+        print("Launcher success. Proceeding with fetched files.")
+        
+    else:
+        # --- This is the original logic for when arguments ARE provided ---
+        parser = argparse.ArgumentParser(description='Click on images to find coordinates.')
+        parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
+        parser.add_argument('-f', '--fps', dest='fps', help='frames per second (default: 10 or extracted from images)', default=10, type=int)
+        parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
+        parser.add_argument('-c', '--config', dest='station', help='station config file', type=str)
+        parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
+        parser.add_argument('-s', dest='skip', help='Seconds of the initial video to skip (default: 0)', default=0.0, type=float)
+        parser.add_argument('-t', dest='total', help='Total seconds of video to load after skipping. Applies to the first video only.', type=float, default=None)
+        parser.add_argument('--calibrate', dest='calibrate', help='Fetch files from a remote host. Format: HOST:CAM[:YYYYMMDD/HHmm]', type=str)
+        parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
+        
+        # --- ADDED ARGUMENT ---
+        parser.add_argument('--upload-target', dest='upload_target', 
+                            help='Remote upload destination in format HOST:DIR (e.g., user@server:/path/to/uploads)', 
+                            type=str, default=None)
+        # --- END ADDED ARGUMENT ---
+
+        parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
+        parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
+        parser.add_argument('--elevation', type=float, help='Observer elevation in meters. Required if --station is not used.')
+        parser.add_argument('ptofile', nargs='?', default=None, help='input .pto or .json calibration file')
+        parser.add_argument('imgfiles', nargs='*', help='input image or video files (.mp4 or image files)')
+        args = parser.parse_args()
+
+        # --- NEW LOGIC TO FIX THE ERROR ---
+        # Handle the case where the upload target is given as the final positional
+        # argument instead of using the --upload-target flag.
+        if args.upload_target is None and args.imgfiles and ':' in args.imgfiles[-1]:
+            potential_target = args.imgfiles[-1]
+            # If the argument doesn't exist as a local file, assume it's the target
+            if not os.path.exists(potential_target):
+                args.upload_target = args.imgfiles.pop(-1) # Remove from imgfiles list
+                print(f"Note: Last argument '{args.upload_target}' interpreted as upload target (use --upload-target flag for clarity).")
+        # --- END NEW LOGIC ---
+    # --- END of if/else for argument handling ---
+
 
     # --- ADDED VALIDATION LOGIC ---
     upload_hostname, upload_dir = None, None
@@ -2034,44 +2275,10 @@ if __name__ == '__main__':
             parser.error("Invalid directory in --upload-target. Must be an absolute path and cannot contain unsafe characters.")
     # --- END VALIDATION LOGIC ---
 
-
-    # These lists will be populated with temp resources that need cleanup.
-    temp_files_to_clean = []
-    temp_dirs = []
-
-    def cleanup_temp_resources():
-        """Cleans up all temporary directories and files created by the script."""
-        print("\nPerforming cleanup...")
-        for d in temp_dirs:
-            # The TemporaryDirectory object's cleanup method handles removal.
-            try:
-                d.cleanup()
-            except Exception as e:
-                print(f"    - Error cleaning up directory: {e}", file=sys.stderr)
-        for f in temp_files_to_clean:
-            if os.path.exists(f):
-                try:
-                    print(f"  - Deleting temporary file: {f}")
-                    os.remove(f)
-                except OSError as e:
-                    print(f"    - Error removing file {f}: {e}", file=sys.stderr)
-        print("Cleanup complete.")
-
-    # Register the cleanup function to run on normal exit or unhandled exceptions.
-    atexit.register(cleanup_temp_resources)
-
-    # Define a handler for signals like Ctrl+C (SIGINT) and kill (SIGTERM).
-    def signal_handler(sig, frame):
-        # The atexit-registered function will be called automatically on sys.exit().
-        print(f"\nSignal {sig} received, exiting gracefully.")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
     # Validate arguments: ptofile and imgfiles are required unless --calibrate is used.
-    if not args.calibrate and (not args.ptofile or not args.imgfiles):
-        parser.error("ptofile and imgfiles are required when not using the --calibrate option.")
+    # This check is now skipped if we used the launcher (which sets --calibrate to None)
+    if not args.calibrate and (not args.ptofile or not args.imgfiles) and len(sys.argv) > 1:
+        parser.error("ptofile and imgfiles are required when not using the --calibrate or no-argument launcher.")
     
     calibrate_info = {
         'is_calibrate_mode': False,
@@ -2139,17 +2346,15 @@ if __name__ == '__main__':
                     if not local_path:
                         raise ValueError(f"scp_file for {key} returned None, indicating a failure.")
                     results[key] = local_path
+                    temp_files_to_clean.append(local_path) # Add to global cleanup list
                 except Exception as e:
                     print(f"Fatal error during parallel file download for '{key}': {e}", file=sys.stderr)
                     sys.exit("Aborting due to scp failure.")
 
-        # Assign results to the correct variables and track for cleanup
+        # Assign results to the correct variables
         args.station = results['station']
-        temp_files_to_clean.append(args.station)
         args.ptofile = results['pto']
-        temp_files_to_clean.append(args.ptofile)
         args.imgfiles = [results['video']]
-        temp_files_to_clean.append(args.imgfiles[0])
 
 
     # Establish observer location from command-line args or station file
@@ -2172,7 +2377,7 @@ if __name__ == '__main__':
         except (configparser.Error, FileNotFoundError) as e:
             sys.exit(f"Error reading station file '{args.station}': {e}")
     else:
-        sys.exit("Error: Observer location not specified. Please use the -s/--station option, or --latitude, --longitude, and --elevation.")
+        sys.exit("Error: Observer location not specified. Please use the -c/--station option, the no-argument launcher, or --latitude, --longitude, and --elevation.")
 
     # If input is a JSON file, convert it to an optimized PTO in memory
     if args.ptofile.lower().endswith('.json'):

@@ -26,7 +26,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
 from tkinter import ttk
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageTk, ImageEnhance, ImageFilter
 from brightstar import brightstar
 from recalibrate import recalibrate
@@ -107,19 +107,36 @@ class LauncherDialog:
         cam_combo['values'] = ['1', '2', '3', '4', '5', '6', '7']
         cam_combo.grid(column=1, row=1, sticky=tk.W)
         
-        # Date/Time
+        # --- Date/Time with Stepper Buttons ---
         now = datetime.now()
-        ttk.Label(frame, text="Date (YYYYMMDD):").grid(column=0, row=2, sticky=tk.W, pady=5)
-        self.date_var = tk.StringVar(value=now.strftime('%Y%m%d'))
-        ttk.Entry(frame, textvariable=self.date_var, width=10).grid(column=1, row=2, sticky=tk.W)
         
+        # Date
+        ttk.Label(frame, text="Date (YYYYMMDD):").grid(column=0, row=2, sticky=tk.W, pady=5)
+        date_frame = ttk.Frame(frame)
+        date_frame.grid(column=1, row=2, sticky=tk.W)
+        ttk.Button(date_frame, text="<", width=2, command=lambda: self._adjust_date(-1)).pack(side=tk.LEFT)
+        self.date_var = tk.StringVar(value=now.strftime('%Y%m%d'))
+        ttk.Entry(date_frame, textvariable=self.date_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(date_frame, text=">", width=2, command=lambda: self._adjust_date(1)).pack(side=tk.LEFT)
+        
+        # Hour
         ttk.Label(frame, text="Hour (hh):").grid(column=0, row=3, sticky=tk.W, pady=5)
+        hour_frame = ttk.Frame(frame)
+        hour_frame.grid(column=1, row=3, sticky=tk.W)
+        ttk.Button(hour_frame, text="<", width=2, command=lambda: self._adjust_hour(-1)).pack(side=tk.LEFT)
         self.hour_var = tk.StringVar(value="00")
-        ttk.Entry(frame, textvariable=self.hour_var, width=4).grid(column=1, row=3, sticky=tk.W)
+        ttk.Entry(hour_frame, textvariable=self.hour_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Button(hour_frame, text=">", width=2, command=lambda: self._adjust_hour(1)).pack(side=tk.LEFT)
 
+        # Minute
         ttk.Label(frame, text="Minute (mm):").grid(column=0, row=4, sticky=tk.W, pady=5)
+        min_frame = ttk.Frame(frame)
+        min_frame.grid(column=1, row=4, sticky=tk.W)
+        ttk.Button(min_frame, text="<", width=2, command=lambda: self._adjust_minute(-1)).pack(side=tk.LEFT)
         self.min_var = tk.StringVar(value="00")
-        ttk.Entry(frame, textvariable=self.min_var, width=4).grid(column=1, row=4, sticky=tk.W)
+        ttk.Entry(min_frame, textvariable=self.min_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Button(min_frame, text=">", width=2, command=lambda: self._adjust_minute(1)).pack(side=tk.LEFT)
+        # --- End Stepper Buttons ---
 
         # Status Label
         self.status_label = ttk.Label(frame, text="")
@@ -136,6 +153,33 @@ class LauncherDialog:
         cancel_button.grid(column=0, row=0, padx=5)
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+
+    def _adjust_date(self, amount):
+        try:
+            current_date = datetime.strptime(self.date_var.get(), '%Y%m%d')
+            new_date = current_date + timedelta(days=amount)
+            self.date_var.set(new_date.strftime('%Y%m%d'))
+        except ValueError:
+            # If current value is invalid, reset to today
+            self.date_var.set(datetime.now().strftime('%Y%m%d'))
+
+    def _adjust_hour(self, amount):
+        try:
+            current_hour = int(self.hour_var.get())
+            # Use modulo to wrap around 0-23
+            new_hour = (current_hour + amount) % 24
+            self.hour_var.set(f"{new_hour:02d}")
+        except ValueError:
+            self.hour_var.set("00")
+
+    def _adjust_minute(self, amount):
+        try:
+            current_minute = int(self.min_var.get())
+            # Use modulo to wrap around 0-59
+            new_minute = (current_minute + amount) % 60
+            self.min_var.set(f"{new_minute:02d}")
+        except ValueError:
+            self.min_var.set("00")
 
     def cancel(self):
         # We must destroy the main Tk window to stop the script
@@ -622,6 +666,7 @@ class Zoom_Advanced(ttk.Frame):
         self.curve_orientation = None
         self.predicted_point = None
         self.last_click_to_highlight = None
+        self.last_orientation_backup = None # For 'o' and 'O' keys
         
         # --- MODIFIED/ADDED ---
         # Store calibration mode info
@@ -910,7 +955,6 @@ class Zoom_Advanced(ttk.Frame):
                 for p in self.positions:
                     snapped_pos = self._project_point_on_curve(p['current'])
                     p['current'] = snapped_pos
-                    #self._update_centroid_entry(p['frame'], snapped_pos)
                     self._create_or_update_centroid(p['frame'], snapped_pos)
                 self.update_curve_fit()
                 self.update_prediction()
@@ -944,12 +988,31 @@ class Zoom_Advanced(ttk.Frame):
             except Exception as e:
                 print(f"Error saving/deploying PTO file: {e}", file=sys.stderr)
         
-        # --- MODIFIED ---
+        elif key_char == 'o':
+            # Backup current orientation before optimizing
+            self.last_orientation_backup = {
+                'p': self.img_data.get('p', 0),
+                'y': self.img_data.get('y', 0),
+                'r': self.img_data.get('r', 0),
+                'v': self.img_data.get('v', 0),
+            }
+            # Run optimization in a separate thread to keep UI responsive
+            threading.Thread(target=self._optimize_orientation, daemon=True).start()
+            return # UI feedback is handled in the thread
+
+        elif key_char == 'O':
+            if self.last_orientation_backup:
+                print("Reverting to last saved orientation.")
+                self.img_data.update(self.last_orientation_backup)
+                self.last_orientation_backup = None # Clear the backup
+                self.pto_dirty = True # Mark as changed since it's a revert
+            else:
+                print("No orientation backup to restore.")
+
         elif key_char == 'S': # Note: 'S' is already uppercase
             self.save_centroid_txt() # Call refactored function
         elif key_char == 's':
             self.save_event_txt() # Call refactored function
-        # --- END MODIFIED ---
             
         elif key_char == 'h': self.show_text ^= 1
         elif key_char == 'i': self.show_info ^= 1
@@ -974,12 +1037,86 @@ class Zoom_Advanced(ttk.Frame):
             self.background_removal_active = False
             self.show_image()
         
-        # --- ADDED ---
         elif key_char == 'u':
             self.upload_data()
-        # --- END ADDED ---
         
         self.show_image()
+
+    def _optimize_orientation(self):
+        """
+        Runs the plate-solving process for orientation only, in a background thread.
+        """
+        # --- GUI Feedback (run on main thread) ---
+        def _update_ui_start():
+            print("Optimizing orientation (background task)...")
+            self.canvas.config(cursor="watch")
+        self.master.after_idle(_update_ui_start)
+        
+        # --- The actual work ---
+        img_temp_filename, old_lens_filename, new_lens_filename, log_file_path = None, None, None, None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".png") as img_f:
+                self.image.save(img_f, format='PNG')
+                img_temp_filename = img_f.name
+
+            img_idx = self.image_index
+            vars_to_optimize = [f'v{img_idx}', f'r{img_idx}', f'p{img_idx}', f'y{img_idx}']
+
+            with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".pto") as pto_f:
+                pto_mapper.write_pto_file(self.pto_data, pto_f.name, optimize_vars=vars_to_optimize)
+                old_lens_filename = pto_f.name
+
+            new_lens_filename = tempfile.NamedTemporaryFile(delete=True, dir="/tmp", suffix=".pto").name
+            log_file_path = tempfile.mktemp(suffix=".log", dir="/tmp")
+
+            with open(log_file_path, 'w') as log_f:
+                with contextlib.redirect_stdout(log_f):
+                    recalibrate(
+                        starttime, old_lens_filename, img_temp_filename, new_lens_filename, pos,
+                        image=self.image_index, radius=1.0, lensopt=False, faintest=4, brightest=-5,
+                        objects=500, blur=50, verbose=True, sigma=20
+                    )
+
+            if not os.path.exists(new_lens_filename) or os.path.getsize(new_lens_filename) == 0:
+                raise RuntimeError("Optimization failed to produce a new calibration file.")
+
+            _, new_images_data = pto_mapper.parse_pto_file(new_lens_filename)
+            new_img_data = new_images_data[self.image_index]
+
+            # --- Update GUI (run on main thread) ---
+            def _update_gui_success():
+                params_to_update = ['p', 'y', 'r', 'v']
+                for param in params_to_update:
+                    if param in new_img_data:
+                        self.img_data[param] = new_img_data[param]
+                self.pto_dirty = True
+                print("Orientation optimization successful.")
+                self.show_image() # Redraw with new params
+            self.master.after_idle(_update_gui_success)
+
+        except Exception as e:
+            # --- Update GUI on Error (run on main thread) ---
+            error_message = f"Orientation optimization failed:\n{e}"
+            def _update_gui_error():
+                print(error_message, file=sys.stderr)
+                messagebox.showerror("Optimization Error", error_message)
+                # Revert to the backup if optimization fails
+                if self.last_orientation_backup:
+                    print("Reverting to pre-optimization orientation.")
+                    self.img_data.update(self.last_orientation_backup)
+                    self.last_orientation_backup = None
+            self.master.after_idle(_update_gui_error)
+
+        finally:
+            # --- Final Cleanup and GUI Reset (run on main thread) ---
+            def _update_gui_finish():
+                if img_temp_filename and os.path.exists(img_temp_filename): os.remove(img_temp_filename)
+                if old_lens_filename and os.path.exists(old_lens_filename): os.remove(old_lens_filename)
+                if new_lens_filename and os.path.exists(new_lens_filename): os.remove(new_lens_filename)
+                if log_file_path and os.path.exists(log_file_path): os.remove(log_file_path)
+                self.canvas.config(cursor="draft_small")
+                self.show_image() # Final redraw to ensure consistency
+            self.master.after_idle(_update_gui_finish)
 
     def _update_centroid_entry(self, frame_num, xy_coords):
         """Recalculates and updates the centroid string for a given frame and xy coordinate."""
@@ -1817,22 +1954,15 @@ class Zoom_Advanced(ttk.Frame):
         self.overlay.append(help_id)
 
         if self.show_text:
-            # --- MODIFIED ---
             help_text_content = ("\n" * 6 +
-                "  q=quit, -/+=bg removal, 1/2=contrast, 3/4=brightness, 5/6=color, 7/8=sharpness, 0=reset\n" + # This line is changed
-                "  p/P=pitch, y/Y=yaw, r/R=roll, z/Z=hfov\n" +
-                "  a/A,b/B,c/C = radial distortion params\n" +
-                "  d/D,e/E = radial distortion shift\n" +
-                "  i=toggle star info, !=toggle boost (100x)\n" +
-                "  x=snap points to line, X=undo snap\n" +
-                "  g=toggle brightness graph\n" +
-                "  t=temporally snap points, T=undo temporal snap\n" +
-                "  Ctrl+Z=undo, Ctrl+Y=redo\n" +
-                "  *=reset orientation, l=save ptofile\n" +
-                f"  s=save event.txt, S=save centroid.txt{', u=upload data' if self.upload_hostname else ''}\n" + # <-- MODIFIED LINE
-                "  arrows=move frame, pgup/dn=move 10 frames\n" +
-                "  mouse wheel=zoom, LMB=drag, RMB=mark & next")
-            # --- END MODIFIED ---
+                "  NAVIGATION: arrows=move frame, pgup/dn=move 10 frames, mouse wheel=zoom, LMB=drag, RMB=mark & next\n" +
+                "  MAIN: q=quit, h=toggle help, i=toggle star info, g=toggle brightness graph\n" +
+                "  EDITING: Ctrl+Z=undo, Ctrl+Y=redo, x=snap to line, X=undo snap, t=temp. space, T=undo temp.\n" +
+                "  CALIBRATION: ?=open dialog, o=optimise orientation, O=undo optimisation, *=reset orientation\n" +
+                "  FINE-TUNE: p/P=pitch, y/Y=yaw, r/R=roll, z/Z=hfov, a/A,b/B,c/C=radial, d/D,e/E=radial shift\n" +
+                "  IMAGE: -/+=bg removal, 1/2=contrast, 3/4=brightness, 5/6=color, 7/8=sharpness, 0=reset\n" +
+                "  SAVE/UPLOAD: l=save pto, s=save event.txt, S=save centroid.txt" + (f", u=upload to {self.upload_hostname}\n" if self.upload_hostname else "\n") +
+                "  MODIFIERS: !=toggle boost (100x)")
             text_id = self.canvas.create_text(bbox2[0]+5, bbox2[1]+5, anchor="nw", text=help_text_content, fill="yellow", font=("helvetica", 10))
             self.overlay.append(text_id)
 
@@ -2524,3 +2654,4 @@ if __name__ == '__main__':
     if args.event_file:
         app.load_event_file(args.event_file)
     window.mainloop()
+

@@ -21,6 +21,7 @@ import tkinter as tk
 import contextlib
 import signal
 import atexit
+import threading  # <-- ADDED
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
@@ -207,6 +208,7 @@ class RecalibrateDialog:
                     self.img_data[param] = new_img_data[param]
 
             self.zoom.show_image()
+            self.zoom.pto_dirty = True # <-- SET DIRTY FLAG
         except Exception as e:
             print(f"Recalibration failed: {e}", file=sys.stderr)
             self.rms_label.config(text=f"Error: {e}")
@@ -381,7 +383,7 @@ def midpoint(az1, alt1, az2, alt2):
 class Zoom_Advanced(ttk.Frame):
     ''' Advanced zoom of the image '''
     def __init__(self, mainframe, files, timestamps, pto_data, image_index,
-                 is_calibrate_mode=False, hostname=None, cam_num=None, date_str=None):
+                 **kwargs): # <-- CHANGED
         ttk.Frame.__init__(self, master=mainframe)
         self.master.title('Click Coords')
         self.overlay = []
@@ -441,11 +443,20 @@ class Zoom_Advanced(ttk.Frame):
         self.predicted_point = None
         self.last_click_to_highlight = None
         
+        # --- MODIFIED/ADDED ---
         # Store calibration mode info
-        self.is_calibrate_mode = is_calibrate_mode
-        self.hostname = hostname
-        self.cam_num = cam_num
-        self.date_str = date_str
+        self.is_calibrate_mode = kwargs.get('is_calibrate_mode', False)
+        self.hostname = kwargs.get('hostname') # This is the remote meteor server
+        self.cam_num = kwargs.get('cam_num')
+        self.date_str = kwargs.get('date_str')
+        
+        # Store new upload target info
+        self.upload_hostname = kwargs.get('upload_hostname')
+        self.upload_dir = kwargs.get('upload_dir')
+        
+        # Flag to track if calibration parameters have been modified
+        self.pto_dirty = False
+        # --- END MODIFIED/ADDED ---
         
         self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
         
@@ -610,9 +621,22 @@ class Zoom_Advanced(ttk.Frame):
             self.mousepos = "\n  cursor pos = outside panorama"
         self.show_image()
     
-    def _save_and_deploy_calibration(self, local_pto_path):
+    def _save_and_deploy_calibration(self, local_pto_path, log_callback=None): # <-- MODIFIED
         """In --calibrate mode, saves PTO to remote host and updates links."""
-        print("Deploying new calibration to remote host...")
+        
+        # --- ADDED HELPER ---
+        def log_message(msg, file=None): # file arg is for stderr compatibility
+            """Logs to the callback if provided, otherwise prints."""
+            if file == sys.stderr: # Log errors as errors
+                msg = f"ERROR: {msg}"
+            
+            if log_callback:
+                log_callback(msg)
+            else:
+                print(msg, file=file if file else sys.stdout) # Original behavior
+        # --- END HELPER ---
+        
+        log_message("Deploying new calibration to remote host...")
         try:
             # Construct remote paths
             remote_pto_dated = f"/meteor/cam{self.cam_num}/lens-{self.date_str}.pto"
@@ -623,8 +647,12 @@ class Zoom_Advanced(ttk.Frame):
 
             # 1. SCP the new PTO file
             remote_full_path = f"{self.hostname}:{remote_pto_dated}"
-            print(f"  - Copying {local_pto_path} to {remote_full_path}...")
-            subprocess.run(['scp', local_pto_path, remote_full_path], check=True, capture_output=True, text=True, errors='ignore')
+            log_message(f"  - Copying {local_pto_path} to {remote_full_path}...")
+            # --- MODIFIED SUBPROCESS CALL ---
+            proc = subprocess.run(['scp', local_pto_path, remote_full_path], check=True, capture_output=True, text=True, errors='ignore')
+            if proc.stdout: log_message(f"    - SCP STDOUT: {proc.stdout.strip()}")
+            if proc.stderr: log_message(f"    - SCP STDERR: {proc.stderr.strip()}")
+            # --- END MODIFICATION ---
 
             # 2. Execute remote commands via SSH to generate grid and update links
             remote_command = (
@@ -633,30 +661,38 @@ class Zoom_Advanced(ttk.Frame):
                 f"ln -s {remote_pto_dated} {remote_pto_link} && "
                 f"ln -s {remote_grid_dated} {remote_grid_link}"
             )
-            print("  - Running remote commands to update grid and links...")
-            print(f"    - Command: ssh {self.hostname} \"{remote_command}\"")
+            log_message("  - Running remote commands to update grid and links...")
+            log_message(f"    - Command: ssh {self.hostname} \"{remote_command}\"")
 
+            # --- MODIFIED SUBPROCESS CALL ---
             proc = subprocess.run(['ssh', self.hostname, remote_command], check=True, capture_output=True, text=True, errors='ignore')
-            print("  - Remote deployment successful.")
+            log_message("  - Remote deployment successful.")
             if proc.stdout:
-                print("    - Remote STDOUT:", proc.stdout)
+                log_message(f"    - Remote STDOUT: {proc.stdout.strip()}")
+            if proc.stderr:
+                log_message(f"    - Remote STDERR: {proc.stderr.strip()}")
+            # --- END MODIFICATION ---
 
         except FileNotFoundError as e:
             error_msg = f"Error: Command '{e.filename}' not found. Please ensure scp and ssh are in your PATH."
-            print(error_msg, file=sys.stderr)
-            messagebox.showerror("Deployment Error", error_msg)
+            log_message(error_msg, file=sys.stderr)
+            if not log_callback: # <-- MODIFIED
+                messagebox.showerror("Deployment Error", error_msg)
         except subprocess.CalledProcessError as e:
             error_msg = (
                 f"Error deploying calibration to {self.hostname}:\n"
                 f"Command failed with exit code {e.returncode}.\n\n"
+                f"STDOUT:\n{e.stdout}\n\n"
                 f"STDERR:\n{e.stderr}"
             )
-            print(error_msg, file=sys.stderr)
-            messagebox.showerror("Deployment Error", error_msg)
+            log_message(error_msg, file=sys.stderr)
+            if not log_callback: # <-- MODIFIED
+                messagebox.showerror("Deployment Error", error_msg)
         except Exception as e:
             error_msg = f"An unexpected error occurred during deployment: {e}"
-            print(error_msg, file=sys.stderr)
-            messagebox.showerror("Deployment Error", error_msg)
+            log_message(error_msg, file=sys.stderr)
+            if not log_callback: # <-- MODIFIED
+                messagebox.showerror("Deployment Error", error_msg)
 
     def key(self, event):
         # Check for Control key modifier (mask 0x4)
@@ -682,6 +718,7 @@ class Zoom_Advanced(ttk.Frame):
             param, change = actions[key_char.lower()]
             if is_upper: change *= -1
             self.img_data[param] = self.img_data.get(param, 0) + change * self.boost
+            self.pto_dirty = True  # <-- SET DIRTY FLAG
 
         elif key_char == '?':
             root = tk.Toplevel(self.master)
@@ -710,10 +747,12 @@ class Zoom_Advanced(ttk.Frame):
             _, fresh_images_data = pto_mapper.parse_pto_file(args.ptofile)
             self.images_data[self.image_index] = fresh_images_data[self.image_index]
             self.img_data = self.images_data[self.image_index]
+            self.pto_dirty = True # <-- SET DIRTY FLAG
         elif key_char == 'l':
             try:
                 # Always save to the local file first to capture the latest changes.
                 pto_mapper.write_pto_file(self.pto_data, args.ptofile)
+                self.pto_dirty = False # <-- RESET DIRTY FLAG
                 
                 if self.is_calibrate_mode:
                     # In calibrate mode, deploy to the remote server.
@@ -724,13 +763,14 @@ class Zoom_Advanced(ttk.Frame):
 
             except Exception as e:
                 print(f"Error saving/deploying PTO file: {e}", file=sys.stderr)
+        
+        # --- MODIFIED ---
         elif key_char == 'S': # Note: 'S' is already uppercase
-            with open("centroid.txt","w") as f:
-                for l in self.centroid:
-                    if l is not None: f.write(l + "\n")
-            print("Saved centroid data to centroid.txt")
+            self.save_centroid_txt() # Call refactored function
         elif key_char == 's':
-            self.save_event_txt()
+            self.save_event_txt() # Call refactored function
+        # --- END MODIFIED ---
+            
         elif key_char == 'h': self.show_text ^= 1
         elif key_char == 'i': self.show_info ^= 1
         elif key_char == 'g': self.show_graph ^= 1
@@ -753,6 +793,11 @@ class Zoom_Advanced(ttk.Frame):
         elif key_char == '+':
             self.background_removal_active = False
             self.show_image()
+        
+        # --- ADDED ---
+        elif key_char == 'u':
+            self.upload_data()
+        # --- END ADDED ---
         
         self.show_image()
 
@@ -969,7 +1014,7 @@ class Zoom_Advanced(ttk.Frame):
                 fill="red", outline=""
             ))
 
-    def save_event_txt(self):
+    def save_event_txt(self, filepath="event.txt"): # <-- MODIFIED
         # Use a filtered list of positions that corresponds to non-None centroid entries
         valid_positions = [p for p in self.positions if self.centroid[p['frame']] is not None]
         centroid2 = [l for l in self.centroid if l is not None]
@@ -977,8 +1022,9 @@ class Zoom_Advanced(ttk.Frame):
         if not centroid2:
             print("No centroid data to save to event.txt")
             return
-            
-        with open("event.txt", "w") as f:
+        
+        # --- MODIFIED ---
+        with open(filepath, "w") as f:
             # --- Trail Section ---
             print("[trail]", file=f)
             print(f"frames = {len(centroid2)}", file=f)
@@ -1034,7 +1080,199 @@ class Zoom_Advanced(ttk.Frame):
 
             print(f"duration = {duration_val}", file=f)
 
-        print("Saved event data to event.txt")
+        print(f"Saved event data to {filepath}") # <-- MODIFIED
+
+    def save_centroid_txt(self, filepath="centroid.txt"):
+        """Saves the current centroid data to the specified file."""
+        try:
+            with open(filepath, "w") as f:
+                for l in self.centroid:
+                    if l is not None: f.write(l + "\n")
+            print(f"Saved centroid data to {filepath}")
+        except Exception as e:
+            print(f"Error saving centroid file '{filepath}': {e}", file=sys.stderr)
+
+    def upload_data(self, event=None):
+        """
+        Handles the 'u' key press. Creates a new window and launches the
+        upload process in a separate thread to avoid freezing the GUI.
+        """
+        if not self.upload_hostname or not self.upload_dir:
+            print("Upload target not configured. Use --upload-target HOST:DIR.")
+            return
+
+        if not self.positions:
+            messagebox.showwarning("Upload Error", "No points selected. Cannot determine upload timestamp.")
+            return
+            
+        # Create the progress window
+        upload_window = tk.Toplevel(self.master)
+        upload_window.title("Upload Progress")
+        upload_window.geometry("700x450")
+
+        text_widget = tk.Text(upload_window, wrap=tk.WORD, height=25, width=90, bg="black", fg="gray90", font=("monospace", 9))
+        text_widget.pack(padx=10, pady=10, expand=True, fill=tk.BOTH)
+        
+        close_button = tk.Button(upload_window, text="Close", command=upload_window.destroy, state=tk.DISABLED)
+        close_button.pack(pady=5)
+
+        def log_to_window(message):
+            """Helper to safely update the GUI text widget from the thread."""
+            def _update_gui():
+                text_widget.insert(tk.END, str(message) + "\n")
+                text_widget.see(tk.END)
+            
+            # Schedule the GUI update to run on the main thread's idle loop
+            self.master.after_idle(_update_gui)
+
+        def _upload_task():
+            """The actual work, to be run in a separate thread."""
+            temp_files = {} # To track files for cleanup
+            
+            # --- NEW: Check if we can infer calibration deployment info ---
+            auto_calibrate_mode = False
+            # We only do this if --calibrate was not *already* specified
+            if not self.is_calibrate_mode:
+                log_to_window("Checking for auto-deployment mode...")
+                if self.upload_dir and self.upload_hostname:
+                    match = re.match(r'/meteor/cam(\d+)', self.upload_dir)
+                    if match:
+                        cam_num = match.group(1)
+                        log_to_window(f"  - Path matched. Will auto-deploy to cam{cam_num} on {self.upload_hostname}.")
+                        auto_calibrate_mode = True # Flag to set members later
+                    else:
+                        log_to_window("  - Path does not match /meteor/camX. Skipping auto-deployment.")
+                else:
+                    log_to_window("  - Upload target not specified. Skipping auto-deployment.")
+            # --- END NEW ---
+
+            try:
+                # 1. Get timestamp and create remote directory
+                log_to_window("Getting timestamp from first point...")
+                first_point_frame = self.positions[0]['frame']
+                first_timestamp = self.timestamps[first_point_frame]
+                dt = datetime.fromtimestamp(first_timestamp, timezone.utc)
+                date_dir = dt.strftime("%Y%m%d")
+                time_dir = dt.strftime("%H%M%S")
+
+                # --- NEW: Set auto-calibration members ---
+                # If we're in auto-calibrate mode, set the necessary class members
+                # using the information we have.
+                if auto_calibrate_mode:
+                    self.is_calibrate_mode = True
+                    self.hostname = self.upload_hostname # Use upload host for deployment
+                    self.cam_num = match.group(1)        # Use cam_num from regex
+                    self.date_str = date_dir             # Use the event's date
+                # --- END NEW ---
+
+                # Use os.path.join for clean path construction
+                remote_subdir = f"{self.upload_dir.rstrip('/')}/events/{date_dir}/{time_dir}"
+                
+                log_to_window(f"Target directory: {self.upload_hostname}:{remote_subdir}")
+                
+                log_to_window(f"Running: ssh {self.upload_hostname} mkdir -p {remote_subdir}")
+                proc = subprocess.run(['ssh', self.upload_hostname, 'mkdir', '-p', remote_subdir], 
+                                      capture_output=True, text=True, check=True, errors='ignore')
+                if proc.stderr: log_to_window(f"STDERR:\n{proc.stderr.strip()}")
+
+                # 2. Save local files to a temporary location
+                log_to_window("Saving local files to temporary location...")
+                
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_event.txt", dir="/tmp") as f:
+                    self.save_event_txt(filepath=f.name)
+                    temp_files['event.txt'] = f.name
+                    log_to_window(f"  - event.txt saved to {f.name}")
+                
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_centroid.txt", dir="/tmp") as f:
+                    self.save_centroid_txt(filepath=f.name)
+                    temp_files['centroid.txt'] = f.name
+                    log_to_window(f"  - centroid.txt saved to {f.name}")
+                
+                if self.pto_dirty:
+                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_lens.pto", dir="/tmp") as f:
+                        pto_mapper.write_pto_file(self.pto_data, f.name)
+                        temp_files['lens.pto'] = f.name
+                        log_to_window(f"  - lens.pto saved to {f.name}")
+
+                # 3. SCP files to remote host
+                if not temp_files:
+                    log_to_window("No files to upload.")
+                    return
+
+                log_to_window("Copying files via scp...")
+                for dest_name, local_path in temp_files.items():
+                    remote_destination = f"{self.upload_hostname}:{remote_subdir}/{dest_name}"
+                    log_to_window(f"  - Copying {local_path} to {remote_destination}...")
+                    
+                    proc = subprocess.run(['scp', local_path, remote_destination], 
+                                          capture_output=True, text=True, check=True, errors='ignore')
+                    if proc.stderr: 
+                        log_to_window(f"    - SCP STDERR for {dest_name}: {proc.stderr.strip()}")
+                
+                log_to_window("  - SCP complete.")
+
+
+                # 4. Deploy calibration (if changed and in calibrate mode)
+                if 'lens.pto' in temp_files and self.is_calibrate_mode:
+                    log_to_window("Deploying new calibration (lens.pto)...")
+                    # Pass the log_callback to capture output in our window
+                    self._save_and_deploy_calibration(temp_files['lens.pto'], log_callback=log_to_window)
+                    self.pto_dirty = False # Reset flag
+                elif 'lens.pto' in temp_files:
+                    log_to_window("  - Calibration changed, but not in --calibrate mode. Skipping deployment.")
+                    self.pto_dirty = False # Reset flag
+
+                # 5. Run remote report script
+                log_to_window("Running remote report script...")
+                report_script = "/home/meteor/bin/report.py"
+                remote_event_file = f"{remote_subdir}/event.txt"
+                log_to_window(f"Running: ssh {self.upload_hostname} {report_script} {remote_event_file}")
+                
+                proc = subprocess.run(['ssh', self.upload_hostname, report_script, remote_event_file], 
+                                      capture_output=True, text=True, check=False, errors='ignore') # Don't check=True, report might fail
+                
+                log_to_window("\n--- Report Output ---")
+                if proc.stdout: log_to_window(proc.stdout.strip())
+                if proc.stderr: log_to_window(f"STDERR:\n{proc.stderr.strip()}")
+                log_to_window("--- End of Report ---")
+
+                log_to_window("\nUpload process complete.")
+
+            except subprocess.CalledProcessError as e:
+                log_to_window(f"\n--- COMMAND FAILED ---")
+                log_to_window(f"Command: {' '.join(e.cmd)}")
+                log_to_window(f"Return Code: {e.returncode}")
+                if e.stdout: log_to_window(f"STDOUT:\n{e.stdout.strip()}")
+                if e.stderr: log_to_window(f"STDERR:\n{e.stderr.strip()}")
+            except Exception as e:
+                log_to_window(f"\n--- UNEXPECTED ERROR ---")
+                log_to_window(str(e))
+            finally:
+                # 6. Clean up temporary files
+                log_to_window("Cleaning up temporary local files...")
+                for f_name, f_path in temp_files.items():
+                    try:
+                        os.remove(f_path)
+                        log_to_window(f"  - Removed {f_name} ({f_path})")
+                    except OSError as e:
+                        log_to_window(f"  - Error removing {f_path}: {e}")
+                
+                # --- NEW: Reset auto-calibration mode ---
+                # Reset the mode if it was auto-set, so the next 'u' press re-evaluates.
+                if auto_calibrate_mode:
+                    self.is_calibrate_mode = False
+                    self.hostname = None
+                    self.cam_num = None
+                    self.date_str = None
+                # --- END NEW ---
+
+                # Safely enable the close button from the main thread
+                def _enable_button():
+                    close_button.config(state=tk.NORMAL)
+                self.master.after_idle(_enable_button)
+
+        # Start the task in a new thread
+        threading.Thread(target=_upload_task, daemon=True).start()
 
     def load_event_file(self, filepath):
         """
@@ -1394,6 +1632,7 @@ class Zoom_Advanced(ttk.Frame):
         self.overlay.append(help_id)
 
         if self.show_text:
+            # --- MODIFIED ---
             help_text_content = ("\n" * 6 +
                 "  q=quit, -/+=bg removal, 1/2=contrast, 3/4=brightness, 5/6=color, 7/8=sharpness, 0=reset\n" + # This line is changed
                 "  p/P=pitch, y/Y=yaw, r/R=roll, z/Z=hfov\n" +
@@ -1405,9 +1644,10 @@ class Zoom_Advanced(ttk.Frame):
                 "  t=temporally snap points, T=undo temporal snap\n" +
                 "  Ctrl+Z=undo, Ctrl+Y=redo\n" +
                 "  *=reset orientation, l=save ptofile\n" +
-                "  s=save event.txt, S=save centroid.txt\n" +
+                f"  s=save event.txt, S=save centroid.txt{', u=upload data' if self.upload_hostname else ''}\n" + # <-- MODIFIED LINE
                 "  arrows=move frame, pgup/dn=move 10 frames\n" +
                 "  mouse wheel=zoom, LMB=drag, RMB=mark & next")
+            # --- END MODIFIED ---
             text_id = self.canvas.create_text(bbox2[0]+5, bbox2[1]+5, anchor="nw", text=help_text_content, fill="yellow", font=("helvetica", 10))
             self.overlay.append(text_id)
 
@@ -1751,12 +1991,49 @@ if __name__ == '__main__':
     parser.add_argument('-t', dest='total', help='Total seconds of video to load after skipping. Applies to the first video only.', type=float, default=None)
     parser.add_argument('--calibrate', dest='calibrate', help='Fetch files from a remote host. Format: HOST:CAM[:YYYYMMDD/HHmm]', type=str)
     parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
+    
+    # --- ADDED ARGUMENT ---
+    parser.add_argument('--upload-target', dest='upload_target', 
+                        help='Remote upload destination in format HOST:DIR (e.g., user@server:/path/to/uploads)', 
+                        type=str, default=None)
+    # --- END ADDED ARGUMENT ---
+
     parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
     parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
     parser.add_argument('--elevation', type=float, help='Observer elevation in meters. Required if --station is not used.')
     parser.add_argument('ptofile', nargs='?', default=None, help='input .pto or .json calibration file')
     parser.add_argument('imgfiles', nargs='*', help='input image or video files (.mp4 or image files)')
     args = parser.parse_args()
+
+    # --- NEW LOGIC TO FIX THE ERROR ---
+    # Handle the case where the upload target is given as the final positional
+    # argument instead of using the --upload-target flag.
+    if args.upload_target is None and args.imgfiles and ':' in args.imgfiles[-1]:
+        potential_target = args.imgfiles[-1]
+        # If the argument doesn't exist as a local file, assume it's the target
+        if not os.path.exists(potential_target):
+            args.upload_target = args.imgfiles.pop(-1) # Remove from imgfiles list
+            print(f"Note: Last argument '{args.upload_target}' interpreted as upload target (use --upload-target flag for clarity).")
+    # --- END NEW LOGIC ---
+
+    # --- ADDED VALIDATION LOGIC ---
+    upload_hostname, upload_dir = None, None
+    if args.upload_target:
+        try:
+            upload_hostname, upload_dir = args.upload_target.split(':', 1)
+        except ValueError:
+            parser.error("Invalid --upload-target format. Expected HOST:DIR or USER@HOST:DIR")
+
+        # Sanity check to prevent shell injection.
+        # This disallows common shell metacharacters.
+        if re.search(r'[;&|`$(){}<> \'\"]', upload_hostname):
+            parser.error("Invalid hostname in --upload-target. Contains unsafe characters.")
+        
+        # Enforce absolute path and disallow unsafe characters for the directory
+        if not upload_dir.startswith('/') or re.search(r'[;&|`$(){}<> \'\"]', upload_dir):
+            parser.error("Invalid directory in --upload-target. Must be an absolute path and cannot contain unsafe characters.")
+    # --- END VALIDATION LOGIC ---
+
 
     # These lists will be populated with temp resources that need cleanup.
     temp_files_to_clean = []
@@ -1800,7 +2077,9 @@ if __name__ == '__main__':
         'is_calibrate_mode': False,
         'hostname': None,
         'cam_num': None,
-        'date_str': None
+        'date_str': None,
+        'upload_hostname': upload_hostname, # <-- ADDED
+        'upload_dir': upload_dir            # <-- ADDED
     }
 
     if args.calibrate:
@@ -1946,6 +2225,7 @@ if __name__ == '__main__':
     seconds_to_load = args.total
     loaded_duration = 0.0
 
+    # Now that 'imgfiles' is clean, this loop will only process video/image files
     for f in args.imgfiles:
         if f.lower().endswith('.mp4'):
             # If -t is specified, stop if we have loaded the requested duration
@@ -2033,6 +2313,7 @@ if __name__ == '__main__':
     # Launch the GUI
     window = tk.Tk()
     window.geometry("1600x960")
+    # 'calibrate_info' now correctly contains the upload target info, if provided
     app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image, **calibrate_info)
 
     if args.event_file:

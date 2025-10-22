@@ -1094,68 +1094,34 @@ class AS7Diagnostic:
         """Checks for running capture processes and for stale/duplicate script instances."""
         print("\n--- Checking Running Processes ---")
         as6_data = self.config_data.get("/home/ams/amscams/conf/as6.json", {})
-        ps_output = ""
         try:
-            # Check if ps command exists
-            if not which('ps'):
-                self.log_issue("SYS_PKG_MISSING", {'pkg': 'ps', 'pkg_name': 'procps'})
-                return # Cannot check processes without ps
-
             ps_output = subprocess.check_output(['ps', '-aux'], text=True)
             for cam_key, cam_info in as6_data.get('cameras', {}).items():
                 ip = cam_info.get('ip')
                 if ip:
-                    # Escape the IP address for literal matching (important for dots)
-                    escaped_ip = re.escape(ip)
                     for stream in ["SD", "HD"]:
-                        found = False
-                        for line in ps_output.splitlines():
-                            # Check if line contains 'ffmpeg', the IP, and the stream ID, and not 'grep'
-                            # This is less strict about order than the previous regex attempt.
-                            if ('ffmpeg' in line and
-                                escaped_ip in line and
-                                stream in line and
-                                'grep' not in line): # Ensure it's not the grep command itself
-                                found = True
-                                break # Found a matching line for this cam/stream
-
-                        if not found:
-                            self.log_issue("FFMPEG_DOWN", {'cam_key': cam_key, 'stream': stream})
-                        else:
-                            self.log_success(f"FFMPEG process for '{cam_key}' ({stream}) is running.")
-        except FileNotFoundError:
-             self.log_issue("SYS_PKG_MISSING", {'pkg': 'ps', 'pkg_name': 'procps'})
-             return
-        except Exception as e:
-             self.log_issue("PERMISSION_DENIED", {'check': f"running ps command: {e}"})
-
-
-        if not self.psutil: return # psutil check failed earlier
+                        found = any(f'ffmpeg' in l and ip in l and stream in l and 'grep' not in l for l in ps_output.splitlines())
+                        if not found: self.log_issue("FFMPEG_DOWN", {'cam_key': cam_key, 'stream': stream})
+                        else: self.log_success(f"FFMPEG process for '{cam_key}' ({stream}) is running.")
+        except Exception: pass
         try:
+            psutil = importlib.import_module("psutil")
             scripts_to_check = ["Process.py"]
             for script_name in scripts_to_check:
                 count = 0
-                for proc in self.psutil.process_iter(['cmdline', 'name']):
-                    try:
-                        if not proc.info['cmdline']:
-                            continue
-                        cmdline_str = ' '.join(proc.info['cmdline'])
-                        proc_name = proc.info['name']
-                        # Check if script name is in the command line and it's a python process
-                        if script_name in cmdline_str and proc_name in ('python', 'python3'):
-                            count += 1
-                    except (self.psutil.NoSuchProcess, self.psutil.AccessDenied):
-                        continue # Process might have died, or we don't have permission
-                    except Exception: pass # Ignore other potential errors for a single process
-
+                for proc in psutil.process_iter(['cmdline', 'name']):
+                    if not proc.info['cmdline']:
+                        continue
+                    cmdline_str = ' '.join(proc.info['cmdline'])
+                    proc_name = proc.info['name']
+                    if script_name in cmdline_str and proc_name in ('python', 'python3'):
+                        count += 1
                 if count > 1:
                     self.log_issue("STALE_PROCESS_FOUND", {'proc': script_name, 'count': count})
-                elif count == 1:
-                    self.log_success(f"Exactly one instance of '{script_name}' is running.")
-                else: # count == 0
-                    self.log_success(f"No running instances of '{script_name}' found.") # This might be OK depending on time of day
-        except Exception as e:
-             self.log_issue("PERMISSION_DENIED", {'check': f"checking for stale processes using psutil: {e}"})
+                else:
+                    self.log_success(f"No stale instances of '{script_name}' found.")
+        except ImportError: pass
+        except Exception: pass
 
 
     def check_log_files_and_status(self):
@@ -1810,13 +1776,12 @@ class AS7Diagnostic:
             self._check_cam_date_dirs(path, indent=1)
 
     def check_nmn_python_imports(self):
-        """Scans NMN bin directory for imports and checks them as the 'meteor' user."""
+        """Scans NMN bin directory for imports using AST and checks them as the 'meteor' user."""
         print("\n--- Checking NMN Python Dependencies (as user 'meteor') ---")
         if not self.is_root:
             self.log_issue("PERMISSION_DENIED", {'check': "NMN Python imports as 'meteor'. Must be run as root."})
             return
         if not self.meteor_pwd:
-            # Try to get meteor user info if not already fetched
             try:
                 self.meteor_pwd = pwd.getpwnam('meteor')
             except KeyError:
@@ -1833,7 +1798,7 @@ class AS7Diagnostic:
             # Ensure the directory itself is readable by meteor
             cmd_read_dir = ['sudo', '-u', 'meteor', 'test', '-r', bin_path]
             subprocess.run(cmd_read_dir, check=True, capture_output=True, timeout=5)
-            # List files as root (since we are root)
+            # List files as root
             py_files = glob.glob(os.path.join(bin_path, "*.py"))
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
              self.log_issue("PERMISSION_DENIED", {'check': f"reading directory {bin_path} as meteor"}, indent=1)
@@ -1843,10 +1808,15 @@ class AS7Diagnostic:
             return
 
         all_imports = set()
-        local_modules = set(os.path.splitext(os.path.basename(f))[0] for f in py_files) # Get names like 'stack', 'stars'
+        local_modules = set(os.path.splitext(os.path.basename(f))[0] for f in py_files)
+        
+        # Import ast module here
+        try:
+            import ast
+        except ImportError:
+            self.log_issue("PYTHON_PKG_MISSING", {'pkg': 'ast (standard library)'}) # Should not happen unless python install is broken
+            return
 
-        # Regex to find 'import x' or 'from x import y' at the start of a non-comment line
-        import_regex = re.compile(r'^\s*(?:import|from)\s+([a-zA-Z0-9_.]+)')
 
         for f in py_files:
             try:
@@ -1854,28 +1824,35 @@ class AS7Diagnostic:
                 cmd_read = ['sudo', '-u', 'meteor', 'test', '-r', f]
                 subprocess.run(cmd_read, check=True, capture_output=True, timeout=5)
 
-                # Read file content (as current user, assumed root)
+                # Read file content as root
                 with open(f, 'r', errors='ignore') as file:
-                    for line in file:
-                        stripped_line = line.strip()
-                        # Skip empty lines and lines that are comments
-                        if not stripped_line or stripped_line.startswith('#'):
-                            continue
-
-                        # Apply regex to the start of the stripped line
-                        match = import_regex.match(stripped_line)
-                        if match:
-                            imp = match.group(1)
-                            # Take only the top-level package name (e.g., dateutil.parser -> dateutil)
-                            top_level_imp = imp.split('.')[0]
-                            # Only add if it's not empty and not relative (doesn't start with .)
-                            if top_level_imp and not imp.startswith('.'):
+                    content = file.read()
+                    
+                # Parse the code using AST
+                try:
+                    tree = ast.parse(content, filename=f)
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            for alias in node.names:
+                                top_level_imp = alias.name.split('.')[0]
                                 all_imports.add(top_level_imp)
+                        elif isinstance(node, ast.ImportFrom):
+                            # Handle 'from . import ...' or 'from .. import ...' (relative imports)
+                            if node.level > 0: # Relative import, ignore for checking external deps
+                                continue
+                            if node.module: # Regular 'from module import ...'
+                                top_level_imp = node.module.split('.')[0]
+                                all_imports.add(top_level_imp)
+                except SyntaxError as e:
+                    self.log_issue("JSON_PARSE_ERROR", {'path': f, 'reason': f"SyntaxError: {e}"}, indent=1) # Re-use JSON error code for simplicity
+                except Exception as e:
+                     self.log_issue("PERMISSION_DENIED", {'check': f"parsing python file {f} with ast: {e}"}, indent=1)
+
 
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 self.log_issue("PERMISSION_DENIED", {'check': f"reading python file {f} as meteor"}, indent=1)
-            except Exception:
-                pass # Ignore other file read errors
+            except Exception as e:
+                self.log_issue("PERMISSION_DENIED", {'check': f"processing file {f}: {e}"})
 
         # Remove known local modules from the set of imports to check via system python
         imports_to_check = all_imports - local_modules
@@ -1929,16 +1906,13 @@ class AS7Diagnostic:
 
             try:
                 # Construct the command to add the bin_path to sys.path before importing
-                # Use escaped quotes for the shell command within python -c
-                # Ensure bin_path ends with a slash for correct path joining in Python if needed
-                safe_bin_path = bin_path.replace("'", "'\\''") # Basic escaping for single quotes in path
+                safe_bin_path = bin_path.replace("'", "'\\''") # Basic escaping
                 import_command = f"import sys; sys.path.insert(0, '{safe_bin_path}'); import {pkg}"
                 cmd_import = ['sudo', '-u', 'meteor', 'python3', '-c', import_command]
-                #print(f"DEBUG: Running command: {' '.join(cmd_import)}") # Keep for debugging if needed
+                #print(f"DEBUG: Running command: {' '.join(cmd_import)}") # Keep for debugging
                 subprocess.run(cmd_import, check=True, capture_output=True, text=True, timeout=10)
                 self.log_success(f"Import OK: {pkg}", indent=1)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                # Add stderr to the context if possible
                 stderr_output = e.stderr.strip() if hasattr(e, 'stderr') and e.stderr else "No stderr"
                 #print(f"DEBUG: Import failed for {pkg}. Stderr: {stderr_output}") # Keep for debugging
                 self.log_issue('NMN_PY_IMPORT_MISSING', {'pkg': pkg, 'stderr': stderr_output}, indent=1)

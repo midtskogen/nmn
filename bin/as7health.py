@@ -414,43 +414,27 @@ class AS7Diagnostic:
                 self.log_success("Credentials file permissions are secure (600).")
         except PermissionError:
              self.log_issue("PERMISSION_DENIED", {'check': f"reading permissions for {creds_file}"})
-        except Exception as e:
-             self.log_issue("PERMISSION_DENIED", {'check': f"reading permissions for {creds_file}: {e}"})
 
         archive_path = "/mnt/archive.allsky.tv"
         try:
             cmd = ['df']
             current_user = pwd.getpwuid(os.getuid()).pw_name
-            can_run_as_ams = self.is_root or (current_user == 'ams')
-
-            if can_run_as_ams:
-                if self.is_root: # If root, explicitly run as ams
-                     cmd = ['sudo', '-u', 'ams', 'df']
-                # else: run as current user who is ams
-                
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if archive_path not in result.stdout:
-                     self.log_issue("ARCHIVE_NOT_MOUNTED")
-                     return
-            else: # Cannot run as ams, just check if mounted for current user
-                 result = subprocess.run(cmd, capture_output=True, text=True)
-                 if archive_path not in result.stdout:
-                     self.log_issue("ARCHIVE_NOT_MOUNTED")
-                     self.log_issue("PERMISSION_DENIED", {'check': f"full check of {archive_path}. Run as root or ams."})
-                     return
-                 else:
-                     self.log_success(f"'{archive_path}' appears mounted (basic check).")
-                     self.log_issue("PERMISSION_DENIED", {'check': f"responsiveness and writability of {archive_path}. Run as root or ams."})
-                     return # Cannot perform further checks reliably
-
+            if self.is_root:
+                cmd = ['sudo', '-u', 'ams', 'df']
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if archive_path not in result.stdout:
+                if not self.is_root and current_user != 'ams':
+                    self.log_issue("PERMISSION_DENIED", {'check': f"verifying mount status of '{archive_path}'. Run as root or ams."})
+                    return
+                else:
+                    self.log_issue("ARCHIVE_NOT_MOUNTED")
+                    return
         except (subprocess.CalledProcessError, FileNotFoundError, PermissionError):
              self.log_issue("PERMISSION_DENIED", {'check': "running 'df' command, possibly as 'ams' user"})
              return
-        except Exception as e:
-             self.log_issue("PERMISSION_DENIED", {'check': f"checking mount status of {archive_path}: {e}"})
-             return
 
-        # --- From here assume we can run commands as 'ams' ---
         try:
             cmd = ['ls', archive_path]
             if self.is_root:
@@ -465,18 +449,17 @@ class AS7Diagnostic:
             if "Input/output error" in e.stderr:
                 self.log_issue("ARCHIVE_HUNG")
             else:
-                self.log_issue("PERMISSION_DENIED", {'check': f"listing contents of {archive_path} as ams."})
+                self.log_issue("PERMISSION_DENIED", {'check': f"listing contents of {archive_path}. Run as root or ams."})
             return
-        except Exception as e:
-            self.log_issue("ARCHIVE_HUNG", {'details': str(e)}) # Add details if available
+        except Exception:
+            self.log_issue("ARCHIVE_HUNG")
             return
 
         as6_data = self.config_data.get("/home/ams/amscams/conf/as6.json")
         station_id = as6_data.get("site", {}).get("ams_id") if as6_data else None
 
         if not station_id:
-            # This case might be hit if as6.json read failed earlier
-            self.log_issue("PERMISSION_DENIED", {'check': f"archive writability. Station ID could not be determined."})
+            self.log_issue("PERMISSION_DENIED", {'check': f"archive writability. Station ID could not be found in as6.json."})
             return
 
         station_archive_path = os.path.join(archive_path, station_id)
@@ -484,7 +467,7 @@ class AS7Diagnostic:
         dir_exists_cmd = ['test', '-d', station_archive_path]
         if self.is_root:
             dir_exists_check = ['sudo', '-u', 'ams'] + dir_exists_cmd
-        else: # running as ams
+        else:
             dir_exists_check = dir_exists_cmd
 
         try:
@@ -493,7 +476,27 @@ class AS7Diagnostic:
             self.log_issue("DIR_MISSING", {'path': station_archive_path})
             return
 
-        self._check_dir_writable_by(station_archive_path, 'ams', "ARCHIVE_NOT_WRITABLE", indent=1)
+        test_file = os.path.join(station_archive_path, ".diag_write_test")
+        write_check_attempted = False
+        try:
+            current_user = pwd.getpwuid(os.getuid()).pw_name
+            if not self.is_root and current_user != 'ams':
+                self.log_issue("PERMISSION_DENIED", {'check': f"write access to '{station_archive_path}'. Run as root or ams."})
+            else:
+                write_check_attempted = True
+                cmd_touch = ['touch', test_file]
+                if self.is_root:
+                    cmd_touch = ['sudo', '-u', 'ams', 'touch', test_file]
+                subprocess.run(cmd_touch, check=True, capture_output=True, text=True)
+                self.log_success(f"Cloud archive subdirectory '{station_archive_path}' is writable by user 'ams'.")
+        except (subprocess.CalledProcessError, Exception):
+            self.log_issue("ARCHIVE_NOT_WRITABLE", {'path': station_archive_path})
+        finally:
+            if write_check_attempted:
+                cmd_rm = ['rm', '-f', test_file]
+                if self.is_root:
+                    cmd_rm = ['sudo', '-u', 'ams', 'rm', '-f', test_file]
+                subprocess.run(cmd_rm, capture_output=True)
 
     def check_config_files(self):
         """Validates the existence, syntax, and content of critical JSON config files."""

@@ -273,7 +273,7 @@ def main():
                 self.ui_variables = {}
                 self.root = tk.Tk()
                 self.root.title("Camera Configuration Tool")
-                self.root.geometry("1100x700")
+                self.root.geometry("1200x700")
                 style = ttk.Style(self.root)
                 style.configure("Even.TFrame", background="white")
                 style.configure("Odd.TFrame", background="#f0f0f0")
@@ -309,13 +309,21 @@ def main():
                 self.subgroup_dropdown.grid(row=0, column=5, padx=5, sticky="ew")
                 self.subgroup_dropdown.bind("<<ComboboxSelected>>", self.display_setting_group)
                 
+                ttk.Label(top_frame, text="Clone from:").grid(row=0, column=6, padx=(10, 5))
+                self.clone_var = tk.StringVar()
+                self.clone_dropdown = ttk.Combobox(top_frame, textvariable=self.clone_var, state="readonly", width=15)
+                self.clone_dropdown.grid(row=0, column=7, padx=5)
+                self.clone_dropdown.bind("<<ComboboxSelected>>", self.on_clone_select)
+                
                 self.reload_button = ttk.Button(top_frame, text="Reload", command=self.reload_camera_data)
-                self.reload_button.grid(row=0, column=6, padx=(10, 5))
+                self.reload_button.grid(row=0, column=8, padx=(10, 5))
                 self.set_time_button = ttk.Button(top_frame, text="Set Time", command=self.set_time)
-                self.set_time_button.grid(row=0, column=7, padx=(5, 5))
+                self.set_time_button.grid(row=0, column=9, padx=(5, 5))
                 self.reboot_button = ttk.Button(top_frame, text="Reboot Camera", command=self.reboot_camera)
-                self.reboot_button.grid(row=0, column=8, padx=(5, 5))
-
+                self.reboot_button.grid(row=0, column=10, padx=(5, 5))
+                self.quit_button = ttk.Button(top_frame, text="Quit", command=self.root.destroy)
+                self.quit_button.grid(row=0, column=11, padx=(5, 5))
+                
                 # --- Scrollable Settings Area ---
                 self.settings_outer_frame = ttk.Frame(self.root)
                 self.settings_outer_frame.pack(expand=True, fill="both", padx=5, pady=(5,0))
@@ -367,7 +375,7 @@ def main():
                 current_subgroup = self.subgroup_var.get()
 
                 self._update_status(f"Reloading configuration for {selected_ip}...")
-                self.root.config(cursor="watch"), self.root.update()
+                self.root.config(cursor="watch")
                 
                 self.controller.invalidate_cache(selected_ip)
                 data = self.controller.load_camera_data(selected_ip)
@@ -387,8 +395,9 @@ def main():
             def on_camera_select(self, event=None):
                 selected_ip = self.ip_var.get()
                 if not selected_ip: return
+                self.update_clone_dropdown()
                 self._update_status(f"Loading settings for {selected_ip}...")
-                self.root.config(cursor="watch"), self.root.update()
+                self.root.config(cursor="watch")
                 data = self.controller.load_camera_data(selected_ip)
                 self.root.config(cursor="")
                 if "error" in data:
@@ -397,6 +406,12 @@ def main():
                 else: self._update_status(f"Successfully loaded settings for {selected_ip}.")
                 self.main_group_dropdown.set(MAIN_GROUPS[0]); self.update_subgroup_dropdown()
             def on_main_group_select(self, event=None): self.update_subgroup_dropdown()
+            def update_clone_dropdown(self):
+                """Updates the 'Clone from:' dropdown to show all IPs except the selected one."""
+                selected_ip = self.ip_var.get()
+                other_ips = [ip for ip in self.ips if ip != selected_ip]
+                self.clone_dropdown['values'] = other_ips
+                self.clone_var.set("")
             def update_subgroup_dropdown(self, preferred_subgroup=None):
                 selected_ip = self.ip_var.get(); main_group = self.main_group_var.get()
                 camera_settings = self.controller.all_camera_data.get(selected_ip, {})
@@ -419,15 +434,38 @@ def main():
                 if not subgroup: return
                 selected_ip = self.ip_var.get(); data = self.controller.all_camera_data.get(selected_ip, {}).get(subgroup)
                 if data is None: return
+                
                 self.canvas = tk.Canvas(self.settings_outer_frame, borderwidth=0, highlightthickness=0)
+                # --- Pack and then immediately HIDE the canvas ---
                 self.canvas.pack(side="left", fill="both", expand=True)
+                self.canvas.pack_forget() # <-- HIDE CANVAS
+                
                 scrollbar = ttk.Scrollbar(self.settings_outer_frame, orient="vertical", command=self.canvas.yview)
                 scrollbar.pack(side="right", fill="y"); self.canvas.configure(yscrollcommand=scrollbar.set)
                 scrollable_frame = ttk.Frame(self.canvas)
                 self.canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-                scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+
+                # Store the handler, but don't bind it just yet
+                configure_handler = lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                
+                # Unbind temporarily to prevent recalculation on every widget add
+                scrollable_frame.unbind("<Configure>")
+
                 self.ui_variables = {}; display_data = data[0] if isinstance(data, list) and data else data
                 self._populate_top_level(scrollable_frame, display_data, self.ui_variables, path_prefix=subgroup)
+
+                # Force Tkinter to process all the new widgets (this is fast as it's not drawing)
+                self.root.update_idletasks() 
+                # Now, calculate the scrollregion just *once*
+                self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                # Re-bind the handler for future window resizes
+                scrollable_frame.bind("<Configure>", configure_handler)
+                
+                self._bind_mousewheel_recursively(scrollable_frame); self.canvas.bind("<MouseWheel>", self._on_mousewheel); self.canvas.bind("<Button-4>", self._on_mousewheel); self.canvas.bind("<Button-5>", self._on_mousewheel)
+
+                # --- Now, SHOW the fully populated canvas ---
+                self.canvas.pack(side="left", fill="both", expand=True) # <-- SHOW CANVAS
+                
                 self._bind_mousewheel_recursively(scrollable_frame); self.canvas.bind("<MouseWheel>", self._on_mousewheel); self.canvas.bind("<Button-4>", self._on_mousewheel); self.canvas.bind("<Button-5>", self._on_mousewheel)
             def _populate_top_level(self, parent, data, ui_vars_dict, path_prefix=""):
                 parent.columnconfigure(0, weight=1)
@@ -437,7 +475,7 @@ def main():
                         group_frame = ttk.Frame(parent, style=f"{style_prefix}.TFrame", padding=5)
                         group_frame.grid(row=i, column=0, sticky="ew")
                         ui_vars_dict[key] = {}
-                        self._populate_frame_with_widgets(group_frame, {key: value}, ui_vars_dict[key], path_prefix=path_prefix, style_prefix=style_prefix)
+                        self._populate_frame_with_widgets(group_frame, {key: value}, ui_vars_dict, path_prefix=path_prefix, style_prefix=style_prefix)
             def _populate_frame_with_widgets(self, parent, data, ui_vars_dict, row=0, indent=0, path_prefix="", style_prefix=""):
                 parent.grid_columnconfigure(indent, weight=0); parent.grid_columnconfigure(indent + 1, weight=1); parent.grid_columnconfigure(indent + 2, weight=2)
                 if isinstance(data, dict):
@@ -446,7 +484,14 @@ def main():
                         label = ttk.Label(parent, text=str(key), style=f"{style_prefix}.TLabel")
                         label.grid(row=row, column=indent, sticky='nw', padx=(indent * 20, 5), pady=2)
                         doc = DOCS.get(full_path)
-                        if isinstance(value, (dict, list)):
+                        should_recurse = False
+                        if isinstance(value, dict):
+                            should_recurse = True
+                        elif isinstance(value, list) and value and isinstance(value[0], dict):
+                            # Only recurse for lists of dictionaries, not simple lists (like RelativePos)
+                            should_recurse = True
+
+                        if should_recurse:
                             if doc and 'desc' in doc:
                                 desc_label = ttk.Label(parent, text=doc['desc'], style=f"{style_prefix}.TLabel", font=self.italic_font, wraplength=400, justify='left')
                                 desc_label.grid(row=row, column=indent + 2, sticky='nw', pady=2, padx=5)
@@ -525,24 +570,126 @@ def main():
                     result = self.controller.set_camera_time(selected_ip)
                     if result["success"]: messagebox.showinfo("Success", result["message"]); self._update_status(result["message"])
                     else: messagebox.showerror("Error", f"Failed to set time:\n{result['message']}"); self._update_status("Error: Failed to set time.")
+
+            def on_clone_select(self, event=None):
+                source_ip = self.clone_var.get()
+                dest_ip = self.ip_var.get()
+                
+                if not source_ip or not dest_ip:
+                    return
+
+                if not messagebox.askyesno("Confirm Clone", f"Are you sure you want to clone all settings from\n{source_ip}\nto\n{dest_ip}?\n\nThis will overwrite all settings on {dest_ip}."):
+                    self.clone_var.set("") # Reset dropdown
+                    return
+
+                self._update_status(f"Cloning settings from {source_ip} to {dest_ip}...")
+                self.root.config(cursor="watch")
+
+                # 1. Load source data
+                source_data = self.controller.load_camera_data(source_ip)
+                
+                if "error" in source_data:
+                    messagebox.showerror("Clone Error", f"Could not load settings from source {source_ip}:\n{source_data['error']}")
+                    self._update_status(f"Error: Failed to load source {source_ip}.")
+                    self.root.config(cursor="")
+                    self.clone_var.set("") # Reset dropdown
+                    return
+
+                # 2. Apply settings group by group
+                errors = []
+                # Get a sorted list of groups to clone (e.g., "AVEnc.Encode", "Camera.Param", etc.)
+                groups_to_clone = sorted([group for group in source_data if group != "error"])
+                
+                for group_name in groups_to_clone:
+                    settings_data = source_data[group_name]
+                    if settings_data is None: continue # Skip empty groups
+                    
+                    self._update_status(f"Cloning {group_name} from {source_ip} to {dest_ip}...")
+                    
+                    result = self.controller.apply_settings(dest_ip, group_name, settings_data)
+                    
+                    if not result["success"]:
+                        errors.append(f"Failed to apply '{group_name}': {result['message']}")
+
+                # 3. Invalidate destination cache
+                self.controller.invalidate_cache(dest_ip)
+                
+                # 4. Report results
+                self.root.config(cursor="")
+                self.clone_var.set("") # Reset dropdown
+
+                if errors:
+                    messagebox.showwarning("Clone Complete (with errors)", f"Finished cloning from {source_ip} to {dest_ip}, but some errors occurred:\n\n" + "\n".join(errors))
+                else:
+                    messagebox.showinfo("Clone Complete", f"Successfully cloned all settings from {source_ip} to {dest_ip}.")
+
+                # 5. Refresh the destination camera's GUI to show the new settings
+                self._update_status(f"Reloading {dest_ip} to reflect new settings...")
+                self.reload_camera_data()
+
             def _reconstruct_settings(self, ui_vars, original_data):
-                if isinstance(original_data, list) and original_data: return [self._reconstruct_settings(ui_vars, original_data[0])]
-                if isinstance(original_data, list): return []
+                if isinstance(original_data, list):
+                    if '_list_data_' in ui_vars:
+                        # This is a list of items we have UI for (e.g., 'Covers')
+                        new_list = []
+                        list_vars = ui_vars['_list_data_']
+                        # We must iterate over list_vars, which was built from original_data
+                        # and is the source of truth for the UI.
+                        for i, item_vars in enumerate(list_vars):
+                            if i < len(original_data):
+                                # Reconstruct this item using its UI vars and original data
+                                new_list.append(self._reconstruct_settings(item_vars, original_data[i]))
+                            else:
+                                # Fallback: if original_data is somehow shorter,
+                                # use the last good item as a template.
+                                if original_data:
+                                     new_list.append(self._reconstruct_settings(item_vars, original_data[-1]))
+                        return new_list
+                    elif original_data:
+                        # This is a list wrapper, like 'VideoWidget' itself,
+                        # for which we did *not* build a '_list_data_'
+                        return [self._reconstruct_settings(ui_vars, original_data[0])]
+                    else:
+                        # This is an empty list
+                        return []
                 new_dict = {}
                 for key, value in original_data.items():
                     ui_info = ui_vars.get(key)
-                    if not ui_info: new_dict[key] = value; continue
-                    if ui_info['type'] == 'combobox':
-                        display_val = ui_info['var'].get(); new_dict[key] = ui_info['map'].get(display_val, display_val)
-                    elif ui_info['type'] == 'checkbox': new_dict[key] = ui_info['var'].get()
-                    elif ui_info['type'] == 'entry':
-                        original_type = type(value); str_val = ui_info['var'].get()
-                        try:
-                            if isinstance(value, str) and value.lower().startswith('0x'): new_dict[key] = str_val
-                            elif original_type is bool: new_dict[key] = str_val.lower() in ['true', '1', 't', 'y', 'yes']
-                            else: new_dict[key] = original_type(str_val)
-                        except (ValueError, TypeError): new_dict[key] = str_val
-                    elif isinstance(ui_info, dict): new_dict[key] = self._reconstruct_settings(ui_info, value)
+                    if not ui_info: 
+                        new_dict[key] = value
+                        continue
+
+                    # Check if ui_info is a widget-describing dict or a nested structure dict
+                    if 'type' in ui_info:
+                        # It's a widget
+                        if ui_info['type'] == 'combobox':
+                            display_val = ui_info['var'].get(); new_dict[key] = ui_info['map'].get(display_val, display_val)
+                        elif ui_info['type'] == 'checkbox': new_dict[key] = ui_info['var'].get()
+                        elif ui_info['type'] == 'entry':
+                            original_type = type(value); str_val = ui_info['var'].get()
+                            try:
+                                if isinstance(value, str) and value.lower().startswith('0x'): new_dict[key] = str_val
+                                elif original_type is bool: new_dict[key] = str_val.lower() in ['true', '1', 't', 'y', 'yes']
+                                
+                                elif original_type is list:
+                                    try:
+                                        # Try to parse it as a JSON list (e.g., [10, 20, 30, 40])
+                                        new_val = json.loads(str_val)
+                                        new_dict[key] = new_val if isinstance(new_val, list) else str_val
+                                    except json.JSONDecodeError:
+                                        new_dict[key] = str_val # Save as string if not valid JSON
+                                
+                                else: new_dict[key] = original_type(str_val)
+                            except (ValueError, TypeError): new_dict[key] = str_val
+                    
+                    elif isinstance(ui_info, dict): 
+                        # It's a nested structure, recurse
+                        new_dict[key] = self._reconstruct_settings(ui_info, value)
+                    
+                    else:
+                        # Fallback, though this shouldn't be hit with current logic
+                        new_dict[key] = value 
+                        
                 return new_dict
         
         print("Launching GUI...")

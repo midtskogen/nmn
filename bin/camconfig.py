@@ -180,6 +180,32 @@ class CameraController:
         except Exception as e:
             return {"success": False, "message": str(e)}
 
+    def clone_settings(self, source_ip, dest_ip):
+        """Clones all settings from source_ip to dest_ip."""
+        source_data = self.load_camera_data(source_ip)
+        
+        if "error" in source_data:
+            return {"success": False, "message": f"Could not load settings from source {source_ip}: {source_data['error']}"}
+
+        errors = []
+        groups_to_clone = sorted([group for group in source_data if group != "error"])
+        
+        for group_name in groups_to_clone:
+            settings_data = source_data[group_name]
+            if settings_data is None: continue # Skip empty groups
+            
+            result = self.apply_settings(dest_ip, group_name, settings_data)
+            
+            if not result["success"]:
+                errors.append(f"Failed to apply '{group_name}': {result['message']}")
+
+        self.invalidate_cache(dest_ip)
+        
+        if errors:
+            return {"success": True, "message": "Clone complete (with errors)", "errors": errors}
+        else:
+            return {"success": True, "message": "Successfully cloned all settings."}
+
 
 def main():
     """
@@ -585,45 +611,22 @@ def main():
                 self._update_status(f"Cloning settings from {source_ip} to {dest_ip}...")
                 self.root.config(cursor="watch")
 
-                # 1. Load source data
-                source_data = self.controller.load_camera_data(source_ip)
+                # 1. Use the controller's clone method
+                result = self.controller.clone_settings(source_ip, dest_ip)
                 
-                if "error" in source_data:
-                    messagebox.showerror("Clone Error", f"Could not load settings from source {source_ip}:\n{source_data['error']}")
-                    self._update_status(f"Error: Failed to load source {source_ip}.")
-                    self.root.config(cursor="")
-                    self.clone_var.set("") # Reset dropdown
-                    return
-
-                # 2. Apply settings group by group
-                errors = []
-                # Get a sorted list of groups to clone (e.g., "AVEnc.Encode", "Camera.Param", etc.)
-                groups_to_clone = sorted([group for group in source_data if group != "error"])
-                
-                for group_name in groups_to_clone:
-                    settings_data = source_data[group_name]
-                    if settings_data is None: continue # Skip empty groups
-                    
-                    self._update_status(f"Cloning {group_name} from {source_ip} to {dest_ip}...")
-                    
-                    result = self.controller.apply_settings(dest_ip, group_name, settings_data)
-                    
-                    if not result["success"]:
-                        errors.append(f"Failed to apply '{group_name}': {result['message']}")
-
-                # 3. Invalidate destination cache
-                self.controller.invalidate_cache(dest_ip)
-                
-                # 4. Report results
+                # 2. Report results
                 self.root.config(cursor="")
                 self.clone_var.set("") # Reset dropdown
 
-                if errors:
-                    messagebox.showwarning("Clone Complete (with errors)", f"Finished cloning from {source_ip} to {dest_ip}, but some errors occurred:\n\n" + "\n".join(errors))
+                if "errors" in result and result["errors"]:
+                    messagebox.showwarning("Clone Complete (with errors)", f"Finished cloning from {source_ip} to {dest_ip}, but some errors occurred:\n\n" + "\n".join(result["errors"]))
+                elif not result["success"]:
+                     messagebox.showerror("Clone Error", f"Could not clone settings from {source_ip}:\n{result['message']}")
                 else:
                     messagebox.showinfo("Clone Complete", f"Successfully cloned all settings from {source_ip} to {dest_ip}.")
 
-                # 5. Refresh the destination camera's GUI to show the new settings
+                # 3. Refresh the destination camera's GUI to show the new settings
+                # The controller method already invalidated the cache
                 self._update_status(f"Reloading {dest_ip} to reflect new settings...")
                 self.reload_camera_data()
 
@@ -712,14 +715,43 @@ def main():
         <body><form method="POST"><h1>System Login</h1>{% if error %}<p class="error">{{ error }}</p>{% endif %}<div class="form-group"><label for="username">Username</label><input type="text" id="username" name="username" required></div><div class="form-group"><label for="password">Password</label><input type="password" id="password" name="password" required></div><button type="submit">Login</button></form></body></html>
         """
 
-        MAIN_TEMPLATE = """
-        <!DOCTYPE html><html><head><title>Camera Config</title>
+        MAIN_TEMPLATE = r"""
+        <!DOCTYPE html><html><head><title>Camera Config</title><meta charset="UTF-8">
         <style>body{font-family:sans-serif;margin:0;background:#f8f9fa;color:#333}.top-bar{background:#fff;padding:10px 20px;border-bottom:1px solid #ddd;display:flex;align-items:center;gap:15px;position:sticky;top:0;z-index:1000}.top-bar label{font-weight:bold}.top-bar select,.top-bar button{padding:8px;border-radius:4px;border:1px solid #ccc}.content{padding:20px}#settings-view{background:white;border:1px solid #ddd;border-radius:4px}.group-frame{padding:10px;border-bottom:1px solid #ddd}.group-frame:last-child{border-bottom:none}.group-frame.even{background-color:#fff}.group-frame.odd{background-color:#f0f0f0}.row{display:grid;grid-template-columns:250px 1fr 2fr;align-items:center;gap:10px;padding:5px 0}.row-indent-1{margin-left:20px}.row-indent-2{margin-left:40px}.description{font-style:italic;color:#555;font-size:.9em}.spinbox{display:flex}.spinbox input{flex-grow:1}.spinbox button{width:30px}#status-bar{position:fixed;bottom:0;left:0;width:100%;background:#333;color:white;padding:5px 10px;font-size:.9em}</style></head>
-        <body><div class="top-bar"><label for="ip-select">Camera IP:</label><select id="ip-select">{% for ip in ips %}<option value="{{ ip }}">{{ ip }}</option>{% endfor %}</select><label for="main-group-select">Main Group:</label><select id="main-group-select">{% for group in main_groups %}<option value="{{ group }}">{{ group }}</option>{% endfor %}</select><label for="subgroup-select">Subgroup:</label><select id="subgroup-select"></select><button id="reload-btn">Reload</button><button id="set-time-btn">Set Time</button><button id="reboot-btn">Reboot Camera</button><button id="apply-btn" disabled>Apply Changes</button></div><div class="content"><div id="settings-view"></div></div><div id="status-bar">Ready.</div>
+        <body><div class="top-bar"><label for="ip-select">Camera IP:</label><select id="ip-select">{% for ip in ips %}<option value="{{ ip }}">{{ ip }}</option>{% endfor %}</select><label for="main-group-select">Main Group:</label><select id="main-group-select">{% for group in main_groups %}<option value="{{ group }}">{{ group }}</option>{% endfor %}</select><label for="subgroup-select">Subgroup:</label><select id="subgroup-select"></select><label for="clone-select">Clone from:</label><select id="clone-select"><option value="">-- Select Source --</option></select><button id="reload-btn">Reload</button><button id="set-time-btn">Set Time</button><button id="reboot-btn">Reboot Camera</button><button id="apply-btn" disabled>Apply Changes</button></div><div class="content"><div id="settings-view"></div></div><div id="status-bar">Ready.</div>
         <script>
-            const ipSelect = document.getElementById('ip-select'), mainGroupSelect = document.getElementById('main-group-select'), subgroupSelect = document.getElementById('subgroup-select'), settingsView = document.getElementById('settings-view'), applyBtn = document.getElementById('apply-btn'), rebootBtn = document.getElementById('reboot-btn'), setTimeBtn = document.getElementById('set-time-btn'), reloadBtn = document.getElementById('reload-btn'), statusBar = document.getElementById('status-bar'), DOCS = JSON.parse('{{ docs | tojson | safe }}');
-            let cameraData = {}, originalSubgroupData = {}, isListWrapped = false;
+            const ipSelect = document.getElementById('ip-select'),
+                  mainGroupSelect = document.getElementById('main-group-select'),
+                  subgroupSelect = document.getElementById('subgroup-select'),
+                  cloneSelect = document.getElementById('clone-select'),
+                  settingsView = document.getElementById('settings-view'),
+                  applyBtn = document.getElementById('apply-btn'),
+                  rebootBtn = document.getElementById('reboot-btn'),
+                  setTimeBtn = document.getElementById('set-time-btn'),
+                  reloadBtn = document.getElementById('reload-btn'),
+                  statusBar = document.getElementById('status-bar'),
+                  DOCS = {{ docs | tojson | safe }};
+            let cameraData = {},
+                originalSubgroupData = {},
+                isListWrapped = false,
+                allIps = {{ ips | tojson | safe }};
+
             function updateStatus(text) { statusBar.textContent = text; }
+            
+            function updateCloneSelect() {
+                const selectedIp = ipSelect.value;
+                cloneSelect.innerHTML = '<option value="">-- Select Source --</option>'; // Reset
+                
+                const otherIps = allIps.filter(ip => ip !== selectedIp);
+                otherIps.forEach(ip => {
+                    const option = document.createElement('option');
+                    option.value = ip;
+                    option.textContent = ip;
+                    cloneSelect.appendChild(option);
+                });
+                cloneSelect.value = ""; // Set to default
+            }
+
             async function reloadCameraData() {
                 const ip = ipSelect.value;
                 if (!ip) return;
@@ -747,6 +779,9 @@ def main():
             async function onIpSelectChange() {
                 const ip = ipSelect.value;
                 if (!ip) return;
+                
+                updateCloneSelect(); // Update clone dropdown
+                
                 updateStatus(`Loading settings for ${ip}...`);
                 if (!cameraData[ip]) {
                     try {
@@ -885,7 +920,7 @@ def main():
                 const settingsToApply = isListWrapped ? newSettings[0] : newSettings;
                 
                 function updateValueByPath(obj, path, value) {
-                    const keys = path.replace(/\\[(\\d+)\\]/g, '.$1').split('.');
+                    const keys = path.replace(/\[(\d+)\]/g, '.$1').split('.');
                     let temp = obj;
                     for (let i = 0; i < keys.length - 1; i++) {
                         if (temp[keys[i]] === undefined) return;
@@ -942,6 +977,58 @@ def main():
                     updateStatus(result.message);
                 } catch (e) { alert(`Error: ${e.message}`); updateStatus(`Error: ${e.message}`); }
             }
+            
+            async function onCloneSelect() {
+                const sourceIp = cloneSelect.value;
+                const destIp = ipSelect.value;
+
+                if (!sourceIp) return; // Do nothing if the default "-- Select Source --" is chosen
+
+                if (!confirm(`Are you sure you want to clone all settings from\n${sourceIp}\nto\n${destIp}?\n\nThis will overwrite all settings on ${destIp}.`)) {
+                    cloneSelect.value = ""; // Reset dropdown
+                    return;
+                }
+
+                updateStatus(`Cloning settings from ${sourceIp} to ${destIp}...`);
+                
+                try {
+                    const response = await fetch('/api/clone', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ source_ip: sourceIp, dest_ip: destIp })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.errors && result.errors.length > 0) {
+                        alert('Clone complete with errors');
+                    } else if (!result.success) {
+                        throw new Error(result.message);
+                    } else {
+                        alert('Clone complete successfully.');
+                    }
+
+                    // Update data for destination IP
+                    if (result.reloaded_data) {
+                        cameraData[destIp] = result.reloaded_data;
+                        updateStatus("Clone complete. Reloaded destination camera data.");
+                    } else {
+                        delete cameraData[destIp]; // Invalidate cache to force reload next time
+                        updateStatus("Clone complete, but verification by reloading failed. Data may be stale.");
+                    }
+
+                    // Refresh the subgroup view to show the new settings
+                    updateSubgroupSelect(subgroupSelect.value);
+
+                } catch (e) {
+                    updateStatus(`Error: ${e.message}`);
+                    alert(`Error during clone: ${e.message}`);
+                } finally {
+                    cloneSelect.value = ""; // Reset dropdown
+                }
+            }
+
+            cloneSelect.addEventListener('change', onCloneSelect);
             ipSelect.addEventListener('change', onIpSelectChange);
             mainGroupSelect.addEventListener('change', updateSubgroupSelect);
             subgroupSelect.addEventListener('change', onSubgroupChange);
@@ -986,6 +1073,26 @@ def main():
                     reloaded_data = controller.load_camera_data(ip)
                     result['reloaded_data'] = None if 'error' in reloaded_data else reloaded_data
                 return jsonify(result)
+            @app.route('/api/clone', methods=['POST'])
+            def clone():
+                if not session.get('logged_in'): return jsonify({"error": "Unauthorized"}), 401
+                data = request.json
+                source_ip = data.get('source_ip')
+                dest_ip = data.get('dest_ip')
+                if not source_ip or not dest_ip:
+                    return jsonify({"success": False, "message": "Missing source_ip or dest_ip"}), 400
+                
+                clone_result = controller.clone_settings(source_ip, dest_ip)
+                
+                # After cloning, fetch the reloaded data for the destination IP
+                # The clone_settings method already invalidated the cache
+                reloaded_data = controller.load_camera_data(dest_ip)
+                
+                # Combine the clone result with the reloaded data
+                response_data = clone_result
+                response_data['reloaded_data'] = None if 'error' in reloaded_data else reloaded_data
+                    
+                return jsonify(response_data)
             @app.route('/api/reboot/<ip>', methods=['POST'])
             def reboot(ip):
                 if not session.get('logged_in'): return jsonify({"error": "Unauthorized"}), 401
@@ -1019,5 +1126,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

@@ -290,7 +290,7 @@ def main():
         
         update_event_file(config, video_output, event_file_path, probability, start_dt)
 
-        if config.getfloat('trail', 'manual') > 0:
+        if config.getfloat('trail', 'manual', fallback=0) > 0:
             print(f"Manually reduced. Reporting to server.")
             upload_results(config, event_dir)
         elif probability >= METEOR_PROBABILITY_THRESHOLD:

@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Fetches and processes meteor observation data for the Norsk Meteornettverk.
+Fetches and processes meteor observation data for the Norsk Meteornettverk. (Multilingual Version)
 
-This script performs the following actions:
+This script performs the following actions for each supported language:
 1.  Fetches event data from a remote station using rsync.
 2.  Processes the raw data to calculate trajectory, orbit, and other metrics.
-3.  Generates scientific plots and summary images (SVG to JPG).
-4.  Produces HTML and KML reports for web presentation.
+3.  Generates scientific plots and summary images (SVG to JPG) with translated text.
+4.  Produces language-specific HTML and KML reports for web presentation.
 5.  Optionally posts a notification to social media.
-
 Usage:
     python3 fetch.py <station_name> <ssh_port> <remote_dir>
-
-Example:
-    python3 fetch.py harestua 10003 /meteor/cam2/events/20150819/224804
+    python3 fetch.py <local_event_directory> (for reprocessing)
 """
 
 import argparse
@@ -22,6 +19,7 @@ import configparser
 import datetime
 import glob
 import io
+import json
 import logging
 import math
 import os
@@ -33,11 +31,10 @@ import time
 from pathlib import Path
 
 # Third-party library imports
-import numpy
+import numpy as np
 import pytz
 from dateutil.tz import tzlocal
 
-# Attempt to import optional libraries for image processing
 try:
     import cairosvg
     from PIL import Image, ImageOps
@@ -47,8 +44,8 @@ except ImportError:
 
 # Local script imports from the same project
 from fb2kml import fb2kml
-from fbspd_merge import fbspd, readres
-from metrack import metrack
+from fbspd_merge import readres, calculate_speed_profile, generate_speed_plots
+from metrack import calculate_trajectory, generate_plots as generate_metrack_plots, write_res_file
 from orbit import calc_azalt, orbit
 import reverse_geocode
 
@@ -58,9 +55,9 @@ class Config:
     # Base directory for all meteor data on the local server
     BASE_HTTP_DIR = Path('/home/httpd/norskmeteornettverk.no')
     METEOR_DATA_DIR = BASE_HTTP_DIR / 'meteor'
+    BIN_DIR = BASE_HTTP_DIR / 'bin'
 
     # Bandwidth limit for rsync in KB/s
-    # Kristiansand has a slower connection
     BW_LIMIT_DEFAULT = '1000'
     BW_LIMIT_SLOW = '150'
 
@@ -75,6 +72,27 @@ class Config:
     SVG_DEFAULT_DPI = 300
     SVG_MAP_DPI = 80
     SVG_ORBIT_DPI = 100
+
+# --- Internationalization (i18n) Setup ---
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs']
+DEFAULT_LANG = 'nb'
+LOC_DIR = Config.BIN_DIR / 'loc'
+
+def load_translations(lang_code: str) -> dict:
+    """Loads the translation dictionary for a given language, with fallback to default."""
+    default_path = LOC_DIR / f"{DEFAULT_LANG}.json"
+    lang_path = LOC_DIR / f"{lang_code}.json"
+
+    translations = {}
+    if default_path.exists():
+        with default_path.open('r', encoding='utf-8') as f:
+            translations = json.load(f)
+
+    if lang_code != DEFAULT_LANG and lang_path.exists():
+        with lang_path.open('r', encoding='utf-8') as f:
+            translations.update(json.load(f))
+            
+    return translations
 
 
 def setup_logging(log_file_path: Path):
@@ -93,10 +111,7 @@ def setup_logging(log_file_path: Path):
 
 
 def run_command(command, cwd=None, check=False, shell=False, stream_output=False):
-    """
-    Runs an external command using subprocess.run.
-    If stream_output is True, output is printed in real-time.
-    """
+    """Runs an external command using subprocess.run."""
     logging.info(f"Running command: {' '.join(command) if isinstance(command, list) else command}")
     
     capture_props = {} if stream_output else {'capture_output': True, 'text': True}
@@ -127,9 +142,7 @@ def run_command(command, cwd=None, check=False, shell=False, stream_output=False
 
 
 def fetch_data(station: str, port: str, remote_dir: str, local_dir: Path) -> bool:
-    """
-    Fetches data from a remote station using rsync with retries.
-    """
+    """Fetches data from a remote station using rsync with retries."""
     local_dir.mkdir(parents=True, exist_ok=True)
     speed = Config.BW_LIMIT_SLOW if station == 'kristiansand' else Config.BW_LIMIT_DEFAULT
     host = station if port == '0' else 'localhost'
@@ -168,26 +181,24 @@ def set_permissions(directory: Path):
 
 def to_cartesian(az: float, alt: float) -> list:
     """Converts Azimuth/Altitude to Cartesian coordinates."""
-    az_rad = math.radians(az)
-    alt_rad = math.radians(alt)
+    az_rad = np.radians(az)
+    alt_rad = np.radians(alt)
     return [
-        math.cos(alt_rad) * math.cos(az_rad),
-        math.cos(alt_rad) * math.sin(az_rad),
-        math.sin(alt_rad)
+        np.cos(alt_rad) * np.cos(az_rad),
+        np.cos(alt_rad) * np.sin(az_rad),
+        np.sin(alt_rad)
     ]
 
 
 def from_cartesian(p: list) -> tuple:
     """Converts Cartesian coordinates to Azimuth/Altitude."""
-    az = math.degrees(math.atan2(p[1], p[0]))
-    alt = math.degrees(math.asin(p[2]))
-    return (math.fmod(az + 360, 360), alt)
+    az = np.degrees(np.arctan2(p[1], p[0]))
+    alt = np.degrees(np.arcsin(p[2]))
+    return (np.fmod(az + 360, 360), alt)
 
 
 def create_centroid_file(local_dir: Path):
-    """
-    Reads event data, recalculates coordinates, and writes centroid2.txt.
-    """
+    """Reads event data, recalculates coordinates, and writes centroid2.txt."""
     event_file = local_dir / 'event.txt'
     centroid_file = local_dir / 'centroid2.txt'
     
@@ -210,8 +221,12 @@ def create_centroid_file(local_dir: Path):
     for c in coordinates:
         az3_str, alt3_str = c.split(',')
         p3 = to_cartesian(float(az3_str), float(alt3_str))
-        t = numpy.cross(numpy.cross(p1, p2), numpy.cross(p3, numpy.cross(p1, p2)))
-        coordinates2.append(from_cartesian(t / numpy.linalg.norm(t)))
+        t = np.cross(np.cross(p1, p2), np.cross(p3, np.cross(p1, p2)))
+        norm_t = np.linalg.norm(t)
+        if norm_t > 0:
+            coordinates2.append(from_cartesian(t / norm_t))
+        else:
+            coordinates2.append((0,0))
 
     try:
         obs_file = next(local_dir.glob('*[0-9][0-9].txt'))
@@ -237,9 +252,7 @@ def create_centroid_file(local_dir: Path):
 
 
 def find_and_merge_event_directory(base_date: datetime.datetime, station: str, current_local_dir: Path):
-    """
-    Searches for an existing event directory and merges the current data into it.
-    """
+    """Searches for an existing event directory and merges the current data into it."""
     date_str = base_date.strftime('%Y%m%d')
     time_str = base_date.strftime('%H%M%S')
     
@@ -271,9 +284,7 @@ def find_and_merge_event_directory(base_date: datetime.datetime, station: str, c
 
 
 def svg_to_jpg(svg_path: Path, jpg_path: Path, dpi: int):
-    """
-    Converts an SVG file to JPG using CairoSVG and Pillow.
-    """
+    """Converts an SVG file to JPG using CairoSVG and Pillow."""
     if not LIBS_AVAILABLE:
         logging.warning("CairoSVG or Pillow not installed. Skipping SVG to JPG conversion.")
         return
@@ -303,18 +314,13 @@ def svg_to_jpg(svg_path: Path, jpg_path: Path, dpi: int):
 
 
 def get_location_from_coords(lat, lon) -> str:
-    """
-    Reverse geocodes coordinates to a municipality name using the reverse-geocode module.
-    This function is designed to continue gracefully on failure.
-    """
+    """Reverse geocodes coordinates to a municipality name using the reverse-geocode module."""
     municipality = ''
     try:
-        # The new library expects a list of coordinate tuples
         coordinates = [(lat, lon)]
         results = reverse_geocode.search(coordinates)
 
         if results:
-            # 'city' is the key for the municipality in this library
             municipality = results[0].get('city', '')
         else:
             logging.warning(f"Reverse geocode returned no results for {coordinates[0]}.")
@@ -325,32 +331,35 @@ def get_location_from_coords(lat, lon) -> str:
     return municipality.strip()
 
 
-def generate_triangulation_html_report(event_dir: Path, resdat, orbit_data, placename):
-    """Generates the HTML tables that depend on triangulation results."""
+def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, placename, translations: dict, lang: str):
+    """Generates the language-specific HTML tables that depend on triangulation results."""
     
-    with (event_dir / 'tables.html').open('w', encoding='utf-8') as f:
+    with output_path.open('w', encoding='utf-8') as f:
         table1 = f"""
-<b>Meteorens atmosfæriske bane</b>:<br>
+<b>{translations.get("atmospheric_trajectory", "Meteor's Atmospheric Trajectory")}</b>:<br>
 <table border=1>
-    <tr><td>Starthøgde:</td><td> {resdat.height[0]:.1f} km</td></tr>
-    <tr><td>Slutthøgde:</td><td> {resdat.height[1]:.1f} km</td></tr>
-    <tr><td>Startposisjon:</td><td> {resdat.lat1[0]:.3f}N {resdat.long1[0]:.3f}E</td></tr>
-    <tr><td>Sluttposisjon:</td><td> {resdat.lat1[1]:.3f}N {resdat.long1[1]:.3f}E</td></tr>
-    <tr><td>Retning:</td><td> {math.fmod(orbit_data['az'] + 360, 360):.1f}°</td></tr>
-    <tr><td>Fallvinkel:</td><td> {orbit_data['alt']:.1f}°</td></tr>
+    <tr><td>{translations.get("start_height", "Start height")}:</td><td> {resdat.height[0]:.1f} km</td></tr>
+    <tr><td>{translations.get("end_height", "End height")}:</td><td> {resdat.height[1]:.1f} km</td></tr>
+    <tr><td>{translations.get("start_position", "Start position")}:</td><td> {resdat.lat1[0]:.3f}N {resdat.long1[0]:.3f}E</td></tr>
+    <tr><td>{translations.get("end_position", "End position")}:</td><td> {resdat.lat1[1]:.3f}N {resdat.long1[1]:.3f}E</td></tr>
+    <tr><td>{translations.get("direction", "Direction")}:</td><td> {np.fmod(orbit_data['az'] + 360, 360):.1f}°</td></tr>
+    <tr><td>{translations.get("inclination_angle", "Inclination angle")}:</td><td> {orbit_data['alt']:.1f}°</td></tr>
 """
         if orbit_data['entry_speed'] > 0:
-            table1 += f"    <tr><td>Inngangshastighet:</td><td> {orbit_data['entry_speed']:.1f} km/s</td></tr>\n"
+            table1 += f"    <tr><td>{translations.get('entry_speed', 'Entry speed')}:</td><td> {orbit_data['entry_speed']:.1f} km/s</td></tr>\n"
 
         if orbit_data['valid']:
             ramin = int(orbit_data['ra'] * 24 * 60 / 360)
+            shower_name = translations.get("sporadic", "sporadic") if not orbit_data['showername'] else orbit_data['showername']
             table1 += f"""
-    <tr><td>Radiantens rektascensjon:</td><td> {ramin // 60:02d}:{ramin % 60:02d} ({orbit_data['ra']:.1f}°)</td></tr>
-    <tr><td>Radiantens deklinasjon:</td><td> {orbit_data['dec']:.1f}°</td></tr>
-    <tr><td>Meteorsverm:</td><td align=center> {'sporadisk' if not orbit_data['showername'] else orbit_data['showername']}</td></tr>
+    <tr><td>{translations.get("radiant_ra", "Radiant R.A.")}:</td><td> {ramin // 60:02d}:{ramin % 60:02d} ({orbit_data['ra']:.1f}°)</td></tr>
+    <tr><td>{translations.get("radiant_dec", "Radiant Dec.")}:</td><td> {orbit_data['dec']:.1f}°</td></tr>
+    <tr><td>{translations.get("meteor_shower", "Meteor Shower")}:</td><td align=center> {shower_name}</td></tr>
 """
         table1 += "</table>"
-        table1 = table1.replace('.', ',')
+        
+        if lang != 'en':
+            table1 = table1.replace('.', ',')
         
         f.write('<table><tr><td valign=top>\n')
         f.write(table1)
@@ -358,27 +367,27 @@ def generate_triangulation_html_report(event_dir: Path, resdat, orbit_data, plac
 
         if orbit_data['valid']:
             table2 = f"""
-<b>Meteoroidens baneelement:</b><br>
+<b>{translations.get("orbital_elements", "Meteoroid's Orbital Elements")}</b>:<br>
 <table border=1>
-    <tr><td>Perihelavstand:</td><td> {orbit_data['rp']:.3f} AU</td></tr>
-    <tr><td>Eksentrisitet:</td><td> {orbit_data['ecc']:.3f}</td></tr>
-    <tr><td>Inklinasjon:</td><td> {orbit_data['inc']:.1f}°</td></tr>
-    <tr><td>Knutelengde:</td><td> {orbit_data['lnode']:.1f}°</td></tr>
-    <tr><td>Perihelargument:</td><td> {orbit_data['argp']:.1f}°</td></tr>
-    <tr><td>Midlere anomali:</td><td> {orbit_data['m0']:.1f}°</td></tr>
-    <tr><td>Epoke:</td><td> {orbit_data['t0']}</td></tr>
+    <tr><td>{translations.get("perihelion_dist", "Perihelion distance")}:</td><td> {orbit_data['rp']:.3f} AU</td></tr>
+    <tr><td>{translations.get("eccentricity", "Eccentricity")}:</td><td> {orbit_data['ecc']:.3f}</td></tr>
+    <tr><td>{translations.get("inclination", "Inclination")}:</td><td> {orbit_data['inc']:.1f}°</td></tr>
+    <tr><td>{translations.get("longitude_node", "Long. of Asc. Node")}:</td><td> {orbit_data['lnode']:.1f}°</td></tr>
+    <tr><td>{translations.get("arg_periapsis", "Argument of Perihelion")}:</td><td> {orbit_data['argp']:.1f}°</td></tr>
+    <tr><td>{translations.get("mean_anomaly", "Mean Anomaly")}:</td><td> {orbit_data['m0']:.1f}°</td></tr>
+    <tr><td>{translations.get("epoch", "Epoch")}:</td><td> {orbit_data['t0']}</td></tr>
 </table>
 """
-            table2 = table2.replace('.', ',')
+            if lang != 'en':
+                table2 = table2.replace('.', ',')
             f.write(table2)
-        
+    
         f.write('</td></tr></table>')
 
 
-def generate_station_html_report(event_dir: Path):
-    """Generates the station-specific HTML file."""
-
-    with (event_dir / 'stations.html').open('w', encoding='utf-8') as f:
+def generate_station_html_report(output_path: Path, event_dir: Path, translations: dict):
+    """Generates the language-specific station HTML file with full details."""
+    with output_path.open('w', encoding='utf-8') as f:
         station_files = sorted(event_dir.glob('*/*/event.txt'))
         for event_file in station_files:
             station = event_file.parent.parent.name
@@ -394,10 +403,8 @@ def generate_station_html_report(event_dir: Path):
             code = ''
             obs_txt_file = event_file.parent / f"{station}-{ts_str}.txt"
             if obs_txt_file.exists():
-                try:
-                    code = obs_txt_file.read_text().split()[12]
-                except IndexError:
-                    pass
+                try: code = obs_txt_file.read_text().split()[12]
+                except IndexError: pass
             
             f.write('</td></tr></table>')
 
@@ -411,94 +418,103 @@ $jpg_path = "{station}/{cam}/fireball.jpg";
 $webm_url = "{url_base}/{cam}/fireball_neg.webm";
 $webm_url2 = "{url_base}/{cam}/fireball_orig.webm";
 $jpg_url = "{url_base}/{cam}/fireball.jpg";
-
-if (file_exists($webm_path)) {{
+$b_prefix = ($lang === '{default_lang_code}') ? '' : substr($lang, 0, 2) . '_';
+$brightness_jpg_path = "{station}/{cam}/" . $b_prefix . "brightness.jpg";
+$brightness_jpg_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
 ?>
     <div style="text-align: center;">
+        <?php if (file_exists($webm_path)) {{ ?>
         <a href="<?php echo $webm_url2; ?>"><video autoplay loop muted playsinline style="max-width: 800px; width: 100%; height: auto; border: 1px solid black;"><source src="<?php echo $webm_url; ?>" type="video/webm"></video></a><br>
+        <?php }} elseif (file_exists($jpg_path)) {{ ?>
+        <a href="<?php echo $jpg_url; ?>"><img src="<?php echo $jpg_url; ?>" style="max-width: 800px; width: 100%; height: auto;" alt="fireball"><br></a>
+        <?php }} ?>
     </div>
-<?php
-}} elseif (file_exists($jpg_path)) {{
-?>
-    <div style="text-align: center;">
-        <a href="<?php echo $jpg_url; ?>"><img src="<?php echo $jpg_url; ?>" style="max-width: 800px; width: 100%; height: auto;" alt="ildkule"><br>
-    </div>
-<?php
-}}
-?>
 <table><tr><td valign=top>
-<a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4"><img src="{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg" width=768 alt="gnomonisk"></a>
+<a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4"><img src="{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg" width=768 alt="gnomonic"></a>
 </td>
 <td valign=top>
 <table border=1>
-<tr><td><b>Videoer:</b></br>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4">Gnomonisk</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.mp4">Gnomonisk med koordinater</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.mp4">Original</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}_hevc.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}_hevc.mp4">Original (HEVC)</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.mp4">Original med koordinater</a><br> <?php }} ?>
+<tr><td><b>{videos_header}</b><br>
+<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4">{gnomonic_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.mp4">{gnomonic_with_coords_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.mp4">{original_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}_hevc.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}_hevc.mp4">{original_hevc_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.mp4">{original_with_coords_label}</a><br> <?php }} ?>
 </td></tr>
-<tr><td><b>Bilder:</b><br>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.jpg">Gnomonisk</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg">Gnomonisk, koordinater</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg">Ukorrigert gnomonisk med koordinater</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels.jpg">Gnomonisk med annotering</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg">Ukorrigert gnomonisk med annotering</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.jpg">Original</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.jpg">Original med koordinater</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-mask.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-mask.jpg">Original med maske</a><br> <?php }} ?>
+<tr><td><b>{images_header}</b><br>
+<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.jpg">{gnomonic_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg">{gnomonic_with_coords_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg">{gnomonic_uncorrected_with_coords_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels.jpg">{gnomonic_with_labels_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg">{gnomonic_uncorrected_with_labels_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.jpg">{original_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.jpg">{original_with_coords_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-mask.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-mask.jpg">{original_with_mask_label}</a><br> <?php }} ?>
 </td></tr>
-<tr><td><b>Tekstfiler:</b><br>
-<?php if (file_exists("{station}/{cam}/event.txt")) {{ ?>• <a href="{url_base}/{cam}/event.txt">Deteksjon</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.txt")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.txt">Observasjon</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/centroid2.txt")) {{ ?>• <a href="{url_base}/{cam}/centroid2.txt">Koordinater</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/lens.pto")) {{ ?>• <a href="{url_base}/{cam}/lens.pto">Original til ekvirektangulær projeksjon</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/gnomonic.pto")) {{ ?>• <a href="{url_base}/{cam}/gnomonic.pto">Original til gnonomisk projeksjon</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/gnomonic_grid.pto")) {{ ?>• <a href="{url_base}/{cam}/gnomonic_grid.pto">Gnonomisk til ekvirektangulær projeksjon</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/gnomonic_corr_grid.pto")) {{ ?>• <a href="{url_base}/{cam}/gnomonic_corr_grid.pto">Korrigert gnonomisk til ekvirektangulær projeksjon</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/stderr.txt")) {{ ?>• <a href="{url_base}/{cam}/stderr.txt">Feilmeldinger</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/report.log")) {{ ?>• <a href="{url_base}/{cam}/report.log">Logg</a><br> <?php }} ?>
+<tr><td><b>{text_files_header}</b><br>
+<?php if (file_exists("{station}/{cam}/event.txt")) {{ ?>• <a href="{url_base}/{cam}/event.txt">{detection_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}.txt")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.txt">{observation_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/centroid2.txt")) {{ ?>• <a href="{url_base}/{cam}/centroid2.txt">{coordinates_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/stderr.txt")) {{ ?>• <a href="{url_base}/{cam}/stderr.txt">{error_messages_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/report.log")) {{ ?>• <a href="{url_base}/{cam}/report.log">{log_file_label}</a><br> <?php }} ?>
 </td></tr></table>
-<?php if (file_exists("{station}/{cam}/brightness.jpg")) {{ ?><a href="{url_base}/{cam}/brightness.jpg"><img src="{url_base}/{cam}/brightness.jpg" width=400 alt="lyssyrke"><br></a> <?php }} ?>
+<?php if (file_exists($brightness_jpg_path)) {{ ?><a href="<?php echo $brightness_jpg_url; ?>"><img src="<?php echo $brightness_jpg_url; ?>" width=400 alt="brightness"><br></a> <?php }} ?>
 </td></tr></table>
 </p>
 </div></div>
             """
-
-            # Construct the correct base URL path and the combined station-timestamp string
             url_base_path = f'/meteor/{event_dir.parent.name}/{event_dir.name}/{station}'
             station_timestamp_str = f"{station}-{ts_str}"
 
-            # Format the template with the correct values and write to the file
             f.write(html_template.format(
-                url_base=url_base_path,
-                station=station,
-                cam=cam,
-                station_ts=station_timestamp_str,
-                code=code,
-                location=location
+                url_base=url_base_path, station=station, cam=cam, station_ts=station_timestamp_str,
+                code=code, location=location, default_lang_code=DEFAULT_LANG,
+                videos_header=translations.get("videos", "Videos:"),
+                images_header=translations.get("images", "Images:"),
+                text_files_header=translations.get("text_files", "Text Files:"),
+                gnomonic_label=translations.get("gnomonic", "Gnomonic"),
+                gnomonic_with_coords_label=translations.get("gnomonic_with_coords", "Gnomonic with coordinates"),
+                original_label=translations.get("original", "Original"),
+                original_hevc_label=translations.get("original_hevc", "Original (HEVC)"),
+                original_with_coords_label=translations.get("original_with_coords", "Original with coordinates"),
+                gnomonic_uncorrected_with_coords_label=translations.get("gnomonic_uncorrected_with_coords", "Uncorrected gnomonic with coordinates"),
+                gnomonic_with_labels_label=translations.get("gnomonic_with_labels", "Gnomonic with labels"),
+                gnomonic_uncorrected_with_labels_label=translations.get("gnomonic_uncorrected_with_labels", "Uncorrected gnomonic with labels"),
+                original_with_mask_label=translations.get("original_with_mask", "Original with mask"),
+                detection_label=translations.get("detection", "Detection"),
+                observation_label=translations.get("observation", "Observation"),
+                coordinates_label=translations.get("coordinates", "Coordinates"),
+                error_messages_label=translations.get("error_messages", "Error Messages"),
+                log_file_label=translations.get("log_file", "Log")
             ))
 
 
-def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showername_sg: str, count: int, first: bool, height_valid: bool):
+def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showername_sg: str, count: int, first: bool, height_valid: bool, translations: dict):
     """Constructs and sends a tweet if conditions are met."""
-    if not (count == 2 and first and height_valid and len(sys.argv) == 4):
+    if not (count >= 2 and first and height_valid and len(sys.argv) == 4):
         logging.info("Conditions for tweeting not met. Skipping.")
         return
-        
-    tweet_base = 'Meteor registrert' if not showername_sg else f'{showername_sg.capitalize()} registrert'
-    tweet_str = f"{tweet_base} over {placename} " if placename else f"{tweet_base} "
+    
+    meteor_registered = translations.get('tweet_meteor_registered', 'Meteor registrert')
+    shower_registered_template = translations.get('tweet_shower_registered', '{shower} registrert')
+    over_str = translations.get('tweet_over', 'over')
+    
+    tweet_base = shower_registered_template.format(shower=showername_sg.capitalize()) if showername_sg else meteor_registered
+    tweet_str = f"{tweet_base} {over_str} {placename} " if placename else f"{tweet_base} "
 
     utc_time = date.replace(tzinfo=pytz.utc)
     local_time = utc_time.astimezone(tzlocal())
-    zone = local_time.strftime('%Z')
-    if zone == 'CET':
-        zone = 'norsk normaltid'
-    elif zone == 'CEST':
-        zone = 'norsk sommertid'
+    zone_name = local_time.strftime('%Z')
+    
+    if zone_name == 'CET':
+        zone = translations.get('timezone_cet', 'norsk normaltid')
+    elif zone_name == 'CEST':
+        zone = translations.get('timezone_cest', 'norsk sommertid')
+    else:
+        zone = zone_name
     
     tweet_str += local_time.strftime(f'%Y-%m-%d %H:%M:%S {zone}')
-    link = f"{Config.BASE_HTTP_DIR.name}/meteor/{utc_time.strftime('%Y%m%d/%H%M%S')}/"
+    link = f"https://norskmeteornettverk.no/meteor/{utc_time.strftime('%Y%m%d/%H%M%S')}/"
     
     full_tweet = f'-status="{tweet_str} {link}"'
     logging.info(f"Prepared tweet: {full_tweet}")
@@ -506,38 +522,29 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
     key_solobs = '/var/www/.oysttyerkey-solobs'
     key_main = '/var/www/.oysttyerkey'
     
-    cmd1 = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key_solobs} -silent {full_tweet}'
-    cmd2 = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key_main} -silent {full_tweet}'
-
-    try:
-        run_command(cmd1, shell=True)
-    except Exception as e:
-        logging.error(f"Failed to send tweet via solobs account: {e}")
-        
-    try:
-        run_command(cmd2, shell=True)
-    except Exception as e:
-        logging.error(f"Failed to send tweet via main account: {e}")
+    for key in [key_solobs, key_main]:
+        cmd = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key} -silent {full_tweet}'
+        try:
+            run_command(cmd, shell=True)
+        except Exception as e:
+            logging.error(f"Failed to send tweet using key {key}: {e}")
 
 
 def process_event(event_dir: Path, date: datetime.datetime):
-    """Main processing logic for a given meteor event."""
+    """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
-    
     obs_filename = f"obs_{date.strftime('%Y-%m-%d_%H:%M:%S')}.txt"
     obs_filepath = event_dir / obs_filename
-    station_codes = set()
-    station_name_to_code = {} 
+    res_filename = obs_filepath.with_suffix('.res')
     
+    station_codes, station_name_to_code = set(), {}
     with obs_filepath.open('w', encoding='utf-8') as outfile:
-        for obs_file_absolute in sorted(event_dir.glob('*/*/*[0-9][0-9].txt')):
-            content = obs_file_absolute.read_text().strip()
+        for obs_file in sorted(event_dir.glob('*/*/*[0-9][0-9].txt')):
+            content = obs_file.read_text().strip()
             if not content: continue
+            
             outfile.write(content + '\n')
-            
-            relative_path = obs_file_absolute.relative_to(event_dir)
-            station_dir_name = relative_path.parts[0]
-            
+            station_dir_name = obs_file.relative_to(event_dir).parts[0]
             try:
                 code = content.split()[12]
                 station_codes.add(code)
@@ -546,162 +553,153 @@ def process_event(event_dir: Path, date: datetime.datetime):
             except IndexError:
                 continue
     
-    logging.info(f"Created station name-to-code map: {station_name_to_code}")
-
     original_cwd = Path.cwd()
     os.chdir(event_dir)
     logging.info(f"Changed working directory to: {event_dir}")
-
     if not Path('index.php').exists():
+        try: Path('index.php').symlink_to('../../report.php')
+        except OSError: pass
+
+    is_multistation = len(station_codes) > 1
+    analysis_results = {}
+
+    if is_multistation:
         try:
-            Path('index.php').symlink_to('../../report.php')
-        except:
-            pass
-
-    # Always generate the station-specific HTML report
-    generate_station_html_report(event_dir)
-
-    if len(station_codes) <= 1:
-        logging.info(f"Not enough stations ({len(station_codes)}) for triangulation. Aborting full analysis.")
-        os.chdir(original_cwd)
-        return
-
-    # This block now only runs for multi-station events
-    try:
-        first_run = not Path('map.jpg').exists()
-        res_filename = obs_filename.replace('.txt', '.res')
-        
-        # 1. Run metrack to generate the .res file
-        track_info = metrack(str(obs_filepath), 'save', 1.0, 'h', False, True, timestamp=None, optimize=True, writestat=True, interactive=True)
-        
-        # Optional: Rerun metrack if results are out of bounds
-        try:
-            stat_filepath = obs_filepath.with_suffix('.stat')
-            config = configparser.ConfigParser()
-            config.read(stat_filepath)
-            start_h = float(config.get('track', 'startheight').split()[0])
-            end_h = float(config.get('track', 'endheight').split()[0])
-            if start_h > 200 or end_h < 10:
-                logging.info("Rerunning Metrack with optimization disabled.")
-                metrack(str(obs_filepath), 'save', 1.0, 'h', False, True, timestamp=None, optimize=False, writestat=True)
-        except Exception as e:
-            logging.warning(f"Could not check or re-run Metrack: {e}")
-
-        # 2. Process the .res file and other data
-        fb2kml(res_filename)
-        print(track_info)
-        try:
-            inlier_codes = set(track_info.inlier_stations)
-            logging.info(f"Metrack identified inlier codes: {inlier_codes}")
-
-            all_centroid_paths = glob.glob('*/*/centroid2.txt')
+            logging.info(f"Multi-station event ({len(station_codes)} stations). Performing core analysis...")
             
-            centroid_files = []
-            for file_path_str in all_centroid_paths:
-                station_dir_name = Path(file_path_str).parts[0]
-                station_code = station_name_to_code.get(station_dir_name)
-                
-                if station_code in inlier_codes:
-                    centroid_files.append(file_path_str)
-                else:
-                    logging.info(f"Excluding outlier centroid file (station: {station_dir_name}, code: {station_code}): {file_path_str}")
+            metrack_opts = {
+                'timestamp': date.timestamp(), 
+                'optimize': True, 
+                'use_ransac': True, 
+                'seed': 0,
+                'ransac_threshold': 1.0,
+                'ransac_iterations': 10,
+                'ransac_runs': 100,
+                'debug_ransac': False,
+                'all_in_tolerance': 1.0
+            }
+            fbspd_opts = {'debug': True, 'seed': 0}
+            
+            metrack_info, metrack_plot_data = calculate_trajectory(str(obs_filepath), **metrack_opts)
+            if not metrack_plot_data: raise ValueError("Metrack calculation failed.")
+            
+            write_res_file(metrack_plot_data['track_start'], metrack_plot_data['track_end'],
+                           metrack_plot_data['cross_pos_inliers'], metrack_plot_data['inlier_obs_data'], str(obs_filepath))
+            
+            resdat = readres(str(res_filename))
+            fb2kml(str(res_filename))
+            
+            inlier_codes = set(metrack_info.inlier_stations)
+            centroid_files = [str(p) for p in event_dir.glob('*/*/centroid2.txt') if station_name_to_code.get(p.parts[-3]) in inlier_codes]
+            fbspd_results, fbspd_plot_data = calculate_speed_profile(str(res_filename), centroid_files, str(obs_filepath), **fbspd_opts)
+            if not fbspd_results: raise ValueError("FBSPD calculation failed.")
+            entry_speed = fbspd_results['initial_speed']
 
-            if centroid_files:
-                abs_res_path = str(event_dir / res_filename)
-                abs_cen_paths_str = ','.join([str(event_dir / p) for p in centroid_files])
-                logging.info(f"To reproduce, run: fbspd_merge.py -r {abs_res_path} -c {abs_cen_paths_str} -d {str(obs_filepath)} -o save -v")
-                _, entry_speed = fbspd(res_filename, centroid_files, str(obs_filepath), doplot='save', debug=True)
-            else:
-                logging.warning("No valid centroid files from inlier stations to calculate speed.")
-                entry_speed = 0
+            az, alt = calc_azalt(resdat.lat1[0], resdat.long1[0], resdat.height[0], resdat.lat1[1], resdat.long1[1], resdat.height[1])
+            placename = get_location_from_coords(resdat.lat1[1], resdat.long1[1])
+            if placename: Path('location.txt').write_text(placename, encoding='utf-8')
+            
+            orbit_data = {'valid': False, 'entry_speed': entry_speed, 'az': az, 'alt': alt}
+            if entry_speed > 9.8:
+                ra, dec, (rp, ecc, inc, lnode, argp, m0, t0), s_name, s_name_sg, valid = orbit(
+                    True, entry_speed, 0, str(res_filename), date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), doplot=''
+                )
+                orbit_data.update({'ra': ra, 'dec': dec, 'rp': rp, 'ecc': ecc, 'inc': inc, 
+                                   'lnode': lnode, 'argp': argp, 'm0': m0, 't0': t0,
+                                   'showername': s_name, 'showername_sg': s_name_sg, 'valid': valid})
+
+            analysis_results = {
+                'metrack_info': metrack_info, 'metrack_plot_data': metrack_plot_data, 'fbspd_plot_data': fbspd_plot_data,
+                'orbit_data': orbit_data, 'resdat': resdat, 'placename': placename,
+                'first_run': not any(p.name.endswith('map.jpg') for p in event_dir.glob('*.jpg'))
+            }
+            logging.info("Core analysis successful.")
 
         except Exception as e:
-            logging.error(f"Failed to calculate entry speed with fbspd: {e}")
-            entry_speed = 0
+            logging.error(f"Core analysis failed: {e}", exc_info=True)
+            is_multistation = False
 
-        orbit_data = {'valid': False, 'entry_speed': entry_speed}
-        if entry_speed > 9.8:
-            ra, dec, (rp, ecc, inc, lnode, argp, m0, t0), s_name, s_name_sg, valid = orbit(
-                True, entry_speed, 0, res_filename, 
-                date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', interactive=True
-            )
-            orbit_data.update({
-                'ra': ra, 'dec': dec, 'rp': rp, 'ecc': ecc, 'inc': inc, 
-                'lnode': lnode, 'argp': argp, 'm0': m0, 't0': t0.rsplit(' ', 1)[0],
-                'showername': s_name, 'showername_sg': s_name_sg, 'valid': valid
-            })
+    for lang in SUPPORTED_LANGS:
+        try:
+            logging.info(f"--- Generating outputs for language: [{lang}] ---")
+            translations = load_translations(lang)
+            file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
 
-        svg_to_jpg(Path('posvstime.svg'), Path('posvstime.jpg'), Config.SVG_DEFAULT_DPI)
-        svg_to_jpg(Path('spd_acc.svg'), Path('spd_acc.jpg'), Config.SVG_DEFAULT_DPI)
-        svg_to_jpg(Path('orbit.svg'), Path('orbit.jpg'), Config.SVG_ORBIT_DPI)
-        svg_to_jpg(Path('height.svg'), Path('height.jpg'), Config.SVG_DEFAULT_DPI)
-        if Path('map.svg').exists():
-            svg_to_jpg(Path('map.svg'), Path('map.jpg'), Config.SVG_MAP_DPI)
+            generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
 
-        # 3. NOW it's safe to read the .res file
-        resdat = readres(res_filename)
-        az, alt = calc_azalt(resdat.lat1[0], resdat.long1[0], resdat.height[0], resdat.lat1[1], resdat.long1[1], resdat.height[1])
-        orbit_data.update({'az': az, 'alt': alt})
+            if is_multistation and analysis_results:
+                logging.info(f"Generating translated plots and reports for [{lang}]")
+                
+                plot_opts = {
+                    'doplot': 'save', 
+                    'interactive': True, 
+                    'autoborders': True,
+                    'azonly': False,
+                    'mapres': 'i'
+                }
+                
+                generate_metrack_plots(analysis_results['metrack_info'], analysis_results['metrack_plot_data'], 
+                                       plot_opts, translations=translations, output_prefix=file_prefix)
 
-        placename = get_location_from_coords(resdat.lat1[1], resdat.long1[1])
-        if placename:
-            Path('location.txt').write_text(placename, encoding='utf-8')
+                generate_speed_plots(analysis_results['fbspd_plot_data'], 
+                                     translations=translations, output_prefix=file_prefix)
 
-        # 4. Generate the final reports using the processed data
-        generate_triangulation_html_report(event_dir, resdat, orbit_data, placename)
+                if analysis_results['orbit_data']['valid']:
+                     orbit(True, analysis_results['orbit_data']['entry_speed'], 0, str(res_filename), 
+                           date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', 
+                           interactive=True, translations=translations, output_prefix=file_prefix)
+                
+                dpi_map = {'map.svg': Config.SVG_MAP_DPI, 'orbit.svg': Config.SVG_ORBIT_DPI}
+                for svg_name in ["posvstime.svg", "spd_acc.svg", "orbit.svg", "height.svg", "map.svg"]:
+                    svg_path = event_dir / f"{file_prefix}{svg_name}"
+                    if svg_path.exists():
+                        dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
+                        svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
+                
+                generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", analysis_results['resdat'], analysis_results['orbit_data'], analysis_results['placename'], translations, lang)
         
+        except Exception as e:
+            logging.error(f"Failed to generate output for language '{lang}': {e}", exc_info=True)
+
+    if is_multistation and analysis_results:
+        resdat = analysis_results['resdat']
         height_valid = 10 < resdat.height[0] <= 150 and 10 <= resdat.height[1] <= 150
-        send_tweet(event_dir, date, placename, orbit_data.get('showername_sg', ''), len(station_codes), first_run, height_valid)
+        nb_translations = load_translations('nb')
+        send_tweet(event_dir, date, analysis_results['placename'], analysis_results['orbit_data'].get('showername_sg', ''), len(station_codes), analysis_results['first_run'], height_valid, nb_translations)
+    elif not is_multistation:
+        logging.info("Not enough stations for triangulation. Skipping tweet.")
         
-    finally:
-        os.chdir(original_cwd)
-        logging.info(f"Returned to original directory: {original_cwd}")
+    os.chdir(original_cwd)
+    logging.info(f"Returned to original directory: {original_cwd}")
 
 
 def main():
     """Main script execution flow."""
-    # New logic: Check for a single argument to reprocess an existing event directory
     if len(sys.argv) == 2:
-        final_event_dir = Path(sys.argv[1])
-        if not final_event_dir.is_absolute():
-            final_event_dir = Path.cwd() / final_event_dir
+        final_event_dir = Path(sys.argv[1]).resolve()
         if not final_event_dir.is_dir():
-            print(f"Error: Directory not found: {final_event_dir}", file=sys.stderr)
-            sys.exit(1)
-
-        # Set up logging within the event directory for this reprocessing job
+            sys.exit(f"Error: Directory not found: {final_event_dir}")
         setup_logging(final_event_dir / 'reprocess.log')
         logging.info(f"Starting reprocessing for event directory: {final_event_dir}")
-
-        # Deduce the processing date from the directory path structure (.../YYYYMMDD/HHMMSS)
         try:
-            proc_date_str = final_event_dir.parent.name
-            proc_time_str = final_event_dir.name
-            processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
-            logging.info(f"Deduced processing date: {processing_date}")
+            date_str = final_event_dir.parent.name
+            time_str = final_event_dir.name
+            processing_date = datetime.datetime.strptime(date_str + time_str, '%Y%m%d%H%M%S')
         except (ValueError, IndexError):
-            logging.critical(
-                f"Could not deduce date from path '{final_event_dir}'. "
-                f"Path must end in the format '<YYYYMMDD>/<HHMMSS>'."
-            )
-            sys.exit(1)
-
-        if not Path(str(final_event_dir) + '/index.php').exists():
-            try:
-                Path(str(final_event_dir) + '/index.php').symlink_to('../../report.php')
-            except:
-                pass
-
-        # Run the main processing function
+            sys.exit(f"Could not deduce date from path '{final_event_dir}'. Path must end in '<YYYYMMDD>/<HHMMSS>'.")
+        
+        if not (final_event_dir / 'index.php').exists():
+            try: (final_event_dir / 'index.php').symlink_to('../../report.php')
+            except OSError: pass
+        
         try:
             process_event(final_event_dir, processing_date)
         except Exception as e:
-            logging.critical(f"A critical error occurred during event reprocessing: {e}", exc_info=True)
+            logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
             logging.info("Reprocessing script finished.")
         sys.exit(0)
 
-    # Original logic for fetching data with three arguments
     parser = argparse.ArgumentParser(
         description="Fetch and process meteor data, or reprocess an existing event directory.",
         usage="""
@@ -709,60 +707,44 @@ def main():
     To reprocess: python3 fetch.py <local_event_directory>
         """
     )
-    parser.add_argument("station", nargs='?', help="Name of the observation station (e.g., 'harestua').")
-    parser.add_argument("port", nargs='?', help="SSH port for the connection ('0' for default port 22).")
-    parser.add_argument("remote_dir", nargs='?', help="Remote directory path of the event.")
-
-    # Exit if the argument count is incorrect (not 1 for reprocess, not 3 for fetch)
-    if len(sys.argv) != 4:
-        print("Invalid number of arguments.")
-        parser.print_help()
-        sys.exit(1)
-
+    parser.add_argument("station", nargs='?', help="Name of station.")
+    parser.add_argument("port", nargs='?', help="SSH port.")
+    parser.add_argument("remote_dir", nargs='?', help="Remote directory path.")
+    if len(sys.argv) != 4: parser.print_help(); sys.exit(1)
+    
     args = parser.parse_args()
-
     station = re.sub(r'\W', '', args.station)
     port = re.sub(r'\D', '', args.port)
-    remote_dir_cleaned = re.sub(r'[^a-zA-Z0-9_/]', '', args.remote_dir)
-    dir_parts = [part for part in remote_dir_cleaned.split('/') if part]
-
-    date_str, time_str = dir_parts[3], dir_parts[4]
-    cam_name = dir_parts[1]
-
+    remote_cleaned = re.sub(r'[^a-zA-Z0-9_/]', '', args.remote_dir)
+    dir_parts = [p for p in remote_cleaned.split('/') if p]
+    date_str, time_str, cam_name = dir_parts[3], dir_parts[4], dir_parts[1]
+    
     local_dir = Config.METEOR_DATA_DIR / date_str / time_str / station / cam_name
     setup_logging(local_dir.parent / 'fetch.log')
 
     if not fetch_data(station, port, args.remote_dir, local_dir):
-        sys.exit("Failed to fetch data. Exiting.")
-
+        sys.exit("Failed to fetch data.")
+        
     set_permissions(Config.METEOR_DATA_DIR / date_str)
-
     date_obj = datetime.datetime.strptime(date_str + time_str, '%Y%m%d%H%M%S')
 
     report_log = local_dir / 'report.log'
-    report_script = Config.BASE_HTTP_DIR / 'bin/process.py'
+    report_script = Config.BIN_DIR / 'process.py'
     report_cmd = [sys.executable, str(report_script), str(local_dir / 'event.txt')]
 
-    logging.info(f"--- Running process.py for {local_dir / 'event.txt'} ---")
+    logging.info(f"--- Running {report_script.name} for {local_dir / 'event.txt'} ---")
     with report_log.open('w') as log_file:
        subprocess.call(report_cmd, stdout=log_file, stderr=log_file)
-
-    if not Path(local_dir).exists():
-        logging.info("--- Event was discarded ---")
-        exit(0)
-
-    if Path(report_log).exists():
-        print(report_log.read_text())
-    logging.info("--- Finished process.py ---")
+    if not local_dir.exists():
+        logging.info("--- Event was discarded by process.py ---")
+        sys.exit(0)
 
     create_centroid_file(local_dir)
-
     final_event_dir = find_and_merge_event_directory(date_obj, station, local_dir)
-
     proc_date_str = final_event_dir.parent.name
     proc_time_str = final_event_dir.name
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
-
+    
     try:
         process_event(final_event_dir, processing_date)
     except Exception as e:
@@ -775,5 +757,4 @@ if __name__ == '__main__':
     fetch_foreign_script = Path(__file__).parent / 'fetch_foreign.sh'
     if len(sys.argv) == 4 and fetch_foreign_script.exists():
         run_command([str(fetch_foreign_script)])
-    
     main()

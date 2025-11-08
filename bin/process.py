@@ -1,32 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Processes a single meteor event detection.
+Processes a single meteor event detection. (Multilingual Version)
 
 This script takes an event.txt file as input and performs the following steps:
-1.  Validates the event against various criteria (e.g., movement direction,
-    proximity to the sun).
-2.  Acquires a processing slot from a system-wide semaphore to limit
-    concurrent jobs and prevent system overload.
-3.  Calls an external script to process video, correct for lens distortion,
-    and generate gnomonic projection data.
-4.  Generates a Metrack-compatible observation file.
+1.  Validates the event against various criteria.
+2.  Acquires a processing slot to limit concurrent jobs.
+3.  Calls external scripts for video processing and classification.
+4.  Generates Metrack-compatible data files (metrack, centroid, light).
 5.  Updates the event.txt file with a summary section.
-6.  Optionally runs a classification script to determine the probability of
-    the event being a meteor and cleans up the directory if it falls below
-    a threshold.
-7.  Generates centroid and brightness data files and a brightness plot.
+6.  Generates a translated brightness plot for each supported language.
 
-This script requires several files to be present in the event directory,
-including meteor.cfg, lens.pto, and the event video file.
-
-NOTE: This updated version uses the 'posix_ipc' library. Install it with:
+NOTE: This updated version uses the 'posix_ipc' library.
+Install it with:
 pip install posix_ipc
 """
 
 import argparse
 import configparser
 import datetime
+import json
 import math
 import os
 import socket
@@ -59,19 +52,37 @@ class Settings:
     CROP_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/meteorcrop.py')
     METEOR_TEST_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/meteor_test.sh')
 
-    # --- NEW: Semaphore-based concurrency limiting settings ---
-    # A unique name for the system-wide semaphore. Must start with a '/'.
+    # --- Semaphore-based concurrency limiting settings ---
     SEMAPHORE_NAME = "/nmn_process_py_semaphore"
-    # Calculate the number of concurrent jobs to allow (half the CPU cores).
-    # We use max(1, ...) to ensure at least one job can run.
     CORE_COUNT = os.cpu_count() or 1
     MAX_CONCURRENT_JOBS = max(1, CORE_COUNT // 4)
 
     # --- Original thresholds ---
     MIN_SUN_ALTITUDE_FOR_CHECK = 1  # degrees
     MIN_SUN_SEPARATION_ARC = 20  # degrees
-    CLASSIFICATION_THRESHOLD_DEFAULT = 0.25
+    CLASSIFICATION_THRESHOLD_DEFAULT = 0.05
     CLASSIFICATION_THRESHOLD_AMS = 0.05
+
+# --- Internationalization (i18n) Setup ---
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs']
+DEFAULT_LANG = 'nb'
+LOC_DIR = Path(__file__).parent / 'loc'
+
+def load_translations(lang_code: str) -> dict:
+    """Loads the translation dictionary for a given language, with fallback to default."""
+    default_path = LOC_DIR / f"{DEFAULT_LANG}.json"
+    lang_path = LOC_DIR / f"{lang_code}.json"
+
+    translations = {}
+    if default_path.exists():
+        with default_path.open('r', encoding='utf-8') as f:
+            translations = json.load(f)
+
+    if lang_code != DEFAULT_LANG and lang_path.exists():
+        with lang_path.open('r', encoding='utf-8') as f:
+            translations.update(json.load(f))
+            
+    return translations
 
 
 def get_args():
@@ -84,7 +95,6 @@ def get_args():
         type=Path,
         help="Path to the event.txt file for the detection."
     )
-
     parser.add_argument(
         "--timeout",
         type=int,
@@ -95,18 +105,7 @@ def get_args():
 
 
 def load_configs(event_file: Path) -> tuple:
-    """
-    Loads configuration from the event file and the station's meteor.cfg.
-
-    Args:
-        event_file: Path to the event.txt file.
-
-    Returns:
-        A tuple containing:
-        - event_config (ConfigParser): Parsed event data.
-        - station_config (ConfigParser): Parsed station data.
-        - event_dir (Path): The directory containing the event file.
-    """
+    """Loads configuration from the event file and the station's meteor.cfg."""
     if not event_file.is_file():
         print(f"Error: Event file not found at '{event_file}'")
         sys.exit(1)
@@ -132,7 +131,6 @@ def calculate_angular_distance(az1: float, alt1: float, az2: float, alt2: float)
     x1, x2 = math.radians(az1), math.radians(az2)
     y1, y2 = math.radians(alt1), math.radians(alt2)
 
-    # Haversine formula
     a = math.sin((y2 - y1) / 2)**2 + math.cos(y1) * math.cos(y2) * math.sin((x2 - x1) / 2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
@@ -156,13 +154,7 @@ def get_sun_position(station_config: configparser.ConfigParser, timestamp: str) 
 
 
 def should_discard_event(event_config, station_config) -> bool:
-    """
-    Performs pre-checks to determine if an event should be discarded.
-
-    Returns:
-        True if the event should be discarded, False otherwise.
-    """
-    # Check 1: Discard objects moving upwards near the horizon
+    """Performs pre-checks to determine if an event should be discarded."""
     try:
         is_flash = event_config.getboolean('video', 'flash')
         coords = event_config.get('trail', 'coordinates').split()
@@ -175,7 +167,6 @@ def should_discard_event(event_config, station_config) -> bool:
     except (configparser.NoOptionError, IndexError):
         pass
 
-    # Check 2: Discard objects too close to the sun
     try:
         is_manual = event_config.getboolean('trail', 'manual')
         if is_manual:
@@ -187,7 +178,7 @@ def should_discard_event(event_config, station_config) -> bool:
         if sun_alt > Settings.MIN_SUN_ALTITUDE_FOR_CHECK:
             midpoint_az, midpoint_alt = map(float, event_config.get('trail', 'midpoint').split(','))
             separation = calculate_angular_distance(sun_az, sun_alt, midpoint_az, midpoint_alt)
-            if separation < Settings.MIN_SEPARATION_ARC:
+            if separation < Settings.MIN_SUN_SEPARATION_ARC:
                 print(f"Discarding: Event is too close to the sun ({separation:.1f}°).")
                 return True
     except (configparser.NoOptionError, ValueError):
@@ -197,39 +188,22 @@ def should_discard_event(event_config, station_config) -> bool:
 
 
 def cleanup_directory_and_exit(event_dir: Path):
-    """
-    Removes the event directory and its contents, attempts to remove the
-    parent if it's empty, and then exits.
-    """
+    """Removes the event directory and its contents, then exits."""
     print(f"Cleaning up and removing directory: {event_dir}")
     for f in event_dir.glob('*'):
         f.unlink()
     event_dir.rmdir()
     try:
-        # Attempt to remove the parent directory (e.g., /.../DATE/EVENT_ID)
-        # This will only succeed if the parent (DATE) is now empty.
         event_dir.parent.rmdir()
     except OSError:
-        # This is expected if the parent directory is not empty.
         pass
     sys.exit(0)
 
 
 def acquire_processing_slot(timeout: int) -> posix_ipc.Semaphore:
-    """
-    Acquires a slot from a system-wide counting semaphore to limit concurrency.
-
-    Exits if a slot cannot be acquired within the timeout.
-
-    Args:
-        timeout: The time in seconds to wait for the semaphore.
-
-    Returns:
-        The acquired semaphore object.
-    """
+    """Acquires a slot from a system-wide counting semaphore to limit concurrency."""
     semaphore = None
     try:
-        # Try to create the semaphore. This only succeeds for the first process.
         semaphore = posix_ipc.Semaphore(
             Settings.SEMAPHORE_NAME,
             posix_ipc.O_CREX,
@@ -237,7 +211,6 @@ def acquire_processing_slot(timeout: int) -> posix_ipc.Semaphore:
         )
         print(f"Semaphore created. Max concurrent jobs set to: {Settings.MAX_CONCURRENT_JOBS}")
     except posix_ipc.ExistentialError:
-        # If it already exists, just open it.
         semaphore = posix_ipc.Semaphore(Settings.SEMAPHORE_NAME)
 
     try:
@@ -274,12 +247,7 @@ def run_command(command: list, cwd: Path) -> subprocess.CompletedProcess:
 
 
 def run_video_processing(event_config, station_config, event_dir: Path) -> tuple:
-    """
-    Runs the makevideos.py script and calculates corrected duration.
-
-    Returns:
-        A tuple containing (start_az, start_alt, end_az, end_alt, duration).
-    """
+    """Runs the makevideos.py script and calculates corrected duration."""
     videostart_str_full = event_config.get('video', 'start')
     cleaned_videostart_str = videostart_str_full.rsplit('(', 1)[0].strip()
     videostart_ts = dt_parse(cleaned_videostart_str)
@@ -326,10 +294,7 @@ def update_event_summary(event_config, station_config, proc_results: tuple):
 
 
 def run_classification(event_config, event_dir: Path):
-    """
-    Crop meteor and cleans up the directory if the event is likely not a meteor.
-    """
-    # Define the path to the fireball.jpg file.
+    """Crops meteor image and cleans up directory if classification is low."""
     fireball_jpg = event_dir.resolve() / 'fireball.jpg'
 
     run_command([sys.executable, Settings.CROP_SCRIPT, '--mode', 'both', str(event_dir.resolve())], cwd=event_dir)
@@ -352,8 +317,8 @@ def run_classification(event_config, event_dir: Path):
         cleanup_directory_and_exit(event_dir)
 
 
-def write_output_files(event_config, station_config, event_dir: Path):
-    """Writes the metrack, centroid, and light data files."""
+def write_data_files(event_config, station_config, event_dir: Path):
+    """Writes the machine-readable data files (metrack, centroid, light)."""
     videostart_str_full = event_config.get('video', 'start')
     cleaned_videostart_str = videostart_str_full.rsplit('(', 1)[0].strip()
     videostart_ts = dt_parse(cleaned_videostart_str)
@@ -366,6 +331,7 @@ def write_output_files(event_config, station_config, event_dir: Path):
     brightness = [float(b) for b in event_config.get('trail', 'brightness').split()]
     size = [float(s) for s in event_config.get('trail', 'size').split()]
     frame_brightness = [float(f) for f in event_config.get('trail', 'frame_brightness').split()]
+    code = station_config.get('station', 'code')
 
     metrack_file = event_dir / f"{base_name}.txt"
     with metrack_file.open('w', encoding='utf-8') as f:
@@ -400,20 +366,40 @@ def write_output_files(event_config, station_config, event_dir: Path):
             dt = ts - timestamps[0]
             f.write(f"{dt:.2f} {b} {s} {fb}\n")
 
+def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: list):
+    """Generates translated brightness plots for all supported languages."""
+    print("Generating multilingual brightness plots...")
+    if not timestamps or not brightness:
+        print("Warning: No data available to generate brightness plot.")
+        return
+
     time_axis = [t - timestamps[0] for t in timestamps]
-    plt.figure()
-    plt.plot(time_axis, brightness)
-    plt.xlabel('Tid [s]')
-    plt.ylabel('Lysstyrke')
-    plt.savefig(event_dir / 'brightness.svg')
-    plt.savefig(event_dir / 'brightness.jpg')
-    plt.close()
+
+    for lang in SUPPORTED_LANGS:
+        translations = load_translations(lang)
+        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+        
+        svg_path = event_dir / f'{file_prefix}brightness.svg'
+        jpg_path = event_dir / f'{file_prefix}brightness.jpg'
+
+        try:
+            plt.figure()
+            plt.plot(time_axis, brightness)
+            plt.xlabel(translations.get("plot_time_x_label", "Time [s]"))
+            plt.ylabel(translations.get("brightness", "Brightness"))
+            plt.title(translations.get("brightness_plot_title", "Brightness over Time"))
+            
+            plt.savefig(svg_path)
+            plt.savefig(jpg_path)
+            plt.close()
+            print(f"  - Saved {svg_path.name} and {jpg_path.name}")
+        except Exception as e:
+            print(f"Error generating plot for language '{lang}': {e}")
 
 
 def main():
     """Main execution flow of the script."""
     args = get_args()
-    # 1. Initial load
     event_config, station_config, event_dir = load_configs(args.event_file)
 
     if should_discard_event(event_config, station_config):
@@ -422,22 +408,20 @@ def main():
     semaphore = acquire_processing_slot(args.timeout)
 
     try:
-        # 2. Run the external process that might change the file
         proc_results = run_video_processing(event_config, station_config, event_dir)
 
-        # 3. Reload the file to get any changes made by the external script
         event_config, station_config, event_dir = load_configs(args.event_file)
 
-        # 4. Now, continue with the updated data
         update_event_summary(event_config, station_config, proc_results)
         run_classification(event_config, event_dir)
-
-        # Save the updated summary back to the event file
         with args.event_file.open('w', encoding='utf-8') as f:
             event_config.write(f)
 
-        # This function will now use the correct, updated brightness data
-        write_output_files(event_config, station_config, event_dir)
+        write_data_files(event_config, station_config, event_dir)
+        
+        timestamps = [float(t) for t in event_config.get('trail', 'timestamps').split()]
+        brightness = [float(b) for b in event_config.get('trail', 'brightness').split()]
+        generate_brightness_plots(event_dir, timestamps, brightness)
 
     finally:
         if semaphore:

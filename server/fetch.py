@@ -41,6 +41,7 @@ try:
     LIBS_AVAILABLE = True
 except ImportError:
     LIBS_AVAILABLE = False
+    logging.warning("Libs cairosvg or Pillow not found. SVG conversion will be skipped.")
 
 # Local script imports from the same project
 from fb2kml import fb2kml
@@ -48,6 +49,13 @@ from fbspd_merge import readres, calculate_speed_profile, generate_speed_plots
 from metrack import calculate_trajectory, generate_plots as generate_metrack_plots, write_res_file
 from orbit import calc_azalt, orbit
 import reverse_geocode
+
+try:
+    import windprofile
+    WINDPROFILE_AVAILABLE = True
+except ImportError:
+    logging.warning("Module 'windprofile.py' not found. Wind profile generation will be skipped.")
+    WINDPROFILE_AVAILABLE = False
 
 
 class Config:
@@ -86,11 +94,17 @@ def load_translations(lang_code: str) -> dict:
     translations = {}
     if default_path.exists():
         with default_path.open('r', encoding='utf-8') as f:
-            translations = json.load(f)
-
+            try:
+                translations = json.load(f)
+            except json.JSONDecodeError as e:
+                logging.error(f"Error parsing default translations {default_path}: {e}")
+                
     if lang_code != DEFAULT_LANG and lang_path.exists():
         with lang_path.open('r', encoding='utf-8') as f:
-            translations.update(json.load(f))
+            try:
+                translations.update(json.load(f))
+            except json.JSONDecodeError as e:
+                logging.error(f"Error parsing language file {lang_path}: {e}")
             
     return translations
 
@@ -174,9 +188,15 @@ def set_permissions(directory: Path):
     """Recursively sets directory and file permissions."""
     for root, dirs, files in os.walk(directory):
         for d in dirs:
-            Path(root, d).chmod(0o775)
+            try:
+                Path(root, d).chmod(0o775)
+            except OSError as e:
+                logging.warning(f"Could not set permissions on dir {root}/{d}: {e}")
         for f in files:
-            Path(root, f).chmod(0o664)
+            try:
+                Path(root, f).chmod(0o664)
+            except OSError as e:
+                logging.warning(f"Could not set permissions on file {root}/{f}: {e}")
 
 
 def to_cartesian(az: float, alt: float) -> list:
@@ -207,12 +227,16 @@ def create_centroid_file(local_dir: Path):
         return
 
     obs = configparser.ConfigParser()
-    obs.read(event_file)
+    try:
+        obs.read(event_file)
 
-    coordinates = obs.get('trail', 'coordinates').split()
-    timestamps = obs.get('trail', 'timestamps').split()
-    az1_str, alt1_str = obs.get('summary', 'startpos').split()
-    az2_str, alt2_str = obs.get('summary', 'endpos').split()
+        coordinates = obs.get('trail', 'coordinates').split()
+        timestamps = obs.get('trail', 'timestamps').split()
+        az1_str, alt1_str = obs.get('summary', 'startpos').split()
+        az2_str, alt2_str = obs.get('summary', 'endpos').split()
+    except Exception as e:
+        logging.error(f"Failed to parse event.txt file {event_file}: {e}")
+        return
 
     p1 = to_cartesian(float(az1_str), float(alt1_str))
     p2 = to_cartesian(float(az2_str), float(alt2_str))
@@ -235,20 +259,23 @@ def create_centroid_file(local_dir: Path):
         logging.error("Could not find an observation file or parse the station code.")
         return
 
-    with centroid_file.open('w', encoding='utf-8') as f:
-        for i, (t_str, (az, alt)) in enumerate(zip(timestamps, coordinates2)):
-            t_float = float(t_str)
-            dt = t_float - float(timestamps[0])
-            gm_time = time.gmtime(t_float)
-            
-            main_timestamp = time.strftime('%Y-%m-%d %H:%M:%S', gm_time)
-            fractional_second = f"{t_float % 1:.2f}".split('.')[1]
-            
-            output_line = (
-                f"{i} {dt:.2f} {alt:.2f} {az:.2f} 1.0 {code} "
-                f"{main_timestamp}.{fractional_second} UTC"
-            )
-            f.write(output_line + '\n')
+    try:
+        with centroid_file.open('w', encoding='utf-8') as f:
+            for i, (t_str, (az, alt)) in enumerate(zip(timestamps, coordinates2)):
+                t_float = float(t_str)
+                dt = t_float - float(timestamps[0])
+                gm_time = time.gmtime(t_float)
+                
+                main_timestamp = time.strftime('%Y-%m-%d %H:%M:%S', gm_time)
+                fractional_second = f"{t_float % 1:.2f}".split('.')[1]
+                
+                output_line = (
+                    f"{i} {dt:.2f} {alt:.2f} {az:.2f} 1.0 {code} "
+                    f"{main_timestamp}.{fractional_second} UTC"
+                )
+                f.write(output_line + '\n')
+    except Exception as e:
+        logging.error(f"Failed to write centroid2.txt: {e}")
 
 
 def find_and_merge_event_directory(base_date: datetime.datetime, station: str, current_local_dir: Path):
@@ -275,8 +302,11 @@ def find_and_merge_event_directory(base_date: datetime.datetime, station: str, c
                     os.replace(f, destination_file)
                 except OSError as e:
                     logging.error(f"Could not move {f} to {destination_file}: {e}")
-
-            shutil.rmtree(current_local_dir.parent.parent)
+            
+            try:
+                shutil.rmtree(current_local_dir.parent.parent)
+            except OSError as e:
+                logging.error(f"Could not remove original event dir {current_local_dir.parent.parent}: {e}")
 
             return target_dir
 
@@ -395,8 +425,13 @@ def generate_station_html_report(output_path: Path, event_dir: Path, translation
             location = station.title()
 
             cfg = configparser.ConfigParser()
-            cfg.read(event_file)
-            ts_float = float(cfg.get('trail', 'timestamps').split()[0])
+            try:
+                cfg.read(event_file)
+                ts_float = float(cfg.get('trail', 'timestamps').split()[0])
+            except Exception as e:
+                logging.warning(f"Could not parse event file {event_file}: {e}")
+                continue
+                
             ts_utc = datetime.datetime.fromtimestamp(ts_float, tz=pytz.utc)
             ts_str = ts_utc.strftime('%Y%m%d%H%M%S')
             
@@ -405,8 +440,6 @@ def generate_station_html_report(output_path: Path, event_dir: Path, translation
             if obs_txt_file.exists():
                 try: code = obs_txt_file.read_text().split()[12]
                 except IndexError: pass
-            
-            f.write('</td></tr></table>')
 
             html_template = """
 <div class="container">
@@ -492,7 +525,7 @@ $brightness_jpg_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
 def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showername_sg: str, count: int, first: bool, height_valid: bool, translations: dict):
     """Constructs and sends a tweet if conditions are met."""
     if not (count >= 2 and first and height_valid and len(sys.argv) == 4):
-        logging.info("Conditions for tweeting not met. Skipping.")
+        logging.info("Conditions for tweeting not met (count>=2, first_run, height_valid, is_fetch_run). Skipping.")
         return
     
     meteor_registered = translations.get('tweet_meteor_registered', 'Meteor registrert')
@@ -526,6 +559,7 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
         cmd = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key} -silent {full_tweet}'
         try:
             run_command(cmd, shell=True)
+            logging.info(f"Successfully sent tweet using key {key}.")
         except Exception as e:
             logging.error(f"Failed to send tweet using key {key}: {e}")
 
@@ -538,27 +572,38 @@ def process_event(event_dir: Path, date: datetime.datetime):
     res_filename = obs_filepath.with_suffix('.res')
     
     station_codes, station_name_to_code = set(), {}
-    with obs_filepath.open('w', encoding='utf-8') as outfile:
-        for obs_file in sorted(event_dir.glob('*/*/*[0-9][0-9].txt')):
-            content = obs_file.read_text().strip()
-            if not content: continue
-            
-            outfile.write(content + '\n')
-            station_dir_name = obs_file.relative_to(event_dir).parts[0]
-            try:
-                code = content.split()[12]
-                station_codes.add(code)
-                if station_dir_name not in station_name_to_code:
-                    station_name_to_code[station_dir_name] = code
-            except IndexError:
-                continue
-    
+    try:
+        with obs_filepath.open('w', encoding='utf-8') as outfile:
+            for obs_file in sorted(event_dir.glob('*/*/*[0-9][0-9].txt')):
+                content = obs_file.read_text().strip()
+                if not content: continue
+                
+                outfile.write(content + '\n')
+                station_dir_name = obs_file.relative_to(event_dir).parts[0]
+                try:
+                    code = content.split()[12]
+                    station_codes.add(code)
+                    if station_dir_name not in station_name_to_code:
+                        station_name_to_code[station_dir_name] = code
+                except IndexError:
+                    logging.warning(f"Could not parse station code from {obs_file}")
+                    continue
+    except Exception as e:
+        logging.error(f"Failed to create observation file {obs_filepath}: {e}")
+        return
+
     original_cwd = Path.cwd()
-    os.chdir(event_dir)
+    try:
+        os.chdir(event_dir)
+    except Exception as e:
+        logging.error(f"Failed to change directory to {event_dir}: {e}")
+        return
+        
     logging.info(f"Changed working directory to: {event_dir}")
     if not Path('index.php').exists():
         try: Path('index.php').symlink_to('../../report.php')
-        except OSError: pass
+        except OSError as e:
+             logging.warning(f"Could not create symlink index.php: {e}")
 
     is_multistation = len(station_codes) > 1
     analysis_results = {}
@@ -581,23 +626,27 @@ def process_event(event_dir: Path, date: datetime.datetime):
             fbspd_opts = {'debug': True, 'seed': 0}
             
             metrack_info, metrack_plot_data = calculate_trajectory(str(obs_filepath), **metrack_opts)
-            if not metrack_plot_data: raise ValueError("Metrack calculation failed.")
+            if not metrack_plot_data: raise ValueError("Metrack calculation returned no plot data.")
             
             write_res_file(metrack_plot_data['track_start'], metrack_plot_data['track_end'],
                            metrack_plot_data['cross_pos_inliers'], metrack_plot_data['inlier_obs_data'], str(obs_filepath))
             
             resdat = readres(str(res_filename))
+            if not resdat: raise ValueError("readres() failed or returned no data.")
+                
             fb2kml(str(res_filename))
             
             inlier_codes = set(metrack_info.inlier_stations)
             centroid_files = [str(p) for p in event_dir.glob('*/*/centroid2.txt') if station_name_to_code.get(p.parts[-3]) in inlier_codes]
             fbspd_results, fbspd_plot_data = calculate_speed_profile(str(res_filename), centroid_files, str(obs_filepath), **fbspd_opts)
-            if not fbspd_results: raise ValueError("FBSPD calculation failed.")
+            if not fbspd_results: raise ValueError("FBSPD calculation failed or returned no results.")
             entry_speed = fbspd_results['initial_speed']
 
             az, alt = calc_azalt(resdat.lat1[0], resdat.long1[0], resdat.height[0], resdat.lat1[1], resdat.long1[1], resdat.height[1])
             placename = get_location_from_coords(resdat.lat1[1], resdat.long1[1])
-            if placename: Path('location.txt').write_text(placename, encoding='utf-8')
+            if placename: 
+                try: Path('location.txt').write_text(placename, encoding='utf-8')
+                except OSError as e: logging.warning(f"Could not write location.txt: {e}")
             
             orbit_data = {'valid': False, 'entry_speed': entry_speed, 'az': az, 'alt': alt}
             if entry_speed > 9.8:
@@ -618,7 +667,11 @@ def process_event(event_dir: Path, date: datetime.datetime):
         except Exception as e:
             logging.error(f"Core analysis failed: {e}", exc_info=True)
             is_multistation = False
+    else:
+        logging.info("Single-station event. Skipping core analysis.")
 
+
+    # --- Language-specific output generation loop ---
     for lang in SUPPORTED_LANGS:
         try:
             logging.info(f"--- Generating outputs for language: [{lang}] ---")
@@ -661,11 +714,61 @@ def process_event(event_dir: Path, date: datetime.datetime):
         except Exception as e:
             logging.error(f"Failed to generate output for language '{lang}': {e}", exc_info=True)
 
+    if is_multistation and analysis_results and WINDPROFILE_AVAILABLE:
+        try:
+            end_height_km = analysis_results['resdat'].height[1]
+            if 10 <= end_height_km <= 40:
+                logging.info(f"End altitude {end_height_km:.1f} km is between 10-40 km. Generating wind profile.")
+                
+                wind_csv_path = event_dir / "wind_profile.csv"
+                end_lat = analysis_results['resdat'].lat1[1]
+                end_lon = analysis_results['resdat'].long1[1]
+                event_timestamp = date.timestamp()
+
+                # Fetch and save raw CSV data
+                success, matched_time = windprofile.get_wind_profile(
+                    end_lat, 
+                    end_lon, 
+                    event_timestamp, 
+                    str(wind_csv_path)
+                )
+
+                if success:
+                    logging.info(f"Successfully fetched wind data for {matched_time}")
+                    # Generate plot for each language
+                    for lang in SUPPORTED_LANGS:
+                        translations = load_translations(lang)
+                        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                        
+                        windprofile.generate_wind_plot(
+                            str(wind_csv_path), 
+                            translations, 
+                            matched_time, 
+                            file_prefix
+                        )
+                        
+                        # Convert the new SVG to JPG
+                        svg_path = event_dir / f"{file_prefix}wind_profile.svg"
+                        if svg_path.exists():
+                            svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_DEFAULT_DPI)
+                        else:
+                            logging.warning(f"Wind profile SVG not found: {svg_path}")
+                else:
+                    logging.warning("Failed to get wind profile data.")
+            else:
+                logging.info(f"End altitude {end_height_km:.1f} km is outside 10-40 km range. Skipping wind profile.")
+
+        except Exception as e:
+            logging.error(f"Failed to generate wind profile: {e}", exc_info=True)
+
+
     if is_multistation and analysis_results:
         resdat = analysis_results['resdat']
         height_valid = 10 < resdat.height[0] <= 150 and 10 <= resdat.height[1] <= 150
-        nb_translations = load_translations('nb')
-        send_tweet(event_dir, date, analysis_results['placename'], analysis_results['orbit_data'].get('showername_sg', ''), len(station_codes), analysis_results['first_run'], height_valid, nb_translations)
+        nb_translations = load_translations('nb') # Tweet always in default lang
+        send_tweet(event_dir, date, analysis_results['placename'], 
+                   analysis_results['orbit_data'].get('showername_sg', ''), 
+                   len(station_codes), analysis_results['first_run'], height_valid, nb_translations)
     elif not is_multistation:
         logging.info("Not enough stations for triangulation. Skipping tweet.")
         
@@ -676,29 +779,37 @@ def process_event(event_dir: Path, date: datetime.datetime):
 def main():
     """Main script execution flow."""
     if len(sys.argv) == 2:
+        # --- Reprocessing Mode ---
         final_event_dir = Path(sys.argv[1]).resolve()
         if not final_event_dir.is_dir():
             sys.exit(f"Error: Directory not found: {final_event_dir}")
-        setup_logging(final_event_dir / 'reprocess.log')
-        logging.info(f"Starting reprocessing for event directory: {final_event_dir}")
+        
+        # Setup logging in the event directory
+        log_path = final_event_dir / 'reprocess.log'
+        setup_logging(log_path)
+        logging.info(f"--- Starting REPROCESSING for event directory: {final_event_dir} ---")
+        
         try:
             date_str = final_event_dir.parent.name
             time_str = final_event_dir.name
             processing_date = datetime.datetime.strptime(date_str + time_str, '%Y%m%d%H%M%S')
         except (ValueError, IndexError):
+            logging.error(f"Could not deduce date from path '{final_event_dir}'. Path must end in '<YYYYMMDD>/<HHMMSS>'.")
             sys.exit(f"Could not deduce date from path '{final_event_dir}'. Path must end in '<YYYYMMDD>/<HHMMSS>'.")
         
         if not (final_event_dir / 'index.php').exists():
             try: (final_event_dir / 'index.php').symlink_to('../../report.php')
-            except OSError: pass
+            except OSError as e:
+                logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
             process_event(final_event_dir, processing_date)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
-            logging.info("Reprocessing script finished.")
+            logging.info("--- Reprocessing script finished. ---")
         sys.exit(0)
+        # --- End Reprocessing Mode ---
 
     parser = argparse.ArgumentParser(
         description="Fetch and process meteor data, or reprocess an existing event directory.",
@@ -707,25 +818,49 @@ def main():
     To reprocess: python3 fetch.py <local_event_directory>
         """
     )
-    parser.add_argument("station", nargs='?', help="Name of station.")
-    parser.add_argument("port", nargs='?', help="SSH port.")
-    parser.add_argument("remote_dir", nargs='?', help="Remote directory path.")
-    if len(sys.argv) != 4: parser.print_help(); sys.exit(1)
+    parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
+    parser.add_argument("port", nargs='?', help="SSH port (if fetching).")
+    parser.add_argument("remote_dir", nargs='?', help="Remote directory path (if fetching).")
     
     args = parser.parse_args()
-    station = re.sub(r'\W', '', args.station)
+
+    if args.port is None or args.remote_dir is None:
+        if len(sys.argv) == 2:
+            # This case is now handled by the reprocessing block above
+             parser.print_help()
+        else:
+            logging.error("Missing arguments. Both port and remote_dir are required for fetching.")
+            parser.print_help()
+        sys.exit(1)
+    
+    # --- Fetch Mode ---
+    station = re.sub(r'\W', '', args.arg1)
     port = re.sub(r'\D', '', args.port)
     remote_cleaned = re.sub(r'[^a-zA-Z0-9_/]', '', args.remote_dir)
-    dir_parts = [p for p in remote_cleaned.split('/') if p]
-    date_str, time_str, cam_name = dir_parts[3], dir_parts[4], dir_parts[1]
     
+    try:
+        dir_parts = [p for p in remote_cleaned.split('/') if p]
+        date_str, time_str, cam_name = dir_parts[3], dir_parts[4], dir_parts[1]
+    except IndexError:
+        logging.error(f"Could not parse remote directory structure: {remote_cleaned}")
+        sys.exit(f"Could not parse remote directory structure: {remote_cleaned}")
+        
     local_dir = Config.METEOR_DATA_DIR / date_str / time_str / station / cam_name
-    setup_logging(local_dir.parent / 'fetch.log')
+    
+    # Setup logging in the station's event directory
+    log_path = local_dir.parent / 'fetch.log'
+    setup_logging(log_path)
+    logging.info(f"--- Starting FETCH for station {station}, remote dir {args.remote_dir} ---")
 
     if not fetch_data(station, port, args.remote_dir, local_dir):
+        logging.error("Failed to fetch data. Exiting.")
         sys.exit("Failed to fetch data.")
         
-    set_permissions(Config.METEOR_DATA_DIR / date_str)
+    try:
+        set_permissions(Config.METEOR_DATA_DIR / date_str)
+    except Exception as e:
+        logging.warning(f"Failed to set permissions on {Config.METEOR_DATA_DIR / date_str}: {e}")
+        
     date_obj = datetime.datetime.strptime(date_str + time_str, '%Y%m%d%H%M%S')
 
     report_log = local_dir / 'report.log'
@@ -733,14 +868,24 @@ def main():
     report_cmd = [sys.executable, str(report_script), str(local_dir / 'event.txt')]
 
     logging.info(f"--- Running {report_script.name} for {local_dir / 'event.txt'} ---")
-    with report_log.open('w') as log_file:
-       subprocess.call(report_cmd, stdout=log_file, stderr=log_file)
+    try:
+        with report_log.open('w') as log_file:
+           subprocess.call(report_cmd, stdout=log_file, stderr=log_file)
+    except Exception as e:
+        logging.error(f"Failed to run process.py: {e}")
+        
     if not local_dir.exists():
         logging.info("--- Event was discarded by process.py ---")
         sys.exit(0)
 
     create_centroid_file(local_dir)
     final_event_dir = find_and_merge_event_directory(date_obj, station, local_dir)
+    
+    # Re-setup logging in the *final* event directory for the main processing
+    log_path = final_event_dir / 'process.log'
+    setup_logging(log_path)
+    logging.info(f"--- Event merged into {final_event_dir}. Starting main processing. ---")
+    
     proc_date_str = final_event_dir.parent.name
     proc_time_str = final_event_dir.name
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
@@ -750,11 +895,14 @@ def main():
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:
-        logging.info("Script finished.")
+        logging.info("--- Script finished. ---")
 
 
 if __name__ == '__main__':
     fetch_foreign_script = Path(__file__).parent / 'fetch_foreign.sh'
     if len(sys.argv) == 4 and fetch_foreign_script.exists():
-        run_command([str(fetch_foreign_script)])
+        try:
+            run_command([str(fetch_foreign_script)])
+        except Exception as e:
+            logging.warning(f"Failed to run fetch_foreign.sh: {e}")
     main()

@@ -127,5 +127,10 @@
   },
   "wind_profile": "Větrný profil",
   "wind_speed_ms": "Rychlost větru (m/s)",
-  "wind_direction_deg": "Směr větru (°)"
+  "wind_direction_deg": "Směr větru (°)",
+  "time": "Čas",
+  "height": "Výška",
+  "ground_dist": "Vzdálenost po zemi",
+  "latitude": "Zeměpisná šířka",
+  "longitude": "Zeměpisná délka"
 }

@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fbspd_hybrid.py: Fits speed and acceleration profiles to meteor centroid data.
+fbspd_merge.py: Fits speed and acceleration profiles to meteor centroid data.
+(Multilingual Version)
 
 This script analyzes meteor trajectory data from multiple observation stations.
 It reads trajectory solutions (.res), station coordinates (.dat), and centroid
 observations (.cen) to compute a merged speed and acceleration profile for a
 meteor event.
 
-This hybrid version combines two time-offset alignment strategies and selects
-the one that produces the best physical fit, making it robust for a wider
-variety of meteor observation data, including those with fragmentation.
+Refactored to separate core calculation from plotting for efficient multilingual
+output generation. The main `fbspd` function remains backward-compatible.
 """
 
 import argparse
 import sys
 import itertools
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -391,15 +391,13 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
 
     exp_params_guess = [v0_guess_clipped, -10.0, 1.0, p0_guess]
     
-    # --- Start of Change ---
     try:
         res_exp = least_squares(residual_func, exp_params_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, expfunc), bounds=exp_bounds, max_nfev=5000)
     except ValueError:
         if debug:
             print("  -> Warning: Exponential fit failed with a ValueError (likely overflow). Falling back to linear fit.")
-        res_exp = None # Mark the exponential fit as failed
-    # --- End of Change ---
-
+        res_exp = None
+    
     res_lin = None
     try:
         lin_params_initial_guess, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig)
@@ -425,10 +423,25 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
     print("Error: Could not find a successful fit for the data.")
     return None, 0, None, np.inf
 
-def _generate_plots(data: dict, params: np.ndarray, lower_params: Optional[np.ndarray], upper_params: Optional[np.ndarray], n_ok: int, doplot: str, sigma_level: float = 1.0, station_id_array: Optional[np.ndarray] = None, exclude_station_idx: Optional[int] = None):
+def generate_speed_plots(plot_data: Dict[str, Any], translations: Optional[dict] = None, output_prefix: str = ''):
+    """
+    Generates all plots based on pre-calculated analysis results.
+    """
+    if translations is None: translations = {}
+    
+    data = plot_data['final_merged_data']
     if data['reltime'].size == 0:
         print("Warning: Cannot generate plots because there is no data.")
         return
+        
+    params = plot_data['final_params']
+    lower_params = plot_data['lower_bound_params']
+    upper_params = plot_data['upper_bound_params']
+    n_ok = plot_data['n_ok']
+    sigma_level = plot_data['sigma_level']
+    station_id_array = plot_data['station_id_array']
+    exclude_station_idx = plot_data['worst_station_idx']
+
     plot_mask = np.full(len(data['reltime']), True)
     if exclude_station_idx is not None and station_id_array is not None: plot_mask = (station_id_array != exclude_station_idx)
     reltime_plot, pos_plot, color_time_plot, sig_plot = data['reltime'][plot_mask], data['pos'][plot_mask], data['color_time'][plot_mask], data['sig'][plot_mask]
@@ -441,191 +454,174 @@ def _generate_plots(data: dict, params: np.ndarray, lower_params: Optional[np.nd
         if window_size % 2 == 0: window_size += 1
         sig_smoothed = np.convolve(data['sig'], np.ones(window_size)/window_size, mode='same')[plot_mask]
     except (ValueError, IndexError): sig_smoothed = sig_plot
+    
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]}); fig1.suptitle("Atmosfærisk bane", fontsize=16, fontstyle="oblique")
-    sc = ax1.scatter(reltime_plot, pos_plot, c=color_time_plot, cmap='viridis', s=10, label='Enkeltobservasjoner'); ax1.plot(t_fit, fit_pos, 'r-', label='Estimert bane', linewidth=2); ax1.set_ylabel('Posisjonen langs banen [km]'); ax1.legend()
-    fig1.subplots_adjust(right=0.85, top=0.92); cbar_ax = fig1.add_axes([0.88, 0.11, 0.03, 0.77]); cbar = fig1.colorbar(sc, cax=cbar_ax); cbar.set_label('Tid [s]')
-    ax2.axhline(0, color='r', linestyle='--', linewidth=1.5, zorder=4); ax2.scatter(reltime_plot, residuals_plot, c=color_time_plot, cmap='viridis', s=10, zorder=5); ax2.fill_between(reltime_plot, -sig_smoothed*sigma_level, sig_smoothed*sigma_level, color='blue', alpha=0.3, label=f'±{sigma_level:.0f}σ usikkerhet'); ax2.set_ylabel('Residualer [km]'); ax2.set_xlabel('Tid [s]'); ax2.legend(loc='upper right')
-    if doplot in ['save', 'both']: plt.savefig("posvstime.svg", bbox_inches='tight', pad_inches=0.05)
     
-    fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, constrained_layout=True); fig2.suptitle("     Dynamisk analyse", fontsize=16, fontstyle="oblique")
+    # --- Plot 1: Position vs Time ---
+    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+    fig1.suptitle(translations.get("plot_pos_title", "Atmospheric Trajectory"), fontsize=16, fontstyle="oblique")
+    sc = ax1.scatter(reltime_plot, pos_plot, c=color_time_plot, cmap='viridis', s=10, label=translations.get("plot_pos_legend_obs", "Observations"))
+    ax1.plot(t_fit, fit_pos, 'r-', label=translations.get("plot_pos_legend_fit", "Fitted trajectory"), linewidth=2)
+    ax1.set_ylabel(translations.get("plot_pos_y_label", "Position along trajectory [km]"))
+    ax1.legend()
+    fig1.subplots_adjust(right=0.85, top=0.92)
+    cbar_ax = fig1.add_axes([0.88, 0.11, 0.03, 0.77])
+    cbar = fig1.colorbar(sc, cax=cbar_ax)
+    cbar.set_label(translations.get("plot_time_x_label", "Time [s]"))
     
-    # --- Start of Change ---
+    uncertainty_label = f'±{sigma_level:.0f}σ {translations.get("uncertainty", "uncertainty")}'
+    ax2.axhline(0, color='r', linestyle='--', linewidth=1.5, zorder=4)
+    ax2.scatter(reltime_plot, residuals_plot, c=color_time_plot, cmap='viridis', s=10, zorder=5)
+    ax2.fill_between(reltime_plot, -sig_smoothed*sigma_level, sig_smoothed*sigma_level, color='blue', alpha=0.3, label=uncertainty_label)
+    ax2.set_ylabel(translations.get("plot_residuals_y_label", "Residuals [km]"))
+    ax2.set_xlabel(translations.get("plot_time_x_label", "Time [s]"))
+    ax2.legend(loc='upper right')
+    plt.savefig(f"{output_prefix}posvstime.svg", bbox_inches='tight', pad_inches=0.05)
+    plt.close(fig1)
     
-    # Plot primary data first
-    ax3.plot(t_fit, fit_speed, 'b-', zorder=10, label='Beste estimat')
-    ax3.set_ylabel('Hastighet [km/s]'); ax3.set_title('Hastighetsprofil')
-    ax4.plot(t_fit, fit_accel, 'b-', zorder=10, label='Beste estimat')
-    ax4.set_ylabel('Akselerasjon [km/s²]'); ax4.set_xlabel('Tid [s]'); ax4.set_title('Akselerasjonsprofil')
+    # --- Plot 2: Speed and Acceleration (FIXED) ---
+    fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, constrained_layout=True)
+    fig2.suptitle(f'     {translations.get("plot_dyn_title", "Dynamic Analysis")}', fontsize=16, fontstyle="oblique")
     
-    # Check if uncertainty bounds are available
+    best_estimate_label = translations.get("best_estimate", "Best estimate")
+    ax3.plot(t_fit, fit_speed, 'b-', zorder=10, label=best_estimate_label)
+    ax3.set_ylabel(translations.get("plot_speed_y_label", "Velocity [km/s]"))
+    ax3.set_title(translations.get("plot_speed_title", "Velocity Profile"))
+    ax4.plot(t_fit, fit_accel, 'b-', zorder=10, label=best_estimate_label)
+    ax4.set_ylabel(translations.get("plot_accel_y_label", "Acceleration [km/s²]"))
+    ax4.set_xlabel(translations.get("plot_time_x_label", "Time [s]"))
+    ax4.set_title(translations.get("plot_accel_title", "Acceleration Profile"))
+    
     if lower_params is not None and upper_params is not None:
         lower_speed, upper_speed = expfunc_1stder(t_fit, *lower_params), expfunc_1stder(t_fit, *upper_params)
         lower_accel, upper_accel = expfunc_2ndder(t_fit, *lower_params), expfunc_2ndder(t_fit, *upper_params)
         
-        # Set y-limit to include the full uncertainty range with a 5% buffer
         if upper_speed.size > 0:
             ax3.set_ylim(bottom=0, top=np.max(upper_speed) * 1.05)
         else:
-            ax3.set_ylim(bottom=0) # Fallback if array is empty
+            ax3.set_ylim(bottom=0)
 
-        # Plot the uncertainty bands
-        ax3.fill_between(t_fit, lower_speed, upper_speed, color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
-        ax4.fill_between(t_fit, lower_accel, np.minimum(upper_accel, 0), color='blue', alpha=0.2, label=f'±{sigma_level:.0f}σ usikkerhet')
+        ax3.fill_between(t_fit, lower_speed, upper_speed, color='blue', alpha=0.2, label=uncertainty_label)
+        ax4.fill_between(t_fit, lower_accel, np.minimum(upper_accel, 0), color='blue', alpha=0.2, label=uncertainty_label)
     else:
-        # If no uncertainty data, use the original scaling on the main fit
         if fit_speed.size > 0:
             ax3.set_ylim(bottom=0, top=np.max(fit_speed) * 1.10)
         else:
             ax3.set_ylim(bottom=0)
 
-    # --- End of Change ---
-            
     ax3.legend(); ax4.legend()
-    if doplot in ['save', 'both']: plt.savefig("spd_acc.svg", bbox_inches='tight', pad_inches=0.05)
-    if doplot in ['show', 'both']: plt.show()
+    plt.savefig(f"{output_prefix}spd_acc.svg", bbox_inches='tight', pad_inches=0.05)
+    plt.close(fig2)
 
-def fbspd(resname: str, cennames: List[str], datname: str, doplot: str = '', posdata: bool = False, debug: bool = False, fscale: float = 0.1, sigma_level: float = 1.0, seed: Optional[int] = None, num_simulations: int = 1000) -> Tuple[bool, float]:
+def calculate_speed_profile(resname: str, cennames: List[str], datname: str, debug: bool = False, 
+                            fscale: float = 0.1, sigma_level: float = 1.0, seed: Optional[int] = None, 
+                            num_simulations: int = 1000) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     if seed is not None: np.random.seed(seed)
-    if doplot and matplotlib.get_backend() != 'agg' and 'show' not in doplot: matplotlib.use('agg')
     resdat = readres(resname)
     all_sitedata = get_sitecoord_fromdat(datname) if datname else []
     all_cendat = [readcen(f) for f in cennames if Path(f).exists()]
-    if not all_cendat: print("Error: No valid centroid data could be loaded."), sys.exit(1)
+    if not all_cendat: print("Error: No valid centroid data could be loaded."); return None, None
 
-    # --- Start of Debug Block 1 ---
     if debug and all_sitedata:
-        print("\n--- Debug: Stations found in .dat file ---")
-        dat_station_names = [f"'{s[0]}'" for s in all_sitedata]
-        print(f"Found {len(dat_station_names)} stations: [{', '.join(dat_station_names)}]")
-        print("------------------------------------------\n")
-    elif debug:
-        print("\n--- Debug: No stations found in .dat file ---\n")
-    # --- End of Debug Block 1 ---
+        print("\n--- Debug: Stations found in .dat file ---"); print(f"Found {len(all_sitedata)} stations: [{', '.join([f'{s[0]}' for s in all_sitedata])}]"); print("------------------------------------------\n")
+    elif debug: print("\n--- Debug: No stations found in .dat file ---\n")
 
     path_p1, path_p2 = lonlat2xyz(resdat.long1[0], resdat.lat1[0], resdat.height[0]), lonlat2xyz(resdat.long1[1], resdat.lat1[1], resdat.height[1])
     path_vec_norm = (path_p2 - path_p1) / np.linalg.norm(path_p2 - path_p1)
     station_obs = []
     for cendat in all_cendat:
-        if cendat.ndata == 0:
-            print(f"Warning: Skipping a centroid file because it contains no valid data points.")
-            continue  # Skips to the next file in the loop
-    
-        # --- Start of Debug Block 2 ---
+        if cendat.ndata == 0: print(f"Warning: Skipping a centroid file because it contains no valid data points."); continue
         station_name_from_cen = cendat.sitestr[0].strip()
-        if debug:
-            print(f"--- Debug: Attempting to match station from .cen file: '{station_name_from_cen}'")
-        # --- End of Debug Block 2 ---
-
-        # Logic to find the matching site_info from the .dat file data
+        if debug: print(f"--- Debug: Attempting to match station from .cen file: '{station_name_from_cen}'")
         site_info = next((s for s in all_sitedata if s[0].strip() == station_name_from_cen), None)
-
         if not site_info:
-            # --- Start of Debug Block 3 ---
-            if debug:
-                print(f"  -> MATCH FAILED. Could not find '{station_name_from_cen}' in the list of .dat stations.")
-            else:
-                # This is the standard warning for non-debug mode
-                print(f"Warning: No site coords for {station_name_from_cen}. Skipping.")
-            # --- End of Debug Block 3 ---
+            if debug: print(f"  -> MATCH FAILED. Could not find '{station_name_from_cen}' in the list of .dat stations.")
+            else: print(f"Warning: No site coords for {station_name_from_cen}. Skipping.")
             continue
+        if debug: print(f"  -> MATCH SUCCESSFUL. Found coordinates for '{station_name_from_cen}'.")
+        name, lon, lat, height = site_info; cendat.site_info = {'name': name, 'lon': lon, 'lat': lat, 'height': height}; processed_data = _process_station(cendat, lonlat2xyz(lon, lat, height), path_p1, path_vec_norm); processed_data['reltime'] = cendat.reltime; station_obs.append(processed_data)
 
-        if debug:
-            print(f"  -> MATCH SUCCESSFUL. Found coordinates for '{station_name_from_cen}'.")
-
-        name, lon, lat, height = site_info
-        cendat.site_info = {'name': name, 'lon': lon, 'lat': lat, 'height': height}
-        processed_data = _process_station(cendat, lonlat2xyz(lon, lat, height), path_p1, path_vec_norm)
-        processed_data['reltime'] = cendat.reltime
-        station_obs.append(processed_data)
-
-    if not station_obs:
-        print("Error: Could not process any station data."), sys.exit(1)
+    if not station_obs: print("Error: Could not process any station data."); return None, None
 
     station_obs_split = _split_obs_by_gaps(station_obs, debug=debug)
-    if not station_obs_split: print("Error: No data fragments left after splitting."), sys.exit(1)
+    if not station_obs_split: print("Error: No data fragments left after splitting."); return None, None
 
-    # --- Strategy A: Triplet-based fit ---
     print("\n--- Trying Timing Strategy 1: Triplet-based physical fit ---")
-    offsets_A_initial = _find_offsets_by_triplet_method(list(station_obs_split), debug=debug)
-    offsets_A_final = _refine_offsets_by_projection_method(list(station_obs_split), offsets_A_initial, debug=debug)
-    merged_A, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_A_final)
-    time_A = merged_A['reltime'] - merged_A['reltime'][0] if merged_A['reltime'].size > 0 else merged_A['reltime']
-    params_A, n_ok_A, pcov_A, cost_A = _fit_merged_data_with_cost(time_A, merged_A['pos'], merged_A['sig'], debug, fscale)
-
-    # --- Strategy B: Anchor-based fit ---
-    print("\n--- Trying Timing Strategy 2: Anchor-based projection fit ---")
-    offsets_B_final = _align_fragments_to_anchor_method(list(station_obs_split), debug=debug)
-    merged_B, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_B_final)
-    time_B = merged_B['reltime'] - merged_B['reltime'][0] if merged_B['reltime'].size > 0 else merged_B['reltime']
-    params_B, n_ok_B, pcov_B, cost_B = _fit_merged_data_with_cost(time_B, merged_B['pos'], merged_B['sig'], debug, fscale)
+    offsets_A_initial = _find_offsets_by_triplet_method(list(station_obs_split), debug=debug); offsets_A_final = _refine_offsets_by_projection_method(list(station_obs_split), offsets_A_initial, debug=debug); merged_A, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_A_final); time_A = merged_A['reltime'] - merged_A['reltime'][0] if merged_A['reltime'].size > 0 else merged_A['reltime']; params_A, n_ok_A, pcov_A, cost_A = _fit_merged_data_with_cost(time_A, merged_A['pos'], merged_A['sig'], debug, fscale)
     
-    # --- Compare and Select Best Strategy ---
-    print("\n--- Comparison of Timing Strategies ---")
-    print(f"Strategy 1 (Triplet) Final Fit Cost: {cost_A if cost_A != np.inf else 'Failed'}")
-    print(f"Strategy 2 (Anchor)  Final Fit Cost: {cost_B if cost_B != np.inf else 'Failed'}")
-
+    print("\n--- Trying Timing Strategy 2: Anchor-based projection fit ---")
+    offsets_B_final = _align_fragments_to_anchor_method(list(station_obs_split), debug=debug); merged_B, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_B_final); time_B = merged_B['reltime'] - merged_B['reltime'][0] if merged_B['reltime'].size > 0 else merged_B['reltime']; params_B, n_ok_B, pcov_B, cost_B = _fit_merged_data_with_cost(time_B, merged_B['pos'], merged_B['sig'], debug, fscale)
+    
+    print("\n--- Comparison of Timing Strategies ---"); print(f"Strategy 1 (Triplet) Final Fit Cost: {cost_A if cost_A != np.inf else 'Failed'}"); print(f"Strategy 2 (Anchor)  Final Fit Cost: {cost_B if cost_B != np.inf else 'Failed'}")
+    
     if cost_A <= cost_B and params_A is not None:
-        print("--> Selecting Strategy 1 (Triplet-based fit) as the best.")
-        final_offsets, final_merged_data, final_params, n_ok, pcov = offsets_A_final, merged_A, params_A, n_ok_A, pcov_A
+        print("--> Selecting Strategy 1 (Triplet-based fit) as the best."); final_offsets, final_merged_data, final_params, n_ok, pcov = offsets_A_final, merged_A, params_A, n_ok_A, pcov_A
     elif params_B is not None:
-        print("--> Selecting Strategy 2 (Anchor-based fit) as the best.")
-        final_offsets, final_merged_data, final_params, n_ok, pcov = offsets_B_final, merged_B, params_B, n_ok_B, pcov_B
-    else:
-        print("Error: Both timing strategies failed to produce a valid fit."), sys.exit(1)
+        print("--> Selecting Strategy 2 (Anchor-based fit) as the best."); final_offsets, final_merged_data, final_params, n_ok, pcov = offsets_B_final, merged_B, params_B, n_ok_B, pcov_B
+    else: print("Error: Both timing strategies failed to produce a valid fit."); return None, None
         
-    final_merged_data, station_id_array, station_names = _merge_and_sort_station_data(station_obs_split, final_offsets)
-    first_obs_time = final_merged_data['reltime'][0]
-    final_merged_data['reltime'] -= first_obs_time
+    final_merged_data, station_id_array, station_names = _merge_and_sort_station_data(station_obs_split, final_offsets); first_obs_time = final_merged_data['reltime'][0]; final_merged_data['reltime'] -= first_obs_time
     if debug: print(f"Time axis shifted by {-first_obs_time:.4f}s to set t=0 at first observation.")
 
-    print("\n--- Per-Station Fit Error ---")
-    station_errors, worst_station_idx = [], None
+    print("\n--- Per-Station Fit Error ---"); station_errors, worst_station_idx = [], None
     if len(station_obs_split) > 1:
         for i, station in enumerate(station_obs_split):
             if len(station['pos']) == 0: continue
-            shifted_time = station['reltime'] + final_offsets[i] - first_obs_time
-            pred_pos = expfunc(shifted_time, *final_params)
-            mse = np.mean((station['pos'] - pred_pos)**2)
-            station_errors.append({'name': station_names[i], 'index': i, 'mse': mse})
+            shifted_time = station['reltime'] + final_offsets[i] - first_obs_time; pred_pos = expfunc(shifted_time, *final_params); mse = np.mean((station['pos'] - pred_pos)**2); station_errors.append({'name': station_names[i], 'index': i, 'mse': mse})
         station_errors.sort(key=lambda x: x['mse'], reverse=True)
         for s in station_errors: print(f"  Fragment: {s['name']:<20} MSE: {s['mse']:.4f} km^2")
         if station_errors and len(station_errors) > 2:
-            print(f"\n-> Fragment with highest error is '{station_errors[0]['name']}'.")
-            worst_mse = station_errors[0]['mse']; other_mses = np.array([s['mse'] for s in station_errors[1:]])
-            threshold = 1 + np.mean(other_mses) + 10 * np.std(other_mses)
+            print(f"\n-> Fragment with highest error is '{station_errors[0]['name']}'."); worst_mse = station_errors[0]['mse']; other_mses = np.array([s['mse'] for s in station_errors[1:]]); threshold = 1 + np.mean(other_mses) + 10 * np.std(other_mses)
             if debug: print(f"   Outlier exclusion check: Worst MSE={worst_mse:.4f}, Threshold={threshold:.4f}")
             if worst_mse > threshold: worst_station_idx = station_errors[0]['index']
 
-    initial_speed = expfunc_1stder(0.0, *final_params)
-    initial_speed_uncertainty, lower_bound_params, upper_bound_params = 0.0, None, None
+    initial_speed = expfunc_1stder(0.0, *final_params); initial_speed_uncertainty, lower_bound_params, upper_bound_params = 0.0, None, None
     if pcov is not None and not np.isnan(pcov).any():
         try:
-            param_samples = np.random.multivariate_normal(final_params, pcov, size=num_simulations)
-            param_samples = param_samples[param_samples[:, 1] <= 0]
+            param_samples = np.random.multivariate_normal(final_params, pcov, size=num_simulations); param_samples = param_samples[param_samples[:, 1] <= 0]
             if len(param_samples) > 10:
-                std_v0, std_accel0 = np.std(param_samples[:, 0]), np.std(param_samples[:, 1])
-                initial_speed_uncertainty = std_v0 * sigma_level
-                lower_bound_params, upper_bound_params = np.copy(final_params), np.copy(final_params)
-                lower_bound_params[0] -= std_v0 * sigma_level; lower_bound_params[1] -= std_accel0 * sigma_level
-                upper_bound_params[0] += std_v0 * sigma_level; upper_bound_params[1] = min(final_params[1] + std_accel0 * sigma_level, 0.0)
+                std_v0, std_accel0 = np.std(param_samples[:, 0]), np.std(param_samples[:, 1]); initial_speed_uncertainty = std_v0 * sigma_level; lower_bound_params, upper_bound_params = np.copy(final_params), np.copy(final_params); lower_bound_params[0] -= std_v0 * sigma_level; lower_bound_params[1] -= std_accel0 * sigma_level; upper_bound_params[0] += std_v0 * sigma_level; upper_bound_params[1] = min(final_params[1] + std_accel0 * sigma_level, 0.0)
         except (np.linalg.LinAlgError, ValueError) as e: print(f"Warning: Could not perform uncertainty simulation: {e}")
 
-    print(f"\nFit successful using {n_ok} data points.")
-    print(f"Initial speed (v_i) [{sigma_level}-sigma]: {initial_speed:.3f} ± {initial_speed_uncertainty:.3f} km/s")
+    results = {'success': True, 'n_ok': n_ok, 'initial_speed': initial_speed, 'initial_speed_uncertainty': initial_speed_uncertainty}
+    plot_data = {'final_merged_data': final_merged_data, 'final_params': final_params, 'lower_bound_params': lower_bound_params, 'upper_bound_params': upper_bound_params, 'n_ok': n_ok, 'sigma_level': sigma_level, 'station_id_array': station_id_array, 'worst_station_idx': worst_station_idx}
+    
+    return results, plot_data
+
+def fbspd(resname: str, cennames: List[str], datname: str, doplot: str = '', posdata: bool = False, debug: bool = False, 
+          fscale: float = 0.1, sigma_level: float = 1.0, seed: Optional[int] = None, num_simulations: int = 1000,
+          translations: Optional[dict] = None, output_prefix: str = '') -> Tuple[bool, float]:
+    
+    if doplot and matplotlib.get_backend() != 'agg' and 'show' not in doplot: matplotlib.use('agg')
+
+    results, plot_data = calculate_speed_profile(resname=resname, cennames=cennames, datname=datname, debug=debug, fscale=fscale, sigma_level=sigma_level, seed=seed, num_simulations=num_simulations)
+
+    if not (results and plot_data):
+        return False, 0.0
+    
+    print(f"\nFit successful using {results['n_ok']} data points.")
+    print(f"Initial speed (v_i) [{sigma_level}-sigma]: {results['initial_speed']:.3f} ± {results['initial_speed_uncertainty']:.3f} km/s")
 
     if doplot:
-        if worst_station_idx is not None: print(f"\nGenerating plots. Excluding significant outlier '{station_names[worst_station_idx]}' for clarity.")
-        else: print("\nGenerating plots for all fragments (no significant outliers found).")
-        _generate_plots(final_merged_data, final_params, lower_bound_params, upper_bound_params, n_ok, doplot, sigma_level, station_id_array, worst_station_idx)
-    
+        if plot_data['worst_station_idx'] is not None:
+            print(f"\nGenerating plots. Excluding significant outlier for clarity.")
+        else:
+            print("\nGenerating plots for all fragments (no significant outliers found).")
+        
+        # Check if matplotlib is available before calling
+        if 'matplotlib' in sys.modules:
+            generate_speed_plots(plot_data, translations, output_prefix)
+        else:
+            print("Warning: Matplotlib not found. Skipping plot generation.")
+
     if posdata:
         print("\nTime [s]  Height [km]  Position [km]  Speed [km/s]")
-        speeds = expfunc_1stder(final_merged_data['reltime'], *final_params)
+        final_merged_data = plot_data['final_merged_data']
+        speeds = expfunc_1stder(final_merged_data['reltime'], *plot_data['final_params'])
         for i in range(len(final_merged_data['reltime'])):
             print(f"{final_merged_data['reltime'][i]:>8.3f}  {final_merged_data['height'][i]:>10.3f}  {final_merged_data['pos'][i]:>12.3f}  {speeds[i]:>11.3f}")
         
-    return True, initial_speed
+    return results['success'], results['initial_speed']
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Fit speed and acceleration profiles to meteor centroid data.')
@@ -633,7 +629,7 @@ if __name__ == "__main__":
     parser.add_argument('-d', '--dat', dest='datname', default='', help='Name of input file with .dat extension.')
     parser.add_argument('-c', '--cen', dest='cennames', required=True, type=lambda s: s.split(','), help='Comma-separated list of input files with centroid data.')
     parser.add_argument('-p', '--posdata', dest='posdata', action='store_true', help='Output final time, height, position, and speed data to console.')
-    parser.add_argument('-o', '--output', dest='output', default='', choices=['', 'show', 'save', 'both'], help='show: Display graphics, save: save graphics to SVG, both: Display and save.')
+    parser.add_argument('-o', '--output', dest='doplot', default='', choices=['', 'show', 'save', 'both'], help='show: Display graphics, save: save graphics to SVG, both: Display and save.')
     parser.add_argument('-v', '--verbose', dest='debug', action="store_true", help='Provide additional debugging output.')
     parser.add_argument('--fscale', dest='fscale', type=float, default=0.1, help='Robust loss function scale. Smaller is more robust. Default: 0.1')
     parser.add_argument('--uncertainty-sigma', dest='sigma_level', type=float, default=1.0, help='Sigma level for uncertainty reporting (e.g., 1.0, 3.0). Default: 1.0')
@@ -642,4 +638,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.cennames and not args.cennames[0]: args.cennames.pop(0)
     if not args.resname or not args.cennames: parser.print_help(), sys.exit(1)
-    fbspd(resname=args.resname, cennames=args.cennames, datname=args.datname, doplot=args.output, posdata=args.posdata, debug=args.debug, fscale=args.fscale, sigma_level=args.sigma_level, seed=args.seed, num_simulations=args.num_simulations)
+    
+    fbspd(resname=args.resname, cennames=args.cennames, datname=args.datname, doplot=args.doplot, posdata=args.posdata, debug=args.debug, fscale=args.fscale, sigma_level=args.sigma_level, seed=args.seed, num_simulations=args.num_simulations)

@@ -127,5 +127,10 @@
   },
   "wind_profile": "Wind Profile",
   "wind_speed_ms": "Wind Speed (m/s)",
-  "wind_direction_deg": "Wind Direction (°)"
+  "wind_direction_deg": "Wind Direction (°)",
+  "time": "Time",
+  "height": "Height",
+  "ground_dist": "Ground Dist",
+  "latitude": "Latitude",
+  "longitude": "Longitude"
 }

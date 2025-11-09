@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Metrack: Atmospheric Meteor Trajectory Fitting Tool
+Metrack: Atmospheric Meteor Trajectory Fitting Tool (Multilingual Version)
 
 This script reads a data file describing a set of meteor observations, calculates
 the meteor's trajectory through the atmosphere using a robust RANSAC-based
 fitting method, and outputs the results. It can be run as a standalone script
 or imported as a module in other tools.
+Refactored to separate core calculation from plotting for efficient multilingual
+output generation. The main `metrack` function remains backward-compatible.
 """
 
 import argparse
@@ -19,8 +21,10 @@ import sys
 import time
 import random
 import itertools
+import json
 from pathlib import Path
 from argparse import Namespace
+from typing import Optional, Dict, Any, Tuple, List
 
 import numpy as np
 
@@ -40,7 +44,7 @@ def _check_and_import_dependencies():
     
     for name, import_name in deps.items():
         try:
-            available[name] = __import__(import_name)
+           available[name] = __import__(import_name)
         except ImportError:
             missing.append(name)
     
@@ -203,9 +207,12 @@ def clean_svg(svg_path):
     except Exception as e:
         print(f"An error occurred while cleaning SVG {svg_path}: {e}")
 
-def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, options):
+def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, options, 
+                translations: Optional[dict] = None, output_filename: Optional[str] = None):
     """Shows the vertical path of a track, distinguishing inliers and outliers."""
     if 'matplotlib' not in AVAILABLE_LIBS: return
+    if translations is None: translations = {}
+
     n_steps, n_obs = 100, len(obs_data['names']) // 2
     start_lon, start_lat, _ = xyz2lonlat(track_start)
     
@@ -216,7 +223,7 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
     track_points = track_start + x_track[:, np.newaxis] * (track_end - track_start)
     lons, lats, heights = zip(*[xyz2lonlat(p) for p in track_points])
     ground_dists = haversine(start_lon, start_lat, np.array(lons), np.array(lats))
-    pylab.plot(ground_dists, heights, 'g-', label='Estimert bane', zorder=1)
+    pylab.plot(ground_dists, heights, 'g-', label=translations.get("plot_height_legend_fit", "Fitted Trajectory"), zorder=1)
 
     # Plot observation start and end points and add labels in a single loop
     for i in range(n_obs):
@@ -228,7 +235,7 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
         is_inlier = i in inlier_indices
         color, zorder = ('r', 3) if is_inlier else ('k', 2)
         mfc = color if is_inlier else 'none'
-        label = 'Observasjoner' if is_inlier else 'Avvikende observasjoner'
+        label = translations.get("plot_height_legend_obs", "Observations") if is_inlier else translations.get("plot_height_legend_outlier", "Outlier Observations")
         pylab.plot(dists, heights, color=color, marker='o', mfc=mfc, linestyle='None', label=label, zorder=zorder)
     
     ymin, ymax = pylab.gca().get_ylim()
@@ -242,47 +249,58 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
         pylab.text(start_dist, start_height + y_offset, obs_data['names'][i], ha='center', va='bottom', fontsize=8)
         pylab.text(end_dist, end_height - y_offset, obs_data['names'][i], ha='center', va='top', fontsize=8)
 
-    pylab.xlabel('Avstand langs bakken (km)'); pylab.ylabel('Høgde (km)')
+    pylab.xlabel(translations.get("plot_height_x_label", "Ground distance (km)"))
+    pylab.ylabel(translations.get("plot_height_y_label", "Height (km)"))
     handles, labels = pylab.gca().get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     pylab.legend(by_label.values(), by_label.keys())
     
-    if 'save' in options['doplot']: pylab.savefig('height.svg'); clean_svg('height.svg')
+    if 'save' in options['doplot']:
+        filename = output_filename or 'height.svg'
+        pylab.savefig(filename)
+        clean_svg(filename)
     if 'show' in options['doplot']: pylab.show()
     pylab.close()
 
-def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, options):
+def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, options,
+             translations: Optional[dict] = None, output_filename: Optional[str] = None):
     """Shows a map of the track and lines of sight, distinguishing inliers and outliers."""
     if 'cartopy' not in AVAILABLE_LIBS or 'matplotlib' not in AVAILABLE_LIBS:
         print("Cannot plot map, missing 'cartopy' or 'matplotlib'.")
         return
+    if translations is None: translations = {}
     
     site_lons, site_lats = obs_data['longitudes'], obs_data['latitudes']
     n_obs = len(site_lons) // 2
-    if options['autoborders']:
+    
+    if options.get('autoborders', False):
         all_lons, all_lats = list(site_lons), list(site_lats)
-        if not options['azonly'] and cross_pos:
+        if not options.get('azonly', False) and cross_pos:
             los_lons, los_lats, _ = zip(*[xyz2lonlat(p) for p in cross_pos])
             all_lons.extend(los_lons); all_lats.extend(los_lats)
         lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1
         lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
-    else:
+    elif options.get('borders') is not None:
         lon_left, lon_right, lat_bot, lat_top = options['borders']
+    else:
+        all_lons, all_lats = list(site_lons), list(site_lats)
+        lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1
+        lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
 
     pylab.figure(figsize=(10, 10))
     proj = ccrs.Gnomonic(central_longitude=np.mean([lon_left, lon_right]), central_latitude=np.mean([lat_bot, lat_top]))
     ax = pylab.axes(projection=proj)
     ax.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree())
     
-    resolution = {'c': '110m', 'l': '50m', 'i': '10m', 'h': '10m', 'f': '10m'}.get(options['mapres'], '10m')
+    resolution = {'c': '110m', 'l': '50m', 'i': '10m', 'h': '10m', 'f': '10m'}.get(options.get('mapres', 'i'), '10m')
     lat_span = abs(lat_top - lat_bot)
-    zoom_level = int(np.log2(360 / (lat_span + 1)))
-    zoom_level = max(6, min(zoom_level, 9))
+    zoom_level = max(6, min(int(np.log2(360 / (lat_span + 1))), 9))
     
     try:
         ax.add_image(OSM(), zoom_level)
-        ax.add_feature(cfeature.LAKES, edgecolor='royalblue', linewidth=0.5, facecolor='none')
-    except Exception: ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
+    except Exception:
+        ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
+    
     ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
     gl = ax.gridlines(draw_labels=True, color='gray', alpha=0.5, linestyle='--', linewidth=0.5)
     gl.top_labels = gl.right_labels = False
@@ -294,12 +312,12 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
 
     for name, (lon, lat) in unique_stations.items():
         if station_is_inlier[name]:
-            ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label='Inkludert observasjon')
+            ax.plot(lon, lat, 'r*', markersize=10, transform=ccrs.PlateCarree(), label=translations.get("plot_map_legend_inlier", "Inlier Observation"))
         else:
-            ax.plot(lon, lat, 'ko', markersize=8, mfc='none', transform=ccrs.PlateCarree(), label='Avvikende observasjon')
+            ax.plot(lon, lat, 'ko', markersize=8, mfc='none', transform=ccrs.PlateCarree(), label=translations.get("plot_map_legend_outlier", "Outlier Observation"))
         ax.text(lon + 0.05, lat + 0.05, name, color='black', transform=ccrs.PlateCarree())
 
-    if not options['azonly'] and cross_pos:
+    if not options.get('azonly', False) and cross_pos:
         for i in range(n_obs):
             start_los_lon, start_los_lat, _ = xyz2lonlat(cross_pos[i])
             end_los_lon, end_los_lat, _ = xyz2lonlat(cross_pos[i + n_obs])
@@ -307,80 +325,54 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
             ax.plot([site_lons[i], start_los_lon], [site_lats[i], start_los_lat], color='#5499c7', transform=ccrs.PlateCarree(), linestyle=linestyle)
             ax.plot([site_lons[i], end_los_lon], [site_lats[i], end_los_lat], color='#1a5276', transform=ccrs.PlateCarree(), linestyle=linestyle)
 
-    if not options['azonly'] and track_start is not None:
+    if not options.get('azonly', False) and track_start is not None:
         start_lon, start_lat, _ = xyz2lonlat(track_start)
         end_lon, end_lat, _ = xyz2lonlat(track_end)
-        ax.plot([start_lon, end_lon], [start_lat, end_lat], color='blue', linewidth=2, transform=ccrs.PlateCarree(), label='Estimert bane')
+        ax.plot([start_lon, end_lon], [start_lat, end_lat], color='blue', linewidth=2, transform=ccrs.PlateCarree(), label=translations.get("plot_map_legend_trajectory", "Fitted Trajectory"))
         ax.annotate('', xy=(end_lon, end_lat), xytext=(start_lon, start_lat), arrowprops=dict(facecolor='blue', edgecolor='blue', arrowstyle='->'), transform=ccrs.PlateCarree())
 
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     ax.legend(by_label.values(), by_label.keys())
 
-    if 'save' in options['doplot']: pylab.savefig('map.svg', bbox_inches='tight', dpi=150); clean_svg('map.svg')
-    if 'show' in options['doplot']: pylab.show()
+    if 'save' in options.get('doplot', ''):
+        filename = output_filename or 'map.svg'
+        pylab.savefig(filename, bbox_inches='tight', dpi=150)
+        clean_svg(filename)
+    if 'show' in options.get('doplot', ''): pylab.show()
     pylab.close()
-
-from PIL import Image
-import numpy as np
 
 def darken_blacks(img, black_point=64):
     """
     Applies a custom curve to an image, darkening neutral/gray colors more
     aggressively than saturated colors.
-
-    Args:
-        img (PIL.Image.Image): The input image object.
-        black_point (int): The brightness level (0-254) to map to pure black.
     """
     if not 0 <= black_point < 255:
         raise ValueError("black_point must be an integer between 0 and 254.")
-
-    # 1. Convert the image to YCbCr to separate brightness (Y) from color (Cb, Cr)
     rgb_img = img.convert('RGB')
     ycbcr_img = rgb_img.convert('YCbCr')
-
-    # 2. Split into channels and convert to numpy arrays for calculations
     y_ch, cb_ch, cr_ch = ycbcr_img.split()
     y_data = np.array(y_ch, dtype=np.float32)
     cb_data = np.array(cb_ch, dtype=np.float32)
     cr_data = np.array(cr_ch, dtype=np.float32)
-
-    # 3. Create the darkening lookup table (LUT) for the brightness channel
     stretch_factor = 255 / (255 - black_point)
     lut = np.array([int(round(max(0, i - black_point) * stretch_factor)) for i in range(256)], dtype=np.uint8)
-    
-    # Apply the darkening effect to the entire brightness channel
     darkened_y_data = lut[y_data.astype(np.uint8)]
-
-    # 4. Calculate a "grayness" weight for each pixel
-    # Chrominance distance from the center (128) determines saturation
-    # A small distance means the color is close to gray.
     chroma_dist = ((cb_data - 128)**2 + (cr_data - 128)**2)
-    
-    # Normalize distance to 0-1 range (max possible distance is ~180)
-    # and invert it to get a weight (1.0 for gray, 0.0 for saturated)
     grayness_weight = 1.0 - np.clip(chroma_dist / 180.0, 0, 1)
-
-    # 5. Blend the original brightness with the darkened brightness using the weight
-    # Pixels with a high grayness_weight will be darkened more.
     final_y_data = y_data * (1 - grayness_weight) + darkened_y_data * grayness_weight
     final_y_data = np.clip(final_y_data, 0, 255).astype(np.uint8)
-
-    # 6. Create a new image from the adjusted Y channel and original Cb, Cr channels
     final_y_ch = Image.fromarray(final_y_data)
     merged_ycbcr = Image.merge('YCbCr', (final_y_ch, cb_ch, cr_ch))
-
-    # 7. Convert back to RGB
     return merged_ycbcr.convert('RGB')
 
-
-
-def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_indices, options, speed_km_s=0):
+def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_indices, options, speed_km_s=0,
+                         translations: Optional[dict] = None, output_filename: Optional[str] = None):
     """
-    Generates an interactive 3D plot of the meteor trajectory and sight lines,
-    with a projected map on the XY plane for accurate scaling and context.
+    Generates an interactive 3D plot of the meteor trajectory and sight lines.
     """
+    if translations is None: translations = {}
+    
     # --- Helper functions for color sorting and image generation ---
     def rgb_to_lab(rgb):
         r, g, b = [x / 255.0 for x in rgb]
@@ -407,65 +399,26 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         old_to_new_map = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_indices)}
         return sorted_palette, old_to_new_map
     
-    def save_colorscale_image(palette, filename):
-        num_colors = len(palette)
-        height = 50
-        gradient_data = np.array(palette, dtype=np.uint8).reshape(1, num_colors, 3)
-        gradient_data = np.repeat(gradient_data, height, axis=0)
-        img = Image.fromarray(gradient_data, 'RGB')
-        img.save(filename)
-        print(f"Debug colorscale image saved to {filename}")
-
-
-    # --- Check for required libraries ---
     if 'plotly' not in AVAILABLE_LIBS or 'cartopy' not in AVAILABLE_LIBS or 'matplotlib' not in AVAILABLE_LIBS or 'Pillow' not in AVAILABLE_LIBS:
-        print("Cannot plot interactive map, missing required libraries.")
-        return
+        print("Cannot plot interactive map, missing required libraries."); return
 
-    # --- 1. Define Projection and Data Bounds ---
-    site_lons, site_lats = obs_data['longitudes'], obs_data['latitudes']
-    n_obs = len(site_lons) // 2
-    all_lons = list(site_lons); all_lats = list(site_lats)
+    site_lons, site_lats = obs_data['longitudes'], obs_data['latitudes']; n_obs = len(site_lons) // 2; all_lons = list(site_lons); all_lats = list(site_lats)
     if not options['azonly'] and track_start is not None:
-        start_lon, start_lat, _ = xyz2lonlat(track_start)
-        end_lon, end_lat, _ = xyz2lonlat(track_end)
-        all_lons.extend([start_lon, end_lon]); all_lats.extend([start_lat, end_lat])
-    center_lon = np.mean(all_lons); center_lat = np.mean(all_lats)
-    proj = ccrs.Gnomonic(central_longitude=center_lon, central_latitude=center_lat)
+        start_lon, start_lat, _ = xyz2lonlat(track_start); end_lon, end_lat, _ = xyz2lonlat(track_end); all_lons.extend([start_lon, end_lon]); all_lats.extend([start_lat, end_lat])
+    center_lon = np.mean(all_lons); center_lat = np.mean(all_lats); proj = ccrs.Gnomonic(central_longitude=center_lon, central_latitude=center_lat)
+    lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1; lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
+    fig_map, ax_map = pylab.subplots(figsize=(10, 10), subplot_kw={'projection': proj}); ax_map.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree()); lat_span = abs(lat_top - lat_bot); zoom_level = int(np.log2(360 / (lat_span + 1.5))); zoom_level = max(6, min(zoom_level, 10))
+    try: ax_map.add_image(OSM(), zoom_level)
+    except Exception as e: print(f"Warning: Could not fetch OSM map tiles. Plot will have a plain background. Error: {e}")
+    x_min_m, x_max_m, y_min_m, y_max_m = ax_map.get_extent(); buf = io.BytesIO(); fig_map.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0, transparent=False); pylab.close(fig_map); buf.seek(0)
 
-    # --- 2. Generate and Save Background Map Image ---
-    lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1
-    lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
-    fig_map, ax_map = pylab.subplots(figsize=(10, 10), subplot_kw={'projection': proj})
-    ax_map.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree())
-    lat_span = abs(lat_top - lat_bot)
-    zoom_level = int(np.log2(360 / (lat_span + 1.5)))
-    zoom_level = max(6, min(zoom_level, 10))
-    try:
-        ax_map.add_image(OSM(), zoom_level)
-    except Exception as e:
-        print(f"Warning: Could not fetch OSM map tiles. Plot will have a plain background. Error: {e}")
-    x_min_m, x_max_m, y_min_m, y_max_m = ax_map.get_extent()
-    
-    # Render the map to an in-memory buffer instead of a file
-    buf = io.BytesIO()
-    fig_map.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0, transparent=False)
-    pylab.close(fig_map)
-    buf.seek(0)
-
-    # --- 3. Prepare Plotly Traces ---
     traces = []
-    def project_points(lons, lats):
-        points_m = proj.transform_points(ccrs.PlateCarree(), np.array(lons), np.array(lats))
-        return points_m[:, 0] / 1000.0, points_m[:, 1] / 1000.0
-
-    # --- Use smoothed color quantization for a high-quality, small map ---
+    def project_points(lons, lats): points_m = proj.transform_points(ccrs.PlateCarree(), np.array(lons), np.array(lats)); return points_m[:, 0] / 1000.0, points_m[:, 1] / 1000.0
+    
     img = Image.open(buf).convert('RGB')
     
-    max_dim = 384 # Lower value for smoother animation, higher for better map quality
-    if max(img.size) > max_dim:
-        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-        print(f"Map image downsampled to {img.size} for better performance.")
+    max_dim = 384
+    if max(img.size) > max_dim: img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS); print(f"Map image downsampled to {img.size} for better performance.")
     
     img = darken_blacks(img, 112)
     
@@ -518,259 +471,132 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         colorscale=custom_colorscale,
         showscale=False, hoverinfo='none'
     ))
-    
-    # --- Add other plot elements ---
+
     if not options['azonly'] and track_start is not None:
-        start_lon, start_lat, start_h = xyz2lonlat(track_start)
-        end_lon, end_lat, end_h = xyz2lonlat(track_end)
-        [start_x, end_x], [start_y, end_y] = project_points([start_lon, end_lon], [start_lat, end_lat])
+        start_lon, start_lat, start_h = xyz2lonlat(track_start); end_lon, end_lat, end_h = xyz2lonlat(track_end); [start_x, end_x], [start_y, end_y] = project_points([start_lon, end_lon], [start_lat, end_lat])
+        trajectory_name = translations.get("plot_map_legend_trajectory", "Fitted Trajectory")
+        ground_track_name = translations.get("plot_map_legend_ground_track", "Ground Track")
+
         traces.extend([
-            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[start_h, end_h], mode='lines', line=dict(color='blue', width=7), name='Estimert bane', showlegend=False, hoverinfo='none'),
-            go.Cone(x=[end_x], y=[end_y], z=[end_h], u=[end_x - start_x], v=[end_y - start_y], w=[end_h - start_h], sizemode="absolute", sizeref=5, anchor="tip", showscale=False, colorscale=[[0, 'blue'], [1, 'blue']], hoverinfo='none'),
-            go.Scatter3d(x=[start_x, start_x], y=[start_y, start_y], z=[start_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'),
-            go.Scatter3d(x=[end_x, end_x], y=[end_y, end_y], z=[end_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'),
-            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[0, 0], mode='lines+markers', line=dict(color='blue', width=2), marker=dict(symbol='circle', color='blue', size=2), name='Bakkebane', hoverinfo='none', showlegend=False)
-        ])
-
-        # Add invisible hover points along the track
+            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[start_h, end_h], mode='lines', line=dict(color='blue', width=7), name=trajectory_name, showlegend=False, hoverinfo='none'), 
+            go.Cone(x=[end_x], y=[end_y], z=[end_h], u=[end_x - start_x], v=[end_y - start_y], w=[end_h - start_h], sizemode="absolute", sizeref=5, anchor="tip", showscale=False, colorscale=[[0, 'blue'], [1, 'blue']], hoverinfo='none'), 
+            go.Scatter3d(x=[start_x, start_x], y=[start_y, start_y], z=[start_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'), 
+            go.Scatter3d(x=[end_x, end_x], y=[end_y, end_y], z=[end_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'), 
+            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[0, 0], mode='lines+markers', line=dict(color='blue', width=2), marker=dict(symbol='circle', color='blue', size=2), name=ground_track_name, hoverinfo='none', showlegend=False)])
+        
         if speed_km_s > 0:
-            num_hover_points = 100
-            track_vec = track_end - track_start
-            total_track_length_km = np.linalg.norm(track_vec)
-            total_duration_s = total_track_length_km / speed_km_s
+            track_vec = track_end - track_start; total_track_length_km = np.linalg.norm(track_vec); total_duration_s = total_track_length_km / speed_km_s; hover_x, hover_y, hover_z, custom_data = [], [], [], []
+            for t in np.linspace(0, 1, 100):
+                point_xyz = track_start + t * track_vec; lon, lat, height_km = xyz2lonlat(point_xyz); proj_x, proj_y = project_points([lon], [lat]); hover_x.append(proj_x[0]); hover_y.append(proj_y[0]); hover_z.append(height_km); custom_data.append([t * total_duration_s, height_km, haversine(start_lon, start_lat, lon, lat), lat, lon])
             
-            start_lon_rad, start_lat_rad = np.radians(start_lon), np.radians(start_lat)
+            hovertemplate_str = (f'<b>{translations.get("time", "Time")}</b>: %{{customdata[0]:.2f}} s<br>'
+                                 f'<b>{translations.get("height", "Height")}</b>: %{{customdata[1]:.2f}} km<br>'
+                                 f'<b>{translations.get("ground_dist", "Ground Dist")}</b>: %{{customdata[2]:.2f}} km<br>'
+                                 f'<b>{translations.get("latitude", "Latitude")}</b>: %{{customdata[3]:.4f}}<br>'
+                                 f'<b>{translations.get("longitude", "Longitude")}</b>: %{{customdata[4]:.4f}}'
+                                 '<extra></extra>')
+            
+            traces.append(go.Scatter3d(x=hover_x, y=hover_y, z=hover_z, mode='markers', marker=dict(color='rgba(0,0,0,0)', size=10), customdata=np.array(custom_data), hovertemplate=hovertemplate_str, name='Track Info', showlegend=False))
     
-            hover_x, hover_y, hover_z = [], [], []
-            custom_data = [] # Store [time, height, ground_dist, lat, lon]
-    
-            for t in np.linspace(0, 1, num_hover_points):
-                point_xyz = track_start + t * track_vec
-                lon, lat, height_km = xyz2lonlat(point_xyz)
-                proj_x, proj_y = project_points([lon], [lat])
-                
-                hover_x.append(proj_x[0])
-                hover_y.append(proj_y[0])
-                hover_z.append(height_km)
-                
-                ground_dist_km = haversine(start_lon, start_lat, lon, lat)
-                time_s = t * total_duration_s
-                custom_data.append([time_s, height_km, ground_dist_km, lat, lon])
-                
-            traces.append(go.Scatter3d(
-                x=hover_x, y=hover_y, z=hover_z,
-                mode='markers',
-                marker=dict(color='rgba(0,0,0,0)', size=10), # Invisible but hoverable
-                customdata=np.array(custom_data),
-                hovertemplate=(
-                    '<b>Time</b>: %{customdata[0]:.2f} s<br>'
-                    '<b>Height</b>: %{customdata[1]:.2f} km<br>'
-                    '<b>Ground Dist</b>: %{customdata[2]:.2f} km<br>'
-                    '<b>Latitude</b>: %{customdata[3]:.4f}<br>'
-                    '<b>Longitude</b>: %{customdata[4]:.4f}'
-                    '<extra></extra>'
-                ),
-                name='Track Info',
-                showlegend=False
-            ))
-
-    unique_stations = {obs_data['names'][i]: (site_lons[i], site_lats[i]) for i in range(n_obs)}
-    station_is_inlier = {name: False for name in unique_stations}
+    unique_stations = {obs_data['names'][i]: (site_lons[i], site_lats[i]) for i in range(n_obs)}; station_is_inlier = {name: False for name in unique_stations}
     for i in inlier_indices: station_is_inlier[obs_data['names'][i]] = True
-
-    for name, (lon, lat) in unique_stations.items():
-        x, y = project_points([lon], [lat])
-
+    for name, (lon, lat) in unique_stations.items(): x, y = project_points([lon], [lat])
     if not options['azonly'] and cross_pos:
         for i in range(n_obs):
-            station_x, station_y = project_points([site_lons[i]], [site_lats[i]])
-            start_los_lon, start_los_lat, start_los_h = xyz2lonlat(cross_pos[i])
-            start_los_x, start_los_y = project_points([start_los_lon], [start_los_lat])
-            end_los_lon, end_los_lat, end_los_h = xyz2lonlat(cross_pos[i + n_obs])
-            end_los_x, end_los_y = project_points([end_los_lon], [end_los_lat])
-            linestyle = 'solid' if i in inlier_indices else 'dash'
-            traces.extend([
-                go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), name=f"Siktelinje start ({obs_data['names'][i]})", showlegend=False, hoverinfo='none'),
-                go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), name=f"Siktelinje slutt ({obs_data['names'][i]})", showlegend=False, hoverinfo='none')
-            ])
+            station_x, station_y = project_points([site_lons[i]], [site_lats[i]]); start_los_lon, start_los_lat, start_los_h = xyz2lonlat(cross_pos[i]); start_los_x, start_los_y = project_points([start_los_lon], [start_los_lat]); end_los_lon, end_los_lat, end_los_h = xyz2lonlat(cross_pos[i + n_obs]); end_los_x, end_los_y = project_points([end_los_lon], [end_los_lat]); linestyle = 'solid' if i in inlier_indices else 'dash'
+            traces.extend([go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), showlegend=False, hoverinfo='none'), go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), showlegend=False, hoverinfo='none')])
 
-    # --- 4. Define Scene Layout and Camera ---
+    x_min_km, x_max_km, y_min_km, y_max_km = x_min_m / 1000.0, x_max_m / 1000.0, y_min_m / 1000.0, y_max_m / 1000.0; grid_center_km = {'x': (x_min_km + x_max_km) / 2.0, 'y': (y_min_km + y_max_km) / 2.0}; norm_factor = 245.0
+    end_lon, end_lat, _ = xyz2lonlat(track_end); end_x_km, end_y_km = project_points([end_lon], [end_lat]); translated_x = end_x_km[0] - grid_center_km['x']; translated_y = end_y_km[0] - grid_center_km['y']; camera_center = dict(x=translated_x / norm_factor, y=translated_y / norm_factor, z=0); camera_distance_norm = 1.3
+    initial_eye = dict(x=camera_center['x'] + camera_distance_norm * np.cos(np.radians(0)), y=camera_center['y'] + camera_distance_norm * np.sin(np.radians(0)), z=camera_center['z'] + camera_distance_norm * np.tan(np.radians(35)))
+    frames = []; num_frames = 180
+    for k in range(num_frames): theta = (k / num_frames) * 2 * np.pi; eye_x = camera_center['x'] + camera_distance_norm * np.cos(theta); eye_y = camera_center['y'] + camera_distance_norm * np.sin(theta); frames.append(go.Frame(layout=dict(scene=dict(camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']))))))
     
-    # Part A: Define the center of the visible grid in kilometers
-    x_min_km = x_min_m / 1000.0
-    x_max_km = x_max_m / 1000.0
-    y_min_km = y_min_m / 1000.0
-    y_max_km = y_max_m / 1000.0
-
-    grid_center_km = {
-        'x': (x_min_km + x_max_km) / 2.0,
-        'y': (y_min_km + y_max_km) / 2.0
-    }
-
-    # Part B: Use the empirically discovered constant for normalization
-    # This value appears to be a fixed scaling factor in Plotly's camera system.
-    norm_factor = 245.0
-
-    # Part C: Calculate the final camera center using the two-step process
-    end_lon, end_lat, _ = xyz2lonlat(track_end)
-    end_x_km, end_y_km = project_points([end_lon], [end_lat])
-    
-    # 1. Translate the coordinates relative to the grid center
-    translated_x = end_x_km[0] - grid_center_km['x']
-    translated_y = end_y_km[0] - grid_center_km['y']
-    
-    # 2. Scale the translated coordinates using the constant to normalize them
-    camera_center = dict(
-        x=translated_x / norm_factor,
-        y=translated_y / norm_factor,
-        z=0
-    )
-
-    # Part D: Calculate camera eye position in the final normalized space
-    camera_distance_norm = 1.3
-    
-    initial_eye = dict(
-        x=camera_center['x'] + camera_distance_norm * np.cos(np.radians(0)),
-        y=camera_center['y'] + camera_distance_norm * np.sin(np.radians(0)),
-        z=camera_center['z'] + camera_distance_norm * np.tan(np.radians(35))
-    )
-
-    # Part E: Generate frames for the autorotation animation
-    frames = []
-    num_frames = 180 # Number of frames for a full 360-degree rotation
-
-    for k in range(num_frames):
-        theta = (k / num_frames) * 2 * np.pi
-        eye_x = camera_center['x'] + camera_distance_norm * np.cos(theta)
-        eye_y = camera_center['y'] + camera_distance_norm * np.sin(theta)
-
-        frames.append(go.Frame(
-            layout=dict(scene=dict(camera=dict(
-                up=dict(x=0, y=0, z=1),
-                center=camera_center,
-                eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']) # Keep Z constant
-            )))
-        ))
-
-    # Part F: Create the final layout
     layout = go.Layout(
-        title='Meteorens atmosfæriske bane', title_x=0.5, title_y=0.92,
+        title=translations.get("plot_map_interactive_title", "Meteor's Atmospheric Trajectory"), title_x=0.5, title_y=0.92, 
         scene=dict(
-            xaxis=dict(
-                title='Øst/vest-avstand (km)',
-                range=[x_min_km, x_max_km],
-                showspikes=True,
-                spikethickness=1
-            ),
-            yaxis=dict(
-                title='Nord/sør-avstand (km)',
-                range=[y_min_km, y_max_km],
-                showspikes=True,
-                spikethickness=1
-            ),
-            zaxis=dict(
-                title='Høgde (km)',
-                showspikes=False, # This will remove the crosshair on the map surface
-                spikethickness=1
-            ),
-            aspectmode='data',
-            dragmode='turntable',
-            camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=initial_eye)
-        ),
-        margin=dict(l=0, r=0, b=0, t=40),
+            xaxis=dict(title=translations.get("plot_map_interactive_xaxis", "East/West Distance (km)"), range=[x_min_km, x_max_km], showspikes=True, spikethickness=1), 
+            yaxis=dict(title=translations.get("plot_map_interactive_yaxis", "North/South Distance (km)"), range=[y_min_km, y_max_km], showspikes=True, spikethickness=1), 
+            zaxis=dict(title=translations.get("plot_map_interactive_zaxis", "Height (km)"), showspikes=False, spikethickness=1), 
+            aspectmode='data', dragmode='turntable', camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=initial_eye)), 
+        margin=dict(l=0, r=0, b=0, t=40), 
         updatemenus=[dict(
-            type='buttons',
-            active=0,
-            showactive=True,
-            y=0.95, x=0.05,
-            xanchor='left', yanchor='top',
-            pad=dict(t=0, r=10),
-            font=dict(size=10),
-            bgcolor='rgba(255, 255, 255, 0.5)',
+            type='buttons', active=0, showactive=True, y=0.95, x=0.05, xanchor='left', yanchor='top', 
+            pad=dict(t=0, r=10), font=dict(size=10), bgcolor='rgba(255, 255, 255, 0.5)', 
             buttons=[
-                dict(label='▶ Spill',
-                     method='animate',
-                     args=[None, dict(frame=dict(duration=50, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
-                dict(label='⏸ Pause',
-                     method='animate',
-                     args=[[None], dict(frame=dict(duration=0, redraw=False),
-                                        mode='immediate',
-                                        transition=dict(duration=0))])
-            ]
-        )]
+                dict(label=translations.get("plot_interactive_play", "▶ Play"), method='animate', args=[None, dict(frame=dict(duration=50, redraw=True), transition=dict(duration=0), fromcurrent=True)]), 
+                dict(label=translations.get("plot_interactive_pause", "⏸ Pause"), method='animate', args=[[None], dict(frame=dict(duration=0, redraw=False), mode='immediate', transition=dict(duration=0))])
+            ])]
     )
     
     fig = go.Figure(data=traces, layout=layout, frames=frames)
-    fig.write_html("map.html", include_plotlyjs='cdn')
+    filename = output_filename or "map.html"
+    fig.write_html(filename, include_plotlyjs='cdn')
 
-    # Append interaction listener to pause animation on click
-    with open("map.html", "a", encoding="utf-8") as f:
-        f.write("""
+    # This javascript block is appended to the HTML file to add custom interaction.
+    # It finds the play button using its translated text content.
+    play_button_text = json.dumps(translations.get("plot_interactive_play", "▶ Play"))
+    with open(filename, "a", encoding="utf-8") as f:
+        f.write(f"""
 <script>
-document.addEventListener("DOMContentLoaded", function () {
+document.addEventListener("DOMContentLoaded", function () {{
     const plot = document.querySelector("div.js-plotly-plot");
     let animationPaused = false;
 
-    function pauseAnimation() {
+    function pauseAnimation() {{
         animationPaused = true;
         console.log("Pausing animation");
-        Plotly.animate(plot, null, {
+        Plotly.animate(plot, null, {{
             mode: 'immediate',
-            frame: { duration: 0, redraw: false },
-            transition: { duration: 0 }
-        }).catch((err) => {
+            frame: {{ duration: 0, redraw: false }},
+            transition: {{ duration: 0 }}
+        }}).catch((err) => {{
             console.warn("Pause failed:", err);
-        });
-    }
+        }});
+    }}
 
-    function resumeAnimation() {
+    function resumeAnimation() {{
         animationPaused = false;
         console.log("Resuming animation");
-        Plotly.animate(plot, null, {
-            frame: { duration: 50, redraw: true },
-            transition: { duration: 0 },
+        Plotly.animate(plot, null, {{
+            frame: {{ duration: 50, redraw: true }},
+            transition: {{ duration: 0 }},
             mode: "next",
             fromcurrent: true
-        }).catch((err) => {
+        }}).catch((err) => {{
             console.warn("Resume failed:", err);
-        });
-    }
+        }});
+    }}
 
-    function toggleAnimation(e) {
+    function toggleAnimation(e) {{
         e.preventDefault(); // prevent context menu
-        if (animationPaused) {
+        if (animationPaused) {{
             resumeAnimation();
-        } else {
+        }} else {{
             pauseAnimation();
-        }
-    }
+        }}
+    }}
 
-    plot.addEventListener('plotly_animated', () => {
+    plot.addEventListener('plotly_animated', () => {{
         console.log("Animation started — resetting paused flag");
         animationPaused = false;
-    });
-
-    if (plot) {
+    }});
+    if (plot) {{
         // Right-click = toggle animation
         plot.addEventListener("contextmenu", toggleAnimation);
-
-        // Hook the "Spill" button to resume and reset state
+        // Hook the play button to resume and reset state
         const playButton = [...document.querySelectorAll("button")].find(btn =>
-            btn.textContent.includes("Spill") || btn.textContent.includes("Play")
+            btn.textContent === {play_button_text}
         );
-
-        if (playButton) {
-            playButton.addEventListener("click", () => {
+        if (playButton) {{
+            playButton.addEventListener("click", () => {{
                 animationPaused = false;
-            });
-        }
-    }
-});
-</script>
-""")
-
-    print("Interactive 3D plot saved to map.html")
-
+            }});
+        }}
+    }}
+}});
+</script>""")
+    print(f"Interactive 3D plot saved to {filename}")
 
 def chisq_of_fit(track_params, los_refs, los_vecs, weights):
     track_ref, track_vec = track_params[:3], track_params[3:]
@@ -1069,40 +895,43 @@ def _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier
     
     return info, track_start, track_end, cross_pos_inliers
 
-def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborders=False, 
-            timestamp=None, optimize=True, writestat=True, use_ransac=True, ransac_threshold=1.0, 
-            ransac_iterations=10, ransac_runs=100, seed=0, debug_ransac=False, all_in_tolerance=1.0, 
-            interactive=False, **kwargs):
+def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], Optional[Dict[str, Any]]]:
     """
-    Main function to run the meteor track analysis.
-    This is the primary entry point for both script and module usage.
+    Performs the core trajectory calculation and returns the results.
+    This function does NOT generate any plots or files.
+
+    Returns:
+        A tuple containing:
+        - MetrackInfo object with the summary of the fit.
+        - A dictionary with data required for plotting.
     """
-    options = locals().copy()
-    options.pop('kwargs', None); options.pop('accept_err', None)
-    
+    options = kwargs.copy()
     raw_data, full_obs_data, borders = _load_and_prepare_data(inname)
     if not raw_data:
         print(f"Error: No valid data found in {inname}")
-        return MetrackInfo()
-
-    if borders and not autoborders: options['borders'] = borders
-    else: options['borders'] = None
+        return MetrackInfo(), None
     
-    if azonly:
-        print("Azimuth-only mode: Plotting observation azimuths without fitting.")
-        if doplot: plot_map(None, None, None, full_obs_data, list(range(len(raw_data['names']))), options)
-        return MetrackInfo()
+    if borders and not options.get('autoborders'): options['borders'] = borders
+    else: options['borders'] = None
 
+    if options.get('azonly', False):
+        print("Azimuth-only mode: No fitting is performed.")
+        # Return enough data for az-only plotting
+        plot_data = {'track_start': None, 'track_end': None, 'cross_pos_all': None, 
+                     'full_obs_data': full_obs_data, 'inlier_indices': list(range(len(raw_data['names'])))}
+        return MetrackInfo(), plot_data
+
+    use_ransac = options.get('use_ransac', True)
     if use_ransac:
         fit_results, inlier_obs_data, inlier_indices = robust_fit_with_ransac(full_obs_data, raw_data, options)
     else:
         print("RANSAC disabled. Using standard fit on all data.")
-        fit_results = fit_track(full_obs_data, optimize=optimize)
+        fit_results = fit_track(full_obs_data, optimize=options.get('optimize', True))
         inlier_obs_data, inlier_indices = full_obs_data, list(range(len(raw_data['names'])))
 
     if fit_results[0] is None:
         print("Could not determine a valid track. Aborting.")
-        return MetrackInfo()
+        return MetrackInfo(), None
 
     info = MetrackInfo()
     info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
@@ -1112,39 +941,90 @@ def metrack(inname, doplot='', accept_err=0, mapres='i', azonly=False, autoborde
     if not is_plausible and use_ransac:
         print("\nWarning: RANSAC solution is physically implausible. Attempting fallback...")
         fit_results = fit_track(full_obs_data, optimize=False)
-        
         if fit_results[0] is None:
-            print("Fallback fit also failed. Aborting.")
-            return MetrackInfo()
-
-        inlier_obs_data = full_obs_data
-        inlier_indices = list(range(len(raw_data['names'])))
+            print("Fallback fit also failed. Aborting."); return MetrackInfo(), None
+        inlier_obs_data = full_obs_data; inlier_indices = list(range(len(raw_data['names'])))
         info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
 
     if 'showerassoc' in AVAILABLE_LIBS:
         info.shower, _ = AVAILABLE_LIBS['showerassoc'].showerassoc(info.radiant_ra, info.radiant_dec, info.speed, time.strftime("%Y-%m-%d", time.localtime(info.timestamp)))
-    
-    print_results(info)
-    if writestat: write_stat_file(info, inname)
-    write_res_file(track_start, track_end, cross_pos_inliers, inlier_obs_data, inname)
-    
-    if doplot:
-        final_track_vec = (track_end - track_start)
-        final_track_vec /= np.linalg.norm(final_track_vec)
-        all_pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data['longitudes'], full_obs_data['latitudes'], full_obs_data['heights_m'])]
-        all_los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data['altitudes'], full_obs_data['azimuths'], full_obs_data['longitudes'], full_obs_data['latitudes'])]
-        cross_pos_all = [closest_point(pos, track_start, los, final_track_vec, return_points=True)[0] for pos, los in zip(all_pos_vectors, all_los_vectors)]
 
-        plot_height(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
-        plot_map(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options)
-        if interactive:
-            plot_map_interactive(track_start, track_end, cross_pos_all, full_obs_data, inlier_indices, options, speed_km_s=info.speed)
+    # Prepare data for plotting functions
+    final_track_vec = (track_end - track_start); final_track_vec /= np.linalg.norm(final_track_vec)
+    all_pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data['longitudes'], full_obs_data['latitudes'], full_obs_data['heights_m'])]
+    all_los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data['altitudes'], full_obs_data['azimuths'], full_obs_data['longitudes'], full_obs_data['latitudes'])]
+    cross_pos_all = [closest_point(pos, track_start, los, final_track_vec, return_points=True)[0] for pos, los in zip(all_pos_vectors, all_los_vectors)]
+
+    plot_data = {
+        'track_start': track_start, 'track_end': track_end, 'cross_pos_inliers': cross_pos_inliers,
+        'cross_pos_all': cross_pos_all, 'full_obs_data': full_obs_data, 'inlier_obs_data': inlier_obs_data,
+        'inlier_indices': inlier_indices
+    }
+    return info, plot_data
+
+
+def generate_plots(info: MetrackInfo, plot_data: Dict[str, Any], options: Dict[str, Any],
+                   translations: Optional[Dict[str, Any]] = None, output_prefix: str = ''):
+    """
+    Generates all plots and interactive files based on pre-calculated analysis results.
+    """
+    if translations is None: translations = {}
+
+    if options.get('azonly', False):
+        map_filename = f"{output_prefix}map.svg"
+        plot_map(None, None, None, plot_data['full_obs_data'], plot_data['inlier_indices'], options, translations, map_filename)
+        return
+
+    height_filename = f"{output_prefix}height.svg"
+    map_filename = f"{output_prefix}map.svg"
+    map_html_filename = f"{output_prefix}map.html"
+
+    plot_height(plot_data['track_start'], plot_data['track_end'], plot_data['cross_pos_all'],
+                plot_data['full_obs_data'], plot_data['inlier_indices'], options, translations, height_filename)
+
+    plot_map(plot_data['track_start'], plot_data['track_end'], plot_data['cross_pos_all'],
+             plot_data['full_obs_data'], plot_data['inlier_indices'], options, translations, map_filename)
+
+    if options.get('interactive', False):
+        plot_map_interactive(plot_data['track_start'], plot_data['track_end'], plot_data['cross_pos_all'],
+                             plot_data['full_obs_data'], plot_data['inlier_indices'], options,
+                             speed_km_s=info.speed, translations=translations, output_filename=map_html_filename)
+
+
+def metrack(inname, doplot='', translations: Optional[dict] = None, output_prefix: str = '', **kwargs):
+    """
+    Main backward-compatible function to run meteor track analysis.
+    This is the primary entry point for both script and module usage.
+    It performs the calculation and, if requested, generates output files.
+    """
+    options = kwargs.copy()
+    options['doplot'] = doplot
+    if translations is None: translations = {}
+
+    # 1. Perform the core calculation
+    info, plot_data = calculate_trajectory(inname, **options)
+    if plot_data is None:
+        return info # Calculation failed, return empty info object
+
+    # 2. Print results and write data files (.res, .stat)
+    print_results(info)
+    if options.get('writestat', True):
+        write_stat_file(info, inname)
+    
+    if not options.get('azonly'):
+        write_res_file(plot_data['track_start'], plot_data['track_end'],
+                       plot_data['cross_pos_inliers'], plot_data['inlier_obs_data'], inname)
+
+    # 3. Generate plots if requested
+    if doplot:
+        generate_plots(info, plot_data, options, translations, output_prefix)
 
     return info
 
+
 def main():
     """Parses command-line arguments and runs the analysis."""
-    parser = argparse.ArgumentParser(description='Atmospheric meteor trajectory fitting.', epilog='Example: ./metrack2.py obs_20120403.dat -o both --interactive')
+    parser = argparse.ArgumentParser(description='Atmospheric meteor trajectory fitting.', epilog='Example: ./metrack.py obs_20120403.dat -o both --interactive')
     parser.add_argument('inname', nargs='?', default=None, help='Name of input file with observation data.')
     parser.add_argument('-o', '--output', choices=['show', 'save', 'both'], default='', dest='doplot', help='Graphics output mode.')
     parser.add_argument('-m', '--map', dest='mapres', default='i', choices=['c','l','i','h','f'], help='Map detail level.')
@@ -1171,9 +1051,11 @@ def main():
     if args.azonly and not args.doplot:
         args.doplot = 'show'
     
+    # The main `metrack` function is called, which handles both calculation and plotting
+    # based on the command-line arguments. Its return value is not used here.
     metrack_args = vars(args)
-    metrack_args['accept_err'] = 0
-    metrack(**metrack_args)
+    metrack_args.pop('inname', None) # inname is passed as first argument
+    metrack(args.inname, **metrack_args)
 
 if __name__ == "__main__":
     main()

@@ -64,7 +64,7 @@ class Settings:
     CLASSIFICATION_THRESHOLD_AMS = 0.05
 
 # --- Internationalization (i18n) Setup ---
-SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs']
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi']
 DEFAULT_LANG = 'nb'
 LOC_DIR = Path(__file__).parent / 'loc'
 
@@ -303,18 +303,34 @@ def run_classification(event_config, event_dir: Path):
         return
 
     proc = run_command([Settings.METEOR_TEST_SCRIPT, fireball_jpg], cwd=event_dir)
-    probability = float(proc.stdout.strip())
+    
+    # *** MODIFICATION: Check for empty string before float conversion ***
+    stdout_value = proc.stdout.strip()
+    probability = None
+    
+    if stdout_value:
+        try:
+            probability = float(stdout_value)
+        except ValueError:
+            print(f"Warning: meteor_test.sh returned non-float value: '{stdout_value}'")
+            probability = None # Explicitly set to None
 
-    event_config.set('summary', 'meteor_probability', str(probability))
+    # Only set probability and check threshold if we have a valid number
+    if probability is not None:
+        event_config.set('summary', 'meteor_probability', str(probability))
 
-    is_ams = event_config.getboolean('trail', 'ams', fallback=False)
-    is_manual = event_config.getboolean('trail', 'manual', fallback=False)
+        is_ams = event_config.getboolean('trail', 'ams', fallback=False)
+        is_manual = event_config.getboolean('trail', 'manual', fallback=False)
 
-    threshold = Settings.CLASSIFICATION_THRESHOLD_AMS if is_ams else Settings.CLASSIFICATION_THRESHOLD_DEFAULT
+        threshold = Settings.CLASSIFICATION_THRESHOLD_AMS if is_ams else Settings.CLASSIFICATION_THRESHOLD_DEFAULT
 
-    if probability < threshold and not is_manual:
-        print(f"Meteor probability ({probability:.2f}) is below threshold ({threshold}). Deleting directory.")
-        cleanup_directory_and_exit(event_dir)
+        if probability < threshold and not is_manual:
+            print(f"Meteor probability ({probability:.2f}) is below threshold ({threshold}). Deleting directory.")
+            cleanup_directory_and_exit(event_dir)
+    else:
+        # This handles the user's request: empty string means no probability
+        print(f"Warning: meteor_test.sh returned no probability. Skipping classification check.")
+    # *** END OF MODIFICATION ***
 
 
 def write_data_files(event_config, station_config, event_dir: Path):

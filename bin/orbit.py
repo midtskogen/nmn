@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
 Calculates and plots the orbit of a meteor based on observational data.
+(Multilingual Version)
 """
 
 # 1. Standard Library Imports
 import os
 import argparse
+import json
+from typing import Optional
 
 # 2. Third-Party Imports
 import numpy as np
@@ -26,6 +29,7 @@ from spiceypy import (
     vadd, vscl, pxform, mxv, recrad, radrec, oscelt, convrt,
     et2utc, conics, ktotal, kdata, furnsh, SpiceyError
 )
+# Assuming fbspd_merge exists for the new workflow
 from fbspd_merge import readres
 import showerassoc
 
@@ -79,12 +83,14 @@ def _load_spice_kernels():
     return True
 
 
-def _plot_orbit(et, meteor_elements, doplot):
+def _plot_orbit(et, meteor_elements, doplot, 
+                translations: Optional[dict] = None, output_filename: Optional[str] = None):
     """
     Generates and displays or saves a 3D plot of the meteoroid's orbit using Matplotlib.
     """
     if doplot not in ['show', 'save', 'both']:
         return
+    if translations is None: translations = {}
 
     fig = plt.figure(figsize=(12, 12))
     ax = fig.add_subplot(111, projection='3d')
@@ -99,17 +105,18 @@ def _plot_orbit(et, meteor_elements, doplot):
     
     km_per_au = convrt(1.0, "AU", "KM")
 
+    # Planet data now only contains non-translatable info
     all_planets = {
-        "MERCURY": {"name": "Merkur", "color": "#B7A9A3"},
-        "Venus": {"name": "Venus", "color": "#C77C00"},
-        "Earth": {"name": "Jorda", "color": "#0077BE"},
-        "MARS BARYCENTER": {"name": "Mars", "color": "#D73A00"},
-        "Jupiter barycenter": {"name": "Jupiter", "color": "#A0522D"},
-        "Saturn barycenter": {"name": "Saturn", "color": "#C19A6B"},
-        "Uranus barycenter": {"name": "Uranus", "color": "#94D2E2"},
-        "Neptune barycenter": {"name": "Neptune", "color": "#3F54B5"}
+        "MERCURY": {"color": "#B7A9A3", "key": "planet_mercury"},
+        "Venus": {"color": "#C77C00", "key": "planet_venus"},
+        "Earth": {"color": "#0077BE", "key": "planet_earth"},
+        "MARS BARYCENTER": {"color": "#D73A00", "key": "planet_mars"},
+        "Jupiter barycenter": {"color": "#A0522D", "key": "planet_jupiter"},
+        "Saturn barycenter": {"color": "#C19A6B", "key": "planet_saturn"},
+        "Uranus barycenter": {"color": "#94D2E2", "key": "planet_uranus"},
+        "Neptune barycenter": {"color": "#3F54B5", "key": "planet_neptune"}
     }
-
+    
     planets_to_plot = {
         "Venus": all_planets["Venus"],
         "Earth": all_planets["Earth"],
@@ -126,6 +133,7 @@ def _plot_orbit(et, meteor_elements, doplot):
             planets_to_plot["Saturn barycenter"] = all_planets["Saturn barycenter"]
         if aphelion_au > 10.12:
             planets_to_plot["Uranus barycenter"] = all_planets["Uranus barycenter"]
+            
             if "Venus" in planets_to_plot:
                 del planets_to_plot["Venus"]
         if aphelion_au > 20.1:
@@ -135,6 +143,7 @@ def _plot_orbit(et, meteor_elements, doplot):
         planets_to_plot["Uranus barycenter"] = all_planets["Uranus barycenter"]
             
     legend_handles = []
+    
     for planet_id, params in planets_to_plot.items():
         state, _ = spkezr(planet_id, et, REF_FRAME_ECLIPTIC, ABERRATION_CORRECTION, SOLAR_SYSTEM_BARYCENTER)
         pos_au = state[:3] / km_per_au
@@ -142,16 +151,19 @@ def _plot_orbit(et, meteor_elements, doplot):
         a_p = p_elts[0] / (1 - p_elts[1]) if p_elts[1] < 1 else float('inf')
         t_p = 2 * np.pi * np.sqrt(a_p**3 / gm_sun) if a_p > 0 and np.isfinite(a_p) else float('inf')
         
+        planet_name = translations.get(params["key"], params["key"].replace('_', ' ').title())
+
         if np.isfinite(t_p):
             orbit_path_km = np.array([conics(p_elts, et + i * (t_p / 500))[:3] for i in range(501)])
             orbit_path_au = orbit_path_km / km_per_au
             ax.plot(orbit_path_au[:, 0], orbit_path_au[:, 1], orbit_path_au[:, 2], '-', color=params["color"], linewidth=1.5, alpha=0.7)
         
-        h, = ax.plot([pos_au[0]], [pos_au[1]], [pos_au[2]], 'o', color=params["color"], markersize=5, markeredgecolor='k', mew=0.5, label=params["name"])
-        ax.text(pos_au[0] * 1.05, pos_au[1] * 1.05, pos_au[2], params["name"], color='k', fontsize=9)
+        h, = ax.plot([pos_au[0]], [pos_au[1]], [pos_au[2]], 'o', color=params["color"], markersize=5, markeredgecolor='k', mew=0.5, label=planet_name)
+        ax.text(pos_au[0] * 1.05, pos_au[1] * 1.05, pos_au[2], planet_name, color='k', fontsize=9)
         legend_handles.append(h)
     
-    h, = ax.plot([0], [0], [0], 'o', color='yellow', markersize=8, markeredgecolor='k', mew=0.5, label='Sola')
+    sun_label = translations.get("sun", "Sun")
+    h, = ax.plot([0], [0], [0], 'o', color='yellow', markersize=8, markeredgecolor='k', mew=0.5, label=sun_label)
     legend_handles.append(h)
 
     if e < 1:
@@ -195,10 +207,11 @@ def _plot_orbit(et, meteor_elements, doplot):
         et_aphelion = tp_et + period_sec / 2.0
         aphelion_state_km = conics(meteor_elements, et_aphelion)
         aphelion_pos_au = aphelion_state_km[:3] / km_per_au
+        aphelion_label = translations.get("aphelion", "Aphelion")
         ax.plot([aphelion_pos_au[0]], [aphelion_pos_au[1]], [0], 'x', color='darkviolet', markersize=7, zorder=10)
         ax.plot([aphelion_pos_au[0], aphelion_pos_au[0]], [aphelion_pos_au[1], aphelion_pos_au[1]], [aphelion_pos_au[2], 0], color='darkviolet', linestyle='--', linewidth=1)
-        ax.plot([aphelion_pos_au[0]], [aphelion_pos_au[1]], [aphelion_pos_au[2]], 'D', color='darkviolet', markersize=6, label='Aphelium', zorder=10)
-        legend_handles.append(Line2D([0], [0], marker='D', color='w', label='Aphelium', markerfacecolor='darkviolet', markersize=7))
+        ax.plot([aphelion_pos_au[0]], [aphelion_pos_au[1]], [aphelion_pos_au[2]], 'D', color='darkviolet', markersize=6, label=aphelion_label, zorder=10)
+        legend_handles.append(Line2D([0], [0], marker='D', color='w', label=aphelion_label, markerfacecolor='darkviolet', markersize=7))
 
     step = max(1, len(x) // 50)
     ax.plot(x[::step], y[::step], 0, '.', color='gray', markersize=1, alpha=0.5)
@@ -206,8 +219,8 @@ def _plot_orbit(et, meteor_elements, doplot):
         ax.plot([x[i], x[i]], [y[i], y[i]], [z[i], 0], '-', color='gray', linewidth=0.5, alpha=0.4)
 
     legend_handles.extend([
-        Line2D([0], [0], color='green', lw=1.5, label='Meteoroidebane (over ekliptikken)'),
-        Line2D([0], [0], color='red', lw=1.5, label='Meteoroidebane (under ekliptikken)')
+        Line2D([0], [0], color='green', lw=1.5, label=translations.get("plot_orbit_legend_above", "Meteoroid orbit (above ecliptic)")),
+        Line2D([0], [0], color='red', lw=1.5, label=translations.get("plot_orbit_legend_below", "Meteoroid orbit (below ecliptic)"))
     ])
 
     max_range = np.max(np.ptp(orbit_au, axis=0)) * 1.1
@@ -216,7 +229,7 @@ def _plot_orbit(et, meteor_elements, doplot):
     ax.set_ylim(mid_points[1] - max_range / 2, mid_points[1] + max_range / 2)
     ax.set_zlim(mid_points[2] - max_range / 2, mid_points[2] + max_range / 2)
     
-    ax.set_title('Meteoroidens heliosentriske bane', fontsize=16, y=1, fontstyle="oblique")
+    ax.set_title(translations.get("plot_orbit_title", "Meteoroid's Heliocentric Orbit"), fontsize=16, y=1, fontstyle="oblique")
     for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
         axis.set_label_text('')
 
@@ -224,8 +237,9 @@ def _plot_orbit(et, meteor_elements, doplot):
     ax.legend(handles=legend_handles, loc='lower left')
 
     if doplot == 'save' or doplot == 'both':
-        plt.savefig('orbit.svg', bbox_inches='tight', pad_inches=0.2)
-        print("Plot saved to orbit.svg")
+        filename = output_filename or 'orbit.svg'
+        plt.savefig(filename, bbox_inches='tight', pad_inches=0.2)
+        print(f"Plot saved to {filename}")
     if doplot == 'show' or doplot == 'both':
         plt.show()
 
@@ -255,7 +269,8 @@ def _create_ecliptic_grid_traces(max_radius):
     return traces
 
 
-def _plot_orbit_interactive(et, meteor_elements):
+def _plot_orbit_interactive(et, meteor_elements,
+                            translations: Optional[dict] = None, output_filename: Optional[str] = None):
     """
     Generates and saves an interactive 3D plot of the meteoroid's orbit
     with an autorotation feature.
@@ -263,6 +278,7 @@ def _plot_orbit_interactive(et, meteor_elements):
     if not PLOTLY_AVAILABLE:
         print("\nError: Plotly is not installed. Please run: pip install plotly")
         return
+    if translations is None: translations = {}
 
     # --- Initial Setup ---
     gm_sun = bodvrd("SUN", "GM", 1)[1][0]
@@ -294,7 +310,7 @@ def _plot_orbit_interactive(et, meteor_elements):
         indices = np.where(condition)[0]
         if not len(indices):
             continue
-            
+        
         x_segment, y_segment, z_segment = [], [], []
         for i in range(len(indices) - 1):
             current_idx, next_idx = indices[i], indices[i+1]
@@ -313,10 +329,10 @@ def _plot_orbit_interactive(et, meteor_elements):
 
     # --- 3. Planetary Orbits and Positions ---
     all_planets = {
-        "MERCURY": {"name": "Merkur", "color": "#B7A9A3"}, "VENUS": {"name": "Venus", "color": "#C77C00"},
-        "EARTH": {"name": "Jorda", "color": "#0077BE"}, "MARS BARYCENTER": {"name": "Mars", "color": "#D73A00"},
-        "JUPITER BARYCENTER": {"name": "Jupiter", "color": "#A0522D"}, "SATURN BARYCENTER": {"name": "Saturn", "color": "#C19A6B"},
-        "URANUS BARYCENTER": {"name": "Uranus", "color": "#94D2E2"}, "NEPTUNE BARYCENTER": {"name": "Neptune", "color": "#3F54B5"}
+        "MERCURY": {"color": "#B7A9A3", "key": "planet_mercury"}, "VENUS": {"color": "#C77C00", "key": "planet_venus"},
+        "EARTH": {"color": "#0077BE", "key": "planet_earth"}, "MARS BARYCENTER": {"color": "#D73A00", "key": "planet_mars"},
+        "JUPITER BARYCENTER": {"color": "#A0522D", "key": "planet_jupiter"}, "SATURN BARYCENTER": {"color": "#C19A6B", "key": "planet_saturn"},
+        "URANUS BARYCENTER": {"color": "#94D2E2", "key": "planet_uranus"}, "NEPTUNE BARYCENTER": {"color": "#3F54B5", "key": "planet_neptune"}
     }
     
     planets_to_plot = {"VENUS", "EARTH", "MARS BARYCENTER", "JUPITER BARYCENTER"}
@@ -338,10 +354,12 @@ def _plot_orbit_interactive(et, meteor_elements):
         pos_au = state[:3] / km_per_au
         p_elts = oscelt(state, et, gm_sun)
         
+        planet_name = translations.get(params["key"], params["key"].replace('_', ' ').title())
+
         traces.append(go.Scatter3d(
             x=[pos_au[0]], y=[pos_au[1]], z=[pos_au[2]], mode='markers+text',
             marker=dict(color=params["color"], size=5, line=dict(color='black', width=1)),
-            text=params["name"], textposition="top center", name=params["name"],
+            text=planet_name, textposition="top center", name=planet_name,
             hoverinfo='text', textfont=dict(size=7), showlegend=False
         ))
         
@@ -351,11 +369,12 @@ def _plot_orbit_interactive(et, meteor_elements):
             orbit_path_km = np.array([conics(p_elts, et + i * (t_p / 500))[:3] for i in range(501)])
             traces.append(go.Scatter3d(
                 x=orbit_path_km[:, 0] / km_per_au, y=orbit_path_km[:, 1] / km_per_au, z=orbit_path_km[:, 2] / km_per_au,
-                mode='lines', line=dict(color=params["color"], width=3), name=params["name"], hoverinfo='none'
+                mode='lines', line=dict(color=params["color"], width=3), name=planet_name, hoverinfo='none'
             ))
 
     # --- 4. Sun, Ecliptic Grid, and Aphelion Marker ---
-    traces.append(go.Scatter3d(x=[0], y=[0], z=[0], mode='markers', name='Sola',
+    sun_label = translations.get("sun", "Sun")
+    traces.append(go.Scatter3d(x=[0], y=[0], z=[0], mode='markers', name=sun_label,
                                marker=dict(color='yellow', size=8, line=dict(color='black', width=1)),
                                hoverinfo='name', showlegend=False))
     
@@ -366,18 +385,19 @@ def _plot_orbit_interactive(et, meteor_elements):
         
         et_aphelion = meteor_elements[6] + period / 2.0
         aphelion_pos_au = conics(meteor_elements, et_aphelion)[:3] / km_per_au
+        aphelion_label = translations.get("aphelion", "Aphelion")
         
         traces.append(go.Scatter3d(
-            x=[aphelion_pos_au[0]], y=[aphelion_pos_au[1]], z=[aphelion_pos_au[2]], mode='markers', name='Aphelium', 
+            x=[aphelion_pos_au[0]], y=[aphelion_pos_au[1]], z=[aphelion_pos_au[2]], mode='markers', name=aphelion_label, 
             marker=dict(symbol='diamond', color='darkviolet', size=2), hoverlabel=common_hover_label, hovertemplate=common_hover_template
         ))
         traces.append(go.Scatter3d(
-            x=[aphelion_pos_au[0]], y=[aphelion_pos_au[1]], z=[0], mode='markers', name='Aphelium (projisert)', 
+            x=[aphelion_pos_au[0]], y=[aphelion_pos_au[1]], z=[0], mode='markers', name=f'{aphelion_label} (projected)', 
             marker=dict(symbol='cross', color='darkviolet', size=2), showlegend=False
         ))
         traces.append(go.Scatter3d(
             x=[aphelion_pos_au[0], aphelion_pos_au[0]], y=[aphelion_pos_au[1], aphelion_pos_au[1]], z=[aphelion_pos_au[2], 0], 
-            mode='lines', name='Aphelium droplinje', line=dict(color='darkviolet', width=2, dash='dash'), hoverinfo='none', showlegend=False
+            mode='lines', name=f'{aphelion_label} dropline', line=dict(color='darkviolet', width=2, dash='dash'), hoverinfo='none', showlegend=False
         ))
 
     # --- 5. Orbit Projection and Droplines on Ecliptic ---
@@ -388,7 +408,7 @@ def _plot_orbit_interactive(et, meteor_elements):
     for i in range(0, len(x), step):
         traces.append(go.Scatter3d(x=[x[i], x[i]], y=[y[i], y[i]], z=[z[i], 0], mode='lines',
                                    line=dict(color='dimgray', width=1.5, dash='dot'), showlegend=False, hoverinfo='none'))
-                                   
+                            
     # --- 6. Animation Frame Generation ---
     frames = []
     num_frames = 360
@@ -405,7 +425,7 @@ def _plot_orbit_interactive(et, meteor_elements):
 
     # --- 7. Figure Layout and Generation ---
     layout = go.Layout(
-        title_text='Meteoroidens heliosentriske bane', title_x=0.5, title_y=1,
+        title_text=translations.get("plot_orbit_title", "Meteoroid's Heliocentric Orbit"), title_x=0.5, title_y=1,
         margin=dict(l=0, r=0, b=0, t=40),
         legend=dict(
             x=1, y=1, xanchor='right', yanchor='top', font=dict(size=8),
@@ -430,10 +450,10 @@ def _plot_orbit_interactive(et, meteor_elements):
             font=dict(size=10), 
             bgcolor='rgba(255, 255, 255, 0.5)',
             buttons=[
-                dict(label='▶ Spill',
+                dict(label=translations.get("plot_interactive_play", "▶ Play"),
                      method='animate',
                      args=[None, dict(frame=dict(duration=20, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
-                dict(label='⏸ Pause',
+                dict(label=translations.get("plot_interactive_pause", "⏸ Pause"),
                      method='animate',
                      args=[[None], dict(frame=dict(duration=0, redraw=False),
                                         mode='immediate',
@@ -443,74 +463,74 @@ def _plot_orbit_interactive(et, meteor_elements):
     )
     
     fig = go.Figure(data=traces, layout=layout, frames=frames)
-    fig.write_html("orbit.html", include_plotlyjs='cdn')
+    filename = output_filename or "orbit.html"
+    fig.write_html(filename, include_plotlyjs='cdn')
 
-    # Append interaction listener to pause animation on click
-    with open("orbit.html", "a", encoding="utf-8") as f:
-        f.write("""
+    # This javascript block is appended to the HTML file to add custom interaction.
+    # It finds the play button using its translated text content.
+    play_button_text = json.dumps(translations.get("plot_interactive_play", "▶ Play"))
+    with open(filename, "a", encoding="utf-8") as f:
+        f.write(f"""
 <script>
-document.addEventListener("DOMContentLoaded", function () {
+document.addEventListener("DOMContentLoaded", function () {{
     const plot = document.querySelector("div.js-plotly-plot");
     let animationPaused = false;
 
-    function pauseAnimation() {
+    function pauseAnimation() {{
         animationPaused = true;
         console.log("Pausing animation");
-        Plotly.animate(plot, null, {
+        Plotly.animate(plot, null, {{
             mode: 'immediate',
-            frame: { duration: 0, redraw: false },
-            transition: { duration: 0 }
-        }).catch((err) => {
+            frame: {{ duration: 0, redraw: false }},
+            transition: {{ duration: 0 }}
+        }}).catch((err) => {{
             console.warn("Pause failed:", err);
-        });
-    }
+        }});
+    }}
 
-    function resumeAnimation() {
+    function resumeAnimation() {{
         animationPaused = false;
         console.log("Resuming animation");
-        Plotly.animate(plot, null, {
-            frame: { duration: 50, redraw: true },
-            transition: { duration: 0 },
+        Plotly.animate(plot, null, {{
+            frame: {{ duration: 50, redraw: true }},
+            transition: {{ duration: 0 }},
             mode: "next",
             fromcurrent: true
-        }).catch((err) => {
+        }}).catch((err) => {{
             console.warn("Resume failed:", err);
-        });
-    }
+        }});
+    }}
 
-    function toggleAnimation(e) {
+    function toggleAnimation(e) {{
         e.preventDefault(); // prevent context menu
-        if (animationPaused) {
+        if (animationPaused) {{
             resumeAnimation();
-        } else {
+        }} else {{
             pauseAnimation();
-        }
-    }
+        }}
+    }}
 
-    plot.addEventListener('plotly_animated', () => {
+    plot.addEventListener('plotly_animated', () => {{
         console.log("Animation started — resetting paused flag");
         animationPaused = false;
-    });
-
-    if (plot) {
+    }});
+    if (plot) {{
         // Right-click = toggle animation
         plot.addEventListener("contextmenu", toggleAnimation);
-
-        // Hook the "Spill" button to resume and reset state
+        // Hook the play button to resume and reset state
         const playButton = [...document.querySelectorAll("button")].find(btn =>
-            btn.textContent.includes("Spill") || btn.textContent.includes("Play")
+            btn.textContent === {play_button_text}
         );
-
-        if (playButton) {
-            playButton.addEventListener("click", () => {
+        if (playButton) {{
+            playButton.addEventListener("click", () => {{
                 animationPaused = false;
-            });
-        }
-    }
-});
+            }});
+        }}
+    }}
+}});
 </script>
 """)
-        print("\nInteractive plot with autorotation saved to orbit.html")
+        print(f"\nInteractive plot with autorotation saved to {filename}")
 
 
 def calc_azalt(lat1, lon1, alt1, lat2, lon2, alt2):
@@ -533,12 +553,14 @@ def calc_azalt(lat1, lon1, alt1, lat2, lon2, alt2):
     
     return bearing, incidence
 
-def orbit(spd_success, v_obs, avg_speed, resname, datestr, timestr, doplot='', interactive=False):
+def orbit(spd_success, v_obs, avg_speed, resname, datestr, timestr, doplot='', interactive=False, 
+          translations: Optional[dict] = None, output_prefix: str = ''):
     """
     Calculates radiant and orbital elements for a meteor observation.
     """
     if not _load_spice_kernels():
         return 0, 0, (0,) * 7, '', '', False
+    if translations is None: translations = {}
 
     resdat = readres(resname)
     lon = float(resdat.long1[0])
@@ -626,10 +648,14 @@ def orbit(spd_success, v_obs, avg_speed, resname, datestr, timestr, doplot='', i
     
     showername, showername_sg = showerassoc.showerassoc(np.degrees(ra_rad), np.degrees(dec_rad), v_rotcorr, datestr)
     
+    # Generate language-specific filenames and call plotters
+    html_filename = f"{output_prefix}orbit.html" if output_prefix else "orbit.html"
+    svg_filename = f"{output_prefix}orbit.svg" if output_prefix else "orbit.svg"
+
     if interactive:
-        _plot_orbit_interactive(et, elements)
+        _plot_orbit_interactive(et, elements, translations, html_filename)
     if doplot:
-        _plot_orbit(et, elements, doplot)
+        _plot_orbit(et, elements, doplot, translations, svg_filename)
         
     return np.degrees(ra_rad), np.degrees(dec_rad), orbelts, showername, showername_sg, True
 

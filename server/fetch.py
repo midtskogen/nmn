@@ -80,9 +80,13 @@ class Config:
     SVG_DEFAULT_DPI = 300
     SVG_MAP_DPI = 80
     SVG_ORBIT_DPI = 100
+    
+    # Tweet settings
+    MAX_EVENT_AGE_FOR_TWEET_HOURS = 4.0
+
 
 # --- Internationalization (i18n) Setup ---
-SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs']
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi']
 DEFAULT_LANG = 'nb'
 LOC_DIR = Config.BIN_DIR / 'loc'
 
@@ -388,6 +392,7 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
 """
         table1 += "</table>"
         
+        # Use comma as decimal separator for languages other than English
         if lang != 'en':
             table1 = table1.replace('.', ',')
         
@@ -451,9 +456,24 @@ $jpg_path = "{station}/{cam}/fireball.jpg";
 $webm_url = "{url_base}/{cam}/fireball_neg.webm";
 $webm_url2 = "{url_base}/{cam}/fireball_orig.webm";
 $jpg_url = "{url_base}/{cam}/fireball.jpg";
+
+// Logic to display language-specific brightness plot with a fallback to default
 $b_prefix = ($lang === '{default_lang_code}') ? '' : substr($lang, 0, 2) . '_';
-$brightness_jpg_path = "{station}/{cam}/" . $b_prefix . "brightness.jpg";
-$brightness_jpg_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
+$specific_brightness_path = "{station}/{cam}/" . $b_prefix . "brightness.jpg";
+$specific_brightness_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
+$default_brightness_path = "{station}/{cam}/brightness.jpg";
+$default_brightness_url = "{url_base}/{cam}/brightness.jpg";
+
+$display_brightness_path = null;
+$display_brightness_url = null;
+
+if (file_exists($specific_brightness_path)) {{
+    $display_brightness_path = $specific_brightness_path;
+    $display_brightness_url = $specific_brightness_url;
+}} elseif (file_exists($default_brightness_path)) {{
+    $display_brightness_path = $default_brightness_path;
+    $display_brightness_url = $default_brightness_url;
+}}
 ?>
     <div style="text-align: center;">
         <?php if (file_exists($webm_path)) {{ ?>
@@ -491,11 +511,12 @@ $brightness_jpg_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
 <?php if (file_exists("{station}/{cam}/stderr.txt")) {{ ?>• <a href="{url_base}/{cam}/stderr.txt">{error_messages_label}</a><br> <?php }} ?>
 <?php if (file_exists("{station}/{cam}/report.log")) {{ ?>• <a href="{url_base}/{cam}/report.log">{log_file_label}</a><br> <?php }} ?>
 </td></tr></table>
-<?php if (file_exists($brightness_jpg_path)) {{ ?><a href="<?php echo $brightness_jpg_url; ?>"><img src="<?php echo $brightness_jpg_url; ?>" width=400 alt="brightness"><br></a> <?php }} ?>
+<?php if ($display_brightness_path !== null) {{ ?><a href="<?php echo $display_brightness_url; ?>"><img src="<?php echo $display_brightness_url; ?>" width=400 alt="{brightness_label}"><br></a> <?php }} ?>
 </td></tr></table>
 </p>
 </div></div>
             """
+            
             url_base_path = f'/meteor/{event_dir.parent.name}/{event_dir.name}/{station}'
             station_timestamp_str = f"{station}-{ts_str}"
 
@@ -518,7 +539,8 @@ $brightness_jpg_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
                 observation_label=translations.get("observation", "Observation"),
                 coordinates_label=translations.get("coordinates", "Coordinates"),
                 error_messages_label=translations.get("error_messages", "Error Messages"),
-                log_file_label=translations.get("log_file", "Log")
+                log_file_label=translations.get("log_file", "Log"),
+                brightness_label=translations.get("brightness", "Brightness")
             ))
 
 
@@ -555,13 +577,24 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
     key_solobs = '/var/www/.oysttyerkey-solobs'
     key_main = '/var/www/.oysttyerkey'
     
+    # *** MODIFICATION: Use subprocess.run directly to detach from TTY ***
     for key in [key_solobs, key_main]:
         cmd = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key} -silent {full_tweet}'
         try:
-            run_command(cmd, shell=True)
+            # We use subprocess.run directly and redirect stdio
+            # to prevent oysttyer from corrupting the terminal.
+            subprocess.run(
+                cmd,
+                shell=True,
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             logging.info(f"Successfully sent tweet using key {key}.")
         except Exception as e:
             logging.error(f"Failed to send tweet using key {key}: {e}")
+    # *** END OF MODIFICATION ***
 
 
 def process_event(event_dir: Path, date: datetime.datetime):
@@ -571,6 +604,43 @@ def process_event(event_dir: Path, date: datetime.datetime):
     obs_filepath = event_dir / obs_filename
     res_filename = obs_filepath.with_suffix('.res')
     
+    # Run process.py for ALL event.txt files in PARALLEL
+    report_script = Config.BIN_DIR / 'process.py'
+    event_files = sorted(event_dir.glob('*/*/event.txt'))
+    
+    if not event_files:
+        logging.warning("No station event.txt files found. Skipping process.py and brightness plots.")
+    
+    processes = [] # List to hold Popen objects
+    for event_file in event_files:
+        report_log = event_file.parent / "report.log" # Generic log name
+        report_cmd = [sys.executable, str(report_script), str(event_file)]
+        logging.info(f"--- Spawning {report_script.name} for {event_file} ---")
+        try:
+            # We use a generic log file name, as process.py generates all languages
+            with report_log.open('w') as log_file:
+               # Use Popen to run in parallel.
+               # The semaphore inside process.py will manage concurrency.
+               proc = subprocess.Popen(report_cmd, stdout=log_file, stderr=log_file)
+               processes.append(proc)
+        except Exception as e:
+            logging.error(f"Failed to spawn process.py for {event_file}: {e}")
+            # Log and continue to the next file
+            
+    # Wait for all spawned process.py jobs to finish
+    if processes:
+        logging.info(f"Waiting for {len(processes)} station processing jobs to complete...")
+        for proc in processes:
+            proc.wait()
+            # Check if any process failed
+            if proc.returncode == 0:
+                logging.info(f"Job for {proc.args[2]} was discarded (exit code 0).")
+            elif proc.returncode == 1:
+                logging.info(f"Job for {proc.args[2]} finished successfully (exit code 1).")
+            else:
+                 logging.warning(f"Job for {proc.args[2]} failed with exit code {proc.returncode}.")
+        logging.info("All station processing jobs finished.")
+
     station_codes, station_name_to_code = set(), {}
     try:
         with obs_filepath.open('w', encoding='utf-8') as outfile:
@@ -763,12 +833,23 @@ def process_event(event_dir: Path, date: datetime.datetime):
 
 
     if is_multistation and analysis_results:
-        resdat = analysis_results['resdat']
-        height_valid = 10 < resdat.height[0] <= 150 and 10 <= resdat.height[1] <= 150
-        nb_translations = load_translations('nb') # Tweet always in default lang
-        send_tweet(event_dir, date, analysis_results['placename'], 
-                   analysis_results['orbit_data'].get('showername_sg', ''), 
-                   len(station_codes), analysis_results['first_run'], height_valid, nb_translations)
+        # *** MODIFICATION: Added event age check ***
+        # The 'date' variable is the naive UTC datetime of the event
+        event_time_utc = date.replace(tzinfo=pytz.utc)
+        current_time_utc = datetime.datetime.now(pytz.utc)
+        event_age = current_time_utc - event_time_utc
+        max_age_seconds = Config.MAX_EVENT_AGE_FOR_TWEET_HOURS * 3600
+
+        if event_age.total_seconds() > max_age_seconds:
+            logging.info(f"Event is older than {Config.MAX_EVENT_AGE_FOR_TWEET_HOURS} hours ({event_age}). Skipping tweet.")
+        else:
+            resdat = analysis_results['resdat']
+            height_valid = 10 < resdat.height[0] <= 150 and 10 <= resdat.height[1] <= 150
+            nb_translations = load_translations('nb') # Tweet always in default lang
+            send_tweet(event_dir, date, analysis_results['placename'], 
+                       analysis_results['orbit_data'].get('showername_sg', ''), 
+                       len(station_codes), analysis_results['first_run'], height_valid, nb_translations)
+        # *** END OF MODIFICATION ***
     elif not is_multistation:
         logging.info("Not enough stations for triangulation. Skipping tweet.")
         
@@ -803,6 +884,7 @@ def main():
                 logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
+            # process_event() will now handle running process.py for all stations
             process_event(final_event_dir, processing_date)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
@@ -863,21 +945,8 @@ def main():
         
     date_obj = datetime.datetime.strptime(date_str + time_str, '%Y%m%d%H%M%S')
 
-    report_log = local_dir / 'report.log'
-    report_script = Config.BIN_DIR / 'process.py'
-    report_cmd = [sys.executable, str(report_script), str(local_dir / 'event.txt')]
-
-    logging.info(f"--- Running {report_script.name} for {local_dir / 'event.txt'} ---")
-    try:
-        with report_log.open('w') as log_file:
-           subprocess.call(report_cmd, stdout=log_file, stderr=log_file)
-    except Exception as e:
-        logging.error(f"Failed to run process.py: {e}")
-        
-    if not local_dir.exists():
-        logging.info("--- Event was discarded by process.py ---")
-        sys.exit(0)
-
+    # process.py is now called from within process_event()
+    
     create_centroid_file(local_dir)
     final_event_dir = find_and_merge_event_directory(date_obj, station, local_dir)
     

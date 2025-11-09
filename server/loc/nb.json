@@ -127,5 +127,10 @@
   },
   "wind_profile": "Vindprofil",
   "wind_speed_ms": "Vindhastighet (m/s)",
-  "wind_direction_deg": "Vindretning (°)"
+  "wind_direction_deg": "Vindretning (°)",
+  "time": "Tid",
+  "height": "Høgde",
+  "ground_dist": "Bakkeavstand",
+  "latitude": "Breddegrad",
+  "longitude": "Lengdegrad"
 }

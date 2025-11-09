@@ -11,7 +11,7 @@ This script performs the following actions for each supported language:
 5.  Optionally posts a notification to social media.
 Usage:
     python3 fetch.py <station_name> <ssh_port> <remote_dir>
-    python3 fetch.py <local_event_directory> (for reprocessing)
+    python3 fetch.py <local_event_directory> [--fast]
 """
 
 import argparse
@@ -34,6 +34,12 @@ from pathlib import Path
 import numpy as np
 import pytz
 from dateutil.tz import tzlocal
+
+# *** NEW: Added matplotlib imports from process.py ***
+import matplotlib
+# Use a non-interactive backend for matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 try:
     import cairosvg
@@ -543,6 +549,38 @@ if (file_exists($specific_brightness_path)) {{
                 brightness_label=translations.get("brightness", "Brightness")
             ))
 
+# *** NEW: Copied function from process.py and changed print() to logging ***
+def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: list):
+    """Generates translated brightness plots for all supported languages."""
+    logging.info(f"Generating multilingual brightness plots for {event_dir}...")
+    if not timestamps or not brightness:
+        logging.warning("Warning: No data available to generate brightness plot.")
+        return
+
+    time_axis = [t - timestamps[0] for t in timestamps]
+
+    for lang in SUPPORTED_LANGS:
+        translations = load_translations(lang)
+        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+        
+        svg_path = event_dir / f'{file_prefix}brightness.svg'
+        jpg_path = event_dir / f'{file_prefix}brightness.jpg'
+
+        try:
+            plt.figure()
+            plt.plot(time_axis, brightness)
+            plt.xlabel(translations.get("plot_time_x_label", "Time [s]"))
+            plt.ylabel(translations.get("brightness", "Brightness"))
+            plt.title(translations.get("brightness_plot_title", "Brightness over Time"))
+            
+            plt.savefig(svg_path)
+            plt.savefig(jpg_path)
+            plt.close()
+            logging.info(f"  - Saved {svg_path.name} and {jpg_path.name}")
+        except Exception as e:
+            logging.error(f"Error generating plot for language '{lang}': {e}")
+# *** END OF NEW FUNCTION ***
+
 
 def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showername_sg: str, count: int, first: bool, height_valid: bool, translations: dict):
     """Constructs and sends a tweet if conditions are met."""
@@ -577,12 +615,9 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
     key_solobs = '/var/www/.oysttyerkey-solobs'
     key_main = '/var/www/.oysttyerkey'
     
-    # *** MODIFICATION: Use subprocess.run directly to detach from TTY ***
     for key in [key_solobs, key_main]:
         cmd = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key} -silent {full_tweet}'
         try:
-            # We use subprocess.run directly and redirect stdio
-            # to prevent oysttyer from corrupting the terminal.
             subprocess.run(
                 cmd,
                 shell=True,
@@ -594,52 +629,68 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
             logging.info(f"Successfully sent tweet using key {key}.")
         except Exception as e:
             logging.error(f"Failed to send tweet using key {key}: {e}")
-    # *** END OF MODIFICATION ***
 
 
-def process_event(event_dir: Path, date: datetime.datetime):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     obs_filename = f"obs_{date.strftime('%Y-%m-%d_%H:%M:%S')}.txt"
     obs_filepath = event_dir / obs_filename
     res_filename = obs_filepath.with_suffix('.res')
     
-    # Run process.py for ALL event.txt files in PARALLEL
-    report_script = Config.BIN_DIR / 'process.py'
-    event_files = sorted(event_dir.glob('*/*/event.txt'))
-    
-    if not event_files:
-        logging.warning("No station event.txt files found. Skipping process.py and brightness plots.")
-    
-    processes = [] # List to hold Popen objects
-    for event_file in event_files:
-        report_log = event_file.parent / "report.log" # Generic log name
-        report_cmd = [sys.executable, str(report_script), str(event_file)]
-        logging.info(f"--- Spawning {report_script.name} for {event_file} ---")
-        try:
-            # We use a generic log file name, as process.py generates all languages
-            with report_log.open('w') as log_file:
-               # Use Popen to run in parallel.
-               # The semaphore inside process.py will manage concurrency.
-               proc = subprocess.Popen(report_cmd, stdout=log_file, stderr=log_file)
-               processes.append(proc)
-        except Exception as e:
-            logging.error(f"Failed to spawn process.py for {event_file}: {e}")
-            # Log and continue to the next file
-            
-    # Wait for all spawned process.py jobs to finish
-    if processes:
-        logging.info(f"Waiting for {len(processes)} station processing jobs to complete...")
-        for proc in processes:
-            proc.wait()
-            # Check if any process failed
-            if proc.returncode == 0:
-                logging.info(f"Job for {proc.args[2]} was discarded (exit code 0).")
-            elif proc.returncode == 1:
-                logging.info(f"Job for {proc.args[2]} finished successfully (exit code 1).")
-            else:
-                 logging.warning(f"Job for {proc.args[2]} failed with exit code {proc.returncode}.")
-        logging.info("All station processing jobs finished.")
+    # *** MODIFICATION: Updated --fast logic ***
+    if not fast:
+        # Run process.py for ALL event.txt files in PARALLEL
+        report_script = Config.BIN_DIR / 'process.py'
+        event_files = sorted(event_dir.glob('*/*/event.txt'))
+        
+        if not event_files:
+            logging.warning("No station event.txt files found. Skipping process.py.")
+        
+        processes = [] # List to hold Popen objects
+        for event_file in event_files:
+            report_log = event_file.parent / "report.log" # Generic log name
+            report_cmd = [sys.executable, str(report_script), str(event_file)]
+            logging.info(f"--- Spawning {report_script.name} for {event_file} ---")
+            try:
+                with report_log.open('w') as log_file:
+                   proc = subprocess.Popen(report_cmd, stdout=log_file, stderr=log_file)
+                   processes.append(proc)
+            except Exception as e:
+                logging.error(f"Failed to spawn process.py for {event_file}: {e}")
+                
+        if processes:
+            logging.info(f"Waiting for {len(processes)} station processing jobs to complete...")
+            for proc in processes:
+                proc.wait()
+                if proc.returncode == 0:
+                    logging.info(f"Job for {proc.args[2]} was discarded (exit code 0).")
+                elif proc.returncode == 1:
+                    logging.info(f"Job for {proc.args[2]} finished successfully (exit code 1).")
+                else:
+                     logging.warning(f"Job for {proc.args[2]} failed with exit code {proc.returncode}.")
+            logging.info("All station processing jobs finished.")
+    else:
+        # --fast mode: Skip process.py, but regenerate brightness plots manually
+        logging.info("--- FAST MODE: Skipping process.py (station video/classification). ---")
+        logging.info("--- FAST MODE: Regenerating station brightness plots... ---")
+        station_event_files = sorted(event_dir.glob('*/*/event.txt'))
+        
+        if not station_event_files:
+            logging.warning("--- FAST MODE: No station event.txt files found to regenerate brightness plots. ---")
+
+        for event_file in station_event_files:
+            try:
+                cfg = configparser.ConfigParser()
+                cfg.read(event_file)
+                timestamps = [float(t) for t in cfg.get('trail', 'timestamps').split()]
+                brightness = [float(b) for b in cfg.get('trail', 'brightness').split()]
+                # The plot function saves plots in the event_file's parent directory
+                generate_brightness_plots(event_file.parent, timestamps, brightness) 
+            except Exception as e:
+                logging.warning(f"Failed to regenerate brightness plot for {event_file}: {e}")
+    # *** END OF MODIFICATION ***
+
 
     station_codes, station_name_to_code = set(), {}
     try:
@@ -788,24 +839,35 @@ def process_event(event_dir: Path, date: datetime.datetime):
         try:
             end_height_km = analysis_results['resdat'].height[1]
             if 10 <= end_height_km <= 40:
-                logging.info(f"End altitude {end_height_km:.1f} km is between 10-40 km. Generating wind profile.")
-                
                 wind_csv_path = event_dir / "wind_profile.csv"
-                end_lat = analysis_results['resdat'].lat1[1]
-                end_lon = analysis_results['resdat'].long1[1]
-                event_timestamp = date.timestamp()
-
-                # Fetch and save raw CSV data
-                success, matched_time = windprofile.get_wind_profile(
-                    end_lat, 
-                    end_lon, 
-                    event_timestamp, 
-                    str(wind_csv_path)
-                )
+                success = False
+                matched_time = None
+                
+                if not fast:
+                    logging.info(f"End altitude {end_height_km:.1f} km is between 10-40 km. Fetching wind profile.")
+                    end_lat = analysis_results['resdat'].lat1[1]
+                    end_lon = analysis_results['resdat'].long1[1]
+                    event_timestamp = date.timestamp()
+                    
+                    success, matched_time = windprofile.get_wind_profile(
+                        end_lat, 
+                        end_lon, 
+                        event_timestamp, 
+                        str(wind_csv_path)
+                    )
+                else:
+                    logging.info(f"--- FAST MODE: Skipping wind profile data fetch. ---")
+                    if wind_csv_path.exists():
+                        logging.info(f"--- FAST MODE: Using existing {wind_csv_path.name}. ---")
+                        success = True
+                        matched_time = "Existing Data" 
+                    else:
+                        logging.info(f"--- FAST MODE: {wind_csv_path.name} not found. Skipping wind plots. ---")
 
                 if success:
-                    logging.info(f"Successfully fetched wind data for {matched_time}")
-                    # Generate plot for each language
+                    if not fast:
+                        logging.info(f"Successfully fetched wind data for {matched_time}")
+                    
                     for lang in SUPPORTED_LANGS:
                         translations = load_translations(lang)
                         file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
@@ -817,13 +879,12 @@ def process_event(event_dir: Path, date: datetime.datetime):
                             file_prefix
                         )
                         
-                        # Convert the new SVG to JPG
                         svg_path = event_dir / f"{file_prefix}wind_profile.svg"
                         if svg_path.exists():
                             svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_DEFAULT_DPI)
                         else:
                             logging.warning(f"Wind profile SVG not found: {svg_path}")
-                else:
+                elif not fast:
                     logging.warning("Failed to get wind profile data.")
             else:
                 logging.info(f"End altitude {end_height_km:.1f} km is outside 10-40 km range. Skipping wind profile.")
@@ -833,8 +894,6 @@ def process_event(event_dir: Path, date: datetime.datetime):
 
 
     if is_multistation and analysis_results:
-        # *** MODIFICATION: Added event age check ***
-        # The 'date' variable is the naive UTC datetime of the event
         event_time_utc = date.replace(tzinfo=pytz.utc)
         current_time_utc = datetime.datetime.now(pytz.utc)
         event_age = current_time_utc - event_time_utc
@@ -849,7 +908,6 @@ def process_event(event_dir: Path, date: datetime.datetime):
             send_tweet(event_dir, date, analysis_results['placename'], 
                        analysis_results['orbit_data'].get('showername_sg', ''), 
                        len(station_codes), analysis_results['first_run'], height_valid, nb_translations)
-        # *** END OF MODIFICATION ***
     elif not is_multistation:
         logging.info("Not enough stations for triangulation. Skipping tweet.")
         
@@ -859,16 +917,38 @@ def process_event(event_dir: Path, date: datetime.datetime):
 
 def main():
     """Main script execution flow."""
-    if len(sys.argv) == 2:
+    
+    parser = argparse.ArgumentParser(
+        description="Fetch and process meteor data, or reprocess an existing event directory.",
+        usage="""
+    To fetch:     python3 fetch.py <station> <port> <remote_dir>
+    To reprocess: python3 fetch.py <local_event_directory> [--fast]
+        """
+    )
+    parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
+    parser.add_argument("port", nargs='?', help="SSH port (if fetching).")
+    parser.add_argument("remote_dir", nargs='?', help="Remote directory path (if fetching).")
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="For reprocessing mode: skips slow video processing (process.py) "
+             "and wind data fetching, and only regenerates analysis, plots, and tables."
+    )
+    
+    args = parser.parse_args()
+
+    is_reprocessing = args.port is None and args.remote_dir is None
+
+    if is_reprocessing:
         # --- Reprocessing Mode ---
-        final_event_dir = Path(sys.argv[1]).resolve()
+        final_event_dir = Path(args.arg1).resolve()
         if not final_event_dir.is_dir():
             sys.exit(f"Error: Directory not found: {final_event_dir}")
         
-        # Setup logging in the event directory
-        log_path = final_event_dir / 'reprocess.log'
+        log_name = 'reprocess_fast.log' if args.fast else 'reprocess.log'
+        log_path = final_event_dir / log_name
         setup_logging(log_path)
-        logging.info(f"--- Starting REPROCESSING for event directory: {final_event_dir} ---")
+        logging.info(f"--- Starting REPROCESSING{' (FAST MODE)' if args.fast else ''} for event directory: {final_event_dir} ---")
         
         try:
             date_str = final_event_dir.parent.name
@@ -884,8 +964,7 @@ def main():
                 logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
-            # process_event() will now handle running process.py for all stations
-            process_event(final_event_dir, processing_date)
+            process_event(final_event_dir, processing_date, fast=args.fast)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -893,29 +972,14 @@ def main():
         sys.exit(0)
         # --- End Reprocessing Mode ---
 
-    parser = argparse.ArgumentParser(
-        description="Fetch and process meteor data, or reprocess an existing event directory.",
-        usage="""
-    To fetch: python3 fetch.py <station> <port> <remote_dir>
-    To reprocess: python3 fetch.py <local_event_directory>
-        """
-    )
-    parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
-    parser.add_argument("port", nargs='?', help="SSH port (if fetching).")
-    parser.add_argument("remote_dir", nargs='?', help="Remote directory path (if fetching).")
-    
-    args = parser.parse_args()
 
-    if args.port is None or args.remote_dir is None:
-        if len(sys.argv) == 2:
-            # This case is now handled by the reprocessing block above
-             parser.print_help()
-        else:
-            logging.error("Missing arguments. Both port and remote_dir are required for fetching.")
-            parser.print_help()
-        sys.exit(1)
-    
     # --- Fetch Mode ---
+    if args.port is None or args.remote_dir is None:
+         parser.error("Missing arguments. Both port and remote_dir are required for fetching.")
+    
+    if args.fast:
+        logging.warning("--fast option is only supported for reprocessing mode. Ignoring.")
+
     station = re.sub(r'\W', '', args.arg1)
     port = re.sub(r'\D', '', args.port)
     remote_cleaned = re.sub(r'[^a-zA-Z0-9_/]', '', args.remote_dir)
@@ -929,7 +993,6 @@ def main():
         
     local_dir = Config.METEOR_DATA_DIR / date_str / time_str / station / cam_name
     
-    # Setup logging in the station's event directory
     log_path = local_dir.parent / 'fetch.log'
     setup_logging(log_path)
     logging.info(f"--- Starting FETCH for station {station}, remote dir {args.remote_dir} ---")
@@ -944,13 +1007,10 @@ def main():
         logging.warning(f"Failed to set permissions on {Config.METEOR_DATA_DIR / date_str}: {e}")
         
     date_obj = datetime.datetime.strptime(date_str + time_str, '%Y%m%d%H%M%S')
-
-    # process.py is now called from within process_event()
     
     create_centroid_file(local_dir)
     final_event_dir = find_and_merge_event_directory(date_obj, station, local_dir)
     
-    # Re-setup logging in the *final* event directory for the main processing
     log_path = final_event_dir / 'process.log'
     setup_logging(log_path)
     logging.info(f"--- Event merged into {final_event_dir}. Starting main processing. ---")
@@ -960,7 +1020,7 @@ def main():
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
     
     try:
-        process_event(final_event_dir, processing_date)
+        process_event(final_event_dir, processing_date, fast=False)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

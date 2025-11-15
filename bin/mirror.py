@@ -74,7 +74,7 @@ else:
     logger.addHandler(handler)
 
 # --- Global State ---
-processed_files = deque(maxlen=200)
+processed_files = deque(maxlen=1000)
 FILENAME_PATTERN = re.compile(r"(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\w+)_(\w+)\.mp4")
 
 # Create a process pool executor to isolate the stack.py call.
@@ -268,8 +268,12 @@ async def watch_detections():
             (_, type_names, eventdir, eventfile) = event
             filepath = os.path.join(eventdir, eventfile)
             
+            if filepath in processed_files:
+                continue
+
             if 'IN_CLOSE_WRITE' in type_names and eventfile.endswith(REDUCED_JSON_SUFFIX):
                 logging.info(f"Executing: {args.exefile} {filepath}")
+                processed_files.append(filepath) 
                 await run_command_async(args.exefile, filepath)
 
         except Exception as e:

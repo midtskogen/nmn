@@ -20,7 +20,8 @@ import asyncio
 import datetime
 import tempfile
 import shutil
-from collections import deque
+import hashlib
+from collections import deque, OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 import stack  # For direct JPG generation
@@ -29,6 +30,7 @@ import stack  # For direct JPG generation
 AMS2EVENT_PY_DEFAULT = "/home/meteor/bin/ams2event.py"
 METEORS_DIR_NAME = "meteors"
 REDUCED_JSON_SUFFIX = "-reduced.json"
+DETECTION_CACHE_SIZE = 1000
 
 # --- Self-Restarting Logic ---
 # Store the script's modification time at startup
@@ -74,7 +76,8 @@ else:
     logger.addHandler(handler)
 
 # --- Global State ---
-processed_files = deque(maxlen=1000)
+processed_video_files = deque(maxlen=1000)
+processed_detection_files = OrderedDict()
 FILENAME_PATTERN = re.compile(r"(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\w+)_(\w+)\.mp4")
 
 # Create a process pool executor to isolate the stack.py call.
@@ -106,6 +109,21 @@ async def run_command_async(*command):
         if stderr:
             logging.error(f"[stderr]\n{stderr.decode()}")
     return proc.returncode
+
+def get_md5(filepath):
+    """Calculates the MD5 checksum of a file."""
+    try:
+        hash_md5 = hashlib.md5()
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+    except FileNotFoundError:
+        logging.warning(f"Could not calculate MD5 for {filepath}, file not found.")
+        return None
+    except Exception as e:
+        logging.error(f"Error calculating MD5 for {filepath}: {e}")
+        return None
 
 def stack_wrapper(*args, **kwargs):
     """
@@ -149,7 +167,7 @@ async def watch_videos():
             if not os.path.exists(filepath):
                 continue
 
-            if filepath in processed_files:
+            if filepath in processed_video_files:
                 continue
 
             if not eventfile.endswith('.mp4'):
@@ -200,7 +218,7 @@ async def watch_videos():
                 if modified_file and os.path.exists(modified_file):
                     os.remove(modified_file)
             
-            processed_files.append(filepath)
+            processed_video_files.append(filepath)
 
             # --- File Organization ---
             cam = int(id_str) % 10
@@ -266,15 +284,40 @@ async def watch_detections():
     async for event in async_event_gen(event_iterator):
         try:
             (_, type_names, eventdir, eventfile) = event
-            filepath = os.path.join(eventdir, eventfile)
             
-            if filepath in processed_files:
+            if 'IN_CLOSE_WRITE' not in type_names or not eventfile.endswith(REDUCED_JSON_SUFFIX):
+                continue
+            
+            filepath = os.path.join(eventdir, eventfile)
+
+            # Calculate new hash
+            new_hash = get_md5(filepath)
+            if new_hash is None:
+                # File might be gone or unreadable, skip
                 continue
 
-            if 'IN_CLOSE_WRITE' in type_names and eventfile.endswith(REDUCED_JSON_SUFFIX):
-                logging.info(f"Executing: {args.exefile} {filepath}")
-                processed_files.append(filepath) 
+            # Get old hash and remove from cache (to re-add at the end for LRU)
+            old_hash = processed_detection_files.pop(filepath, None)
+
+            if old_hash is None:
+                # Case 1: New file
+                logging.info(f"New detection file, executing: {args.exefile} {filepath}")
+                processed_detection_files[filepath] = new_hash
                 await run_command_async(args.exefile, filepath)
+            elif new_hash != old_hash:
+                # Case 2: Modified file
+                logging.info(f"Modified detection file, re-executing: {args.exefile} {filepath}")
+                processed_detection_files[filepath] = new_hash
+                await run_command_async(args.exefile, filepath)
+            else:
+                # Case 3: Unmodified file (CLOSE_WRITE on same content)
+                logging.info(f"Ignoring unmodified file event: {filepath}")
+                # Re-add with the same hash to keep it in the LRU cache
+                processed_detection_files[filepath] = old_hash
+            
+            # Enforce cache size
+            while len(processed_detection_files) > DETECTION_CACHE_SIZE:
+                processed_detection_files.popitem(last=False) # Evict oldest
 
         except Exception as e:
             logging.exception(f"Error in detection watcher loop: {e}")

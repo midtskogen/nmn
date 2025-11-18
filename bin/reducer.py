@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
 from tkinter import ttk
 from datetime import datetime, timezone, timedelta
-from PIL import Image, ImageTk, ImageEnhance, ImageFilter
+from PIL import Image, ImageTk, ImageEnhance, ImageFilter, ImageDraw
 from brightstar import brightstar
 from recalibrate import recalibrate
 from timestamp import get_timestamp
@@ -1479,13 +1479,19 @@ class Zoom_Advanced(ttk.Frame):
         text_widget = tk.Text(upload_window, wrap=tk.WORD, height=25, width=90, bg="black", fg="gray90", font=("monospace", 9))
         text_widget.pack(padx=10, pady=10, expand=True, fill=tk.BOTH)
         
+        # Configure tag for red text
+        text_widget.tag_config("red", foreground="#ff5555")
+        
         close_button = tk.Button(upload_window, text="Close", command=upload_window.destroy, state=tk.DISABLED)
         close_button.pack(pady=5)
 
-        def log_to_window(message):
+        def log_to_window(message, tag=None):
             """Helper to safely update the GUI text widget from the thread."""
             def _update_gui():
-                text_widget.insert(tk.END, str(message) + "\n")
+                if tag:
+                    text_widget.insert(tk.END, str(message) + "\n", tag)
+                else:
+                    text_widget.insert(tk.END, str(message) + "\n")
                 text_widget.see(tk.END)
             
             # Schedule the GUI update to run on the main thread's idle loop
@@ -1603,7 +1609,7 @@ class Zoom_Advanced(ttk.Frame):
                 if proc.stderr: log_to_window(f"STDERR:\n{proc.stderr.strip()}")
                 log_to_window("--- End of Report ---")
 
-                log_to_window("\nUpload process complete.")
+                log_to_window("Upload finished", "red")
 
             except subprocess.CalledProcessError as e:
                 log_to_window(f"\n--- COMMAND FAILED ---")
@@ -1899,18 +1905,9 @@ class Zoom_Advanced(ttk.Frame):
             image = Image.fromarray(subtracted_arr.astype(np.uint8)).convert('RGB')
 
         image = self.converted_image(image, self.contrast, self.brightness, self.color, self.sharpness)
-        imagetk = ImageTk.PhotoImage(image.resize((int(x2 - x1), int(y2 - y1))))
+        image = image.resize((int(x2 - x1), int(y2 - y1)))
 
-        for c in self.overlay: self.canvas.delete(c)
-        self.overlay.clear()
-
-        canvas_origin_x = max(bbox2[0], bbox1[0])
-        canvas_origin_y = max(bbox2[1], bbox1[1])
-
-        imageid = self.canvas.create_image(canvas_origin_x, canvas_origin_y, anchor='nw', image=imagetk)
-        self.canvas.lower(imageid)
-        self.canvas.imagetk = imagetk
-
+        # --- Draw Translucent Curve Overlay on PIL Image ---
         if self.curve_coeffs is not None and len(self.positions) >= 3:
             p = np.poly1d(self.curve_coeffs)
             p_first = self.positions[0]['current']
@@ -1943,14 +1940,42 @@ class Zoom_Advanced(ttk.Frame):
                 fit_y = np.linspace(start_point, end_point, 100)
                 fit_x = p(fit_y)
 
-            canvas_points = []
-            for i in range(len(fit_x)):
-                canvas_x = (fit_x[i] - self.x) * self.imscale + canvas_origin_x
-                canvas_y = (fit_y[i] - self.y) * self.imscale + canvas_origin_y
-                canvas_points.extend([canvas_x, canvas_y])
+            # Create a transparent overlay
+            overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
             
-            if len(canvas_points) > 2:
-                self.overlay.append(self.canvas.create_line(canvas_points, fill="cyan", width=2, smooth=True))
+            pil_points = []
+            for i in range(len(fit_x)):
+                # Calculate position on the resized/cropped image
+                # image coords (0,0) correspond to (self.x, self.y) in the original image
+                px = (fit_x[i] - self.x) * self.imscale
+                py = (fit_y[i] - self.y) * self.imscale
+                pil_points.append((px, py))
+            
+            if len(pil_points) > 1:
+                # Draw cyan line (0, 255, 255) with 25% alpha (64)
+                draw.line(pil_points, fill=(0, 255, 255, 64), width=2, joint='curve')
+            
+            # Composite the overlay onto the image
+            if image.mode != 'RGBA':
+                image = image.convert('RGBA')
+            image = Image.alpha_composite(image, overlay)
+            image = image.convert('RGB') # Convert back for compatibility
+        # --- End Translucent Overlay ---
+
+        imagetk = ImageTk.PhotoImage(image)
+
+        for c in self.overlay: self.canvas.delete(c)
+        self.overlay.clear()
+
+        canvas_origin_x = max(bbox2[0], bbox1[0])
+        canvas_origin_y = max(bbox2[1], bbox1[1])
+
+        imageid = self.canvas.create_image(canvas_origin_x, canvas_origin_y, anchor='nw', image=imagetk)
+        self.canvas.lower(imageid)
+        self.canvas.imagetk = imagetk
+
+        # Curve drawing logic removed here as it is now handled via PIL overlay above
 
         for pos_data in self.positions:
             ox, oy = pos_data['original']

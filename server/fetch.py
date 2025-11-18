@@ -35,9 +35,8 @@ import numpy as np
 import pytz
 from dateutil.tz import tzlocal
 
-# *** NEW: Added matplotlib imports from process.py ***
-import matplotlib
 # Use a non-interactive backend for matplotlib
+import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -390,7 +389,8 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
 
         if orbit_data['valid']:
             ramin = int(orbit_data['ra'] * 24 * 60 / 360)
-            shower_name = translations.get("sporadic", "sporadic") if not orbit_data['showername'] else orbit_data['showername']
+            # The showername passed in orbit_data should now be correctly translated
+            shower_name = translations.get("sporadic", "sporadic") if not orbit_data.get('showername') else orbit_data['showername']
             table1 += f"""
     <tr><td>{translations.get("radiant_ra", "Radiant R.A.")}:</td><td> {ramin // 60:02d}:{ramin % 60:02d} ({orbit_data['ra']:.1f}°)</td></tr>
     <tr><td>{translations.get("radiant_dec", "Radiant Dec.")}:</td><td> {orbit_data['dec']:.1f}°</td></tr>
@@ -549,7 +549,7 @@ if (file_exists($specific_brightness_path)) {{
                 brightness_label=translations.get("brightness", "Brightness")
             ))
 
-# *** NEW: Copied function from process.py and changed print() to logging ***
+
 def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: list):
     """Generates translated brightness plots for all supported languages."""
     logging.info(f"Generating multilingual brightness plots for {event_dir}...")
@@ -579,7 +579,6 @@ def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: lis
             logging.info(f"  - Saved {svg_path.name} and {jpg_path.name}")
         except Exception as e:
             logging.error(f"Error generating plot for language '{lang}': {e}")
-# *** END OF NEW FUNCTION ***
 
 
 def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showername_sg: str, count: int, first: bool, height_valid: bool, translations: dict):
@@ -638,7 +637,6 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
     obs_filepath = event_dir / obs_filename
     res_filename = obs_filepath.with_suffix('.res')
     
-    # *** MODIFICATION: Updated --fast logic ***
     if not fast:
         # Run process.py for ALL event.txt files in PARALLEL
         report_script = Config.BIN_DIR / 'process.py'
@@ -689,7 +687,6 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
                 generate_brightness_plots(event_file.parent, timestamps, brightness) 
             except Exception as e:
                 logging.warning(f"Failed to regenerate brightness plot for {event_file}: {e}")
-    # *** END OF MODIFICATION ***
 
 
     station_codes, station_name_to_code = set(), {}
@@ -769,20 +766,26 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
                 try: Path('location.txt').write_text(placename, encoding='utf-8')
                 except OSError as e: logging.warning(f"Could not write location.txt: {e}")
             
-            orbit_data = {'valid': False, 'entry_speed': entry_speed, 'az': az, 'alt': alt}
+            # --- Core Analysis Data Storage ---
+            orbit_data_base = {'valid': False, 'entry_speed': entry_speed, 'az': az, 'alt': alt}
             if entry_speed > 9.8:
-                ra, dec, (rp, ecc, inc, lnode, argp, m0, t0), s_name, s_name_sg, valid = orbit(
+                # Capture the raw shower name (likely in default language/Norwegian)
+                ra, dec, (rp, ecc, inc, lnode, argp, m0, t0), raw_shower_name, _, valid = orbit(
                     True, entry_speed, 0, str(res_filename), date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), doplot=''
                 )
-                orbit_data.update({'ra': ra, 'dec': dec, 'rp': rp, 'ecc': ecc, 'inc': inc, 
+                orbit_data_base.update({'ra': ra, 'dec': dec, 'rp': rp, 'ecc': ecc, 'inc': inc, 
                                    'lnode': lnode, 'argp': argp, 'm0': m0, 't0': t0,
-                                   'showername': s_name, 'showername_sg': s_name_sg, 'valid': valid})
+                                   'showername': raw_shower_name, # Store the raw name
+                                   'valid': valid})
 
             analysis_results = {
                 'metrack_info': metrack_info, 'metrack_plot_data': metrack_plot_data, 'fbspd_plot_data': fbspd_plot_data,
-                'orbit_data': orbit_data, 'resdat': resdat, 'placename': placename,
+                'orbit_data': orbit_data_base,
+                'resdat': resdat, 
+                'placename': placename,
                 'first_run': not any(p.name.endswith('map.jpg') for p in event_dir.glob('*.jpg'))
             }
+
             logging.info("Core analysis successful.")
 
         except Exception as e:
@@ -793,6 +796,15 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
 
 
     # --- Language-specific output generation loop ---
+    
+    # 1. Build a Reverse Lookup Map (Name -> Code) using the default language (nb)
+    #    This handles cases where orbit() returns a localized name (e.g. "Leonidene") instead of a code.
+    nb_translations = load_translations('nb')
+    name_to_code = {}
+    if 'showers' in nb_translations:
+        for code, name in nb_translations['showers'].items():
+            name_to_code[name.lower()] = code
+
     for lang in SUPPORTED_LANGS:
         try:
             logging.info(f"--- Generating outputs for language: [{lang}] ---")
@@ -803,6 +815,33 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
 
             if is_multistation and analysis_results:
                 logging.info(f"Generating translated plots and reports for [{lang}]")
+                
+                # --- Resolve Shower Name Logic ---
+                current_orbit_data = analysis_results['orbit_data'].copy() 
+                
+                raw_shower_name = current_orbit_data.get('showername', '')
+                shower_code = None
+                
+                # 1. Check if the raw name is already a code
+                if raw_shower_name in translations.get('showers', {}):
+                    shower_code = raw_shower_name
+                # 2. Use the reverse map to find the code from the Norwegian/default name
+                elif raw_shower_name and raw_shower_name.lower() in name_to_code:
+                    shower_code = name_to_code[raw_shower_name.lower()]
+                
+                # Resolve the Final Name for the current language
+                final_shower_name = ""
+                if shower_code:
+                    final_shower_name = translations.get('showers', {}).get(shower_code, raw_shower_name)
+                else:
+                    # Fallback logic
+                    if not raw_shower_name or raw_shower_name.lower() in ['sporadic', 'spo', '']:
+                         final_shower_name = translations.get('sporadic', 'sporadic')
+                    else:
+                         final_shower_name = raw_shower_name
+
+                current_orbit_data['showername'] = final_shower_name
+                current_orbit_data['showername_sg'] = final_shower_name 
                 
                 plot_opts = {
                     'doplot': 'save', 
@@ -818,8 +857,8 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
                 generate_speed_plots(analysis_results['fbspd_plot_data'], 
                                      translations=translations, output_prefix=file_prefix)
 
-                if analysis_results['orbit_data']['valid']:
-                     orbit(True, analysis_results['orbit_data']['entry_speed'], 0, str(res_filename), 
+                if current_orbit_data['valid']:
+                     orbit(True, current_orbit_data['entry_speed'], 0, str(res_filename), 
                            date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', 
                            interactive=True, translations=translations, output_prefix=file_prefix)
                 
@@ -830,7 +869,11 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
                         dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
                         svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
                 
-                generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", analysis_results['resdat'], analysis_results['orbit_data'], analysis_results['placename'], translations, lang)
+                generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", 
+                                                   analysis_results['resdat'], 
+                                                   current_orbit_data, 
+                                                   analysis_results['placename'], 
+                                                   translations, lang)
         
         except Exception as e:
             logging.error(f"Failed to generate output for language '{lang}': {e}", exc_info=True)
@@ -843,26 +886,17 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
                 success = False
                 matched_time = None
                 
-                if not fast:
-                    logging.info(f"End altitude {end_height_km:.1f} km is between 10-40 km. Fetching wind profile.")
-                    end_lat = analysis_results['resdat'].lat1[1]
-                    end_lon = analysis_results['resdat'].long1[1]
-                    event_timestamp = date.timestamp()
-                    
-                    success, matched_time = windprofile.get_wind_profile(
-                        end_lat, 
-                        end_lon, 
-                        event_timestamp, 
-                        str(wind_csv_path)
-                    )
-                else:
-                    logging.info(f"--- FAST MODE: Skipping wind profile data fetch. ---")
-                    if wind_csv_path.exists():
-                        logging.info(f"--- FAST MODE: Using existing {wind_csv_path.name}. ---")
-                        success = True
-                        matched_time = "Existing Data" 
-                    else:
-                        logging.info(f"--- FAST MODE: {wind_csv_path.name} not found. Skipping wind plots. ---")
+                logging.info(f"End altitude {end_height_km:.1f} km is between 10-40 km. Fetching wind profile.")
+                end_lat = analysis_results['resdat'].lat1[1]
+                end_lon = analysis_results['resdat'].long1[1]
+                event_timestamp = date.timestamp()
+                
+                success, matched_time = windprofile.get_wind_profile(
+                    end_lat, 
+                    end_lon, 
+                    event_timestamp, 
+                    str(wind_csv_path)
+                )
 
                 if success:
                     if not fast:
@@ -904,10 +938,20 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
         else:
             resdat = analysis_results['resdat']
             height_valid = 10 < resdat.height[0] <= 150 and 10 <= resdat.height[1] <= 150
-            nb_translations = load_translations('nb') # Tweet always in default lang
+            
+            # For tweeting, we use the 'nb' name. If raw name is 'nb', we use that.
+            # If raw name is code, we translate.
+            raw_shower_name = analysis_results['orbit_data'].get('showername', '')
+            showername_sg = raw_shower_name
+            
+            # Optional: Ensure tweet uses 'nb' explicitly if raw wasn't nb
+            if raw_shower_name and raw_shower_name in nb_translations.get('showers', {}):
+                 showername_sg = nb_translations['showers'][raw_shower_name]
+
             send_tweet(event_dir, date, analysis_results['placename'], 
-                       analysis_results['orbit_data'].get('showername_sg', ''), 
+                       showername_sg, 
                        len(station_codes), analysis_results['first_run'], height_valid, nb_translations)
+
     elif not is_multistation:
         logging.info("Not enough stations for triangulation. Skipping tweet.")
         

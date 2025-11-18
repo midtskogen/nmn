@@ -683,6 +683,9 @@ class Zoom_Advanced(ttk.Frame):
         self.pto_dirty = False
         # --- END MODIFIED/ADDED ---
         
+        # --- NEW: Flag for restarting ---
+        self.restart = False
+        
         self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
         
         self.canvas.update()
@@ -918,6 +921,50 @@ class Zoom_Advanced(ttk.Frame):
             log_message(error_msg, file=sys.stderr)
             if not log_callback: # <-- MODIFIED
                 messagebox.showerror("Deployment Error", error_msg)
+    
+    def show_quit_menu(self):
+        """Shows a custom dialog with Quit, New Event, and Cancel options."""
+        top = tk.Toplevel(self.master)
+        top.title("Exit Options")
+        top.geometry("320x120")
+        top.resizable(False, False)
+        
+        # Center the dialog relative to the main window
+        try:
+            x = self.master.winfo_x() + (self.master.winfo_width() // 2) - 160
+            y = self.master.winfo_y() + (self.master.winfo_height() // 2) - 60
+            top.geometry(f"+{x}+{y}")
+        except:
+            pass # Fallback if geometry calc fails
+
+        tk.Label(top, text="What would you like to do?", font=("Helvetica", 11)).pack(pady=15)
+
+        btn_frame = tk.Frame(top)
+        btn_frame.pack(fill=tk.X, pady=5)
+        
+        # Center buttons
+        btn_frame.pack_configure(anchor=tk.CENTER)
+
+        def quit_app():
+            top.destroy()
+            sys.exit(0)
+
+        def new_event():
+            self.restart = True
+            top.destroy()
+            self.master.destroy() # Closes the current window, returning control to __main__
+
+        def cancel():
+            top.destroy()
+
+        # Using grid for even spacing
+        tk.Button(btn_frame, text="Quit App", command=quit_app, width=10).pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_frame, text="New Event", command=new_event, width=10).pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_frame, text="Cancel", command=cancel, width=10).pack(side=tk.LEFT, padx=10)
+
+        top.transient(self.master)
+        top.grab_set()
+        self.master.wait_window(top)
 
     def key(self, event):
         # Check for Control key modifier (mask 0x4)
@@ -1019,8 +1066,7 @@ class Zoom_Advanced(ttk.Frame):
         elif key_char == 'g': self.show_graph ^= 1
         elif key_char == '!': self.boost = 100 if self.boost == 1 else 1
         elif key_char == 'q':
-            if messagebox.askyesno("Quit", "Are you sure you want to quit?"):
-                exit(0)
+            self.show_quit_menu()
         elif key_char == '1': self.contrast -= 0.1
         elif key_char == '2': self.contrast += 0.1
         elif key_char == '3': self.brightness -= 0.1
@@ -2167,15 +2213,15 @@ class Zoom_Advanced(ttk.Frame):
         self.positions.insert(insert_index, new_point)
 
         # Update curve fitting, prediction, and other states
-        if len(self.positions) >= 3:
-            self.update_curve_fit()
-        else:
-            self.curve_coeffs = None
-
         if len(self.positions) >= 2:
             self.update_prediction()
         else:
             self.predicted_point = None
+        
+        if len(self.positions) >= 3:
+            self.update_curve_fit()
+        else:
+            self.curve_coeffs = None
 
         self._update_highlight_state()
         
@@ -2303,355 +2349,370 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, signal_handler)
     # --- End handler registration ---
 
-    args = None
-    
-    # --- NEW: Check for no-argument launch ---
-    if len(sys.argv) == 1:
-        print("No arguments detected, launching GUI selector...")
-        root = tk.Tk()
-        root.withdraw() # Hide the main root window
+    # Loop to allow restarting the application logic
+    while True:
+        args = None
         
-        # --- MODIFIED DIALOG LAUNCH ---
-        # Pass the Toplevel AND the main root window
-        dialog_toplevel = tk.Toplevel(root)
-        dialog = LauncherDialog(dialog_toplevel, root)
-        root.mainloop() # This blocks until main_tk.destroy() is called
-        # --- END MODIFICATION ---
+        # --- NEW: Check for no-argument launch ---
+        if len(sys.argv) == 1:
+            print("No arguments detected, launching GUI selector...")
+            root = tk.Tk()
+            root.withdraw() # Hide the main root window
+            
+            # --- MODIFIED DIALOG LAUNCH ---
+            # Pass the Toplevel AND the main root window
+            dialog_toplevel = tk.Toplevel(root)
+            dialog = LauncherDialog(dialog_toplevel, root)
+            root.mainloop() # This blocks until main_tk.destroy() is called
+            # --- END MODIFICATION ---
 
-        # After mainloop, check if the dialog succeeded
-        if not hasattr(dialog, 'fetched_files'):
-            print("Launcher cancelled. Exiting.")
-            sys.exit(0)
-        
-        # If it succeeded, manually populate the 'args' namespace
-        # as if argparse had run.
-        parser = argparse.ArgumentParser() # Create a dummy parser to get a namespace
-        args = parser.parse_args([]) # Get an empty namespace
-        
-        args.station = dialog.fetched_files['config']
-        args.ptofile = dialog.fetched_files['pto']
-        args.imgfiles = [dialog.fetched_files['video']]
-        args.upload_target = dialog.upload_target
-        
-        # Set defaults for other args that argparse would normally handle
-        args.image = 0
-        args.fps = 10
-        args.name = "NUL" # This will be overridden by the config file anyway
-        args.start = None
-        args.skip = 0.0
-        args.total = None
-        args.calibrate = None
-        args.event_file = None
-        args.latitude = None
-        args.longitude = None
-        args.elevation = None
+            # After mainloop, check if the dialog succeeded
+            if not hasattr(dialog, 'fetched_files'):
+                print("Launcher cancelled. Exiting.")
+                sys.exit(0)
+            
+            # If it succeeded, manually populate the 'args' namespace
+            # as if argparse had run.
+            parser = argparse.ArgumentParser() # Create a dummy parser to get a namespace
+            args = parser.parse_args([]) # Get an empty namespace
+            
+            args.station = dialog.fetched_files['config']
+            args.ptofile = dialog.fetched_files['pto']
+            args.imgfiles = [dialog.fetched_files['video']]
+            args.upload_target = dialog.upload_target
+            
+            # Set defaults for other args that argparse would normally handle
+            args.image = 0
+            args.fps = 10
+            args.name = "NUL" # This will be overridden by the config file anyway
+            args.start = None
+            args.skip = 0.0
+            args.total = None
+            args.calibrate = None
+            args.event_file = None
+            args.latitude = None
+            args.longitude = None
+            args.elevation = None
 
-        print("Launcher success. Proceeding with fetched files.")
-        
-    else:
-        # --- This is the original logic for when arguments ARE provided ---
-        parser = argparse.ArgumentParser(description='Click on images to find coordinates.')
-        parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
-        parser.add_argument('-f', '--fps', dest='fps', help='frames per second (default: 10 or extracted from images)', default=10, type=int)
-        parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
-        parser.add_argument('-c', '--config', dest='station', help='station config file', type=str)
-        parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
-        parser.add_argument('-s', dest='skip', help='Seconds of the initial video to skip (default: 0)', default=0.0, type=float)
-        parser.add_argument('-t', dest='total', help='Total seconds of video to load after skipping. Applies to the first video only.', type=float, default=None)
-        parser.add_argument('--calibrate', dest='calibrate', help='Fetch files from a remote host. Format: HOST:CAM[:YYYYMMDD/HHmm]', type=str)
-        parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
-        
-        # --- ADDED ARGUMENT ---
-        parser.add_argument('--upload-target', dest='upload_target', 
-                            help='Remote upload destination in format HOST:DIR (e.g., user@server:/path/to/uploads)', 
-                            type=str, default=None)
-        # --- END ADDED ARGUMENT ---
-
-        parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
-        parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
-        parser.add_argument('--elevation', type=float, help='Observer elevation in meters. Required if --station is not used.')
-        parser.add_argument('ptofile', nargs='?', default=None, help='input .pto or .json calibration file')
-        parser.add_argument('imgfiles', nargs='*', help='input image or video files (.mp4 or image files)')
-        args = parser.parse_args()
-
-        # --- NEW LOGIC TO FIX THE ERROR ---
-        # Handle the case where the upload target is given as the final positional
-        # argument instead of using the --upload-target flag.
-        if args.upload_target is None and args.imgfiles and ':' in args.imgfiles[-1]:
-            potential_target = args.imgfiles[-1]
-            # If the argument doesn't exist as a local file, assume it's the target
-            if not os.path.exists(potential_target):
-                args.upload_target = args.imgfiles.pop(-1) # Remove from imgfiles list
-                print(f"Note: Last argument '{args.upload_target}' interpreted as upload target (use --upload-target flag for clarity).")
-        # --- END NEW LOGIC ---
-    # --- END of if/else for argument handling ---
-
-
-    # --- ADDED VALIDATION LOGIC ---
-    upload_hostname, upload_dir = None, None
-    if args.upload_target:
-        try:
-            upload_hostname, upload_dir = args.upload_target.split(':', 1)
-        except ValueError:
-            parser.error("Invalid --upload-target format. Expected HOST:DIR or USER@HOST:DIR")
-
-        # Sanity check to prevent shell injection.
-        # This disallows common shell metacharacters.
-        if re.search(r'[;&|`$(){}<> \'\"]', upload_hostname):
-            parser.error("Invalid hostname in --upload-target. Contains unsafe characters.")
-        
-        # Enforce absolute path and disallow unsafe characters for the directory
-        if not upload_dir.startswith('/') or re.search(r'[;&|`$(){}<> \'\"]', upload_dir):
-            parser.error("Invalid directory in --upload-target. Must be an absolute path and cannot contain unsafe characters.")
-    # --- END VALIDATION LOGIC ---
-
-    # Validate arguments: ptofile and imgfiles are required unless --calibrate is used.
-    # This check is now skipped if we used the launcher (which sets --calibrate to None)
-    if not args.calibrate and (not args.ptofile or not args.imgfiles) and len(sys.argv) > 1:
-        parser.error("ptofile and imgfiles are required when not using the --calibrate or no-argument launcher.")
-    
-    calibrate_info = {
-        'is_calibrate_mode': False,
-        'hostname': None,
-        'cam_num': None,
-        'date_str': None,
-        'upload_hostname': upload_hostname, # <-- ADDED
-        'upload_dir': upload_dir            # <-- ADDED
-    }
-
-    if args.calibrate:
-        parts = args.calibrate.split(':')
-        if len(parts) not in [2, 3]:
-            sys.exit(f"Error: Invalid format for --calibrate: '{args.calibrate}'. Expected HOST:CAM or HOST:CAM:YYYYMMDD/HHmm.")
-
-        hostname = parts[0]
-        cam_num = parts[1]
-
-        if len(parts) == 3:
-            date_time_str = parts[2]
-            match = re.match(r'(\d{8})/(\d{2})(\d{2})', date_time_str)
-            if not match:
-                sys.exit(f"Error: Invalid date/time format for --calibrate: '{date_time_str}'. Expected YYYYMMDD/HHmm.")
-            date_str, hour_str, minute_str = match.groups()
+            print("Launcher success. Proceeding with fetched files.")
+            
         else:
-            # Default to today at 00:00
-            now = datetime.now()
-            date_str = now.strftime('%Y%m%d')
-            hour_str = "00"
-            minute_str = "00"
-            print(f"No date provided for --calibrate, defaulting to {date_str}/{hour_str}{minute_str}")
+            # --- This is the original logic for when arguments ARE provided ---
+            parser = argparse.ArgumentParser(description='Click on images to find coordinates.')
+            parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
+            parser.add_argument('-f', '--fps', dest='fps', help='frames per second (default: 10 or extracted from images)', default=10, type=int)
+            parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
+            parser.add_argument('-c', '--config', dest='station', help='station config file', type=str)
+            parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)
+            parser.add_argument('-s', dest='skip', help='Seconds of the initial video to skip (default: 0)', default=0.0, type=float)
+            parser.add_argument('-t', dest='total', help='Total seconds of video to load after skipping. Applies to the first video only.', type=float, default=None)
+            parser.add_argument('--calibrate', dest='calibrate', help='Fetch files from a remote host. Format: HOST:CAM[:YYYYMMDD/HHmm]', type=str)
+            parser.add_argument('--load-event', dest='event_file', help='load a previously saved event.txt file for editing', type=str)
+            
+            # --- ADDED ARGUMENT ---
+            parser.add_argument('--upload-target', dest='upload_target', 
+                                help='Remote upload destination in format HOST:DIR (e.g., user@server:/path/to/uploads)', 
+                                type=str, default=None)
+            # --- END ADDED ARGUMENT ---
 
-        calibrate_info.update({
-            'is_calibrate_mode': True,
-            'hostname': hostname,
-            'cam_num': cam_num,
-            'date_str': date_str
-        })
+            parser.add_argument('--latitude', type=float, help='Observer latitude in degrees. Required if --station is not used.')
+            parser.add_argument('--longitude', type=float, help='Observer longitude in degrees. Required if --station is not used.')
+            parser.add_argument('--elevation', type=float, help='Observer elevation in meters. Required if --station is not used.')
+            parser.add_argument('ptofile', nargs='?', default=None, help='input .pto or .json calibration file')
+            parser.add_argument('imgfiles', nargs='*', help='input image or video files (.mp4 or image files)')
+            args = parser.parse_args()
 
-        # Imply -t 1 (load only the first second) if not already specified by the user.
-        if args.total is None:
-            print("Calibrate mode: Defaulting to loading only the first second of the video (-t 1).")
-            args.total = 1.0
+            # --- NEW LOGIC TO FIX THE ERROR ---
+            # Handle the case where the upload target is given as the final positional
+            # argument instead of using the --upload-target flag.
+            if args.upload_target is None and args.imgfiles and ':' in args.imgfiles[-1]:
+                potential_target = args.imgfiles[-1]
+                # If the argument doesn't exist as a local file, assume it's the target
+                if not os.path.exists(potential_target):
+                    args.upload_target = args.imgfiles.pop(-1) # Remove from imgfiles list
+                    print(f"Note: Last argument '{args.upload_target}' interpreted as upload target (use --upload-target flag for clarity).")
+            # --- END NEW LOGIC ---
+        # --- END of if/else for argument handling ---
 
-        # Construct remote paths
-        remote_cfg_path = "/etc/meteor.cfg"
-        remote_pto_path = f"/meteor/cam{cam_num}/lens.pto"
-        remote_video_path = f"/meteor/cam{cam_num}/{date_str}/{hour_str}/full_{minute_str}.mp4"
 
-        # --- Perform SCP copies in parallel ---
-        print("Copying remote files in parallel...")
-        files_to_copy = {
-            'station': remote_cfg_path,
-            'pto': remote_pto_path,
-            'video': remote_video_path
+        # --- ADDED VALIDATION LOGIC ---
+        upload_hostname, upload_dir = None, None
+        if args.upload_target:
+            try:
+                upload_hostname, upload_dir = args.upload_target.split(':', 1)
+            except ValueError:
+                parser.error("Invalid --upload-target format. Expected HOST:DIR or USER@HOST:DIR")
+
+            # Sanity check to prevent shell injection.
+            if re.search(r'[;&|`$(){}<> \'\"]', upload_hostname):
+                parser.error("Invalid hostname in --upload-target. Contains unsafe characters.")
+            
+            # Enforce absolute path and disallow unsafe characters for the directory
+            if not upload_dir.startswith('/') or re.search(r'[;&|`$(){}<> \'\"]', upload_dir):
+                parser.error("Invalid directory in --upload-target. Must be an absolute path and cannot contain unsafe characters.")
+        # --- END VALIDATION LOGIC ---
+
+        # Validate arguments: ptofile and imgfiles are required unless --calibrate is used.
+        # This check is now skipped if we used the launcher (which sets --calibrate to None)
+        if not args.calibrate and (not args.ptofile or not args.imgfiles) and len(sys.argv) > 1:
+            parser.error("ptofile and imgfiles are required when not using the --calibrate or no-argument launcher.")
+        
+        calibrate_info = {
+            'is_calibrate_mode': False,
+            'hostname': None,
+            'cam_num': None,
+            'date_str': None,
+            'upload_hostname': upload_hostname, # <-- ADDED
+            'upload_dir': upload_dir            # <-- ADDED
         }
-        results = {}
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_key = {executor.submit(scp_file, hostname, path): key for key, path in files_to_copy.items()}
-            
-            for future in future_to_key:
-                key = future_to_key[future]
-                try:
-                    local_path = future.result()
-                    if not local_path:
-                        raise ValueError(f"scp_file for {key} returned None, indicating a failure.")
-                    results[key] = local_path
-                    temp_files_to_clean.append(local_path) # Add to global cleanup list
-                except Exception as e:
-                    print(f"Fatal error during parallel file download for '{key}': {e}", file=sys.stderr)
-                    sys.exit("Aborting due to scp failure.")
 
-        # Assign results to the correct variables
-        args.station = results['station']
-        args.ptofile = results['pto']
-        args.imgfiles = [results['video']]
+        if args.calibrate:
+            parts = args.calibrate.split(':')
+            if len(parts) not in [2, 3]:
+                sys.exit(f"Error: Invalid format for --calibrate: '{args.calibrate}'. Expected HOST:CAM or HOST:CAM:YYYYMMDD/HHmm.")
 
+            hostname = parts[0]
+            cam_num = parts[1]
 
-    # Establish observer location from command-line args or station file
-    pos = ephem.Observer()
-    if all(arg is not None for arg in [args.latitude, args.longitude, args.elevation]):
-        print("Using location from command-line arguments.")
-        pos.lat, pos.lon, pos.elevation = str(args.latitude), str(args.longitude), args.elevation
-        pos.temp, pos.pressure = 15.0, 1010.0  # Set reasonable defaults
-    elif args.station:
-        print(f"Using location from station file: {args.station}")
-        try:
-            config = configparser.ConfigParser()
-            config.read(args.station)
-            pos.lat = config.get('astronomy', 'latitude')
-            pos.lon = config.get('astronomy', 'longitude')
-            pos.elevation = float(config.get('astronomy', 'elevation'))
-            pos.temp = float(config.get('astronomy', 'temperature', fallback=15))
-            pos.pressure = float(config.get('astronomy', 'pressure', fallback=1010))
-            args.name = config.get('station', 'code', fallback=args.name)
-        except (configparser.Error, FileNotFoundError) as e:
-            sys.exit(f"Error reading station file '{args.station}': {e}")
-    else:
-        sys.exit("Error: Observer location not specified. Please use the -c/--station option, the no-argument launcher, or --latitude, --longitude, and --elevation.")
-
-    # If input is a JSON file, convert it to an optimized PTO in memory
-    if args.ptofile.lower().endswith('.json'):
-        print(f"Detected JSON calibration file: {args.ptofile}. Converting...")
-        try:
-            with open(args.ptofile) as f:
-                calib_data = json.load(f)
-            
-            # Check for the 'cal_params' key and use the correct data dictionary
-            if 'cal_params' in calib_data:
-                cal_params_data = calib_data['cal_params']
+            if len(parts) == 3:
+                date_time_str = parts[2]
+                match = re.match(r'(\d{8})/(\d{2})(\d{2})', date_time_str)
+                if not match:
+                    sys.exit(f"Error: Invalid date/time format for --calibrate: '{date_time_str}'. Expected YYYYMMDD/HHmm.")
+                date_str, hour_str, minute_str = match.groups()
             else:
-                cal_params_data = calib_data
+                # Default to today at 00:00
+                now = datetime.now()
+                date_str = now.strftime('%Y%m%d')
+                hour_str = "00"
+                minute_str = "00"
+                print(f"No date provided for --calibrate, defaulting to {date_str}/{hour_str}{minute_str}")
 
-            # Use the already configured observer 'pos' to generate PTO data
-            width = cal_params_data.get('imagew', 1920)
-            height = cal_params_data.get('imageh', 1080)
-            pto_content = amscalib2lens.generate_pto_from_json(cal_params_data, pos, width, height, match_dist_limit=0.2)
+            calibrate_info.update({
+                'is_calibrate_mode': True,
+                'hostname': hostname,
+                'cam_num': cam_num,
+                'date_str': date_str
+            })
 
-            # Hugin's optimizer requires a file, so we use a temporary one.
-            with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".pto", dir="/tmp") as temp_pto_file:
-                temp_pto_path = temp_pto_file.name
-                temp_files_to_clean.append(temp_pto_path)
-                temp_pto_file.write(pto_content)
-                temp_pto_file.flush() # Ensure data is written before optimizer runs
+            # Imply -t 1 (load only the first second) if not already specified by the user.
+            if args.total is None:
+                print("Calibrate mode: Defaulting to loading only the first second of the video (-t 1).")
+                args.total = 1.0
 
-                print(f"Running Hugin's autooptimiser on temporary file {temp_pto_path}...")
-                proc = subprocess.run(['autooptimiser', '-n', temp_pto_path, '-o', temp_pto_path], capture_output=True, text=True)
+            # Construct remote paths
+            remote_cfg_path = "/etc/meteor.cfg"
+            remote_pto_path = f"/meteor/cam{cam_num}/lens.pto"
+            remote_video_path = f"/meteor/cam{cam_num}/{date_str}/{hour_str}/full_{minute_str}.mp4"
+
+            # --- Perform SCP copies in parallel ---
+            print("Copying remote files in parallel...")
+            files_to_copy = {
+                'station': remote_cfg_path,
+                'pto': remote_pto_path,
+                'video': remote_video_path
+            }
+            results = {}
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                future_to_key = {executor.submit(scp_file, hostname, path): key for key, path in files_to_copy.items()}
                 
-                if proc.returncode != 0:
-                    print("\nWarning: autooptimiser failed during conversion.", file=sys.stderr)
-                    print(proc.stderr, file=sys.stderr)
-                else:
-                    print("Optimization complete.")
-            
-            # The rest of the script will now use the newly created and optimized PTO file
-            args.ptofile = temp_pto_path
+                for future in future_to_key:
+                    key = future_to_key[future]
+                    try:
+                        local_path = future.result()
+                        if not local_path:
+                            raise ValueError(f"scp_file for {key} returned None, indicating a failure.")
+                        results[key] = local_path
+                        temp_files_to_clean.append(local_path) # Add to global cleanup list
+                    except Exception as e:
+                        print(f"Fatal error during parallel file download for '{key}': {e}", file=sys.stderr)
+                        sys.exit("Aborting due to scp failure.")
 
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            sys.exit(f"Error reading JSON file: {e}")
-        except (IOError, ValueError) as e:
-            sys.exit(f"Error during JSON to PTO conversion: {e}")
-        except FileNotFoundError:
-            sys.exit("\nError: 'autooptimiser' command not found. Please ensure Hugin is installed.")
+            # Assign results to the correct variables
+            args.station = results['station']
+            args.ptofile = results['pto']
+            args.imgfiles = [results['video']]
 
-    # Process video files into image frames
-    images = []
-    
-    seconds_to_skip = args.skip
-    seconds_to_load = args.total
-    loaded_duration = 0.0
 
-    # Now that 'imgfiles' is clean, this loop will only process video/image files
-    for f in args.imgfiles:
-        if f.lower().endswith('.mp4'):
-            # If -t is specified, stop if we have loaded the requested duration
-            if seconds_to_load is not None and loaded_duration >= seconds_to_load:
-                break
-
+        # Establish observer location from command-line args or station file
+        pos = ephem.Observer()
+        if all(arg is not None for arg in [args.latitude, args.longitude, args.elevation]):
+            print("Using location from command-line arguments.")
+            pos.lat, pos.lon, pos.elevation = str(args.latitude), str(args.longitude), args.elevation
+            pos.temp, pos.pressure = 15.0, 1010.0  # Set reasonable defaults
+        elif args.station:
+            print(f"Using location from station file: {args.station}")
             try:
-                probe = ffmpeg.probe(f)
-                video_duration = float(next(s['duration'] for s in probe['streams'] if s['codec_type'] == 'video'))
-            except (ffmpeg.Error, StopIteration, KeyError, ValueError):
-                print(f"Warning: Could not probe duration of {f}. Skipping file.", file=sys.stderr)
-                continue
-
-            # --- Handle Skipping ---
-            if seconds_to_skip > 0:
-                if seconds_to_skip >= video_duration:
-                    # This video is skipped entirely
-                    seconds_to_skip -= video_duration
-                    print(f"Skipping entire video {f} ({video_duration:.2f}s). Remaining skip: {seconds_to_skip:.2f}s.")
-                    continue  # Go to the next file
-                else:
-                    # We will seek within this video; the full skip amount will be satisfied
-                    current_file_skip = seconds_to_skip
-                    seconds_to_skip = 0
-            else:
-                current_file_skip = 0
-
-            # --- Handle Total Duration (-t) ---
-            current_file_load_duration = None
-            if seconds_to_load is not None:
-                remaining_to_load = seconds_to_load - loaded_duration
-                available_in_video = video_duration - current_file_skip
-                current_file_load_duration = min(remaining_to_load, available_in_video)
-                if current_file_load_duration <= 0:
-                    break  # We've loaded enough; stop processing files
-
-            # --- Decode Frames ---
-            temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp")
-            temp_dirs.append(temp_dir)
-            try:
-                load_duration_msg = f"{current_file_load_duration:.2f}" if current_file_load_duration is not None else "all available"
-                print(f"Processing {f}: skipping {current_file_skip:.2f}s, loading up to {load_duration_msg}s.")
-                read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
-                
-                decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))
-                images.extend(decoded_files)
-
-                # Update the total duration we have successfully loaded
-                duration_this_run = len(decoded_files) / args.fps
-                loaded_duration += duration_this_run
-            except Exception as e:
-                print(f"Error processing {f}: {e}", file=sys.stderr)
-
+                config = configparser.ConfigParser()
+                config.read(args.station)
+                pos.lat = config.get('astronomy', 'latitude')
+                pos.lon = config.get('astronomy', 'longitude')
+                pos.elevation = float(config.get('astronomy', 'elevation'))
+                pos.temp = float(config.get('astronomy', 'temperature', fallback=15))
+                pos.pressure = float(config.get('astronomy', 'pressure', fallback=1010))
+                args.name = config.get('station', 'code', fallback=args.name)
+            except (configparser.Error, FileNotFoundError) as e:
+                sys.exit(f"Error reading station file '{args.station}': {e}")
         else:
-            images.append(os.path.abspath(f))
+            sys.exit("Error: Observer location not specified. Please use the -c/--station option, the no-argument launcher, or --latitude, --longitude, and --elevation.")
 
-    if not images:
-        sys.exit("No image files found.")
+        # If input is a JSON file, convert it to an optimized PTO in memory
+        if args.ptofile.lower().endswith('.json'):
+            print(f"Detected JSON calibration file: {args.ptofile}. Converting...")
+            try:
+                with open(args.ptofile) as f:
+                    calib_data = json.load(f)
+                
+                # Check for the 'cal_params' key and use the correct data dictionary
+                if 'cal_params' in calib_data:
+                    cal_params_data = calib_data['cal_params']
+                else:
+                    cal_params_data = calib_data
 
-    # Extract or generate timestamps for all frames
-    timestamps = [None] * len(images)
-    if args.start is None:
-        raw_timestamps = extract_timestamps(images)
-        print("Interpolating timestamps...")
-        timestamps = interpolate_timestamps(raw_timestamps)
-        starttime = timestamps[0] if timestamps and timestamps[0] is not None else datetime.now().timestamp()
-    else:
-        starttime = datetime.strptime(args.start, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()
-        timestamps = [starttime + (x / args.fps) for x in range(len(images))]
+                # Use the already configured observer 'pos' to generate PTO data
+                width = cal_params_data.get('imagew', 1920)
+                height = cal_params_data.get('imageh', 1080)
+                pto_content = amscalib2lens.generate_pto_from_json(cal_params_data, pos, width, height, match_dist_limit=0.2)
 
-    # Parse the final PTO data (either original or from conversion)
-    try:
-        pto_data = pto_mapper.parse_pto_file(args.ptofile)
-    except Exception as e:
-        sys.exit(f"Error parsing PTO file '{args.ptofile}': {e}")
+                # Hugin's optimizer requires a file, so we use a temporary one.
+                with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".pto", dir="/tmp") as temp_pto_file:
+                    temp_pto_path = temp_pto_file.name
+                    temp_files_to_clean.append(temp_pto_path)
+                    temp_pto_file.write(pto_content)
+                    temp_pto_file.flush() # Ensure data is written before optimizer runs
 
-    global_options, images_data = pto_data
-    if args.image >= len(images_data):
-        sys.exit(f"Error: Image index {args.image} is out of range for PTO file with {len(images_data)} images.")
-    
-    img_data = images_data[args.image]
-    first_pil = Image.open(images[0])
-    img_data['w'], img_data['h'] = first_pil.size
+                    print(f"Running Hugin's autooptimiser on temporary file {temp_pto_path}...")
+                    proc = subprocess.run(['autooptimiser', '-n', temp_pto_path, '-o', temp_pto_path], capture_output=True, text=True)
+                    
+                    if proc.returncode != 0:
+                        print("\nWarning: autooptimiser failed during conversion.", file=sys.stderr)
+                        print(proc.stderr, file=sys.stderr)
+                    else:
+                        print("Optimization complete.")
+                
+                # The rest of the script will now use the newly created and optimized PTO file
+                args.ptofile = temp_pto_path
 
-    # Launch the GUI
-    window = tk.Tk()
-    window.geometry("1600x960")
-    # 'calibrate_info' now correctly contains the upload target info, if provided
-    app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image, **calibrate_info)
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                sys.exit(f"Error reading JSON file: {e}")
+            except (IOError, ValueError) as e:
+                sys.exit(f"Error during JSON to PTO conversion: {e}")
+            except FileNotFoundError:
+                sys.exit("\nError: 'autooptimiser' command not found. Please ensure Hugin is installed.")
 
-    if args.event_file:
-        app.load_event_file(args.event_file)
-    window.mainloop()
+        # Process video files into image frames
+        images = []
+        
+        seconds_to_skip = args.skip
+        seconds_to_load = args.total
+        loaded_duration = 0.0
 
+        # Now that 'imgfiles' is clean, this loop will only process video/image files
+        for f in args.imgfiles:
+            if f.lower().endswith('.mp4'):
+                # If -t is specified, stop if we have loaded the requested duration
+                if seconds_to_load is not None and loaded_duration >= seconds_to_load:
+                    break
+
+                try:
+                    probe = ffmpeg.probe(f)
+                    video_duration = float(next(s['duration'] for s in probe['streams'] if s['codec_type'] == 'video'))
+                except (ffmpeg.Error, StopIteration, KeyError, ValueError):
+                    print(f"Warning: Could not probe duration of {f}. Skipping file.", file=sys.stderr)
+                    continue
+
+                # --- Handle Skipping ---
+                if seconds_to_skip > 0:
+                    if seconds_to_skip >= video_duration:
+                        # This video is skipped entirely
+                        seconds_to_skip -= video_duration
+                        print(f"Skipping entire video {f} ({video_duration:.2f}s). Remaining skip: {seconds_to_skip:.2f}s.")
+                        continue  # Go to the next file
+                    else:
+                        # We will seek within this video; the full skip amount will be satisfied
+                        current_file_skip = seconds_to_skip
+                        seconds_to_skip = 0
+                else:
+                    current_file_skip = 0
+
+                # --- Handle Total Duration (-t) ---
+                current_file_load_duration = None
+                if seconds_to_load is not None:
+                    remaining_to_load = seconds_to_load - loaded_duration
+                    available_in_video = video_duration - current_file_skip
+                    current_file_load_duration = min(remaining_to_load, available_in_video)
+                    if current_file_load_duration <= 0:
+                        break  # We've loaded enough; stop processing files
+
+                # --- Decode Frames ---
+                temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp")
+                temp_dirs.append(temp_dir)
+                try:
+                    load_duration_msg = f"{current_file_load_duration:.2f}" if current_file_load_duration is not None else "all available"
+                    print(f"Processing {f}: skipping {current_file_skip:.2f}s, loading up to {load_duration_msg}s.")
+                    read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
+                    
+                    decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))
+                    images.extend(decoded_files)
+
+                    # Update the total duration we have successfully loaded
+                    duration_this_run = len(decoded_files) / args.fps
+                    loaded_duration += duration_this_run
+                except Exception as e:
+                    print(f"Error processing {f}: {e}", file=sys.stderr)
+
+            else:
+                images.append(os.path.abspath(f))
+
+        if not images:
+            sys.exit("No image files found.")
+
+        # Extract or generate timestamps for all frames
+        timestamps = [None] * len(images)
+        if args.start is None:
+            raw_timestamps = extract_timestamps(images)
+            print("Interpolating timestamps...")
+            timestamps = interpolate_timestamps(raw_timestamps)
+            starttime = timestamps[0] if timestamps and timestamps[0] is not None else datetime.now().timestamp()
+        else:
+            starttime = datetime.strptime(args.start, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()
+            timestamps = [starttime + (x / args.fps) for x in range(len(images))]
+
+        # Parse the final PTO data (either original or from conversion)
+        try:
+            pto_data = pto_mapper.parse_pto_file(args.ptofile)
+        except Exception as e:
+            sys.exit(f"Error parsing PTO file '{args.ptofile}': {e}")
+
+        global_options, images_data = pto_data
+        if args.image >= len(images_data):
+            sys.exit(f"Error: Image index {args.image} is out of range for PTO file with {len(images_data)} images.")
+        
+        img_data = images_data[args.image]
+        first_pil = Image.open(images[0])
+        img_data['w'], img_data['h'] = first_pil.size
+
+        # Launch the GUI
+        window = tk.Tk()
+        window.geometry("1600x960")
+        # 'calibrate_info' now correctly contains the upload target info, if provided
+        app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image, **calibrate_info)
+
+        if args.event_file:
+            app.load_event_file(args.event_file)
+        window.mainloop()
+
+        # --- CHECK RESTART FLAG ---
+        if hasattr(app, 'restart') and app.restart:
+            print("\n--- Restarting to select new event ---\n")
+            cleanup_temp_resources()
+            temp_files_to_clean.clear()
+            temp_dirs.clear()
+            
+            # IMPORTANT: Reset sys.argv so the script behaves as if launched 
+            # without arguments, triggering the LauncherDialog again.
+            sys.argv = [sys.argv[0]]
+            
+            continue # Loop back to the top
+        else:
+            break # Exit the loop and terminate naturally

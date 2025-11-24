@@ -276,15 +276,81 @@ async def watch_videos():
             continue
 
 async def watch_detections():
-    """Monitors for meteor detection JSON files and triggers an external script."""
+    """
+    Monitors for meteor detection JSON files in recent directories only.
+    Manually handles recursion to ignore directories older than 7 days.
+    """
     logging.info('Detections watcher started.')
-    i = inotify.adapters.InotifyTree(args.recdir, mask=inotify.constants.IN_CLOSE_WRITE)
     
+    # 1. Setup the low-level adapter
+    i = inotify.adapters.Inotify()
+    
+    # We need to watch for creating new directories so we can track them in the future
+    mask_events = (
+        inotify.constants.IN_CLOSE_WRITE | 
+        inotify.constants.IN_CREATE |      # Needed to catch new subdirectories
+        inotify.constants.IN_MOVED_TO      # Needed if folders are moved in
+    )
+
+    # 2. Calculate cutoff (7 days ago)
+    cutoff_time = datetime.datetime.now().timestamp() - (7 * 24 * 60 * 60)
+
+    # 3. "Smart" Recursive Loader
+    # Runs in executor to prevent blocking during startup
+    def smart_add_watches():
+        count = 0
+        # Always watch the root
+        i.add_watch(args.recdir, mask=mask_events)
+        
+        for root, dirs, files in os.walk(args.recdir):
+            # MODIFY dirs IN-PLACE to prune the walk
+            # We only keep directories that have been modified recently
+            # or look like they are part of the current path structure.
+            
+            # We create a list of dirs to remove
+            to_remove = []
+            for d in dirs:
+                full_path = os.path.join(root, d)
+                try:
+                    stat = os.stat(full_path)
+                    # If directory mtime is older than cutoff, ignore it AND its children
+                    if stat.st_mtime < cutoff_time:
+                        to_remove.append(d)
+                    else:
+                        # It is recent, add a watch
+                        i.add_watch(full_path, mask=mask_events)
+                        count += 1
+                except OSError:
+                    # Permission error or file vanished
+                    to_remove.append(d)
+            
+            # Prune the walk
+            for d in to_remove:
+                dirs.remove(d)
+        return count
+
+    loop = asyncio.get_running_loop()
+    watch_count = await loop.run_in_executor(None, smart_add_watches)
+    logging.info(f"Monitoring {watch_count} active directories.")
+
+    # 4. Process Events
     event_iterator = iter(i.event_gen(yield_nones=False))
     async for event in async_event_gen(event_iterator):
         try:
             (_, type_names, eventdir, eventfile) = event
             
+            # Since we aren't using InotifyTree, we must manually add watches 
+            # to new directories created while the script is running.
+            if 'IN_ISDIR' in type_names:
+                if 'IN_CREATE' in type_names or 'IN_MOVED_TO' in type_names:
+                    new_dir = os.path.join(eventdir, eventfile)
+                    try:
+                        logging.info(f"New directory detected, adding watch: {new_dir}")
+                        i.add_watch(new_dir, mask=mask_events)
+                    except Exception as e:
+                        logging.error(f"Failed to watch new directory {new_dir}: {e}")
+                continue # It's a directory event, not a file event
+
             if 'IN_CLOSE_WRITE' not in type_names or not eventfile.endswith(REDUCED_JSON_SUFFIX):
                 continue
             
@@ -293,31 +359,23 @@ async def watch_detections():
             # Calculate new hash
             new_hash = get_md5(filepath)
             if new_hash is None:
-                # File might be gone or unreadable, skip
                 continue
 
-            # Get old hash and remove from cache (to re-add at the end for LRU)
             old_hash = processed_detection_files.pop(filepath, None)
 
             if old_hash is None:
-                # Case 1: New file
-                logging.info(f"New detection file, executing: {args.exefile} {filepath}")
+                logging.info(f"New detection file: {filepath}")
                 processed_detection_files[filepath] = new_hash
                 await run_command_async(args.exefile, filepath)
             elif new_hash != old_hash:
-                # Case 2: Modified file
-                logging.info(f"Modified detection file, re-executing: {args.exefile} {filepath}")
+                logging.info(f"Modified detection file: {filepath}")
                 processed_detection_files[filepath] = new_hash
                 await run_command_async(args.exefile, filepath)
             else:
-                # Case 3: Unmodified file (CLOSE_WRITE on same content)
-                logging.info(f"Ignoring unmodified file event: {filepath}")
-                # Re-add with the same hash to keep it in the LRU cache
                 processed_detection_files[filepath] = old_hash
             
-            # Enforce cache size
             while len(processed_detection_files) > DETECTION_CACHE_SIZE:
-                processed_detection_files.popitem(last=False) # Evict oldest
+                processed_detection_files.popitem(last=False)
 
         except Exception as e:
             logging.exception(f"Error in detection watcher loop: {e}")

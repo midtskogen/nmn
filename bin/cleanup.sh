@@ -1,7 +1,7 @@
 #!/bin/bash
 
 find /meteor/cam*/*.3gp /meteor/cam*/cifs* /tmp/tmp* -mtime +1 -exec rm -f {} \; 2> /dev/null
-find /meteor/cam*/events -depth -type d -mtime +180 -exec rm -r {} \; 2> /dev/null
+find /meteor/cam*/amsevents -depth -type d -mtime +180 -exec rm -r {} \; 2> /dev/null
 
 ~/bin/cleancam.py
 

@@ -2425,7 +2425,7 @@ if __name__ == '__main__':
             # --- This is the original logic for when arguments ARE provided ---
             parser = argparse.ArgumentParser(description='Click on images to find coordinates.')
             parser.add_argument('-i', '--image', dest='image', help='which image in the .pto file to use (default: 0)', default=0, type=int)
-            parser.add_argument('-f', '--fps', dest='fps', help='frames per second (default: 10 or extracted from images)', default=10, type=int)
+            parser.add_argument('-f', '--fps', dest='fps', help='frames per second (default: 10 or extracted from images)', default=10, type=float)
             parser.add_argument('-n', '--name', dest='name', help='station name (default: NUL or extracted from station config)', default="NUL", type=str)
             parser.add_argument('-c', '--config', dest='station', help='station config file', type=str)
             parser.add_argument('-d', '--date', dest='start', help='start time (default: extracted from images))', type=str)

@@ -11,7 +11,7 @@ This script performs the following actions for each supported language:
 5.  Optionally posts a notification to social media.
 Usage:
     python3 fetch.py <station_name> <ssh_port> <remote_dir>
-    python3 fetch.py <local_event_directory> [--fast]
+    python3 fetch.py <local_event_directory> [--fast] [--all]
 """
 
 import argparse
@@ -630,7 +630,7 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
             logging.error(f"Failed to send tweet using key {key}: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     obs_filename = f"obs_{date.strftime('%Y-%m-%d_%H:%M:%S')}.txt"
@@ -733,7 +733,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False):
             metrack_opts = {
                 'timestamp': date.timestamp(), 
                 'optimize': True, 
-                'use_ransac': True, 
+                'use_ransac': not all_stations, # Disable RANSAC if all_stations is True
                 'seed': 0,
                 'ransac_threshold': 1.0,
                 'ransac_iterations': 10,
@@ -966,7 +966,7 @@ def main():
         description="Fetch and process meteor data, or reprocess an existing event directory.",
         usage="""
     To fetch:     python3 fetch.py <station> <port> <remote_dir>
-    To reprocess: python3 fetch.py <local_event_directory> [--fast]
+    To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all]
         """
     )
     parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
@@ -977,6 +977,11 @@ def main():
         action="store_true",
         help="For reprocessing mode: skips slow video processing (process.py) "
              "and wind data fetching, and only regenerates analysis, plots, and tables."
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Skip elimination of outlier stations (disables RANSAC)."
     )
     
     args = parser.parse_args()
@@ -1008,7 +1013,7 @@ def main():
                 logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
-            process_event(final_event_dir, processing_date, fast=args.fast)
+            process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -1064,7 +1069,7 @@ def main():
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
     
     try:
-        process_event(final_event_dir, processing_date, fast=False)
+        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

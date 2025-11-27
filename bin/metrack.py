@@ -868,10 +868,21 @@ def _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier
     start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
     end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
     
+    # Calculate preliminary incidence to detect Earth Grazers
+    temp_vec = track_end - track_start
+    temp_vec_rot_lon = np.dot(rotation_matrix(np.array([0,0,1]), np.radians(start_lon)), temp_vec)
+    temp_vec_local = np.dot(rotation_matrix(np.array([0,1,0]), np.radians(90 - start_lat)), temp_vec_rot_lon)
+    prelim_incidence = -np.degrees(np.arctan2(temp_vec_local[2], np.hypot(temp_vec_local[0], temp_vec_local[1])))
+
+    # Only swap start/end if the end is higher AND it's not a shallow Earth Grazer
     if info.end_height > info.start_height:
-        track_start, track_end = track_end, track_start
-        start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
-        end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
+        is_earth_grazer = abs(prelim_incidence) < 5.0
+        if is_earth_grazer:
+            print(f"  -> Earth Grazer detected (Incidence: {prelim_incidence:.2f}°). Preserving rising trajectory.")
+        else:
+            track_start, track_end = track_end, track_start
+            start_lon, start_lat, info.start_height = xyz2lonlat(track_start)
+            end_lon, end_lat, info.end_height = xyz2lonlat(track_end)
 
     info.ground_track = haversine(start_lon, start_lat, end_lon, end_lat)
 
@@ -1053,9 +1064,10 @@ def main():
     
     # The main `metrack` function is called, which handles both calculation and plotting
     # based on the command-line arguments. Its return value is not used here.
+    input_filename = args.inname
     metrack_args = vars(args)
     metrack_args.pop('inname', None) # inname is passed as first argument
-    metrack(args.inname, **metrack_args)
+    metrack(input_filename, **metrack_args)
 
 if __name__ == "__main__":
     main()

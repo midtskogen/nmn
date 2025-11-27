@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import atexit  # <--- NEW IMPORT
 import configparser
 import datetime
 import glob
@@ -131,6 +132,20 @@ def setup_logging(log_file_path: Path):
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
     logging.getLogger().addHandler(console_handler)
+
+
+def restore_terminal_state():
+    """
+    Restores the terminal settings to a sane state on exit.
+    This fixes issues where subprocesses (like oysttyer or ssh) disable
+    terminal echo and fail to restore it.
+    """
+    try:
+        # 'stty sane' restores terminal settings (including echo)
+        subprocess.run(['stty', 'sane'], check=False)
+    except Exception:
+        # If stty isn't available or fails (e.g. cron job), ignore it.
+        pass
 
 
 def run_command(command, cwd=None, check=False, shell=False, stream_output=False):
@@ -961,6 +976,9 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
 
 def main():
     """Main script execution flow."""
+    
+    # --- Register cleanup to fix terminal echo on exit ---
+    atexit.register(restore_terminal_state)
     
     parser = argparse.ArgumentParser(
         description="Fetch and process meteor data, or reprocess an existing event directory.",

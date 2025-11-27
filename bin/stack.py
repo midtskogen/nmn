@@ -36,6 +36,20 @@ def check_hw_accel() -> typing.Optional[str]:
         return None
     return None
 
+def calculate_aligned_dimensions(width: int, height: int, resize_factor: float) -> typing.Tuple[int, int]:
+    """
+    Calculates target dimensions.
+    Width must be multiple of 2 (for YUV420).
+    Height must be multiple of 4 (for the reshape optimization in finalize_and_save).
+    """
+    if resize_factor != 1.0:
+        width = int(width * resize_factor)
+        height = int(height * resize_factor)
+    
+    width = (width // 2) * 2
+    height = (height // 4) * 4
+    return width, height
+
 # ==============================================================================
 # Numba JIT-Optimized Functions
 # ==============================================================================
@@ -122,10 +136,11 @@ def video_stack_worker(task: dict, resize_factor: float = 1.0, use_hw_accel: boo
     props = get_video_properties_ffprobe(video_path)
     if not props: return None
 
-    width, height = props["width"], props["height"]
-    if resize_factor != 1.0:
-        width, height = int(width * resize_factor), int(height * resize_factor)
-        width, height = (width // 2) * 2, (height // 2) * 2
+    raw_width, raw_height = props["width"], props["height"]
+    width, height = calculate_aligned_dimensions(raw_width, raw_height, resize_factor)
+    
+    # Determine if we need to scale (either for resize, or to align dimensions)
+    force_scale = (width != raw_width) or (height != raw_height)
 
     luma_stack = np.zeros((height, width), dtype=np.uint8)
     chroma_u_stack = np.full((height // 2, width // 2), 128, dtype=np.uint8)
@@ -136,10 +151,10 @@ def video_stack_worker(task: dict, resize_factor: float = 1.0, use_hw_accel: boo
 
     if use_hw_accel:
         ffmpeg_command.extend(["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"])
-        if resize_factor != 1.0: video_filters.append(f"scale_vaapi=w={width}:h={height}")
+        if force_scale: video_filters.append(f"scale_vaapi=w={width}:h={height}")
         video_filters.extend(["hwdownload,format=nv12", f"format={output_pix_fmt}"])
     else:
-        if resize_factor != 1.0: video_filters.append(f"scale=w={width}:h={height}")
+        if force_scale: video_filters.append(f"scale=w={width}:h={height}")
 
     ffmpeg_command.extend(["-i", video_path, "-ss", str(task["start_seconds"]), "-t", str(task["duration_seconds"])])
     if video_filters: ffmpeg_command.extend(["-vf", ",".join(video_filters)])
@@ -192,12 +207,11 @@ def stack_video_frames(video_paths: list, output_path: str,
 
     if not processing_plan: raise StackingError("No video frames found to process with the given time settings.")
     
+    # Calculate global working dimensions
     props = get_video_properties_ffprobe(video_paths[0])
-    width, height = props['width'], props['height']
-    if resize_factor != 1.0:
-        width, height = int(width * resize_factor), int(height * resize_factor)
-        width, height = (width // 2) * 2, (height // 2) * 2
+    width, height = calculate_aligned_dimensions(props['width'], props['height'], resize_factor)
 
+    log.info(f"Processing Resolution: {width}x{height} (Aligned for I420).")
     log.info(f"Using software decoding by default. Ready to process {len(processing_plan)} video segments using up to {num_threads} threads.")
     total_luma, total_u, total_v = np.zeros((height, width), dtype=np.uint8), np.full((height // 2, width // 2), 128, dtype=np.uint8), np.full((height // 2, width // 2), 128, dtype=np.uint8)
     
@@ -234,6 +248,7 @@ def finalize_and_save(luma_plane: np.ndarray, u_plane: np.ndarray,
         v_plane = enhance_filter(v_plane, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0, num_workers=num_threads)
 
     height, width = luma_plane.shape
+    # NOTE: The reshape here requires height to be divisible by 4.
     yuv_i420 = np.vstack([ luma_plane, u_plane.reshape((height // 4, width)), v_plane.reshape((height // 4, width)) ])
     bgr_image = cv2.cvtColor(yuv_i420, cv2.COLOR_YUV2BGR_I420)
     

@@ -943,9 +943,21 @@ def worker_for_video_frame(args):
     if frame.format.name not in ("yuv420p", "yuvj420p"): frame = frame.reformat(format="yuv420p")
 
     sw_orig, sh_orig = frame.width, frame.height
-    py_src_orig = np.asarray(frame.planes[0]).reshape(sh_orig, sw_orig)
-    pu_src_orig = np.asarray(frame.planes[1]).reshape(sh_orig // 2, sw_orig // 2)
-    pv_src_orig = np.asarray(frame.planes[2]).reshape(sh_orig // 2, sw_orig // 2)
+    
+    # Handle Y-plane stride
+    py_buffer = np.asarray(frame.planes[0])
+    py_stride = py_buffer.size // sh_orig
+    py_src_orig = py_buffer.reshape(sh_orig, py_stride)[:, :sw_orig]
+    
+    # Handle U-plane stride
+    pu_buffer = np.asarray(frame.planes[1])
+    pu_stride = pu_buffer.size // (sh_orig // 2)
+    pu_src_orig = pu_buffer.reshape(sh_orig // 2, pu_stride)[:, :sw_orig // 2]
+    
+    # Handle V-plane stride
+    pv_buffer = np.asarray(frame.planes[2])
+    pv_stride = pv_buffer.size // (sh_orig // 2)
+    pv_src_orig = pv_buffer.reshape(sh_orig // 2, pv_stride)[:, :sw_orig // 2]
     
     noise_level = estimate_noise(py_src_orig)
 
@@ -1228,9 +1240,21 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             if frame.format.name not in ("yuv420p", "yuvj420p"): frame = frame.reformat(format="yuv420p")
             
             sw, sh = frame.width, frame.height
-            py_src = np.asarray(frame.planes[0]).reshape(sh, sw)
-            pu_src = np.asarray(frame.planes[1]).reshape(sh // 2, sw // 2)
-            pv_src = np.asarray(frame.planes[2]).reshape(sh // 2, sw // 2)
+            
+            # Handle Y-plane stride
+            py_buffer = np.asarray(frame.planes[0])
+            py_stride = py_buffer.size // sh
+            py_src = py_buffer.reshape(sh, py_stride)[:, :sw]
+            
+            # Handle U-plane stride
+            pu_buffer = np.asarray(frame.planes[1])
+            pu_stride = pu_buffer.size // (sh // 2)
+            pu_src = pu_buffer.reshape(sh // 2, pu_stride)[:, :sw // 2]
+            
+            # Handle V-plane stride
+            pv_buffer = np.asarray(frame.planes[2])
+            pv_stride = pv_buffer.size // (sh // 2)
+            pv_src = pv_buffer.reshape(sh // 2, pv_stride)[:, :sw // 2]
             
             pad_t = pad if 'top' in padsides else 0; pad_b = pad if 'bottom' in padsides else 0
             pad_l = pad if 'left' in padsides else 0; pad_r = pad if 'right' in padsides else 0

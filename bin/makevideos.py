@@ -564,33 +564,36 @@ def run_command(command, description, verbose=False):
     """Executes a shell command with progress indication and error handling."""
     if not verbose:
         print(f"-> {description}...")
+    
+    # This prevents buffer deadlocks and lets you see errors immediately.
+    do_capture = not verbose
+    
     try:
-        result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
+        # Pass stdout/stderr as None if verbose (streams to console), else PIPE (capture)
+        stdout_dest = subprocess.PIPE if do_capture else None
+        stderr_dest = subprocess.PIPE if do_capture else None
+
+        result = subprocess.run(
+            command, 
+            check=True, 
+            shell=True, 
+            stdout=stdout_dest,
+            stderr=stderr_dest,
+            text=True
+        )
+
         if verbose:
-            output_file = "N/A"
-            if ' -o ' in command: output_file = command.split(' -o ')[-1].split(' ')[0]
-            elif '>' in command: output_file = command.split('>')[-1].strip()
-            
-            log_message = (
-                f"\n{'='*70}\n"
-                f"Action: {description}\n"
-                f"Producing: {output_file}\n"
-                f"Command: {command}\n"
-            )
-            print(log_message, end="")
-            if result.stdout.strip():
-                print(f"--- stdout ---\n{result.stdout.strip()}")
-            if result.stderr.strip():
-                sys.stderr.write(f"--- stderr ---\n{result.stderr.strip()}\n")
-            print(f"{'='*70}\n")
+            # If we didn't capture, we can't print the result.stdout because it's already printed.
+            print(f"   ...Done: {description}.")
         else:
             print(f"   ...Done: {description}.")
         return result
     except subprocess.CalledProcessError as e:
         print(f"\n--- ERROR executing external command ---\nCommand failed: {command}", file=sys.stderr)
-        if e.stdout: print(f"Stdout:\n{e.stdout}", file=sys.stderr)
-        if e.stderr: print(f"Stderr:\n{e.stderr}", file=sys.stderr)
-        # Re-raise the exception to be handled by the caller
+        # If we captured output, print it now.
+        if do_capture:
+            if e.stdout: print(f"Stdout:\n{e.stdout}", file=sys.stderr)
+            if e.stderr: print(f"Stderr:\n{e.stderr}", file=sys.stderr)
         raise
 
 def _run_full_view_sequentially(event_data, filenames, tmpdir, verbose):

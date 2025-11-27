@@ -1279,6 +1279,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
 
             # --- Update and encode the single, reused output frame ---
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
+            # Set the Presentation Time Stamp (PTS)
+            out_frame.pts = frame_count - 1 
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
                 
@@ -1467,6 +1469,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             
             # --- Update and encode the single, reused output frame ---
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
+            # Set the Presentation Time Stamp (PTS)
+            out_frame.pts = frame_count - 1
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
 

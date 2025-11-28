@@ -28,11 +28,12 @@ import errno
 import datetime
 
 
+# Assuming user-provided scripts are in the same directory or python path.
 try:
     from logos import NMN_LOGO_B64, SBSDNB_LOGO_B64, AS7_LOGO_B64
 except ImportError as e:
     print(f"Error: A required local module is missing: {e}", file=sys.stderr)
-    print("Please ensure logos.py is accessible.", file=sys.stderr)
+    print("Please ensure logos.py is accessible and contains NMN, SBSDNB, and AS7 logo data.", file=sys.stderr)
     sys.exit(1)
 
 # Image and video processing libraries
@@ -60,6 +61,36 @@ def refraction(alt):
     corrected_alt = alt - 0.006 / math.tan(tan_arg)
     return round(corrected_alt, 2)
 
+def get_dynamic_mag_limit(pto_path):
+    """
+    Parses the PTO file to find the Field of View (v parameter).
+    Returns a limiting magnitude based on the FOV:
+      - FOV > 115: Mag 3
+      - FOV > 100: Mag 4
+      - Otherwise: Mag 5 (default)
+    """
+    default_mag = 5
+    try:
+        with open(pto_path, 'r') as f:
+            for line in f:
+                # Look for the image line 'i'
+                if line.strip().startswith('i '):
+                    # Regex to find 'v' followed by numbers/dots
+                    # Matches "v127.111" in "i w1920 ... v127.111 ..."
+                    match = re.search(r'\bv([\d\.]+)', line)
+                    if match:
+                        fov = float(match.group(1))
+                        if fov > 115:
+                            return 3
+                        elif fov > 100:
+                            return 4
+                        else:
+                            return default_mag
+    except Exception as e:
+        print(f"Warning: Could not determine FOV from {pto_path} (Error: {e}). Using default mag {default_mag}.", file=sys.stderr)
+    
+    return default_mag
+
 def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
     """Draws marker crosses and az/alt labels on an image at specified coordinates."""
     description = f"Drawing marker crosses and labels on {Path(image_path).name}"
@@ -70,7 +101,6 @@ def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
 
     sx, sy, ex, ey = pixel_coords
 
-    # Check if azalt_coords has enough values before unpacking
     if len(azalt_coords) < 4:
         print("Warning: Insufficient az/alt coordinates provided to draw_marker_crosses.", file=sys.stderr)
         return image_path
@@ -91,11 +121,9 @@ def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
         if not font:
             font = ImageFont.load_default()
 
-        # Format text labels, e.g., [211.13, 14.00]
         start_label = f"({start_az:.2f}, {start_alt:.2f})"
         end_label = f"({end_az:.2f}, {end_alt:.2f})"
 
-        # Position text to the right of the cross, vertically centered
         start_text_pos = (sx + 20, sy - 8)
         end_text_pos = (ex + 20, ey - 8)
 
@@ -121,11 +149,9 @@ def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
 
 def _get_initial_gnomonic_pixels(event_data, lens_pto_data, gnomonic_pto_data):
     """Maps initial fisheye pixel coordinates to the gnomonic image plane."""
-    # Step 1: Get initial pixel coordinates from event.txt
     start_px, start_py = map(float, event_data['begin'].split(','))
     end_px, end_py = map(float, event_data['end'].split(','))
 
-    # Step 2: Map fisheye pixel coords -> equirectangular pano coords
     start_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, start_px, start_py)
     end_pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, end_px, end_py)
     if not (start_pano and end_pano): return None
@@ -133,7 +159,6 @@ def _get_initial_gnomonic_pixels(event_data, lens_pto_data, gnomonic_pto_data):
     start_az2, start_alt2 = start_pano
     end_az2, end_alt2 = end_pano
 
-    # Step 3: Map equirectangular pano coords -> gnomonic image coords
     start_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, start_az2, start_alt2)
     end_res = pto_mapper.map_pano_to_image(gnomonic_pto_data, end_az2, end_alt2)
     if not (start_res and end_res): return None
@@ -143,10 +168,7 @@ def _get_initial_gnomonic_pixels(event_data, lens_pto_data, gnomonic_pto_data):
     return gnomonic_startx, gnomonic_starty, gnomonic_endx, gnomonic_endy
 
 def _refine_gnomonic_track(initial_pixels, gnomonic_image_path, frames_count=None):
-    """
-    Runs refinetrack.py to get more precise start/end points and optional brightness data.
-    Returns a tuple: (refined_pixels, brightness_values).
-    """
+    """Runs refinetrack.py to get more precise start/end points."""
     gnomonic_startx, gnomonic_starty, gnomonic_endx, gnomonic_endy = initial_pixels
     refine_cmd = [
         sys.executable, str(BIN_DIR / "refinetrack.py"),
@@ -154,21 +176,16 @@ def _refine_gnomonic_track(initial_pixels, gnomonic_image_path, frames_count=Non
         f"{gnomonic_startx},{gnomonic_starty}",
         f"{gnomonic_endx},{gnomonic_endy}"
     ]
-    # Add the --frames argument if provided
     if frames_count and frames_count > 0:
         refine_cmd.append(f"--frames={frames_count}")
 
     print(f"Executing: {' '.join(refine_cmd)}")
     result = subprocess.run(refine_cmd, capture_output=True, text=True, check=True)
     
-    # Parse the output, which may contain coordinates and brightness values
     output_parts = result.stdout.strip().split()
     coord_str = " ".join(output_parts[:2])
-    
-    # The first 4 numbers are coordinates, the rest are brightness values
     point_coords = re.split(r'[,\s]+', coord_str)
     refined_pixels = tuple(map(float, point_coords[:4]))
-    
     brightness_values = output_parts[2:] if len(output_parts) > 2 else []
 
     return refined_pixels, brightness_values
@@ -178,12 +195,10 @@ def _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale):
     """Maps refined gnomonic pixel coordinates back to az/alt values."""
     refined_start_x, refined_start_y, refined_end_x, refined_end_y = refined_pixels
     
-    # Map refined gnomonic image points back to pano coordinates
     start_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_start_x, refined_start_y)
     end_pano_coords = pto_mapper.map_image_to_pano(gnomonic_pto_data, 0, refined_end_x, refined_end_y)
     if not (start_pano_coords and end_pano_coords): return None
 
-    # Convert pano coordinates to az/alt and apply refraction
     corr_startaz = round(start_pano_coords[0] / scale, 2)
     corr_startalt = refraction(90 - (start_pano_coords[1] / scale))
     corr_endaz = round(end_pano_coords[0] / scale, 2)
@@ -191,11 +206,7 @@ def _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale):
     return corr_startaz, corr_startalt, corr_endaz, corr_endalt
 
 def calculate_refined_endpoints(event_data, filenames, verbose=False):
-    """
-    Calculates the refined start/end points of the meteor trail.
-    If the 'manual' flag is set or 'sunalt' is high, it skips refinement.
-    Returns a dictionary with gnomonic pixel coordinates, az/alt coordinates, and brightness.
-    """
+    """Calculates the refined start/end points of the meteor trail."""
     try:
         print("-> Calculating refined endpoints...")
         lens_pto_data = pto_mapper.parse_pto_file(filenames['lens_pto'])
@@ -209,16 +220,13 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
         if Path(f"{filenames['name']}-gnomonic-mask.jpg").exists():
             gnomonic_image_path = f"{filenames['name']}-gnomonic-mask.jpg"
 
-        # Check conditions for running coordinate and brightness refinement.
         is_manual = event_data.get('manual', 0) != 0
         sun_is_high = event_data.get('sunalt', -99) > -8
         frames_count = event_data.get('frames')
 
-        # Determine if brightness estimation should be run.
         should_estimate_brightness = False
         if frames_count and not is_manual:
             existing_brightness = event_data.get('brightness_values')
-            # Check if brightness values are missing or if all values are the same.
             if not existing_brightness or len(set(existing_brightness)) == 1:
                 should_estimate_brightness = True
         
@@ -226,10 +234,8 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
         
         refined_pixels, brightness_values = None, []
         if is_manual or sun_is_high:
-            if is_manual:
-                print("   -> Skipping track refinement: 'manual' flag is set.")
-            if sun_is_high:
-                print(f"   -> Skipping track refinement: sun altitude ({event_data.get('sunalt')}°) is > -8°.")
+            if is_manual: print("   -> Skipping track refinement: 'manual' flag is set.")
+            if sun_is_high: print(f"   -> Skipping track refinement: sun altitude ({event_data.get('sunalt')}°) is > -8°.")
             refined_pixels = initial_gnomonic_pixels
         else:
             print("   -> Running track refinement for greater precision.")
@@ -244,12 +250,11 @@ def calculate_refined_endpoints(event_data, filenames, verbose=False):
 
         result_data = {'gnomonic_pixels': refined_pixels, 'azalt': azalt}
 
-        # Validate brightness data before including it
         if frames_to_pass and brightness_values:
             if len(brightness_values) == frames_to_pass:
                 result_data['brightness'] = brightness_values
             else:
-                print(f"Warning: Brightness update skipped. Expected {frames_to_pass} values, but got {len(brightness_values)}.", file=sys.stderr)
+                print(f"Warning: Brightness update skipped.", file=sys.stderr)
 
         print("   ...Done: Calculating refined endpoints.")
         return result_data
@@ -280,7 +285,7 @@ def modify_pto_canvas(input_path, output_path, width, height, verbose=False):
                 modified_lines.append(line)
 
         if not found_p_line:
-            print(f"Warning: 'p' line not found in {input_path}. File may be invalid.", file=sys.stderr)
+            print(f"Warning: 'p' line not found in {input_path}.", file=sys.stderr)
 
         with open(output_path, 'w') as f_out:
             f_out.writelines(modified_lines)
@@ -291,32 +296,75 @@ def modify_pto_canvas(input_path, output_path, width, height, verbose=False):
     print(f"   ...Done: {description}.")
     return output_path
 
-def composite_logos(base_image_path, output_path, nmn_logo_path, sbsdnb_logo_path, as7_logo_path, verbose=False):
-    """Composites logos onto a base image using Pillow."""
-    description = f"Adding logos to {Path(base_image_path).name}"
+def create_logo_overlay(width, height, logo_paths, output_path=None):
+    """
+    Creates a transparent image of (width, height) with NMN, SBSDNB, and AS7 logos 
+    placed in the Top-Left, Top-Right, and Bottom-Right corners respectively.
+    Returns the path to the saved overlay image.
+    """
+    if output_path is None:
+        # Create a temp file if no path specified
+        fd, output_path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+
+    try:
+        # Create transparent base
+        base_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        
+        with Image.open(logo_paths['nmn']).convert("RGBA") as nmn_logo, \
+             Image.open(logo_paths['sbsdnb']).convert("RGBA") as sbsdnb_logo, \
+             Image.open(logo_paths['as7']).convert("RGBA") as as7_logo:
+
+            # 1. NMN Logo (Top Left)
+            base_img.paste(nmn_logo, (16, 16), nmn_logo)
+            
+            # 2. SBSDNB Logo (Top Right)
+            sbsdnb_x = width - sbsdnb_logo.width - 16
+            base_img.paste(sbsdnb_logo, (sbsdnb_x, 16), sbsdnb_logo)
+
+            # 3. AS7 Logo (Lower Right)
+            as7_x = width - as7_logo.width - 16
+            as7_y = height - as7_logo.height - 16
+            base_img.paste(as7_logo, (as7_x, as7_y), as7_logo)
+            
+        base_img.save(output_path)
+        return output_path
+
+    except Exception as e:
+        print(f"Error creating logo overlay: {e}", file=sys.stderr)
+        return None
+
+def add_logos(base_image_path, output_path, logo_paths, verbose=False):
+    """
+    Convenience function to composite logos directly onto an image file.
+    Uses create_logo_overlay internally for consistency.
+    """
+    description = f"Adding logos to {Path(output_path).name}"
     print(f"-> {description}...")
-    if verbose:
-        print(f"   Base: {base_image_path}, NMN: {nmn_logo_path}, SBSDNB: {sbsdnb_logo_path}, AS7: {as7_logo_path}")
+    
+    try:
+        with Image.open(base_image_path).convert("RGBA") as base:
+            # Generate an overlay matching the base image dimensions
+            overlay_path = f"{base_image_path}.logos.temp.png"
+            create_logo_overlay(base.width, base.height, logo_paths, overlay_path)
+            
+            with Image.open(overlay_path).convert("RGBA") as overlay:
+                 composited = Image.alpha_composite(base, overlay)
+                 
+                 ext = Path(output_path).suffix.lower()
+                 if ext in ['.jpg', '.jpeg']:
+                     composited.convert("RGB").save(output_path)
+                 else:
+                     composited.save(output_path)
+            
+            if os.path.exists(overlay_path):
+                os.remove(overlay_path)
 
-    with Image.open(base_image_path).convert("RGBA") as base_img, \
-         Image.open(nmn_logo_path).convert("RGBA") as nmn_logo, \
-         Image.open(sbsdnb_logo_path).convert("RGBA") as sbsdnb_logo, \
-         Image.open(as7_logo_path).convert("RGBA") as as7_logo:
-
-        # 1. NMN Logo (Top Left)
-        base_img.paste(nmn_logo, (16, 16), nmn_logo)
-        
-        # 2. SBSDNB Logo (Top Right)
-        sbsdnb_x = base_img.width - sbsdnb_logo.width - 16
-        base_img.paste(sbsdnb_logo, (sbsdnb_x, 16), sbsdnb_logo)
-
-        # 3. AS7 Logo (Lower Right)
-        as7_x = base_img.width - as7_logo.width - 16
-        as7_y = base_img.height - as7_logo.height - 16
-        base_img.paste(as7_logo, (as7_x, as7_y), as7_logo)
-        
-        base_img.convert("RGB").save(output_path)
-    print(f"   ...Done: {description}.")
+        print(f"   ...Done: {description}.")
+    except Exception as e:
+        print(f"Error adding logos: {e}", file=sys.stderr)
+        if verbose: traceback.print_exc(file=sys.stderr)
+    
     return output_path
 
 def draw_text_on_image(image_path, text, output_path, verbose=False):
@@ -361,8 +409,11 @@ def set_image_opacity(input_path, output_path, opacity, verbose=False):
     return output_path
 
 def alpha_composite_images(base_path, overlay_path, output_path, verbose=False):
-    """Composites a pre-processed overlay onto a base image."""
-    description = f"Creating composite image with grid: {Path(output_path).name}"
+    """
+    Composites a pre-processed overlay onto a base image.
+    IMPORTANT: Preserves Alpha channel if saving to PNG, enabling semi-transparent video overlays.
+    """
+    description = f"Creating composite image: {Path(output_path).name}"
     print(f"-> {description}...")
     if verbose:
         print(f"   Base: {base_path}, Overlay: {overlay_path}")
@@ -373,7 +424,16 @@ def alpha_composite_images(base_path, overlay_path, output_path, verbose=False):
             overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
         
         composited = Image.alpha_composite(base, overlay)
-        composited.convert("RGB").save(output_path)
+        
+        # Check output extension to determine mode
+        ext = Path(output_path).suffix.lower()
+        if ext in ['.jpg', '.jpeg']:
+            # Drop alpha for JPEGs
+            composited.convert("RGB").save(output_path)
+        else:
+            # Keep alpha channel for PNGs (Essential for transparent video overlays)
+            composited.save(output_path)
+            
     print(f"   ...Done: {description}.")
     return output_path
 
@@ -391,7 +451,7 @@ def crop_image(input_path, output_path, crop_box, verbose=False):
 
 def overlay_video_with_image(video_path, overlay_path, output_path, verbose=False):
     """Overlays an image on a video using the ffmpeg-python library."""
-    description = f"Creating video with grid overlay: {Path(output_path).name}"
+    description = f"Creating video with overlay: {Path(output_path).name}"
     print(f"-> {description}...")
     if verbose:
         print(f"   Video Input: {video_path}, Overlay Input: {overlay_path}")
@@ -414,10 +474,13 @@ def overlay_video_with_image(video_path, overlay_path, output_path, verbose=Fals
         sys.exit(1)
     return output_path
 
-def handle_hevc_transcoding(video_path, verbose=False):
+def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
     """
     Checks if a video file uses the HEVC codec. If so, renames the original
     to '_hevc.mp4' and creates a new H.264 version with the original name.
+    
+    OPTIMIZATION: Applies the logo overlay during the transcode step to avoid 
+    an extra encoding pass.
     """
     video_file = Path(video_path)
     if not video_file.exists():
@@ -430,7 +493,7 @@ def handle_hevc_transcoding(video_path, verbose=False):
         video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
 
         if video_stream and video_stream.get('codec_name') == 'hevc':
-            print(f"   -> HEVC codec detected. Transcoding to H.264...")
+            print(f"   -> HEVC codec detected. Transcoding to H.264 (with overlay)...")
 
             # Define the new name for the original HEVC file
             hevc_file_path = video_file.with_name(f"{video_file.stem}_hevc.mp4")
@@ -440,11 +503,15 @@ def handle_hevc_transcoding(video_path, verbose=False):
             shutil.move(str(video_file), str(hevc_file_path))
 
             # Transcode the renamed file back to the original filename with H.264
-            print(f"      - Transcoding {hevc_file_path.name} to {video_file.name} (H.264)...")
+            # AND apply the overlay in the same pass
+            print(f"      - Transcoding and watermarking {hevc_file_path.name} to {video_file.name} (H.264)...")
             try:
+                input_video = ffmpeg.input(str(hevc_file_path))
+                overlay_img = ffmpeg.input(logo_overlay_path)
+                
                 (
                     ffmpeg
-                    .input(str(hevc_file_path))
+                    .filter([input_video, overlay_img], 'overlay', 0, 0)
                     .output(str(video_file), vcodec='libx264', crf=23, preset='medium')
                     .overwrite_output()
                     .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
@@ -500,8 +567,6 @@ def get_event_data(event_file):
                     elif key == 'brightness':
                         data['brightness_values'] = [float(b) for b in value.split()]
 
-                
-                # General section keys
                 if key == 'start':
                     timestamp = None
                     for part in parts:
@@ -531,7 +596,6 @@ def get_event_data(event_file):
 
 def update_event_file(event_data, filepath="event.txt"):
     """Updates event.txt with refined brightness data."""
-    # Only proceed if there is valid brightness data to write.
     if 'brightness' not in event_data or not event_data['brightness']:
         return
 
@@ -574,11 +638,8 @@ def run_command(command, description, verbose=False):
     if not verbose:
         print(f"-> {description}...")
     
-    # This prevents buffer deadlocks and lets you see errors immediately.
     do_capture = not verbose
-    
     try:
-        # Pass stdout/stderr as None if verbose (streams to console), else PIPE (capture)
         stdout_dest = subprocess.PIPE if do_capture else None
         stderr_dest = subprocess.PIPE if do_capture else None
 
@@ -591,50 +652,73 @@ def run_command(command, description, verbose=False):
             text=True
         )
 
-        if verbose:
-            # If we didn't capture, we can't print the result.stdout because it's already printed.
-            print(f"   ...Done: {description}.")
-        else:
+        if not verbose:
             print(f"   ...Done: {description}.")
         return result
     except subprocess.CalledProcessError as e:
         print(f"\n--- ERROR executing external command ---\nCommand failed: {command}", file=sys.stderr)
-        # If we captured output, print it now.
         if do_capture:
             if e.stdout: print(f"Stdout:\n{e.stdout}", file=sys.stderr)
             if e.stderr: print(f"Stderr:\n{e.stderr}", file=sys.stderr)
         raise
 
-def _run_full_view_sequentially(event_data, filenames, tmpdir, verbose):
+def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbose):
     """Runs the full view processing pipeline sequentially."""
     print("\n--- Processing Full View (Sequential) ---")
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
     
+    # 1. Generate Grid
     grid_labels_path = f"{tmpdir}/grid-labels.png"
     drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
     run_command(drawgrid_cmd, "Generating full view grid", verbose)
 
+    # 2. Make grid transparent
     grid_labels_transparent_path = f"{tmpdir}/grid-labels-transparent.png"
     set_image_opacity(grid_labels_path, grid_labels_transparent_path, OVERLAY_OPACITY, verbose=verbose)
     
-    print("-> Creating final full view images and videos...")
-    alpha_composite_images(filenames['jpg'], grid_labels_transparent_path, filenames['jpggrid'], verbose=verbose)
-    overlay_video_with_image(filenames['full'], grid_labels_transparent_path, filenames['mp4grid'], verbose=verbose)
+    # 3. Create Logo Overlay Layer (1920x1080)
+    logo_layer_path = f"{tmpdir}/logo_layer_1080p.png"
+    create_logo_overlay(1920, 1080, logo_paths, logo_layer_path)
 
-def _run_full_view_in_parallel(event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg: Future):
+    # 4. Composite Logos onto the Transparent Grid
+    # This ensures mp4grid gets both grid and logos
+    final_overlay_path = f"{tmpdir}/grid_plus_logos.png"
+    alpha_composite_images(grid_labels_transparent_path, logo_layer_path, final_overlay_path, verbose=verbose)
+
+    print("-> Creating final full view images and videos...")
+    # 5. Composite Final Overlay (Grid+Logos) onto the clean stacked JPG to create [prefix]-grid.jpg
+    alpha_composite_images(filenames['jpg'], final_overlay_path, filenames['jpggrid'], verbose=verbose)
+    
+    # 6. Overlay Final Overlay (Grid+Logos) onto the video to create [prefix]-grid.mp4
+    overlay_video_with_image(filenames['full'], final_overlay_path, filenames['mp4grid'], verbose=verbose)
+
+def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbose, executor, future_stacked_jpg: Future):
     """Runs the full view processing pipeline in parallel."""
     print("\n--- Processing Full View ---")
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
     
+    # 1. Grid Generation
     grid_labels_path = f"{tmpdir}/grid-labels.png"
     drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
     future_grid_png = executor.submit(run_command, drawgrid_cmd, "Generating full view grid", verbose)
 
+    # 2. Transparency
     future_transparent_grid = executor.submit(lambda: set_image_opacity(future_grid_png.result() and grid_labels_path, f"{tmpdir}/grid-labels-transparent.png", OVERLAY_OPACITY, verbose))
     
+    # 3. Create Logo Layer (independent)
+    logo_layer_path = f"{tmpdir}/logo_layer_1080p.png"
+    future_logo_layer = executor.submit(create_logo_overlay, 1920, 1080, logo_paths, logo_layer_path)
+
+    # 4. Composite Logos onto Transparent Grid
+    final_overlay_path = f"{tmpdir}/grid_plus_logos.png"
+    future_final_overlay = executor.submit(lambda: alpha_composite_images(future_transparent_grid.result(), future_logo_layer.result(), final_overlay_path, verbose))
+
     print("-> Submitting final full view image and video tasks...")
-    future_jpg_grid = executor.submit(lambda: alpha_composite_images(future_stacked_jpg.result() and filenames['jpg'], future_transparent_grid.result(), filenames['jpggrid'], verbose))
-    future_mp4_grid = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_transparent_grid.result(), filenames['mp4grid'], verbose))
+    # 5. Create [prefix]-grid.jpg (Clean JPG + GridWithLogos)
+    future_jpg_grid = executor.submit(lambda: alpha_composite_images(future_stacked_jpg.result() and filenames['jpg'], future_final_overlay.result(), filenames['jpggrid'], verbose))
+    
+    # 6. Create [prefix]-grid.mp4 (Full Video + GridWithLogos)
+    future_mp4_grid = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_final_overlay.result(), filenames['mp4grid'], verbose))
 
     for future in as_completed([future_jpg_grid, future_mp4_grid]):
         future.result()
@@ -642,14 +726,13 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, verbose, executor,
 # --- Gnomonic View Processing Helpers ---
 
 def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked_jpg_path, padding_value=1024):
-    """Generates the base gnomonic projection image from a stacked JPG."""
+    """Generates the base gnomonic projection image (clean)."""
     azalt_start = event_data.get('start_azalt')
     azalt_end = event_data.get('end_azalt')
     if not azalt_start or not azalt_end:
         print("Warning: Skipping gnomonic projection generation: 'coordinates' not found in event.txt.", file=sys.stderr)
         return None
 
-    # 1. Reproject for gnomonic view
     reproject_cmd = (
         f"{sys.executable} {BIN_DIR}/reproject.py -f 45 --width 1920 --height 2560 "
         f"-o {filenames['gnomonic_pto']} -g {filenames['gnomonic_grid_pto']} "
@@ -657,15 +740,12 @@ def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked
     )
     run_command(reproject_cmd, "Reprojecting for gnomonic view", verbose)
 
-    # 2. Stitch gnomonic JPG
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
     stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad {padding_value} "
                         f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
     run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
     
-    # 3. Add logos
-    composite_logos(tmp_gnomonic_jpg, filenames['gnomonic'], 
-                    f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", f"{tmpdir}/as7.png", verbose=verbose)
+    shutil.move(tmp_gnomonic_jpg, filenames['gnomonic'])
     
     print(f"   ...Done: Generated base gnomonic image '{filenames['gnomonic']}'.")
     return filenames['gnomonic']
@@ -692,50 +772,65 @@ def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
     grid_path = filenames['gnomonic_corr_grid_png']
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
     
-    # Generate base grid
-    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['gnomonic_corr_grid_pto']} {grid_path}"
+    # Calculate Magnitude Limit based on FOV
+    mag_limit = get_dynamic_mag_limit(filenames['gnomonic_corr_grid_pto'])
+    
+    # Generate base grid using dynamic magnitude limit
+    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -f {mag_limit} -d {ts2} {filenames['gnomonic_corr_grid_pto']} {grid_path}"
     run_command(drawgrid_cmd, "Generating gnomonic grid", verbose)
     
-    # Draw marker crosses and az/alt labels on the grid image
     if refined_data and 'gnomonic_pixels' in refined_data and 'azalt' in refined_data:
         draw_marker_crosses(grid_path, refined_data['gnomonic_pixels'], refined_data['azalt'], verbose=verbose)
 
-    # Draw text label
     draw_text_on_image(grid_path, event_data['label'], grid_path, verbose=verbose)
     return grid_path
 
-def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose):
+def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, verbose):
     """
-    Creates the gnomonic grid, decorates it, and produces the final composite image.
-    Assumes the base gnomonic image and PTO files already exist.
+    Creates the gnomonic grid, applies logos, and produces the final composite image.
+    Handles the difference between Tall JPG projection and Cropped Video projection.
     """
-    # 1. Recalibrate PTO file. The base gnomonic image is now created earlier.
     recalibrate_gnomonic_view(event_data, filenames, verbose)
     
-    # 2. Calculate refined endpoints using the newly created/recalibrated files.
     refined_data = calculate_refined_endpoints(event_data, filenames, verbose)
     if refined_data:
         event_data['refined_coords'] = refined_data.get('azalt')
         if refined_data.get('brightness'):
             event_data['brightness'] = refined_data.get('brightness')
 
-    # 3. Generate the grid and draw decorations (crosses, text).
+    # 1. Generate Base Grid (Tall) with dynamic star labels
     grid_path = _generate_decorated_grid(event_data, filenames, refined_data, verbose)
     
-    # 4. Prepare the grid for compositing (set opacity, crop for video).
+    # 2. Make Grid Transparent
     gnomonic_grid_transparent = f"{tmpdir}/gnomonic_grid_transparent.png"
     set_image_opacity(grid_path, gnomonic_grid_transparent, OVERLAY_OPACITY, verbose=verbose)
     
-    cropped_gnomonic_grid = f"{tmpdir}/gnomonic_grid_cropped.png"
-    crop_image(gnomonic_grid_transparent, cropped_gnomonic_grid, crop_box=(0, 740, 1920, 740 + 1080), verbose=verbose)
+    # --- PROJECTION IMAGE CREATION (TALL 1920x2560) ---
+    # Create a tall logo layer for the static JPG
+    logo_layer_tall = f"{tmpdir}/logo_layer_tall.png"
+    # Using 2560 height to place logos at the very top and very bottom of the strip
+    create_logo_overlay(1920, 2560, logo_paths, logo_layer_tall)
+    
+    # Composite Tall Grid + Tall Logos
+    overlay_tall = f"{tmpdir}/overlay_tall.png"
+    alpha_composite_images(gnomonic_grid_transparent, logo_layer_tall, overlay_tall, verbose=verbose)
+    
+    # Create final [prefix]-gnomonic-grid.jpg
+    alpha_composite_images(filenames['gnomonic'], overlay_tall, filenames['gnomonicgrid'], verbose=verbose)
 
-    # 5. Create final composite static image.
-    alpha_composite_images(filenames['gnomonic'], gnomonic_grid_transparent, filenames['gnomonicgrid'], verbose=verbose)
 
-    return {"cropped_grid": cropped_gnomonic_grid}
+    # --- VIDEO GRID OVERLAY PREPARATION (CROPPED 1920x1080) ---
+    # Crop the TRANSPARENT GRID (without logos yet) to 1080p
+    cropped_grid_clean = f"{tmpdir}/gnomonic_grid_cropped_clean.png"
+    crop_image(gnomonic_grid_transparent, cropped_grid_clean, crop_box=(0, 740, 1920, 740 + 1080), verbose=verbose)
+    
+    # We return the CLEAN cropped grid.
+    # Why? Because we will overlay logos onto the BASE gnomonic video separately.
+    # If we add logos to the grid here, we'd get double logos (ghosting).
+    return {"cropped_grid": cropped_grid_clean}
 
 
-def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, verbose, executor, future_stacked_jpg: Future):
+def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbose, executor, future_stacked_jpg: Future):
     """Runs the gnomonic processing by splitting it into parallel video and image/grid pipelines."""
     print("\n--- Processing Gnomonic View ---")
     azalt_start, azalt_end = event_data.get('start_azalt'), event_data.get('end_azalt')
@@ -743,70 +838,82 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, verbose, execu
         print("Skipping gnomonic view: 'coordinates' not found in event.txt.")
         return
 
-    # 1. Generate the base gnomonic projection image. This replaces the old reproject task.
-    #    It must wait for the stacked JPG to be created.
+    # 1. Generate the base gnomonic projection image.
     stacked_jpg_path = future_stacked_jpg.result() and filenames['jpg']
     future_gnomonic_base_image = executor.submit(generate_gnomonic_projection, 
                                                  event_data, filenames, tmpdir, verbose, stacked_jpg_path)
-    future_gnomonic_base_image.result() # This must complete before the next steps.
+    future_gnomonic_base_image.result() 
 
-
-    # 2. GNOMONIC VIDEO PIPELINE (long-running)
-    # Starts the creation of the raw gnomonic video, which runs in parallel with the grid creation.
+    # 2. GNOMONIC VIDEO PIPELINE
     future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
                                           filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
-    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {filenames['gnomonicmp4']}"
-    future_gnomonic_mp4 = executor.submit(lambda: run_command(future_modified_pto.result() and stitch_cmd_mp4, "Creating gnomonic video", verbose))
+    
+    # Create raw stitch
+    raw_gnomonic_mp4 = f"{tmpdir}/raw_gnomonic.mp4"
+    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {raw_gnomonic_mp4}"
+    future_stitch = executor.submit(lambda: run_command(future_modified_pto.result() and stitch_cmd_mp4, "Creating gnomonic video", verbose))
 
-    # 3. GNOMONIC IMAGE/GRID PIPELINE (long-running)
-    # This task now depends on the base gnomonic image being created.
-    future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, verbose)
+    # Create 1080p Logo Layer
+    logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
+    # Ensure this exists (might have been created in full view, but parallel safety says create again or check)
+    create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
+
+    # 3. GNOMONIC IMAGE/GRID PIPELINE
+    future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, logo_paths, verbose)
 
     # 4. FINAL ASSEMBLY
-    # Wait for the video and the grid assets, then combine them.
-    grid_assets = future_grid_assets.result()
-    future_gnomonic_mp4.result()
+    grid_assets = future_grid_assets.result() # Contains CLEAN cropped grid
+    future_stitch.result() # Wait for raw stitching
     
+    # A. Watermark the Base Gnomonic Video -> [prefix]-gnomonic.mp4
+    overlay_video_with_image(raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+    
+    # B. Create Grid Video: Overlay CLEAN grid onto WATERMARKED base video -> [prefix]-gnomonic-grid.mp4
+    # This prevents double logos (ghosting) while ensuring correct placement.
     overlay_video_with_image(filenames['gnomonicmp4'], grid_assets["cropped_grid"], filenames['gnomonicgridmp4'], verbose)
 
-def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, verbose):
+def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbose):
     """Runs the entire gnomonic processing pipeline sequentially."""
     print("\n--- Processing Gnomonic View (Sequential) ---")
     azalt_start, azalt_end = event_data.get('start_azalt'), event_data.get('end_azalt')
     if not azalt_start or not azalt_end: return
 
-    # 1. Generate base gnomonic image. Requires the stacked JPG which was created just before this function call.
+    # 1. Generate base gnomonic image (clean).
     generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, filenames['jpg'])
 
-    # 2. Create the decorated grid and get assets for the video overlay
-    grid_assets = _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, verbose)
+    # 2. Create the decorated grid (returns clean cropped grid)
+    grid_assets = _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, verbose)
 
-    # 3. Create final gnomonic video
+    # 3. Create Gnomonic Video
     print("-> Creating final gnomonic video...")
     modify_pto_canvas(filenames['gnomonic_pto'], filenames['gnomonic_mp4_pto'], 1920, 1080, verbose=verbose)
-    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {filenames['gnomonicmp4']}"
+    
+    raw_gnomonic_mp4 = f"{tmpdir}/raw_gnomonic.mp4"
+    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {raw_gnomonic_mp4}"
     run_command(stitch_cmd_mp4, "Creating gnomonic video", verbose)
     
+    # Prepare Logo Layer
+    logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
+    if not Path(logo_layer_1080p).exists():
+        create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
+
+    # A. Watermark Base Video
+    overlay_video_with_image(raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+    
+    # B. Overlay Grid (Clean) on Watermarked Video
     overlay_video_with_image(filenames['gnomonicmp4'], grid_assets["cropped_grid"], filenames['gnomonicgridmp4'], verbose=verbose)
 
 # --- Client Mode Functions ---
 
 def search_for_videos(video_dir, start_unix):
-    """
-    Searches for three consecutive one-minute video files around the start time
-    based on the expected camera directory structure.
-    Returns a list of 3 Path objects (or None if not found) from earliest to latest.
-    """
+    """Searches for three consecutive one-minute video files."""
     found_files = []
-    # Search for files for t-1, t, and t+1 minute relative to the event start.
     for i in [-1, 0, 1]:
         found_file = None
         base_time = start_unix + (i * 60)
-        # Check the minute before and after if the exact minute isn't found.
         for offset in [0, -60, 60]:
             search_time = base_time + offset
             dt_obj = datetime.datetime.fromtimestamp(search_time, tz=datetime.timezone.utc)
-            # Path format is expected to be: YYYYMMDD/HH/full_MM.mp4
             file_path = Path(video_dir) / dt_obj.strftime('%Y%m%d/%H') / f"full_{dt_obj.strftime('%M')}.mp4"
             if file_path.exists():
                 found_file = file_path
@@ -815,17 +922,12 @@ def search_for_videos(video_dir, start_unix):
     return found_files
 
 def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
-    """
-    Runs the script in client mode: finds source videos, concatenates them
-    into the event video, copies relevant conf/grid files, and prints event
-    coordinates before exiting.
-    """
+    """Runs the script in client mode."""
     print("--- Running in Client Mode ---")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         print(f"Using temporary directory {tmpdir}")
 
-        # --- Copy configuration files ---
         dest_conf = Path("metdetect.conf")
         if not dest_conf.exists():
             src_conf = Path(video_dir) / "metdetect.conf"
@@ -833,36 +935,28 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
                 try:
                     shutil.copy(src_conf, dest_conf)
                     print(f"Copied {src_conf} to current directory.")
-                except shutil.SameFileError:
-                    pass # File is already here, which is fine.
-                except shutil.Error as e:
-                    print(f"Error copying metdetect.conf: {e}", file=sys.stderr)
+                except shutil.SameFileError: pass
+                except shutil.Error as e: print(f"Error copying metdetect.conf: {e}", file=sys.stderr)
             else:
-                 print("Warning: metdetect.conf not found in current directory or in --video-dir.", file=sys.stderr)
+                 print("Warning: metdetect.conf not found.", file=sys.stderr)
 
         meteor_cfg_src = Path("/etc/meteor.cfg")
-        if meteor_cfg_src.exists():
-            shutil.copy(meteor_cfg_src, ".")
-        else:
-             print("Warning: /etc/meteor.cfg not found.", file=sys.stderr)
+        if meteor_cfg_src.exists(): shutil.copy(meteor_cfg_src, ".")
+        else: print("Warning: /etc/meteor.cfg not found.", file=sys.stderr)
 
-        # --- Find and prepare video files ---
         full1, full2, full3 = search_for_videos(video_dir, start_unix)
         video_files = [full1, full2, full3]
-        
         if not all(video_files):
             print("Error: One or more source videos not found.", file=sys.stderr)
             sys.exit(1)
         print(f"Found source videos:\n- {full1}\n- {full2}\n- {full3}")
         
-        # --- Get metadata from first video (timestamp and frame rate) ---
         ts = 0
         try:
             probe = ffmpeg.probe(str(full1))
             rate_str = next((s['r_frame_rate'] for s in probe['streams'] if s['codec_type'] == 'video'), None)
             if rate_str is None: raise ValueError("No video stream found")
-            rate = eval(rate_str)
-
+            
             creation_time_str = probe.get('format', {}).get('tags', {}).get('creation_time')
             if creation_time_str:
                 dt_obj = datetime.datetime.fromisoformat(creation_time_str.replace('Z', '+00:00'))
@@ -878,21 +972,16 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
                 dt_obj = datetime.datetime.strptime(date_str, "%Y%m%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
                 ts = int(dt_obj.timestamp())
             else:
-                print("Error: Could not determine timestamp for first video file. Exiting.", file=sys.stderr)
+                print("Error: Could not determine timestamp. Exiting.", file=sys.stderr)
                 sys.exit(1)
         
-        # --- Calculate FFmpeg skip and length ---
         skip_sec = start_unix - ts - 10
         len_padded = length_sec + 14
-        
         if skip_sec < 0:
-            print(f"Warning: Calculated skip time is negative ({skip_sec}s). This may clip the event start.", file=sys.stderr)
+            print(f"Warning: Calculated skip time is negative ({skip_sec}s).", file=sys.stderr)
             skip_sec = max(0, skip_sec)
 
-        # --- Concatenate videos with FFmpeg and report final clip time ---
         full_mp4 = f"{output_name}.mp4"
-        
-        # Calculate the start and end time of the final clip to be generated
         ts_clip_start = ts + skip_sec
         ts_clip_end = ts_clip_start + len_padded
         start_hms = datetime.datetime.fromtimestamp(ts_clip_start, tz=datetime.timezone.utc).strftime('%H:%M:%S')
@@ -919,34 +1008,26 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
             print(f"FFmpeg stderr:\n{e.stderr.decode('utf8')}", file=sys.stderr)
             sys.exit(1)
         
-        # --- Copy grid, lens, and mask files ---
         day_str = datetime.datetime.fromtimestamp(start_unix, tz=datetime.timezone.utc).strftime('%Y%m%d')
         
         def find_and_copy_latest_file(pattern, dest_name, event_day_str):
             base_dir = Path(video_dir)
-            # Default to a non-dated file in the video dir
             latest_file_to_copy = base_dir / dest_name
-            
-            # Find the most recent dated file that is on or before the event day
             files = sorted(base_dir.glob(pattern))
             for f in files:
                 match = re.search(r'-(\d{8})\.', f.name)
                 if match and match.group(1) <= event_day_str:
                     latest_file_to_copy = f
-                else:
-                    break # List is sorted, no more candidates
-            
+                else: break 
             if latest_file_to_copy.exists():
                 shutil.copy(latest_file_to_copy, dest_name)
                 return latest_file_to_copy
             return None
 
-        grid_f = find_and_copy_latest_file("grid-*.png", "grid.png", day_str)
-        lens_f = find_and_copy_latest_file("lens-*.pto", "lens.pto", day_str)
-        mask_f = find_and_copy_latest_file("mask-*.jpg", "mask.jpg", day_str)
-        print(f"Using grid: {grid_f}, lens: {lens_f}, mask: {mask_f}")
+        find_and_copy_latest_file("grid-*.png", "grid.png", day_str)
+        find_and_copy_latest_file("lens-*.pto", "lens.pto", day_str)
+        find_and_copy_latest_file("mask-*.jpg", "mask.jpg", day_str)
 
-        # --- Generate stacked and gnomonic images for meteorcrop ---
         print("\n--- Generating images for cropping ---")
         
         filenames = {
@@ -960,48 +1041,45 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
         with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
         with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
 
-        # Stack the video to create the JPG
+        logo_paths = {'nmn': f"{tmpdir}/nmn.png", 'sbsdnb': f"{tmpdir}/sbsdnb.png", 'as7': f"{tmpdir}/as7.png"}
+
         stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
         run_command(stack_cmd, "Stacking video frames to create JPG", verbose)
         
         event_data = get_event_data("event.txt")
-
-        # Determine if recalibration should run, same logic as full pipeline
         event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
-        if verbose:
-            print(f"Recalibration check: manual={event_data.get('manual', 0)}, sunalt={event_data.get('sunalt', 0)} -> Recalibrate: {event_data['recalibrate']}")
 
-        # Generate the base gnomonic image needed for meteorcrop
         gnomonic_image_path = generate_gnomonic_projection(
             event_data, filenames, tmpdir, verbose, filenames['jpg'], padding_value=32
         )
 
         if gnomonic_image_path:
-            # Run recalibration step to create gnomonic_corr_grid.pto
             recalibrate_gnomonic_view(event_data, filenames, verbose)
             
-            # Run meteorcrop.py on the current directory
+            # Run crop on CLEAN images
             meteorcrop_cmd = f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} ."
             run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg", verbose)
+            
+            # Watermark the Gnomonic Image
+            add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose)
 
+        # Watermark the Stacked Image
+        add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose)
 
-        # --- Read event.txt for coordinates ---
         try:
             event_data = get_event_data("event.txt")
             start_coords = event_data.get('start_azalt', 'N/A,N/A').replace(',', ' ')
             end_coords = event_data.get('end_azalt', 'N/A,N/A').replace(',', ' ')
             print(f"Start: {start_coords}  End: {end_coords}")
-        except SystemExit: # get_event_data calls sys.exit on failure
+        except SystemExit:
             print("Could not read event.txt to report coordinates.")
 
 def main(args):
     """Main function to orchestrate the video processing pipeline."""
     if args.client:
-        # In client mode, we only perform the actions to create the event video
         run_client_mode(args.file_prefix, args.video_dir, args.start, args.length, args.verbose)
         return
         
-    # Check for unused arguments in full pipeline mode
     if args.video_dir or args.start is not None or args.length is not None:
         print("Warning: --video-dir, --start, and --length are only used with the --client flag. They will be ignored.", file=sys.stderr)
 
@@ -1013,6 +1091,8 @@ def main(args):
         with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
         with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
         with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
+
+        logo_paths = {'nmn': f"{tmpdir}/nmn.png", 'sbsdnb': f"{tmpdir}/sbsdnb.png", 'as7': f"{tmpdir}/as7.png"}
 
         event_data = get_event_data('event.txt')
         name = args.file_prefix
@@ -1034,36 +1114,44 @@ def main(args):
         if args.nothreads:
             stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
             run_command(stack_cmd, "Stacking video frames to create JPG", args.verbose)
-            _run_full_view_sequentially(event_data, filenames, tmpdir, args.verbose)
+            _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
             if gnomonic_enabled:
-                _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, args.verbose)
+                _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
         else:
             with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
                 stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
                 future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", args.verbose)
 
-                future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, args.verbose, executor, future_stacked_jpg)
+                future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
                 
                 if gnomonic_enabled:
-                    future_gnomonic = executor.submit(_run_gnomonic_view_in_parallel, event_data, filenames, tmpdir, args.verbose, executor, future_stacked_jpg)
-                    future_gnomonic.result() # Wait for gnomonic pipeline to finish
+                    future_gnomonic = executor.submit(_run_gnomonic_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
+                    future_gnomonic.result()
                 else:
                     print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
 
-                future_full_view.result() # Wait for full view pipeline to finish
+                future_full_view.result()
 
-        composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", f"{tmpdir}/as7.png", verbose=args.verbose)
+        # Watermark the base images (clean stacked and gnomonic) at the end
+        add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose=args.verbose)
+        if gnomonic_enabled and Path(filenames['gnomonic']).exists():
+             add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose=args.verbose)
+
 
     # --- HEVC Transcoding Step ---
     print("\n--- Finalizing Videos ---")
-    handle_hevc_transcoding(filenames['full'], args.verbose)
+    
+    # We create a 1080p overlay specifically for the HEVC transcode process
+    with tempfile.TemporaryDirectory() as hevc_tmp:
+        hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
+        create_logo_overlay(1920, 1080, logo_paths, hevc_overlay_path)
+        handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
 
     # Update event.txt before finishing
     update_event_file(event_data)
 
     print("\n--- Pipeline Finished ---")
 
-    # Print the refined coordinates as the final output
     if event_data.get('refined_coords'):
         s_az, s_alt, e_az, e_alt = event_data['refined_coords']
         print(f"Start: {s_az:.2f} {s_alt:.2f}  End: {e_az:.2f} {e_alt:.2f}")
@@ -1074,43 +1162,32 @@ def check_pid(pid):
     try:
         os.kill(pid, 0)
     except OSError as err:
-        if err.errno == errno.ESRCH:
-            return False # No such process
-        elif err.errno == errno.EPERM:
-            return True # Process exists, but we don't have permission
-        else:
-            raise # Other OS error
-    return True # Process exists
+        if err.errno == errno.ESRCH: return False
+        elif err.errno == errno.EPERM: return True
+        else: raise
+    return True
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description=(
-            "Processes meteor observation videos using Python libraries.\n"
-            "Default mode creates advanced products like gnomonic projections.\n"
-            "'--client' mode creates the initial event video from raw footage."
-        ),
+        description="Processes meteor observation videos.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    # --- Arguments for all modes ---
-    parser.add_argument("file_prefix", help="The base name for input/output files (e.g., 'event_20250101_123456').")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed information about commands being run.")
+    parser.add_argument("file_prefix", help="The base name for input/output files.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed info.")
     
-    # --- Arguments for client mode ---
     client_group = parser.add_argument_group('Client Mode')
-    client_group.add_argument("--client", action="store_true", help="Run in client mode to generate the initial event video.")
-    client_group.add_argument("--video-dir", help="[Client mode] Directory containing source video files (e.g., '~/RPIws/').")
-    client_group.add_argument("--start", type=int, help="[Client mode] Event start time as a Unix timestamp.")
-    client_group.add_argument("--length", type=int, help="[Client mode] Event duration in seconds.")
+    client_group.add_argument("--client", action="store_true", help="Run in client mode.")
+    client_group.add_argument("--video-dir", help="[Client mode] Source video directory.")
+    client_group.add_argument("--start", type=int, help="[Client mode] Start timestamp.")
+    client_group.add_argument("--length", type=int, help="[Client mode] Duration in seconds.")
 
-    # --- Arguments for full pipeline ---
-    full_group = parser.add_argument_group('Full Pipeline Mode (default)')
-    full_group.add_argument("--nothreads", action="store_true", help="Disable multithreading and run all tasks sequentially.")
+    full_group = parser.add_argument_group('Full Pipeline Mode')
+    full_group.add_argument("--nothreads", action="store_true", help="Disable multithreading.")
 
     args = parser.parse_args()
 
-    # Validate arguments for client mode
     if args.client and (args.video_dir is None or args.start is None or args.length is None):
-        parser.error("--client mode requires --video-dir, --start, and --length arguments.")
+        parser.error("--client mode requires --video-dir, --start, and --length.")
 
     os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
     lockfile = Path("processing.lock")
@@ -1119,13 +1196,11 @@ if __name__ == "__main__":
         try:
             pid = int(lockfile.read_text())
             if check_pid(pid):
-                print(f"Error: Lockfile '{lockfile}' exists and process {pid} is still running.", file=sys.stderr)
+                print(f"Error: Process {pid} is still running.", file=sys.stderr)
                 sys.exit(1)
             else:
-                print(f"Warning: Removing stale lockfile for dead process {pid}.", file=sys.stderr)
                 lockfile.unlink()
         except (ValueError, FileNotFoundError):
-            print(f"Warning: Removing corrupt or empty lockfile.", file=sys.stderr)
             lockfile.unlink(missing_ok=True)
 
     try:

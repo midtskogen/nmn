@@ -28,9 +28,8 @@ import errno
 import datetime
 
 
-# Assuming user-provided scripts are in the same directory or python path.
 try:
-    from logos import NMN_LOGO_B64, SBSDNB_LOGO_B64
+    from logos import NMN_LOGO_B64, SBSDNB_LOGO_B64, AS7_LOGO_B64
 except ImportError as e:
     print(f"Error: A required local module is missing: {e}", file=sys.stderr)
     print("Please ensure logos.py is accessible.", file=sys.stderr)
@@ -292,20 +291,30 @@ def modify_pto_canvas(input_path, output_path, width, height, verbose=False):
     print(f"   ...Done: {description}.")
     return output_path
 
-def composite_logos(base_image_path, output_path, nmn_logo_path, sbsdnb_logo_path, verbose=False):
+def composite_logos(base_image_path, output_path, nmn_logo_path, sbsdnb_logo_path, as7_logo_path, verbose=False):
     """Composites logos onto a base image using Pillow."""
     description = f"Adding logos to {Path(base_image_path).name}"
     print(f"-> {description}...")
     if verbose:
-        print(f"   Base: {base_image_path}, NMN: {nmn_logo_path}, SBSDNB: {sbsdnb_logo_path}")
+        print(f"   Base: {base_image_path}, NMN: {nmn_logo_path}, SBSDNB: {sbsdnb_logo_path}, AS7: {as7_logo_path}")
 
     with Image.open(base_image_path).convert("RGBA") as base_img, \
          Image.open(nmn_logo_path).convert("RGBA") as nmn_logo, \
-         Image.open(sbsdnb_logo_path).convert("RGBA") as sbsdnb_logo:
+         Image.open(sbsdnb_logo_path).convert("RGBA") as sbsdnb_logo, \
+         Image.open(as7_logo_path).convert("RGBA") as as7_logo:
 
+        # 1. NMN Logo (Top Left)
         base_img.paste(nmn_logo, (16, 16), nmn_logo)
+        
+        # 2. SBSDNB Logo (Top Right)
         sbsdnb_x = base_img.width - sbsdnb_logo.width - 16
         base_img.paste(sbsdnb_logo, (sbsdnb_x, 16), sbsdnb_logo)
+
+        # 3. AS7 Logo (Lower Right)
+        as7_x = base_img.width - as7_logo.width - 16
+        as7_y = base_img.height - as7_logo.height - 16
+        base_img.paste(as7_logo, (as7_x, as7_y), as7_logo)
+        
         base_img.convert("RGB").save(output_path)
     print(f"   ...Done: {description}.")
     return output_path
@@ -656,7 +665,7 @@ def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked
     
     # 3. Add logos
     composite_logos(tmp_gnomonic_jpg, filenames['gnomonic'], 
-                    f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=verbose)
+                    f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", f"{tmpdir}/as7.png", verbose=verbose)
     
     print(f"   ...Done: Generated base gnomonic image '{filenames['gnomonic']}'.")
     return filenames['gnomonic']
@@ -949,6 +958,7 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
         
         with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
         with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
+        with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
 
         # Stack the video to create the JPG
         stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
@@ -1002,6 +1012,7 @@ def main(args):
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
         with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
+        with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
 
         event_data = get_event_data('event.txt')
         name = args.file_prefix
@@ -1041,7 +1052,7 @@ def main(args):
 
                 future_full_view.result() # Wait for full view pipeline to finish
 
-        composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", verbose=args.verbose)
+        composite_logos(filenames['jpg'], filenames['jpg'], f"{tmpdir}/nmn.png", f"{tmpdir}/sbsdnb.png", f"{tmpdir}/as7.png", verbose=args.verbose)
 
     # --- HEVC Transcoding Step ---
     print("\n--- Finalizing Videos ---")

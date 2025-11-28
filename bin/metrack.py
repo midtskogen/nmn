@@ -507,8 +507,17 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             traces.extend([go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), showlegend=False, hoverinfo='none'), go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), showlegend=False, hoverinfo='none')])
 
     x_min_km, x_max_km, y_min_km, y_max_km = x_min_m / 1000.0, x_max_m / 1000.0, y_min_m / 1000.0, y_max_m / 1000.0; grid_center_km = {'x': (x_min_km + x_max_km) / 2.0, 'y': (y_min_km + y_max_km) / 2.0}; norm_factor = 245.0
-    end_lon, end_lat, _ = xyz2lonlat(track_end); end_x_km, end_y_km = project_points([end_lon], [end_lat]); translated_x = end_x_km[0] - grid_center_km['x']; translated_y = end_y_km[0] - grid_center_km['y']; camera_center = dict(x=translated_x / norm_factor, y=translated_y / norm_factor, z=0); camera_distance_norm = 1.3
+    
+    # Calculate track midpoint for camera centering
+    track_mid = (track_start + track_end) / 2.0
+    mid_lon, mid_lat, _ = xyz2lonlat(track_mid)
+    mid_x_km, mid_y_km = project_points([mid_lon], [mid_lat])
+    
+    translated_x = mid_x_km[0] - grid_center_km['x']
+    translated_y = mid_y_km[0] - grid_center_km['y']
+    camera_center = dict(x=translated_x / norm_factor, y=translated_y / norm_factor, z=0); camera_distance_norm = 1.3
     initial_eye = dict(x=camera_center['x'] + camera_distance_norm * np.cos(np.radians(0)), y=camera_center['y'] + camera_distance_norm * np.sin(np.radians(0)), z=camera_center['z'] + camera_distance_norm * np.tan(np.radians(35)))
+
     frames = []; num_frames = 180
     for k in range(num_frames): theta = (k / num_frames) * 2 * np.pi; eye_x = camera_center['x'] + camera_distance_norm * np.cos(theta); eye_y = camera_center['y'] + camera_distance_norm * np.sin(theta); frames.append(go.Frame(layout=dict(scene=dict(camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']))))))
     

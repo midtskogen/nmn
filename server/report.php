@@ -1,145 +1,413 @@
 <?php
-
-// --- Helper Functions ---
-
-function sanitize_input($data) {
-    return htmlspecialchars(stripslashes(trim($data)));
+// --- Configuration ---
+$DEFAULT_LANG = 'nb_NO';
+$LANG_DIR = '/home/httpd/norskmeteornettverk.no/bin/loc'; // Corrected to a full, unambiguous path as a best practice.
+// --- Setup ---
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
 }
 
-function generate_random_name($length = 5) {
-    return substr(str_shuffle(str_repeat('0123456789abcdefghijklmnopqrstuvwxyz', ceil($length/36))),1,$length);
-}
-
-function translate_value($key, $value) {
-    $translations = [
-        'time_accuracy' => ['unknown' => 'Veit ikke', 'pm1' => '±1 minutt', 'pm5' => '±5 minutt', 'pm15' => '±15 minutt', 'pm30' => '±30 minutt', 'gt30' => 'Mer enn 30 minutts usikkerhet'],
-        'dominant_color' => ['unknown' => 'Usikker', 'white' => 'Hvit', 'green' => 'Grønn', 'blue' => 'Blå', 'yellow' => 'Gul', 'orange' => 'Oransje', 'red' => 'Rød', 'other' => 'Annen'],
-        'brightness' => ['unknown' => 'Usikker', 'stars' => 'Som de klareste stjernene', 'brighter' => 'Litt sterkere enn stjernene', 'muchbrighter' => 'Mye sterkere enn stjernene men terrenget lyste ikke opp', 'lit' => 'Terrenget lyste opp', 'daylight' => 'Nesten som daglys', 'fulldaylight' => 'Fullt daglys'],
-        'duration' => ['unknown' => 'Usikker', 'lt2' => 'under 2 sekund', '2-4' => '2 - 4 sekund', '4-8' => '4 - 8 sekund', '8-16' => '8 - 16 sekund', 'gt16' => 'mer enn 16 sekund'],
-        'other_phenomena' => ['afterglow' => 'Etterglød', 'smoke' => 'Røykspor', 'fragmentation' => 'Oppsplitting', 'explosion' => 'Eksplosjon', 'sound' => 'Lyd/drønn'],
-        'sound_delay' => ['unknown' => 'Usikker', 'lt30s' => 'Mindre enn 30 sekund', '30s-1m' => '30 sekund til ett minutt', '1m-1.5m' => 'Ett minutt til halvannet minutt', '1.5m-2m' => 'Halvannet minutt til to minutt', 'gt2m' => 'Mer enn to minutt'],
-    ];
-    return $translations[$key][$value] ?? htmlspecialchars($value);
-}
-
-function save_base64_image($base64_string, $output_file) {
-    $data = explode(',', $base64_string);
-    if (count($data) < 2) return false;
-    return file_put_contents($output_file, base64_decode($data[1])) !== false;
-}
-
-// --- Main Script Logic ---
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // 1. Sanitize and retrieve form data
-    $sighting_date_str = sanitize_input($_POST['sighting_date_full'] ?? '');
-    $sighting_time_str = sanitize_input($_POST['sighting_time_full'] ?? '');
-    $lat = filter_var($_POST['latitude'] ?? '0', FILTER_SANITIZE_NUMBER_FLOAT, FILTER_FLAG_ALLOW_FRACTION);
-    $lon = filter_var($_POST['longitude'] ?? '0', FILTER_SANITIZE_NUMBER_FLOAT, FILTER_FLAG_ALLOW_FRACTION);
-    $start_az = sanitize_input($_POST['bearing1'] ?? '');
-    $start_alt = sanitize_input($_POST['alt1'] ?? '');
-    $end_az = sanitize_input($_POST['bearing2'] ?? '');
-    $end_alt = sanitize_input($_POST['alt2'] ?? '');
-    $time_accuracy_val = sanitize_input($_POST['time_accuracy'] ?? 'unknown');
-    $dominant_color_val = sanitize_input($_POST['dominant_color'] ?? 'unknown');
-    $brightness_val = sanitize_input($_POST['brightness'] ?? 'unknown');
-    $duration_val = sanitize_input($_POST['duration'] ?? 'unknown');
-    $other_phenomena = isset($_POST['other_phenomena']) ? (array)$_POST['other_phenomena'] : [];
-    $sound_delay_val = sanitize_input($_POST['sound_delay'] ?? 'unknown');
-    $more_info = sanitize_input($_POST['more_info'] ?? '');
-    $contact_name = sanitize_input($_POST['contact_name'] ?? '');
-    $contact_phone = sanitize_input($_POST['contact_phone'] ?? '');
-    $contact_email = filter_var($_POST['contact_email'] ?? '', FILTER_SANITIZE_EMAIL);
-
-    // 2. Create directory structure
-    $date_obj = DateTime::createFromFormat('Y-m-d H:i:s', "{$sighting_date_str} {$sighting_time_str}") ?: new DateTime();
-    $report_dir = 'reports/' . $date_obj->format('Ymd/His') . '/';
-    if (!is_dir($report_dir)) mkdir($report_dir, 0777, true);
-
-    // 3. Generate unique filename and paths
-    $file_name = generate_random_name(5);
-    $report_file_path = "{$report_dir}{$file_name}.html";
-    
-    // 4. Handle image uploads from base64 data
-    $sky_view_image_name = '';
-    if (isset($_POST['sky_view_image'])) {
-        $sky_view_image_name = "sky-view-{$file_name}.png";
-        save_base64_image($_POST['sky_view_image'], $report_dir . $sky_view_image_name);
+/**
+ * Gets the user's real IP address, safely handling proxies.
+ * @return string The user's IP address.
+ */
+function get_user_ip() {
+    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        return trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
     }
-    
-    // NEW: Handle the generated map image
-    $generated_map_image_name = '';
-    if (isset($_POST['generated_map_image'])) {
-        $generated_map_image_name = "map-view-{$file_name}.png";
-        save_base64_image($_POST['generated_map_image'], $report_dir . $generated_map_image_name);
+    if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+        return trim($_SERVER['HTTP_X_REAL_IP']);
     }
-    
-    // 5. Handle File Uploads
-    $uploaded_files_html = $uploaded_files_text = '';
-    if (isset($_FILES['file_uploads'])) {
-        $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm'];
-        foreach ($_FILES['file_uploads']['tmp_name'] as $i => $tmp_name) {
-            if ($_FILES['file_uploads']['error'][$i] === UPLOAD_ERR_OK) {
-                $file_type = mime_content_type($tmp_name);
-                if (in_array($file_type, $allowed_types)) {
-                    $original_name = $_FILES['file_uploads']['name'][$i];
-                    $new_filename = "upload-{$i}-{$file_name}." . pathinfo($original_name, PATHINFO_EXTENSION);
-                    if (move_uploaded_file($tmp_name, $report_dir . $new_filename)) {
-                        $uploaded_files_text .= "- {$new_filename}\n";
-                        if (strpos($file_type, 'image/') === 0) {
-                            $uploaded_files_html .= "<div class='col-md-4 mb-3'><a href='{$new_filename}' target='_blank'><img src='{$new_filename}' class='img-fluid' alt='Opplastet bilde'></a><p class='text-center mt-1'><a href='{$new_filename}' target='_blank'>Vis i full størrelse</a></p></div>";
-                        } elseif (strpos($file_type, 'video/') === 0) {
-                            $uploaded_files_html .= "<div class='col-md-4 mb-3'><p><a href='{$new_filename}' target='_blank'>Se video: {$new_filename}</a></p><video controls width='100%'><source src='{$new_filename}' type='{$file_type}'></video></div>";
-                        }
-                    }
+    return $_SERVER['REMOTE_ADDR'] ?? 'unknown_ip';
+}
+
+/**
+ * Determines the desired language based on the same priorities as index.php.
+ * Priority: URL Param > Cookie > Browser Header > GeoIP > Default.
+ * @param string $default_lang The default language code to use as a fallback.
+ * @return string The determined and validated language code (e.g., 'en_GB').
+ */
+function get_language($default_lang) {
+    // ADDED 'fi_FI' to the list of supported languages
+    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI'];
+    if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs)) {
+        return $_GET['lang'];
+    }
+    if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
+        return $_COOKIE['lang'];
+    }
+    if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
+        preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1|0\.[0-9]+))?/i', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $matches);
+        if (count($matches[1])) {
+            $langs = array_combine($matches[1], $matches[4]);
+            foreach ($langs as $lang => $val) { if ($val === '') $langs[$lang] = 1; }
+            arsort($langs, SORT_NUMERIC);
+            foreach (array_keys($langs) as $browser_lang) {
+                $browser_lang_code = str_replace('-', '_', $browser_lang);
+                if (in_array($browser_lang_code, $supported_langs)) return $browser_lang_code;
+                $short_code = substr($browser_lang_code, 0, 2);
+                foreach ($supported_langs as $supported) {
+                    if (substr($supported, 0, 2) === $short_code) return $supported;
                 }
             }
         }
     }
-    
-    // 6. Prepare URLs and translated values for the template
-    $protocol = 'https://'; // Force HTTPS to resolve mixed content issues
-    $base_url = $protocol . $_SERVER['HTTP_HOST'];
-    $absolute_report_url = "{$base_url}/{$report_file_path}";
-    
-    $time_accuracy_text = translate_value('time_accuracy', $time_accuracy_val);
-    $dominant_color_text = translate_value('dominant_color', $dominant_color_val);
-    $brightness_text = translate_value('brightness', $brightness_val);
-    $duration_text = translate_value('duration', $duration_val);
-    $sound_delay_text = translate_value('sound_delay', $sound_delay_val);
-    $phenomena_list_html = !empty($other_phenomena) ? '<ul>' . implode('', array_map(function($p) { return '<li>' . translate_value('other_phenomena', sanitize_input($p)) . '</li>'; }, $other_phenomena)) . '</ul>' : '<p>Ingen valgt.</p>';
-    $phenomena_list_text = !empty($other_phenomena) ? implode(', ', array_map(function($p) { return translate_value('other_phenomena', sanitize_input($p)); }, $other_phenomena)) : 'Ingen valgt.';
-    $sound_delay_html = in_array('sound', $other_phenomena) ? "<h6>Tid fra syn til lyd:</h6><p>{$sound_delay_text}</p>" : '';
-    $sound_delay_text_email = in_array('sound', $other_phenomena) ? "Lydforsinkelse: {$sound_delay_text}\n" : '';
-    
-    // 7. Build the HTML content for the report file
-    $html_template = <<<HTML
-<!doctype html>
-<html lang="no"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Meteor-rapport: {$date_obj->format('Y-m-d H:i')}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><style>body{background-color:#f8f9fa}.map-img,.sky-img,.card video,.card img{max-width:100%;width:100%;height:auto;border:1px solid #dee2e6;border-radius:.375rem}</style></head><body><div class="container-fluid my-4">{HEADER_PLACEHOLDER}<div class="row"><div class="col-lg-6 mb-4"><div class="card h-100"><div class="card-header"><h5>Observasjonstidspunkt og -sted</h5></div><div class="card-body"><h6>Tidspunkt (UTC):</h6><p>{$date_obj->format('d. F Y, H:i:s')} UTC</p><h6>Nøyaktighet:</h6><p>{$time_accuracy_text}</p><h6>Observasjonssted:</h6><p>Breddegrad: {$lat}<br>Lengdegrad: {$lon}</p><img src="{MAP_IMAGE_SRC}" alt="Kart over observasjonssted" class="img-fluid map-img mt-3"></div></div></div><div class="col-lg-6 mb-4"><div class="card h-100"><div class="card-header"><h5>Meteorbane</h5></div><div class="card-body"><div class="row"><div class="col-sm-6"><h6>Startpunkt:</h6><p>Retning: {$start_az}°<br>Høgde: {$start_alt}°</p></div><div class="col-sm-6"><h6>Sluttpunkt:</h6><p>Retning: {$end_az}°<br>Høgde: {$end_alt}°</p></div></div><img src="{SKY_VIEW_IMAGE_URL}" alt="Himmelkart av observasjon" class="img-fluid sky-img mt-3"></div></div></div></div><div class="card mb-4"><div class="card-header"><h5>Andre opplysninger</h5></div><div class="card-body"><h6>Dominerende farge:</h6><p>{$dominant_color_text}</p><h6>Største lysstyrke:</h6><p>{$brightness_text}</p><h6>Varighet:</h6><p>{$duration_text}</p><h6>Andre fenomen:</h6>{$phenomena_list_html}{$sound_delay_html}<h6>Observatørens kommentarer:</h6><p class="text-muted">{$more_info}</p></div></div><div class="card mb-4"><div class="card-header"><h5>Kontaktinformasjon</h5></div><div class="card-body"><p><strong>Navn:</strong> {$contact_name}</p><p><strong>Telefon:</strong> {$contact_phone}</p><p><strong>E-post:</strong> {$contact_email}</p></div></div><div class="card"><div class="card-header"><h5>Vedlegg</h5></div><div class="card-body"><div class="row">{$uploaded_files_html}</div></div></div><div class="text-center text-muted py-3">Rapport-ID: {$file_name}</div></div></body></html>
-HTML;
-    
-    // 8. Create and save the final HTML report file
-    $file_html = str_replace(['{HEADER_PLACEHOLDER}', '{MAP_IMAGE_SRC}', '{SKY_VIEW_IMAGE_URL}'], ['<div class="text-center mb-4"><h1 class="display-4">Meteor-rapport</h1></div>', $generated_map_image_name, $sky_view_image_name], $html_template);
-    file_put_contents($report_file_path, $file_html);
+    $country_to_lang_map = [
+        'NO' => 'nb_NO', 'SE' => 'nb_NO', 'DK' => 'nb_NO',
+        'GB' => 'en_GB', 'US' => 'en_GB', 'CA' => 'en_GB', 'AU' => 'en_GB', 'NZ' => 'en_GB', 'IE' => 'en_GB',
+        'DE' => 'de_DE', 'AT' => 'de_DE', 'CH' => 'de_DE',
+        'CZ' => 'cs_CZ', 'SK' => 'cs_CZ',
+        'FI' => 'fi_FI', // ADDED Finland to the country map
+    ];
+    $user_ip = get_user_ip();
+    $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
+    if ($geo_data_json) {
+        $geo_data = json_decode($geo_data_json);
+        if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
+            return $country_to_lang_map[$geo_data->countryCode];
+        }
+    }
+    return $default_lang;
+}
 
-    // 9. Send Email Notification
-    $to = "Steinar Midtskogen <steinar@norskmeteornettverk.no>, GEOTOP <mbgeotop@gmail.com>, Tor Einar Aslesen <taslesen@gmail.com>, Arne Danielsen <arne@soleskogobservatory.com>, Runar Sandnes <post@runarsandnes.com>, Vegard Lundby Rekaa <vegard@rekaa.no>";
-    $subject = "Ny meteorrapport - " . $date_obj->format('Y-m-d H:i:s');
-    $message = "En ny meteorrapport har blitt sendt inn.\n\nFull rapport: {$absolute_report_url}\n\nTidspunkt (UTC): {$date_obj->format('d. F Y, H:i:s')}\nNøyaktighet: {$time_accuracy_text}\n\nObservasjonssted:\nBreddegrad: {$lat}\nLengdegrad: {$lon}\n\nBane:\nStart: {$start_az}° Az, {$start_alt}° Alt\nSlutt: {$end_az}° Az, {$end_alt}° Alt\n\nAndre opplysninger:\nFarge: {$dominant_color_text}\nLysstyrke: {$brightness_text}\nVarighet: {$duration_text}\nFenomen: {$phenomena_list_text}\n{$sound_delay_text_email}Kommentarer:\n{$more_info}\n\nKontaktinformasjon:\nNavn: {$contact_name}\nTelefon: {$contact_phone}\nE-post: {$contact_email}\n\nVedlegg:\n{$uploaded_files_text}";
-    $headers = "From: Norsk meteornettverk <steinar@norskmeteornettverk.no>\r\nReply-To: steinar@norskmeteornettverk.no\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Mailer: PHP/" . phpversion();
-    mail($to, $subject, $message, $headers);
+// --- Main Logic ---
+$lang_code = get_language($DEFAULT_LANG);
+setcookie('lang', $lang_code, time() + (86400 * 365), "/");
 
-    // 10. Echo the confirmation HTML back to the user
-    $confirmation_html = str_replace(
-        ['{HEADER_PLACEHOLDER}', '{MAP_IMAGE_SRC}', '{SKY_VIEW_IMAGE_URL}'],
-        ['<div class="text-center mb-4"><h1 class="display-4">Takk for rapporten!</h1><p class="lead">Her er ei oppsummering av observasjonen din.</p></div>', "{$base_url}/{$report_dir}{$generated_map_image_name}", "{$base_url}/{$report_dir}{$sky_view_image_name}"],
-        $html_template
-    );
-    $confirmation_html = preg_replace("/(src|href)='(upload-)/", "$1='{$base_url}/{$report_dir}$2", $confirmation_html);
-    echo $confirmation_html;
+// Use the short 2-letter language code to build the filename (e.g., 'nb', 'en', 'fi')
+// This matches the actual filenames like 'nb.json', 'en.json', 'fi.json', etc.
+$lang_short = substr($lang_code, 0, 2);
+$default_lang_short = substr($DEFAULT_LANG, 0, 2);
 
-} else {
-    header("Location: obs4.html");
-    exit();
+$t = [];
+$lang_file_path = $LANG_DIR . '/' . $lang_short . '.json';
+if (!file_exists($lang_file_path)) {
+    // Fallback to the default language's short code if the detected one doesn't exist
+    $lang_file_path = $LANG_DIR . '/' . $default_lang_short . '.json';
+}
+
+if (file_exists($lang_file_path)) {
+    $t_json = file_get_contents($lang_file_path);
+    if ($t_json) {
+        $t = json_decode($t_json, true);
+    }
+}
+
+// --- File Path Setup ---
+$a = array_reverse(explode('/', getcwd()));
+$path = "/meteor/" . $a[1] . "/" . $a[0] . "/";
+$date = substr_replace($a[1], '-', 4, 0);
+$date = substr_replace($date, '-', 7, 0);
+$time = substr_replace($a[0], ':', 2, 0);
+$time = substr_replace($time, ':', 5, 0);
+$time = preg_replace("/[a-z]/", "", $time);
+// The file prefix logic was already correct, using the short language code
+$file_prefix = ($lang_short === 'nb') ? '' : $lang_short . '_';
+
+$map_jpg_path        = "{$file_prefix}map.jpg";
+$map_html_path       = "{$file_prefix}map.html";
+$height_jpg_path     = "{$file_prefix}height.jpg";
+$orbit_jpg_path      = "{$file_prefix}orbit.jpg";
+$orbit_html_path     = "{$file_prefix}orbit.html";
+$tables_html_path    = "{$file_prefix}tables.html";
+$stations_html_path  = "{$file_prefix}stations.html";
+$posvstime_jpg_path  = "{$file_prefix}posvstime.jpg";
+$spd_acc_jpg_path    = "{$file_prefix}spd_acc.jpg";
+$wind_jpg_path       = "{$file_prefix}wind_profile.jpg"; // Path for wind profile plot
+$image_path          = "{$file_prefix}image.jpg";
+
+/**
+ * Checks if a language-specific file exists, falling back to the default (non-prefixed) file.
+ * @param string $specific_path The path with the language prefix (e.g., 'en_map.jpg').
+ * @param string $default_path The path without the language prefix (e.g., 'map.jpg').
+ * @return string|null The accessible file path, or null if neither exists.
+ */
+function get_accessible_path($specific_path, $default_path) {
+    return file_exists($specific_path) ? $specific_path : (file_exists($default_path) ? $default_path : null);
+}
+
+$map_jpg_display     = get_accessible_path($map_jpg_path, "map.jpg");
+$map_html_display    = get_accessible_path($map_html_path, "map.html");
+$height_jpg_display  = get_accessible_path($height_jpg_path, "height.jpg");
+$orbit_jpg_display   = get_accessible_path($orbit_jpg_path, "orbit.jpg");
+$orbit_html_display  = get_accessible_path($orbit_html_path, "orbit.html");
+$tables_html_display   = get_accessible_path($tables_html_path, "tables.html");
+$stations_html_display = get_accessible_path($stations_html_path, "stations.html");
+$posvstime_jpg_display = get_accessible_path($posvstime_jpg_path, "posvstime.jpg");
+$spd_acc_jpg_display   = get_accessible_path($spd_acc_jpg_path, "spd_acc.jpg");
+$wind_jpg_display    = get_accessible_path($wind_jpg_path, "wind_profile.jpg"); // Check for wind profile
+?>
+<!DOCTYPE html>
+<html lang="<?php echo htmlspecialchars($lang_short); ?>">
+<head>
+  <meta charset="UTF-8">
+  <title><?php echo htmlspecialchars($t['report_title'] ?? 'Meteor Report'); ?></title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+<?php
+print '<meta property="og:url" content="' . $path . '">' . "\n";
+print '<meta property="og:type" content="article">' . "\n";
+print '<meta property="og:site_name" content="Norsk meteornettverk">' . "\n";
+$og_image_display = get_accessible_path($image_path, "image.jpg");
+if ($og_image_display) {
+    print '<meta property="og:image" content="' . $path . $og_image_display . '">' . "\n";
 }
 ?>
+
+<style>
+:root {
+  --primary-color: #082060; --secondary-color: #c01010; --background-color: #f4f6f9;
+  --text-color: #333; --card-bg-color: #ffffff; --border-color: #dee2e6;
+  --header-font: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; --body-font: 'Verdana', sans-serif;
+}
+body { font-family: var(--body-font); font-size: 16px; margin: 0; padding: 0;
+ background-color: var(--background-color); color: var(--text-color); line-height: 1.6; }
+.page-wrapper { margin: 0 auto; padding: 1em; position: relative; }
+h1 { color: var(--primary-color);
+ font-family: var(--header-font); font-size: 2.5em; margin: 0.5em 0; font-weight: 300; letter-spacing: -1px; text-align: center; }
+p { text-align: justify;
+}
+a { color: var(--secondary-color); text-decoration: none; transition: color: 0.3s; }
+a:hover { color: #601010; text-decoration: underline; }
+img { max-width: 100%;
+ height: auto; display: block; margin: 1em auto; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+.container { display: flex; flex-direction: row;
+ gap: 2em; margin: 2em 0; align-items: flex-start; }
+.column { flex: 1; display: flex; flex-direction: column; background-color: var(--card-bg-color); padding: 1.5em;
+ border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }
+iframe { width: 100%; min-height: 512px; border: none; border-radius: 8px; flex-grow: 1;
+}
+@media (max-width: 1024px) { .container { flex-direction: column; } iframe { min-height: 512px; height: 512px; } }
+.text-center { text-align: center;
+}
+table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+th, td { padding: 0.75em; text-align: left; border-bottom: 1px solid var(--border-color);
+}
+.container .column > table td:first-child { font-weight: bold; color: var(--primary-color); }
+footer { text-align: center; margin-top: 2em; padding: 1em; color: #666;
+ font-size: 0.9em; }
+
+/* Language switcher positioned absolutely */
+.language-switcher {
+    position: absolute;
+    top: 1em;
+    right: 1em;
+    z-index: 1000;
+    background-color: transparent;
+    padding: 0.25em 0.5em;
+    border-radius: 8px;
+    font-size: 1.5em;
+}
+.language-switcher a {
+    text-decoration: none;
+    margin: 0 0.25em;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+    display: inline-block;
+    /* Ensures consistent behavior */
+}
+.language-switcher a:hover {
+    opacity: 1;
+}
+
+/* ADDED: Restore auto-scaling for images inside tables from stations.html */
+table img {
+    width: 100% !important;
+    /* Force override of inline width attribute */
+    height: auto;
+}
+@media (max-width: 768px) {
+  /* This targets the <td> elements of the main layout table 
+    in stations.html. The [valign="top"] attribute is 
+    a specific selector from that file's structure.
+  */
+  .column > table > tbody > tr > td[valign="top"] {
+    display: block;  /* Makes the table cells stack vertically */
+    width: 100%;     /* Ensures they take up the full width */
+    box-sizing: border-box;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="page-wrapper">
+    
+    <div class="language-switcher">
+        <span style="font-size: 0.7em;">
+        <a href="?lang=nb_NO" title="Norsk">🇳🇴</a>
+        <a href="?lang=en_GB" title="English">🇬🇧</a>
+        <a href="?lang=de_DE" title="Deutsch">🇩🇪</a>
+        <a href="?lang=cs_CZ" title="Čeština">🇨🇿</a>
+        <a href="?lang=fi_FI" title="Suomi">🇫🇮</a> <?php // ADDED Finnish flag and link ?>
+	</span>
+    </div>
+
+    <br>
+    <h1>
+    <?php
+    if (file_exists('location.txt') && filesize('location.txt') > 0) {
+        $location = trim(file_get_contents('location.txt'));
+        $title_str = '';
+        
+        if ($lang_short === 'cs') {
+            $declensions_path = $LANG_DIR . '/cs_declensions.json';
+            $declined_location = null;
+            if (file_exists($declensions_path)) {
+                $declensions = json_decode(file_get_contents($declensions_path), true);
+                if (isset($declensions[$location])) {
+                    $declined_location = $declensions[$location];
+                }
+            }
+            if ($declined_location) {
+                $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteor nad') . ' ' . htmlspecialchars($declined_location);
+            } else {
+                $title_str = htmlspecialchars($t['meteor'] ?? 'Meteor') . ', ' . htmlspecialchars($t['location'] ?? 'poloha') . ': ' . htmlspecialchars($location);
+            }
+        } elseif ($lang_short === 'fi') {
+            // HYBRID LOGIC: Check declension file first, then apply simple rule.
+            $declensions_path = $LANG_DIR . '/fi_declensions.json';
+            $declined_location = null;
+            if (file_exists($declensions_path)) {
+                $declensions = json_decode(file_get_contents($declensions_path), true);
+                if (isset($declensions[$location])) {
+                    $declined_location = $declensions[$location];
+                }
+            }
+
+            // If not found in declensions, apply the simple fallback rule
+            if ($declined_location === null) {
+                $last_char = substr($location, -1);
+                // Finnish vowels
+                $vowels = ['a', 'e', 'i', 'o', 'u', 'y', 'ä', 'ö'];
+                
+                // Check against lowercase version of the last character
+                if (in_array(mb_strtolower($last_char, 'UTF-8'), $vowels)) {
+                    $declined_location = $location . 'n';
+                } else {
+                    $declined_location = $location . 'in';
+                }
+            }
+            
+            $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteor') . ' ' . htmlspecialchars($declined_location) . ' yllä';
+            
+        } else {
+            // Default logic for nb, en, de
+            $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteor over') . ' ' . htmlspecialchars($location);
+        }
+        
+        echo $title_str . " <span style=\"white-space: nowrap;\">$date</span> $time " . htmlspecialchars($t['utc'] ?? 'UTC');
+    } else {
+        echo htmlspecialchars(($t['report_title'] ?? 'Meteor Report') . " $date $time " . $t['utc']);
+    }
+    ?>
+    </h1>
+
+    <?php // --- Container 1: Maps (Layout Change 2) --- ?>
+    <?php if ($map_html_display || $map_jpg_display): // Show container if any map exists ?>
+    <div class="container">
+      
+      <?php // Left Column: Primary Map (Interactive, or Static Fallback) ?>
+      <div class="column">
+        <?php if ($map_html_display): // Interactive Map exists ?>
+            <div id="map-placeholder">
+              <?php // The placeholder is empty, will be replaced by JS ?>
+            </div>
+            <script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('map-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '<?php echo $map_html_display; ?>'; ph.parentNode.replaceChild(iframe, ph); } });</script>
+            <p class='text-center'><a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><?php echo htmlspecialchars($t['kml_file'] ?? 'KML file'); ?></a></p>
+            
+        <?php elseif ($map_jpg_display): // No Interactive map, but Static map exists ?>
+            <p><?php echo htmlspecialchars($t['map_caption'] ?? 'Map caption missing.'); ?></p> <?php // Caption stays here in "Static Only" mode ?>
+            <div id="map-placeholder">
+                <a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><img src='<?php echo $map_jpg_display; ?>' alt='map'></a>
+            </div>
+            <p class='text-center'><a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><?php echo htmlspecialchars($t['kml_file'] ?? 'KML file'); ?></a></p>
+            
+        <?php endif; ?>
+      </div>
+      
+      <?php // Right Column: Secondary Map (Static, if side-by-side) or Spacer ?>
+      <?php if ($map_html_display && $map_jpg_display): // Side-by-side mode: Interactive (left) + Static (right) ?>
+          <div class="column">
+            <p><?php echo htmlspecialchars($t['map_caption'] ?? 'Map caption missing.'); ?></p> <?php // <-- CAPTION MOVED HERE ?>
+            <img src='<?php echo $map_jpg_display; ?>' alt='static map'>
+          </div>
+          
+      <?php elseif ($map_html_display || $map_jpg_display): // "Only" mode (Interactive Only OR Static Only) ?>
+          <?php // We need this spacer to prevent the left column from taking 100% width ?>
+          <div class="column" style="background: transparent; box-shadow: none; border: none; padding: 0;"></div>
+      <?php endif; ?>
+      
+    </div>
+    <?php endif; ?>
+
+
+    <?php // --- Container 2: Height and Wind Profiles (Layout Changes 2 & 3) --- ?>
+    <?php if ($height_jpg_display || $wind_jpg_display): // Show container if either exists ?>
+    <div class="container">
+      
+      <?php // Left Column: Height plot (or empty spacer) ?>
+      <?php if ($height_jpg_display): ?>
+        <div class="column"><img src='<?php echo $height_jpg_display; ?>' alt='height profile'></div>
+      <?php else: ?>
+        <?php // Add an invisible spacer column to maintain the 50/50 layout ?>
+        <div class="column" style="background: transparent; box-shadow: none; border: none; padding: 0;"></div>
+      <?php endif; ?>
+      
+      <?php // Right Column: Wind plot (or empty spacer) ?>
+      <?php if ($wind_jpg_display): ?>
+        <div class="column"><img src='<?php echo $wind_jpg_display; ?>' alt='wind profile'></div>
+      <?php else: ?>
+        <?php // Add an invisible spacer column to maintain the 50/50 layout ?>
+        <div class="column" style="background: transparent; box-shadow: none; border: none; padding: 0;"></div>
+      <?php endif; ?>
+
+    </div>
+    <?php endif; ?>
+
+
+    <?php if ($orbit_jpg_display || $orbit_html_display || $tables_html_display): ?>
+    <div class="container">
+      <?php if ($tables_html_display) { echo '<div class="column">'; include $tables_html_display; echo '</div>'; } ?>
+      <?php if ($orbit_jpg_display || $orbit_html_display): ?>
+      <div class="column">
+        <div id="orbit-placeholder">
+          <?php if ($orbit_jpg_display) echo "<img src='{$orbit_jpg_display}' alt='orbit plot'>"; ?>
+        </div>
+        <?php if ($orbit_html_display):
+          echo "<script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('orbit-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '$orbit_html_display'; ph.parentNode.replaceChild(iframe, ph); } });</script>";
+          if ($orbit_jpg_display) echo "<p class='text-center'><a href='{$orbit_jpg_display}'>" . htmlspecialchars($t['non_interactive_plot'] ?? 'Non-interactive plot') . "</a></p>";
+        endif; ?>
+      </div>
+      <?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($posvstime_jpg_display || $spd_acc_jpg_display): ?>
+    <div class="container">
+      <?php if ($posvstime_jpg_display): ?>
+      <div class="column"><img src='<?php echo $posvstime_jpg_display; ?>' alt='position vs time'></div>
+      <?php endif; ?>
+      <?php if ($spd_acc_jpg_display): ?>
+      <div class="column"><img src='<?php echo $spd_acc_jpg_display; ?>' alt='speed and acceleration'></div>
+      <?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <hr style="border: none; border-top: 1px solid var(--border-color); margin: 2em 0;">
+
+    <?php
+    if ($stations_html_display) {
+        // Alias $lang_short to $lang, as the included stations.html file
+        // (generated by fetch.py) expects a variable named $lang for its internal PHP logic.
+        $lang = $lang_short;
+        include $stations_html_display;
+    }
+    ?>
+
+    <footer>
+        <p class="text-center"><?php echo htmlspecialchars($t['footer_text'] ?? 'This is an automatically generated report from the Norwegian Meteor Network.'); ?></p>
+    </footer>
+
+</div>
+</body>
+</html>

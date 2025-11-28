@@ -78,6 +78,8 @@
     "footer_text": "Tämä on automaattisesti luotu raportti Norsk meteornettverk -verkostolta.",
     "non_interactive_map": "Ei-interaktiivinen kartta",
     "non_interactive_plot": "Ei-interaktiivinen kuvaaja",
+    "interactive_map": "Interaktiivinen kartta",
+    "interactive_plot": "Interaktiivinen kuvaaja",
     "kml_file": "KML-tiedosto",
     "planet_mercury": "Merkurius",
     "planet_venus": "Venus",

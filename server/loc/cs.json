@@ -78,6 +78,8 @@
   "footer_text": "Toto je automaticky generovaná zpráva z Norské meteorické sítě.",
   "non_interactive_map": "Neinteraktivní mapa",
   "non_interactive_plot": "Neinteraktivní graf",
+  "interactive_map": "Interaktivní mapa",
+  "interactive_plot": "Interaktivní graf",
   "kml_file": "Soubor KML",
   "planet_mercury": "Merkur",
   "planet_venus": "Venuše",

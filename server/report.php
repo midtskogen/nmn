@@ -313,7 +313,11 @@ table img {
               <?php // The placeholder is empty, will be replaced by JS ?>
             </div>
             <script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('map-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '<?php echo $map_html_display; ?>'; ph.parentNode.replaceChild(iframe, ph); } });</script>
-            <p class='text-center'><a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><?php echo htmlspecialchars($t['kml_file'] ?? 'KML file'); ?></a></p>
+            <p class='text-center'>
+                <a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><?php echo htmlspecialchars($t['kml_file'] ?? 'KML file'); ?></a>
+                &nbsp;|&nbsp;
+                <a href='<?php echo $map_html_display; ?>'><?php echo htmlspecialchars($t['interactive_map'] ?? 'Interactive map'); ?></a>
+            </p>
             
         <?php elseif ($map_jpg_display): // No Interactive map, but Static map exists ?>
             <p><?php echo htmlspecialchars($t['map_caption'] ?? 'Map caption missing.'); ?></p> <?php // Caption stays here in "Static Only" mode ?>
@@ -375,7 +379,12 @@ table img {
         </div>
         <?php if ($orbit_html_display):
           echo "<script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('orbit-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '$orbit_html_display'; ph.parentNode.replaceChild(iframe, ph); } });</script>";
-          if ($orbit_jpg_display) echo "<p class='text-center'><a href='{$orbit_jpg_display}'>" . htmlspecialchars($t['non_interactive_plot'] ?? 'Non-interactive plot') . "</a></p>";
+          echo "<p class='text-center'>";
+          if ($orbit_jpg_display) {
+             echo "<a href='{$orbit_jpg_display}'>" . htmlspecialchars($t['non_interactive_plot'] ?? 'Non-interactive plot') . "</a> | ";
+          }
+          echo "<a href='{$orbit_html_display}'>" . htmlspecialchars($t['interactive_plot'] ?? 'Interactive plot') . "</a>";
+          echo "</p>";
         endif; ?>
       </div>
       <?php endif; ?>

@@ -78,6 +78,8 @@
   "footer_text": "Dies ist ein automatisch generierter Bericht des Norwegischen Meteorennetzwerks.",
   "non_interactive_map": "Nicht-interaktive Karte",
   "non_interactive_plot": "Nicht-interaktives Diagramm",
+  "interactive_map": "Interaktive Karte",
+  "interactive_plot": "Interaktives Diagramm",
   "kml_file": "KML-Datei",
   "planet_mercury": "Merkur",
   "planet_venus": "Venus",

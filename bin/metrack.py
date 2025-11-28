@@ -473,30 +473,75 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     ))
 
     if not options['azonly'] and track_start is not None:
-        start_lon, start_lat, start_h = xyz2lonlat(track_start); end_lon, end_lat, end_h = xyz2lonlat(track_end); [start_x, end_x], [start_y, end_y] = project_points([start_lon, end_lon], [start_lat, end_lat])
+        # --- Segmentation Logic for Earth Grazers ---
+        # Instead of a simple start/end line, we segment the track to account for Earth curvature on the flat map.
+        total_dist_km = np.linalg.norm(track_end - track_start)
+        segment_length_km = 50.0
+        num_segments = max(1, int(np.ceil(total_dist_km / segment_length_km)))
+        
+        # Create interpolated points along the 3D straight line
+        t_vals = np.linspace(0, 1, num_segments + 1)
+        track_vec = track_end - track_start
+        
+        # Calculate coordinates for every segment point
+        seg_x, seg_y, seg_h = [], [], []
+        
+        for t in t_vals:
+            p_3d = track_start + t * track_vec
+            p_lon, p_lat, p_h = xyz2lonlat(p_3d)
+            p_proj_x, p_proj_y = project_points([p_lon], [p_lat])
+            seg_x.append(p_proj_x[0])
+            seg_y.append(p_proj_y[0])
+            seg_h.append(p_h)
+
+        # Get start/end explicitly for markers/cones
+        start_x, start_y, start_h = seg_x[0], seg_y[0], seg_h[0]
+        end_x, end_y, end_h = seg_x[-1], seg_y[-1], seg_h[-1]
+        
         trajectory_name = translations.get("plot_map_legend_trajectory", "Fitted Trajectory")
         ground_track_name = translations.get("plot_map_legend_ground_track", "Ground Track")
 
         traces.extend([
-            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[start_h, end_h], mode='lines', line=dict(color='blue', width=7), name=trajectory_name, showlegend=False, hoverinfo='none'), 
-            go.Cone(x=[end_x], y=[end_y], z=[end_h], u=[end_x - start_x], v=[end_y - start_y], w=[end_h - start_h], sizemode="absolute", sizeref=5, anchor="tip", showscale=False, colorscale=[[0, 'blue'], [1, 'blue']], hoverinfo='none'), 
-            go.Scatter3d(x=[start_x, start_x], y=[start_y, start_y], z=[start_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'), 
-            go.Scatter3d(x=[end_x, end_x], y=[end_y, end_y], z=[end_h, 0], mode='lines', line=dict(color='cyan', width=2, dash='dash'), showlegend=False, hoverinfo='none'), 
-            go.Scatter3d(x=[start_x, end_x], y=[start_y, end_y], z=[0, 0], mode='lines+markers', line=dict(color='blue', width=2), marker=dict(symbol='circle', color='blue', size=2), name=ground_track_name, hoverinfo='none', showlegend=False)])
-        
-        if speed_km_s > 0:
-            track_vec = track_end - track_start; total_track_length_km = np.linalg.norm(track_vec); total_duration_s = total_track_length_km / speed_km_s; hover_x, hover_y, hover_z, custom_data = [], [], [], []
-            for t in np.linspace(0, 1, 100):
-                point_xyz = track_start + t * track_vec; lon, lat, height_km = xyz2lonlat(point_xyz); proj_x, proj_y = project_points([lon], [lat]); hover_x.append(proj_x[0]); hover_y.append(proj_y[0]); hover_z.append(height_km); custom_data.append([t * total_duration_s, height_km, haversine(start_lon, start_lat, lon, lat), lat, lon])
-            
-            hovertemplate_str = (f'<b>{translations.get("time", "Time")}</b>: %{{customdata[0]:.2f}} s<br>'
-                                 f'<b>{translations.get("height", "Height")}</b>: %{{customdata[1]:.2f}} km<br>'
-                                 f'<b>{translations.get("ground_dist", "Ground Dist")}</b>: %{{customdata[2]:.2f}} km<br>'
-                                 f'<b>{translations.get("latitude", "Latitude")}</b>: %{{customdata[3]:.4f}}<br>'
-                                 f'<b>{translations.get("longitude", "Longitude")}</b>: %{{customdata[4]:.4f}}'
-                                 '<extra></extra>')
-            
-            traces.append(go.Scatter3d(x=hover_x, y=hover_y, z=hover_z, mode='markers', marker=dict(color='rgba(0,0,0,0)', size=10), customdata=np.array(custom_data), hovertemplate=hovertemplate_str, name='Track Info', showlegend=False))
+            # 1. Main Trajectory (Now Segmented)
+            go.Scatter3d(
+                x=seg_x, y=seg_y, z=seg_h, 
+                mode='lines', 
+                line=dict(color='blue', width=7), 
+                name=trajectory_name, 
+                showlegend=False, 
+                hoverinfo='none'
+            ), 
+            # 2. Cone at the end (Tip)
+            go.Cone(
+                x=[end_x], y=[end_y], z=[end_h], 
+                u=[end_x - start_x], v=[end_y - start_y], w=[end_h - start_h], 
+                sizemode="absolute", sizeref=5, anchor="tip", 
+                showscale=False, colorscale=[[0, 'blue'], [1, 'blue']], 
+                hoverinfo='none'
+            ), 
+            # 3. Drop line at Start
+            go.Scatter3d(
+                x=[start_x, start_x], y=[start_y, start_y], z=[start_h, 0], 
+                mode='lines', line=dict(color='cyan', width=2, dash='dash'), 
+                showlegend=False, hoverinfo='none'
+            ), 
+            # 4. Drop line at End
+            go.Scatter3d(
+                x=[end_x, end_x], y=[end_y, end_y], z=[end_h, 0], 
+                mode='lines', line=dict(color='cyan', width=2, dash='dash'), 
+                showlegend=False, hoverinfo='none'
+            ), 
+            # 5. Ground Track (Segmented to match the curvature of the main track)
+            go.Scatter3d(
+                x=seg_x, y=seg_y, z=[0]*len(seg_x), 
+                mode='lines+markers', 
+                line=dict(color='blue', width=2), 
+                marker=dict(symbol='circle', color='blue', size=2), 
+                name=ground_track_name, 
+                hoverinfo='none', 
+                showlegend=False
+            )
+        ])
     
     unique_stations = {obs_data['names'][i]: (site_lons[i], site_lats[i]) for i in range(n_obs)}; station_is_inlier = {name: False for name in unique_stations}
     for i in inlier_indices: station_is_inlier[obs_data['names'][i]] = True

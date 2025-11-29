@@ -20,13 +20,13 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import termios
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import math
 import pto_mapper
 import errno
 import datetime
-import termios
 
 
 # Assuming user-provided scripts are in the same directory or python path.
@@ -91,6 +91,21 @@ def get_dynamic_mag_limit(pto_path):
         print(f"Warning: Could not determine FOV from {pto_path} (Error: {e}). Using default mag {default_mag}.", file=sys.stderr)
     
     return default_mag
+
+def get_video_resolution(video_path):
+    """
+    Probes the video file to return its width and height.
+    Defaults to 1920x1080 if probing fails.
+    """
+    try:
+        probe = ffmpeg.probe(video_path)
+        video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
+        if video_stream:
+            return int(video_stream['width']), int(video_stream['height'])
+    except Exception as e:
+        print(f"Warning: Could not probe resolution of {video_path}: {e}", file=sys.stderr)
+    
+    return 1920, 1080
 
 def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
     """Draws marker crosses and az/alt labels on an image at specified coordinates."""
@@ -677,9 +692,11 @@ def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbo
     grid_labels_transparent_path = f"{tmpdir}/grid-labels-transparent.png"
     set_image_opacity(grid_labels_path, grid_labels_transparent_path, OVERLAY_OPACITY, verbose=verbose)
     
-    # 3. Create Logo Overlay Layer (1920x1080)
-    logo_layer_path = f"{tmpdir}/logo_layer_1080p.png"
-    create_logo_overlay(1920, 1080, logo_paths, logo_layer_path)
+    # 3. Create Logo Overlay Layer (Dynamic Size based on video)
+    # Get actual video resolution
+    vw, vh = get_video_resolution(filenames['full'])
+    logo_layer_path = f"{tmpdir}/logo_layer_full.png"
+    create_logo_overlay(vw, vh, logo_paths, logo_layer_path)
 
     # 4. Composite Logos onto the Transparent Grid
     # This ensures mp4grid gets both grid and logos
@@ -688,8 +705,9 @@ def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbo
 
     print("-> Creating final full view images and videos...")
     
+    # --- Create [prefix]-orig.mp4 (Original Video + Logos) ---
     # overlay_video_with_image defaults to libx264
-    overlay_video_with_image(filenames['full'], logo_layer_path, filenames['orig'], verbose=verbose) #
+    overlay_video_with_image(filenames['full'], logo_layer_path, filenames['orig'], verbose=verbose)
 
     # 5. Composite Final Overlay (Grid+Logos) onto the clean stacked JPG to create [prefix]-grid.jpg
     alpha_composite_images(filenames['jpg'], final_overlay_path, filenames['jpggrid'], verbose=verbose)
@@ -710,9 +728,11 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
     # 2. Transparency
     future_transparent_grid = executor.submit(lambda: set_image_opacity(future_grid_png.result() and grid_labels_path, f"{tmpdir}/grid-labels-transparent.png", OVERLAY_OPACITY, verbose))
     
-    # 3. Create Logo Layer (independent)
-    logo_layer_path = f"{tmpdir}/logo_layer_1080p.png"
-    future_logo_layer = executor.submit(create_logo_overlay, 1920, 1080, logo_paths, logo_layer_path)
+    # 3. Create Logo Layer (Dynamic Size)
+    # Determine video resolution (Synchronous is fine, it's fast)
+    vw, vh = get_video_resolution(filenames['full'])
+    logo_layer_path = f"{tmpdir}/logo_layer_full.png"
+    future_logo_layer = executor.submit(create_logo_overlay, vw, vh, logo_paths, logo_layer_path)
 
     # 4. Composite Logos onto Transparent Grid
     final_overlay_path = f"{tmpdir}/grid_plus_logos.png"
@@ -720,8 +740,9 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
 
     print("-> Submitting final full view image and video tasks...")
     
+    # --- Create [prefix]-orig.mp4 (Original Video + Logos) ---
     # We use the future_logo_layer result directly on the original video
-    future_orig_mp4 = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_logo_layer.result(), filenames['orig'], verbose)) #
+    future_orig_mp4 = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_logo_layer.result(), filenames['orig'], verbose))
 
     # 5. Create [prefix]-grid.jpg (Clean JPG + GridWithLogos)
     future_jpg_grid = executor.submit(lambda: alpha_composite_images(future_stacked_jpg.result() and filenames['jpg'], future_final_overlay.result(), filenames['jpggrid'], verbose))
@@ -1160,11 +1181,13 @@ def main(args):
 
         # --- HEVC Transcoding Step ---
         print("\n--- Finalizing Videos ---")
-    
+        
         # We create a 1080p overlay specifically for the HEVC transcode process
         with tempfile.TemporaryDirectory() as hevc_tmp:
+            # Determine actual video resolution for the overlay
+            vw, vh = get_video_resolution(filenames['full'])
             hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
-            create_logo_overlay(1920, 1080, logo_paths, hevc_overlay_path)
+            create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
             handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
 
     # Update event.txt before finishing

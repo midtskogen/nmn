@@ -15,7 +15,7 @@ Usage:
 """
 
 import argparse
-import atexit  # <--- NEW IMPORT
+import atexit
 import configparser
 import datetime
 import glob
@@ -669,6 +669,8 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 with report_log.open('w') as log_file:
                    proc = subprocess.Popen(report_cmd, stdout=log_file, stderr=log_file)
                    processes.append(proc)
+                   # Wait 3 seconds before spawning the next process to stagger load
+                   time.sleep(3)
             except Exception as e:
                 logging.error(f"Failed to spawn process.py for {event_file}: {e}")
                 
@@ -676,12 +678,15 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             logging.info(f"Waiting for {len(processes)} station processing jobs to complete...")
             for proc in processes:
                 proc.wait()
+                
+                # UPDATED LOGIC:
                 if proc.returncode == 0:
-                    logging.info(f"Job for {proc.args[2]} was discarded (exit code 0).")
+                    logging.info(f"Job for {proc.args[2]} finished successfully (exit code 0).")
                 elif proc.returncode == 1:
-                    logging.info(f"Job for {proc.args[2]} finished successfully (exit code 1).")
+                    logging.info(f"Job for {proc.args[2]} was discarded (exit code 1).")
                 else:
-                     logging.warning(f"Job for {proc.args[2]} failed with exit code {proc.returncode}.")
+                    logging.warning(f"Job for {proc.args[2]} failed with exit code {proc.returncode}.")
+            
             logging.info("All station processing jobs finished.")
     else:
         # --fast mode: Skip process.py, but regenerate brightness plots manually

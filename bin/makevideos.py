@@ -48,7 +48,7 @@ except ImportError as e:
 
 
 # --- Script Constants ---
-OVERLAY_OPACITY = 0.65
+OVERLAY_OPACITY = 0.40
 BIN_DIR = Path(__file__).parent.resolve()
 
 # --- Helper Functions ---
@@ -64,10 +64,10 @@ def refraction(alt):
 
 def get_dynamic_mag_limit(pto_path):
     """
-    Parses the PTO file to find the Field of View (v parameter).
-    Returns a limiting magnitude based on the FOV:
-      - FOV > 115: Mag 3
-      - FOV > 100: Mag 4
+    Parses the PTO file to find the Field of View (v parameter) and Image Width (w parameter).
+    Returns a limiting magnitude based on the FOV and dimensions:
+      - FOV > 115 OR Width < 1280: Mag 3
+      - FOV > 100 OR Width < 1920: Mag 4
       - Otherwise: Mag 5 (default)
     """
     default_mag = 5
@@ -76,19 +76,22 @@ def get_dynamic_mag_limit(pto_path):
             for line in f:
                 # Look for the image line 'i'
                 if line.strip().startswith('i '):
-                    # Regex to find 'v' followed by numbers/dots
-                    # Matches "v127.111" in "i w1920 ... v127.111 ..."
-                    match = re.search(r'\bv([\d\.]+)', line)
-                    if match:
-                        fov = float(match.group(1))
-                        if fov > 115:
+                    # Regex to find 'v' (FOV) and 'w' (Width)
+                    v_match = re.search(r'\bv([\d\.]+)', line)
+                    w_match = re.search(r'\bw(\d+)', line)
+                    
+                    if v_match:
+                        fov = float(v_match.group(1))
+                        # Default to 1920 if width is not found to rely solely on FOV logic in that edge case
+                        width = int(w_match.group(1)) if w_match else 1920
+                        if fov > 115 or width < 1280:
                             return 3
-                        elif fov > 100:
+                        elif fov > 100 or width < 1920:
                             return 4
                         else:
                             return default_mag
     except Exception as e:
-        print(f"Warning: Could not determine FOV from {pto_path} (Error: {e}). Using default mag {default_mag}.", file=sys.stderr)
+        print(f"Warning: Could not determine FOV/Width from {pto_path} (Error: {e}). Using default mag {default_mag}.", file=sys.stderr)
     
     return default_mag
 
@@ -682,10 +685,11 @@ def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbo
     """Runs the full view processing pipeline sequentially."""
     print("\n--- Processing Full View (Sequential) ---")
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
+    mag_limit = get_dynamic_mag_limit(filenames['lens_pto'])
     
     # 1. Generate Grid
     grid_labels_path = f"{tmpdir}/grid-labels.png"
-    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
+    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -f {mag_limit} -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
     run_command(drawgrid_cmd, "Generating full view grid", verbose)
 
     # 2. Make grid transparent
@@ -719,10 +723,11 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
     """Runs the full view processing pipeline in parallel."""
     print("\n--- Processing Full View ---")
     ts2 = event_data['timestamp'] + event_data['duration'] // 2
-    
+    mag_limit = get_dynamic_mag_limit(filenames['lens_pto'])
+
     # 1. Grid Generation
     grid_labels_path = f"{tmpdir}/grid-labels.png"
-    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
+    drawgrid_cmd = f"{sys.executable} {BIN_DIR}/drawgrid.py -c meteor.cfg -f {mag_limit} -d {ts2} {filenames['lens_pto']} {grid_labels_path}"
     future_grid_png = executor.submit(run_command, drawgrid_cmd, "Generating full view grid", verbose)
 
     # 2. Transparency

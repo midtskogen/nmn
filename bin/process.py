@@ -5,15 +5,11 @@ Processes a single meteor event detection. (Multilingual Version)
 
 This script takes an event.txt file as input and performs the following steps:
 1.  Validates the event against various criteria.
-2.  Acquires a processing slot to limit concurrent jobs.
+2.  Checks current CPU usage to limit congestion.
 3.  Calls external scripts for video processing and classification.
 4.  Generates Metrack-compatible data files (metrack, centroid, light).
 5.  Updates the event.txt file with a summary section.
 6.  Generates a translated brightness plot for each supported language.
-
-NOTE: This updated version uses the 'posix_ipc' library.
-Install it with:
-pip install posix_ipc
 """
 
 import argparse
@@ -22,12 +18,11 @@ import datetime
 import json
 import math
 import os
-import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
-
+import re
 import ephem
 import matplotlib
 import psutil
@@ -37,26 +32,18 @@ from dateutil.parser import parse as dt_parse
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# The posix_ipc library is required for the new semaphore-based locking.
-try:
-    import posix_ipc
-except ImportError:
-    print("Error: The 'posix_ipc' library is required. Please install it using 'pip install posix_ipc'")
-    sys.exit(1)
-
-
 class Settings:
     """Configuration constants for the script."""
     # Path to the script that processes video files
     MAKEVIDEOS_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/makevideos.py')
     CROP_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/meteorcrop.py')
-    METEOR_TEST_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/meteor_test.sh')
+    METEOR_TEST_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/predict.py')
 
-    # --- Semaphore-based concurrency limiting settings ---
-    SEMAPHORE_NAME = "/nmn_process_py_semaphore"
-    CORE_COUNT = os.cpu_count() or 1
-    MAX_CONCURRENT_JOBS = max(1, CORE_COUNT // 4)
-
+    # --- CPU-based concurrency limiting settings ---
+    # The threshold is now a percentage (0-100). 
+    # 50% is roughly equivalent to your previous "half of available cores" logic.
+    MAX_CPU_PERCENT = 50.0
+    
     # --- Original thresholds ---
     MIN_SUN_ALTITUDE_FOR_CHECK = 1  # degrees
     MIN_SUN_SEPARATION_ARC = 20  # degrees
@@ -99,7 +86,7 @@ def get_args():
         "--timeout",
         type=int,
         default=900,
-        help="Timeout in seconds for acquiring a processing slot. Defaults to 900."
+        help="Timeout in seconds for waiting for low system load. Defaults to 900."
     )
     return parser.parse_args()
 
@@ -197,34 +184,35 @@ def cleanup_directory_and_exit(event_dir: Path):
         event_dir.parent.rmdir()
     except OSError:
         pass
-    sys.exit(0)
+    sys.exit(1)
 
 
-def acquire_processing_slot(timeout: int) -> posix_ipc.Semaphore:
-    """Acquires a slot from a system-wide counting semaphore to limit concurrency."""
-    semaphore = None
-    try:
-        semaphore = posix_ipc.Semaphore(
-            Settings.SEMAPHORE_NAME,
-            posix_ipc.O_CREX,
-            initial_value=Settings.MAX_CONCURRENT_JOBS
-        )
-        print(f"Semaphore created. Max concurrent jobs set to: {Settings.MAX_CONCURRENT_JOBS}")
-    except posix_ipc.ExistentialError:
-        semaphore = posix_ipc.Semaphore(Settings.SEMAPHORE_NAME)
+def wait_for_safe_cpu(timeout: int):
+    """
+    Blocks execution until the system CPU percentage drops below 
+    Settings.MAX_CPU_PERCENT. 
+    
+    Uses psutil.cpu_percent(interval=3) to get an immediate, short-term reading.
+    """
+    start_time = time.time()
+    
+    print(f"Checking CPU usage. Threshold is set to: {Settings.MAX_CPU_PERCENT}%")
+    
+    while True:
+        # Check CPU usage over a 3-second window
+        current_cpu = psutil.cpu_percent(interval=3)
+        
+        if current_cpu < Settings.MAX_CPU_PERCENT:
+            print(f"CPU usage ({current_cpu:.1f}%) is safe. Proceeding.")
+            return
 
-    try:
-        print(f"Process {os.getpid()} waiting for a processing slot...")
-        semaphore.acquire(timeout=timeout)
-        print(f"Process {os.getpid()} acquired a slot. Starting job.")
-        return semaphore
-    except posix_ipc.BusyError:
-        print(f"Error: Could not acquire a processing slot within {timeout} seconds.")
-        print("The system might be overloaded with other processing jobs.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"An unexpected error occurred while acquiring semaphore: {e}")
-        sys.exit(1)
+        if (time.time() - start_time) > timeout:
+            print(f"Error: Timeout reached ({timeout}s) waiting for CPU usage to drop.")
+            print(f"Current CPU: {current_cpu:.1f}%. Threshold: {Settings.MAX_CPU_PERCENT}%")
+            sys.exit(1)
+
+        print(f"CPU usage ({current_cpu:.1f}%) is too high. Waiting 5s...")
+        time.sleep(5)
 
 
 def run_command(command: list, cwd: Path) -> subprocess.CompletedProcess:
@@ -303,19 +291,25 @@ def run_classification(event_config, event_dir: Path):
         return
 
     proc = run_command([Settings.METEOR_TEST_SCRIPT, fireball_jpg], cwd=event_dir)
-    
-    # *** MODIFICATION: Check for empty string before float conversion ***
+
     stdout_value = proc.stdout.strip()
     probability = None
-    
-    if stdout_value:
-        try:
-            probability = float(stdout_value)
-        except ValueError:
-            print(f"Warning: meteor_test.sh returned non-float value: '{stdout_value}'")
-            probability = None # Explicitly set to None
 
-    # Only set probability and check threshold if we have a valid number
+    if stdout_value:
+        # Search for all numbers (integers or floats) in the output
+        # Pattern matches optional +/- sign, then float (0.00) or integer patterns
+        matches = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", stdout_value)
+        
+        if matches:
+            try:
+                # Take the LAST number found in the output
+                probability = float(matches[-1])
+            except ValueError:
+                print(f"Warning: Could not convert extracted value '{matches[-1]}' to float.")
+                probability = None
+        else:
+            print(f"Warning: No numbers found in meteor_test.sh output: '{stdout_value}'")
+
     if probability is not None:
         event_config.set('summary', 'meteor_probability', str(probability))
 
@@ -328,9 +322,7 @@ def run_classification(event_config, event_dir: Path):
             print(f"Meteor probability ({probability:.2f}) is below threshold ({threshold}). Deleting directory.")
             cleanup_directory_and_exit(event_dir)
     else:
-        # This handles the user's request: empty string means no probability
         print(f"Warning: meteor_test.sh returned no probability. Skipping classification check.")
-    # *** END OF MODIFICATION ***
 
 
 def write_data_files(event_config, station_config, event_dir: Path):
@@ -421,7 +413,8 @@ def main():
     if should_discard_event(event_config, station_config):
         cleanup_directory_and_exit(event_dir)
 
-    semaphore = acquire_processing_slot(args.timeout)
+    # Use the new CPU-based check instead of load avg
+    wait_for_safe_cpu(args.timeout)
 
     try:
         proc_results = run_video_processing(event_config, station_config, event_dir)
@@ -438,14 +431,11 @@ def main():
         timestamps = [float(t) for t in event_config.get('trail', 'timestamps').split()]
         brightness = [float(b) for b in event_config.get('trail', 'brightness').split()]
         generate_brightness_plots(event_dir, timestamps, brightness)
+        sys.exit(0)
 
-    finally:
-        if semaphore:
-            semaphore.release()
-            semaphore.close()
-            print(f"Process {os.getpid()} released its processing slot.")
-
-    sys.exit(1)
+    except Exception as e:
+        print(f"An error occurred during processing: {e}")
+        sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ import math
 import pto_mapper
 import errno
 import datetime
+import termios
 
 
 # Assuming user-provided scripts are in the same directory or python path.
@@ -47,7 +48,7 @@ except ImportError as e:
 
 
 # --- Script Constants ---
-OVERLAY_OPACITY = 0.6
+OVERLAY_OPACITY = 0.65
 BIN_DIR = Path(__file__).parent.resolve()
 
 # --- Helper Functions ---
@@ -686,6 +687,10 @@ def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbo
     alpha_composite_images(grid_labels_transparent_path, logo_layer_path, final_overlay_path, verbose=verbose)
 
     print("-> Creating final full view images and videos...")
+    
+    # overlay_video_with_image defaults to libx264
+    overlay_video_with_image(filenames['full'], logo_layer_path, filenames['orig'], verbose=verbose) #
+
     # 5. Composite Final Overlay (Grid+Logos) onto the clean stacked JPG to create [prefix]-grid.jpg
     alpha_composite_images(filenames['jpg'], final_overlay_path, filenames['jpggrid'], verbose=verbose)
     
@@ -714,13 +719,18 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
     future_final_overlay = executor.submit(lambda: alpha_composite_images(future_transparent_grid.result(), future_logo_layer.result(), final_overlay_path, verbose))
 
     print("-> Submitting final full view image and video tasks...")
+    
+    # We use the future_logo_layer result directly on the original video
+    future_orig_mp4 = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_logo_layer.result(), filenames['orig'], verbose)) #
+
     # 5. Create [prefix]-grid.jpg (Clean JPG + GridWithLogos)
     future_jpg_grid = executor.submit(lambda: alpha_composite_images(future_stacked_jpg.result() and filenames['jpg'], future_final_overlay.result(), filenames['jpggrid'], verbose))
     
     # 6. Create [prefix]-grid.mp4 (Full Video + GridWithLogos)
     future_mp4_grid = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_final_overlay.result(), filenames['mp4grid'], verbose))
 
-    for future in as_completed([future_jpg_grid, future_mp4_grid]):
+    # Add future_orig_mp4 to the completion wait list
+    for future in as_completed([future_jpg_grid, future_mp4_grid, future_orig_mp4]):
         future.result()
 
 # --- Gnomonic View Processing Helpers ---
@@ -1098,12 +1108,22 @@ def main(args):
         name = args.file_prefix
         
         filenames = {
-            'name': name, 'full': f"{name}.mp4", 'jpg': f"{name}.jpg", 'jpggrid': f"{name}-grid.jpg",
-            'mp4grid': f"{name}-grid.mp4", 'gnomonic': f"{name}-gnomonic.jpg", 'gnomonicgrid': f"{name}-gnomonic-grid.jpg",
-            'gnomonicmp4': f"{name}-gnomonic.mp4", 'gnomonicgridmp4': f"{name}-gnomonic-grid.mp4",
-            'gnomonic_pto': 'gnomonic.pto', 'gnomonic_grid_pto': 'gnomonic_grid.pto',
-            'gnomonic_corr_grid_pto': 'gnomonic_corr_grid.pto', 'gnomonic_corr_grid_png': 'gnomonic_corr_grid.png',
-            'gnomonic_mp4_pto': 'gnomonic_mp4.pto', 'lens_pto': 'lens.pto'
+            'name': name, 
+            'full': f"{name}.mp4", 
+            'orig': f"{name}-orig.mp4",
+            'jpg': f"{name}.jpg", 
+            'jpggrid': f"{name}-grid.jpg",
+            'mp4grid': f"{name}-grid.mp4", 
+            'gnomonic': f"{name}-gnomonic.jpg", 
+            'gnomonicgrid': f"{name}-gnomonic-grid.jpg",
+            'gnomonicmp4': f"{name}-gnomonic.mp4", 
+            'gnomonicgridmp4': f"{name}-gnomonic-grid.mp4",
+            'gnomonic_pto': 'gnomonic.pto', 
+            'gnomonic_grid_pto': 'gnomonic_grid.pto',
+            'gnomonic_corr_grid_pto': 'gnomonic_corr_grid.pto', 
+            'gnomonic_corr_grid_png': 'gnomonic_corr_grid.png',
+            'gnomonic_mp4_pto': 'gnomonic_mp4.pto', 
+            'lens_pto': 'lens.pto'
         }
 
         event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
@@ -1138,14 +1158,14 @@ def main(args):
              add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose=args.verbose)
 
 
-    # --- HEVC Transcoding Step ---
-    print("\n--- Finalizing Videos ---")
+        # --- HEVC Transcoding Step ---
+        print("\n--- Finalizing Videos ---")
     
-    # We create a 1080p overlay specifically for the HEVC transcode process
-    with tempfile.TemporaryDirectory() as hevc_tmp:
-        hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
-        create_logo_overlay(1920, 1080, logo_paths, hevc_overlay_path)
-        handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
+        # We create a 1080p overlay specifically for the HEVC transcode process
+        with tempfile.TemporaryDirectory() as hevc_tmp:
+            hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
+            create_logo_overlay(1920, 1080, logo_paths, hevc_overlay_path)
+            handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
 
     # Update event.txt before finishing
     update_event_file(event_data)
@@ -1203,6 +1223,15 @@ if __name__ == "__main__":
         except (ValueError, FileNotFoundError):
             lockfile.unlink(missing_ok=True)
 
+    # --- TERMINAL STATE SAVING ---
+    original_tty_settings = None
+    fd = sys.stdin.fileno()
+    if sys.stdin.isatty():
+        try:
+            original_tty_settings = termios.tcgetattr(fd)
+        except termios.error:
+            pass
+
     try:
         lockfile.write_text(str(os.getpid()))
         main(args)
@@ -1212,3 +1241,15 @@ if __name__ == "__main__":
     finally:
         if lockfile.exists() and lockfile.read_text() == str(os.getpid()):
             lockfile.unlink()
+        
+        # --- TERMINAL STATE RESTORATION ---
+        if original_tty_settings:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, original_tty_settings)
+            except termios.error:
+                pass
+            # Explicitly verify echo is on (extra safety)
+            try:
+                subprocess.run(['stty', 'echo'], check=False, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass

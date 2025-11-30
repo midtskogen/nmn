@@ -498,8 +498,9 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
     Checks if a video file uses the HEVC codec. If so, renames the original
     to '_hevc.mp4' and creates a new H.264 version with the original name.
     
-    OPTIMIZATION: Applies the logo overlay during the transcode step to avoid 
-    an extra encoding pass.
+    MODIFIED: This now creates a CLEAN H.264 version for the original filename,
+    instead of burning in the watermark. The watermarked version was already
+    created as [prefix]-orig.mp4 in the pipeline.
     """
     video_file = Path(video_path)
     if not video_file.exists():
@@ -512,7 +513,7 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
         video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
 
         if video_stream and video_stream.get('codec_name') == 'hevc':
-            print(f"   -> HEVC codec detected. Transcoding to H.264 (with overlay)...")
+            print(f"   -> HEVC codec detected. Transcoding to H.264 (clean)...")
 
             # Define the new name for the original HEVC file
             hevc_file_path = video_file.with_name(f"{video_file.stem}_hevc.mp4")
@@ -522,15 +523,13 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
             shutil.move(str(video_file), str(hevc_file_path))
 
             # Transcode the renamed file back to the original filename with H.264
-            # AND apply the overlay in the same pass
-            print(f"      - Transcoding and watermarking {hevc_file_path.name} to {video_file.name} (H.264)...")
+            # IMPORTANT: Removed overlay logic here to keep the "original" filename clean.
+            print(f"      - Transcoding {hevc_file_path.name} to {video_file.name} (H.264)...")
             try:
-                input_video = ffmpeg.input(str(hevc_file_path))
-                overlay_img = ffmpeg.input(logo_overlay_path)
-                
+                # Simple transcode to H264 without overlay
                 (
                     ffmpeg
-                    .filter([input_video, overlay_img], 'overlay', 0, 0)
+                    .input(str(hevc_file_path))
                     .output(str(video_file), vcodec='libx264', crf=23, preset='medium')
                     .overwrite_output()
                     .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
@@ -1177,6 +1176,19 @@ def main(args):
                     print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
 
                 future_full_view.result()
+
+        # --- KEY CHANGE: Generate fireball.jpg BEFORE watermarking ---
+        # This ensures the crop happens on the clean images
+        meteorcrop_script = BIN_DIR / 'meteorcrop.py'
+        if meteorcrop_script.exists():
+            try:
+                # meteorcrop.py typically takes the directory '.' as argument
+                meteorcrop_cmd = f"{sys.executable} {meteorcrop_script} ."
+                run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg (on clean images)", args.verbose)
+            except Exception as e:
+                print(f"Warning: Failed to run meteorcrop.py: {e}", file=sys.stderr)
+        else:
+             print(f"Warning: {meteorcrop_script.name} not found. Skipping automatic cropping.", file=sys.stderr)
 
         # Watermark the base images (clean stacked and gnomonic) at the end
         add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose=args.verbose)

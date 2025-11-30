@@ -498,7 +498,7 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
     Checks if a video file uses the HEVC codec. If so, renames the original
     to '_hevc.mp4' and creates a new H.264 version with the original name.
     
-    MODIFIED: This now creates a CLEAN H.264 version for the original filename,
+    This creates a CLEAN H.264 version for the original filename,
     instead of burning in the watermark. The watermarked version was already
     created as [prefix]-orig.mp4 in the pipeline.
     """
@@ -696,8 +696,8 @@ def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbo
     set_image_opacity(grid_labels_path, grid_labels_transparent_path, OVERLAY_OPACITY, verbose=verbose)
     
     # 3. Create Logo Overlay Layer (Dynamic Size based on video)
-    # Get actual video resolution
-    vw, vh = get_video_resolution(filenames['full'])
+    # Get actual video resolution - USE SOURCE
+    vw, vh = get_video_resolution(filenames['source'])
     logo_layer_path = f"{tmpdir}/logo_layer_full.png"
     create_logo_overlay(vw, vh, logo_paths, logo_layer_path)
 
@@ -709,14 +709,15 @@ def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbo
     print("-> Creating final full view images and videos...")
     
     # --- Create [prefix]-orig.mp4 (Original Video + Logos) ---
-    # overlay_video_with_image defaults to libx264
-    overlay_video_with_image(filenames['full'], logo_layer_path, filenames['orig'], verbose=verbose)
+    # USE SOURCE
+    overlay_video_with_image(filenames['source'], logo_layer_path, filenames['orig'], verbose=verbose)
 
     # 5. Composite Final Overlay (Grid+Logos) onto the clean stacked JPG to create [prefix]-grid.jpg
     alpha_composite_images(filenames['jpg'], final_overlay_path, filenames['jpggrid'], verbose=verbose)
     
     # 6. Overlay Final Overlay (Grid+Logos) onto the video to create [prefix]-grid.mp4
-    overlay_video_with_image(filenames['full'], final_overlay_path, filenames['mp4grid'], verbose=verbose)
+    # USE SOURCE
+    overlay_video_with_image(filenames['source'], final_overlay_path, filenames['mp4grid'], verbose=verbose)
 
 def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbose, executor, future_stacked_jpg: Future):
     """Runs the full view processing pipeline in parallel."""
@@ -733,8 +734,8 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
     future_transparent_grid = executor.submit(lambda: set_image_opacity(future_grid_png.result() and grid_labels_path, f"{tmpdir}/grid-labels-transparent.png", OVERLAY_OPACITY, verbose))
     
     # 3. Create Logo Layer (Dynamic Size)
-    # Determine video resolution (Synchronous is fine, it's fast)
-    vw, vh = get_video_resolution(filenames['full'])
+    # Determine video resolution (Synchronous is fine, it's fast) - USE SOURCE
+    vw, vh = get_video_resolution(filenames['source'])
     logo_layer_path = f"{tmpdir}/logo_layer_full.png"
     future_logo_layer = executor.submit(create_logo_overlay, vw, vh, logo_paths, logo_layer_path)
 
@@ -745,14 +746,15 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
     print("-> Submitting final full view image and video tasks...")
     
     # --- Create [prefix]-orig.mp4 (Original Video + Logos) ---
-    # We use the future_logo_layer result directly on the original video
-    future_orig_mp4 = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_logo_layer.result(), filenames['orig'], verbose))
+    # We use the future_logo_layer result directly on the original video - USE SOURCE
+    future_orig_mp4 = executor.submit(lambda: overlay_video_with_image(filenames['source'], future_logo_layer.result(), filenames['orig'], verbose))
 
     # 5. Create [prefix]-grid.jpg (Clean JPG + GridWithLogos)
     future_jpg_grid = executor.submit(lambda: alpha_composite_images(future_stacked_jpg.result() and filenames['jpg'], future_final_overlay.result(), filenames['jpggrid'], verbose))
     
     # 6. Create [prefix]-grid.mp4 (Full Video + GridWithLogos)
-    future_mp4_grid = executor.submit(lambda: overlay_video_with_image(filenames['full'], future_final_overlay.result(), filenames['mp4grid'], verbose))
+    # USE SOURCE
+    future_mp4_grid = executor.submit(lambda: overlay_video_with_image(filenames['source'], future_final_overlay.result(), filenames['mp4grid'], verbose))
 
     # Add future_orig_mp4 to the completion wait list
     for future in as_completed([future_jpg_grid, future_mp4_grid, future_orig_mp4]):
@@ -883,9 +885,9 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
     future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
                                           filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
     
-    # Create raw stitch
+    # Create raw stitch - USE SOURCE
     raw_gnomonic_mp4 = f"{tmpdir}/raw_gnomonic.mp4"
-    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {raw_gnomonic_mp4}"
+    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['source']} {raw_gnomonic_mp4}"
     future_stitch = executor.submit(lambda: run_command(future_modified_pto.result() and stitch_cmd_mp4, "Creating gnomonic video", verbose))
 
     # Create 1080p Logo Layer
@@ -923,8 +925,9 @@ def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, v
     print("-> Creating final gnomonic video...")
     modify_pto_canvas(filenames['gnomonic_pto'], filenames['gnomonic_mp4_pto'], 1920, 1080, verbose=verbose)
     
+    # USE SOURCE
     raw_gnomonic_mp4 = f"{tmpdir}/raw_gnomonic.mp4"
-    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['full']} {raw_gnomonic_mp4}"
+    stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['source']} {raw_gnomonic_mp4}"
     run_command(stitch_cmd_mp4, "Creating gnomonic video", verbose)
     
     # Prepare Logo Layer
@@ -1151,20 +1154,32 @@ def main(args):
             'lens_pto': 'lens.pto'
         }
 
+        # Determine the best source video. 
+        # If [name]_hevc.mp4 exists, use it (highest quality).
+        # Otherwise, default to [name].mp4.
+        hevc_source = Path(f"{name}_hevc.mp4")
+        if hevc_source.exists():
+            print(f"-> Detected HEVC source: {hevc_source.name}. Using it for processing.")
+            filenames['source'] = str(hevc_source)
+        else:
+            filenames['source'] = filenames['full']
+
         event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
         pos_label = f"{event_data.get('latitude', 0):.4f}N {event_data.get('longitude', 0):.4f}E"
         event_data['label'] = f"{event_data.get('clock', '')}\n{pos_label}"
         gnomonic_enabled = 'begin' in event_data and 'start_azalt' in event_data
 
         if args.nothreads:
-            stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
+            # Change filenames['full'] to filenames['source']
+            stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['source']}"
             run_command(stack_cmd, "Stacking video frames to create JPG", args.verbose)
             _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
             if gnomonic_enabled:
                 _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
         else:
             with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-                stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
+                # Change filenames['full'] to filenames['source']
+                stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['source']}"
                 future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", args.verbose)
 
                 future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
@@ -1201,11 +1216,12 @@ def main(args):
         
         # We create a 1080p overlay specifically for the HEVC transcode process
         with tempfile.TemporaryDirectory() as hevc_tmp:
-            # Determine actual video resolution for the overlay
-            vw, vh = get_video_resolution(filenames['full'])
-            hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
-            create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
-            handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
+            # Determine actual video resolution for the overlay - USE FULL because we are replacing it
+            if Path(filenames['full']).exists():
+                vw, vh = get_video_resolution(filenames['full'])
+                hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
+                create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
+                handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
 
     # Update event.txt before finishing
     update_event_file(event_data)

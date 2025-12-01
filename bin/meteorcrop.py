@@ -2,16 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Extracts a normalized image and video of a meteor track from a gnomonic projection.
-
-This script leverages the rotation and cropping features of the stitcher to
-extract a meteor track with maximum efficiency.
-
-A single, precise PTO file is generated to command the stitcher to reproject the
-source media (image and video) directly into the final rotated and cropped geometry.
-
-A reusable background plate is generated once from the first frame of the source
-video. This plate is used for background subtraction in both the image and video
-processing steps to ensure consistency and improve performance.
 """
 
 # --- Standard Library Imports ---
@@ -356,50 +346,6 @@ def create_background_plate(event_dir: Path, pto_path: Path, source_video_path: 
     return bg_plate_path
 
 
-def stack_video_to_image(video_path: Path) -> np.ndarray:
-    """
-    Stacks all frames of a video file to create a single max-brightness image.
-    This function is inspired by the logic in stack.py.
-    Returns a BGR numpy array.
-    """
-    print(f"Stacking frames from '{video_path.name}' to create a composite image...")
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise ScriptError(f"Could not open video file for stacking: {video_path}")
-
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    if frame_count <= 0:
-        cap.release()
-        raise ScriptError(f"Video file '{video_path.name}' contains no frames.")
-
-    # Initialize a YUV stack. U and V are set to 128 (neutral grey).
-    yuv_stack = np.zeros((height, width, 3), dtype=np.uint8)
-    yuv_stack[:, :, 1:] = 128
-
-    with tqdm(total=frame_count, desc="Stacking Frames", unit="frame") as pbar:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
-            
-            # Create a mask where the new frame's luma is brighter than the stack's
-            update_mask = yuv_frame[:, :, 0] > yuv_stack[:, :, 0]
-            
-            # Apply the mask to update all channels (Y, U, and V)
-            yuv_stack[update_mask] = yuv_frame[update_mask]
-            pbar.update(1)
-
-    cap.release()
-    bgr_result = cv2.cvtColor(yuv_stack, cv2.COLOR_YUV2BGR)
-    print("✅ Frame stacking complete.")
-    return bgr_result
-
-
 def subtract_background_from_image_array(main_image_bgr: np.ndarray, background_plate_path: Path) -> Image:
     """
     Performs luminance-gated background subtraction on a numpy image array (BGR).
@@ -590,7 +536,9 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
     print("\nStarting video creation process...")
     # Find source video again to be safe, reusing the logic from main
     candidates = list(event_dir.glob("*.mp4"))
-    candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name]
+    # --- KEY FIX: EXCLUDE -orig.mp4 TO PREVENT WRONG SOURCE SELECTION ---
+    candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name and "-orig" not in v.name]
+    
     hevc_vid = next((v for v in candidates if "_hevc" in v.name), None)
     std_vid = next((v for v in candidates if "_hevc" not in v.name), None)
     source_video_path = hevc_vid if hevc_vid else std_vid
@@ -644,6 +592,35 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
             temp_stitched_video.unlink(missing_ok=True)
         temp_subtracted_video.unlink(missing_ok=True)
 
+def process_image_mode(event_dir: Path, pto_path: Path, background_plate_path: Path, source_video_path: Path):
+    """
+    Handles the 'image' generation mode logic.
+    Decoupled from video mode to avoid artifact inheritance from video processing.
+    """
+    print("\nProcessing image to extract meteor track...")
+            
+    # Smart image path deduction: 
+    # If video is 'video_hevc.mp4', image is 'video.jpg' (not 'video_hevc.jpg')
+    if "_hevc" in source_video_path.name:
+        source_image_name = source_video_path.name.replace("_hevc", "").replace(".mp4", ".jpg")
+        source_image_path = source_video_path.parent / source_image_name
+    else:
+        source_image_path = source_video_path.with_suffix(".jpg")
+
+    if not source_image_path.is_file():
+        # Fallback: check if the direct suffix version exists (e.g. if stacking logic changed)
+        fallback_path = source_video_path.with_suffix(".jpg")
+        if fallback_path.is_file():
+            source_image_path = fallback_path
+        else:
+            raise FileNotFoundError(f"Could not find corresponding source image '{source_image_path.name}'")
+    
+    track_image = extract_meteor_track(source_image_path, pto_path, event_dir, background_plate_path)
+    output_path = event_dir / Settings.OUTPUT_FILENAME
+    track_image.save(filename=str(output_path))
+    track_image.close()
+    print(f"✅ Success! Created '{output_path.name}'")
+
 
 # ==============================================================================
 #  MAIN EXECUTION
@@ -682,7 +659,8 @@ def main():
         # 1. Gather all mp4s
         candidates = list(event_dir.glob("*.mp4"))
         # 2. Exclude derived/processed videos
-        candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name]
+        # --- KEY FIX: EXCLUDE -orig.mp4 TO PREVENT WRONG SOURCE SELECTION ---
+        candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name and "-orig" not in v.name]
         
         # 3. Prefer HEVC if available
         hevc_vid = next((v for v in candidates if "_hevc" in v.name), None)
@@ -697,58 +675,13 @@ def main():
 
         # --- Mode-Specific Processing ---
 
-        if args.mode == "image":
-            print("\nProcessing image to extract meteor track...")
-            
-            # Smart image path deduction: 
-            # If video is 'video_hevc.mp4', image is 'video.jpg' (not 'video_hevc.jpg')
-            if "_hevc" in source_video_path.name:
-                source_image_name = source_video_path.name.replace("_hevc", "").replace(".mp4", ".jpg")
-                source_image_path = source_video_path.parent / source_image_name
-            else:
-                source_image_path = source_video_path.with_suffix(".jpg")
-
-            if not source_image_path.is_file():
-                # Fallback: check if the direct suffix version exists (e.g. if stacking logic changed)
-                fallback_path = source_video_path.with_suffix(".jpg")
-                if fallback_path.is_file():
-                    source_image_path = fallback_path
-                else:
-                    raise FileNotFoundError(f"Could not find corresponding source image '{source_image_path.name}'")
-            
-            track_image = extract_meteor_track(source_image_path, pto_path, event_dir, background_plate_path)
-            output_path = event_dir / Settings.OUTPUT_FILENAME
-            track_image.save(filename=str(output_path))
-            track_image.close()
-            print(f"✅ Success! Created '{output_path.name}'")
-        
-        elif args.mode == "video":
+        if args.mode == "video" or args.mode == "both":
+            # Always clean up stitched video afterwards to keep things tidy
             create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h, delete_stitched_vid=True)
             
-        elif args.mode == "both":
-            # 1. Process video, keeping the stitched intermediate for the image step
-            create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h, delete_stitched_vid=False)
-            
-            # 2. Process image using the stacked frames of the stitched video
-            print("\nProcessing to create final image from video stack...")
-            if not temp_stitched_video_path.is_file():
-                raise FileNotFoundError(f"Stitched video '{temp_stitched_video_path.name}' needed for stacking not found. Video processing may have failed.")
-
-            # Stack frames from the stitched video into a single BGR numpy array
-            stacked_bgr_array = stack_video_to_image(temp_stitched_video_path)
-            
-            # Save a copy of the original (pre-subtraction) stacked image
-            orig_output_path = event_dir / Settings.OUTPUT_ORIG_FILENAME
-            cv2.imwrite(str(orig_output_path), stacked_bgr_array)
-            print(f"Saved original stacked image as '{orig_output_path.name}'")
-
-            # Subtract the background from the stacked image array
-            track_image = subtract_background_from_image_array(stacked_bgr_array, background_plate_path)
-            
-            output_path = event_dir / Settings.OUTPUT_FILENAME
-            track_image.save(filename=str(output_path))
-            track_image.close()
-            print(f"✅ Success! Created '{output_path.name}'")
+        if args.mode == "image" or args.mode == "both":
+            # Process image independently using the best available static image source
+            process_image_mode(event_dir, pto_path, background_plate_path, source_video_path)
 
     except ScriptError as e:
         print(f"❌ Error: {e}", file=sys.stderr)

@@ -588,7 +588,13 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
     If delete_stitched_vid is False, the temporary stitched video is not removed.
     """
     print("\nStarting video creation process...")
-    source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
+    # Find source video again to be safe, reusing the logic from main
+    candidates = list(event_dir.glob("*.mp4"))
+    candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name]
+    hevc_vid = next((v for v in candidates if "_hevc" in v.name), None)
+    std_vid = next((v for v in candidates if "_hevc" not in v.name), None)
+    source_video_path = hevc_vid if hevc_vid else std_vid
+
     if not source_video_path:
         raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
     
@@ -672,7 +678,18 @@ def main():
 
         final_w, final_h = create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
         
-        source_video_path = next((v for v in event_dir.glob("*.mp4") if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name), None)
+        # --- Source Detection Logic ---
+        # 1. Gather all mp4s
+        candidates = list(event_dir.glob("*.mp4"))
+        # 2. Exclude derived/processed videos
+        candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name]
+        
+        # 3. Prefer HEVC if available
+        hevc_vid = next((v for v in candidates if "_hevc" in v.name), None)
+        std_vid = next((v for v in candidates if "_hevc" not in v.name), None)
+        
+        source_video_path = hevc_vid if hevc_vid else std_vid
+
         if not source_video_path:
             raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
         
@@ -682,9 +699,22 @@ def main():
 
         if args.mode == "image":
             print("\nProcessing image to extract meteor track...")
-            source_image_path = source_video_path.with_suffix(".jpg")
+            
+            # Smart image path deduction: 
+            # If video is 'video_hevc.mp4', image is 'video.jpg' (not 'video_hevc.jpg')
+            if "_hevc" in source_video_path.name:
+                source_image_name = source_video_path.name.replace("_hevc", "").replace(".mp4", ".jpg")
+                source_image_path = source_video_path.parent / source_image_name
+            else:
+                source_image_path = source_video_path.with_suffix(".jpg")
+
             if not source_image_path.is_file():
-                raise FileNotFoundError(f"Could not find corresponding source image '{source_image_path.name}'")
+                # Fallback: check if the direct suffix version exists (e.g. if stacking logic changed)
+                fallback_path = source_video_path.with_suffix(".jpg")
+                if fallback_path.is_file():
+                    source_image_path = fallback_path
+                else:
+                    raise FileNotFoundError(f"Could not find corresponding source image '{source_image_path.name}'")
             
             track_image = extract_meteor_track(source_image_path, pto_path, event_dir, background_plate_path)
             output_path = event_dir / Settings.OUTPUT_FILENAME

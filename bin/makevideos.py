@@ -498,7 +498,7 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
     Checks if a video file uses the HEVC codec. If so, renames the original
     to '_hevc.mp4' and creates a new H.264 version with the original name.
     
-    This creates a CLEAN H.264 version for the original filename,
+    This now creates a CLEAN H.264 version for the original filename,
     instead of burning in the watermark. The watermarked version was already
     created as [prefix]-orig.mp4 in the pipeline.
     """
@@ -1266,7 +1266,7 @@ if __name__ == "__main__":
         parser.error("--client mode requires --video-dir, --start, and --length.")
 
     os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
-    lockfile = Path("processing.lock")
+    lockfile = Path("makevideos.lock")
 
     if lockfile.exists():
         try:

@@ -285,8 +285,6 @@ def run_classification(event_config, event_dir: Path):
     """Crops meteor image and cleans up directory if classification is low."""
     fireball_jpg = event_dir.resolve() / 'fireball.jpg'
 
-    run_command([sys.executable, Settings.CROP_SCRIPT, '--mode', 'both', str(event_dir.resolve())], cwd=event_dir)
-
     if event_config.has_option('summary', 'meteor_probability'):
         return
 

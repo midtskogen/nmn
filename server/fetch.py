@@ -511,8 +511,7 @@ if (file_exists($specific_brightness_path)) {{
 <tr><td><b>{videos_header}</b><br>
 <?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4">{gnomonic_label}</a><br> <?php }} ?>
 <?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.mp4">{gnomonic_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.mp4">{original_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}_hevc.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}_hevc.mp4">{original_hevc_label}</a><br> <?php }} ?>
+<?php if (file_exists("{station}/{cam}/{station_ts}-orig.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-orig.mp4">{original_label}</a><br> <?php }} elseif (file_exists("{station}/{cam}/{station_ts}.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.mp4">{original_label}</a><br> <?php }} ?>
 <?php if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.mp4">{original_with_coords_label}</a><br> <?php }} ?>
 </td></tr>
 <tr><td><b>{images_header}</b><br>
@@ -550,7 +549,6 @@ if (file_exists($specific_brightness_path)) {{
                 gnomonic_label=translations.get("gnomonic", "Gnomonic"),
                 gnomonic_with_coords_label=translations.get("gnomonic_with_coords", "Gnomonic with coordinates"),
                 original_label=translations.get("original", "Original"),
-                original_hevc_label=translations.get("original_hevc", "Original (HEVC)"),
                 original_with_coords_label=translations.get("original_with_coords", "Original with coordinates"),
                 gnomonic_uncorrected_with_coords_label=translations.get("gnomonic_uncorrected_with_coords", "Uncorrected gnomonic with coordinates"),
                 gnomonic_with_labels_label=translations.get("gnomonic_with_labels", "Gnomonic with labels"),

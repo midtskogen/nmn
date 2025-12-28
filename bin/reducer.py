@@ -1102,6 +1102,7 @@ class Zoom_Advanced(ttk.Frame):
         elif key_char == '!': self.boost = 100 if self.boost == 1 else 1
         elif key_char == 'q':
             self.show_quit_menu()
+            if self.restart: return # Stop processing if we are restarting
         elif key_char == '1': self.contrast -= 0.1
         elif key_char == '2': self.contrast += 0.1
         elif key_char == '3': self.brightness -= 0.1

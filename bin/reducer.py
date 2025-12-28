@@ -138,13 +138,19 @@ class LauncherDialog:
         ttk.Button(min_frame, text=">", width=2, command=lambda: self._adjust_minute(1)).pack(side=tk.LEFT)
         # --- End Stepper Buttons ---
 
+        # Duration
+        ttk.Label(frame, text="Duration (min):").grid(column=0, row=5, sticky=tk.W, pady=5)
+        self.duration_var = tk.StringVar(value="1")
+        dur_spin = ttk.Spinbox(frame, from_=1, to=1440, textvariable=self.duration_var, width=5)
+        dur_spin.grid(column=1, row=5, sticky=tk.W)
+
         # Status Label
         self.status_label = ttk.Label(frame, text="")
-        self.status_label.grid(column=0, row=5, columnspan=2, sticky=tk.W, pady=10)
+        self.status_label.grid(column=0, row=6, columnspan=2, sticky=tk.W, pady=10)
 
         # Buttons
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(column=0, row=6, columnspan=2, sticky=tk.E, pady=10)
+        btn_frame.grid(column=0, row=7, columnspan=2, sticky=tk.E, pady=10)
         
         self.fetch_button = ttk.Button(btn_frame, text="Fetch", command=self.fetch_files)
         self.fetch_button.grid(column=1, row=0, padx=5)
@@ -194,6 +200,12 @@ class LauncherDialog:
         hour_str = self.hour_var.get()
         min_str = self.min_var.get()
 
+        try:
+            duration = int(self.duration_var.get())
+            if duration < 1: duration = 1
+        except ValueError:
+            duration = 1
+
         if not station_display or not cam_num:
             messagebox.showerror("Error", "Please select a station and camera.")
             return
@@ -210,9 +222,15 @@ class LauncherDialog:
         self.fetch_button.config(state=tk.DISABLED) # Prevent double-click
 
         # 2. Construct remote paths
+        try:
+            start_dt = datetime.strptime(f"{date_str}{hour_str}{min_str}", "%Y%m%d%H%M")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid Date/Time.")
+            self.fetch_button.config(state=tk.NORMAL)
+            return
+
         remote_cfg_path = "/etc/meteor.cfg"
         remote_pto_path = f"/meteor/cam{cam_num}/lens.pto"
-        remote_video_path = f"/meteor/cam{cam_num}/{date_str}/{hour_str}/full_{min_str}.mp4"
         self.upload_target = f"{hostname}:/meteor/cam{cam_num}"
 
         # 3. Fetch files
@@ -233,20 +251,37 @@ class LauncherDialog:
             else:
                 raise Exception(f"Failed to fetch PTO file: {remote_pto_path}")
 
-            self.status_label.config(text=f"Fetching video from {hostname}...")
-            self.root.update_idletasks()
-            local_video = scp_file(hostname, remote_video_path)
-            if local_video:
-                temp_files_to_clean.append(local_video)
-            else:
-                raise Exception(f"Failed to fetch video file: {remote_video_path}")
+            # Loop to fetch video files based on duration
+            local_videos = []
+            for i in range(duration):
+                current_dt = start_dt + timedelta(minutes=i)
+                
+                c_date = current_dt.strftime("%Y%m%d")
+                c_hour = current_dt.strftime("%H")
+                c_min = current_dt.strftime("%M")
+                
+                remote_video_path = f"/meteor/cam{cam_num}/{c_date}/{c_hour}/full_{c_min}.mp4"
+                
+                self.status_label.config(text=f"Fetching video {i+1}/{duration} ({c_hour}:{c_min})...")
+                self.root.update_idletasks()
+                
+                local_vid = scp_file(hostname, remote_video_path)
+                if local_vid:
+                    temp_files_to_clean.append(local_vid)
+                    local_videos.append(local_vid)
+                else:
+                    print(f"Warning: Could not fetch {remote_video_path}", file=sys.stderr)
+                    # Continue trying subsequent files
+
+            if not local_videos:
+                raise Exception("Failed to fetch any video files.")
 
             # 4. Success! Store results and close.
             self.status_label.config(text="Success! Launching...")
             self.fetched_files = {
                 'config': local_cfg,
                 'pto': local_pto,
-                'video': local_video
+                'video': local_videos # List of files
             }
             # We must destroy the main Tk window to terminate root.mainloop()
             self.main_tk.destroy()
@@ -2403,7 +2438,7 @@ if __name__ == '__main__':
             
             args.station = dialog.fetched_files['config']
             args.ptofile = dialog.fetched_files['pto']
-            args.imgfiles = [dialog.fetched_files['video']]
+            args.imgfiles = dialog.fetched_files['video'] # Already a list
             args.upload_target = dialog.upload_target
             
             # Set defaults for other args that argparse would normally handle

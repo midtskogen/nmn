@@ -33,13 +33,13 @@ E_SQUARED = 2 * FLATTENING - FLATTENING**2  # Eccentricity squared
 
 # --- Configuration Constants ---
 TIME_OFFSET_BRUTE_STEP = 0.25
-MIN_POINTS_FOR_EXP_FIT = 4
+MIN_POINTS_FOR_EXP_FIT = 6       # INCREASED from 4 to 6 to filter noise
 XYZ_CONVERGENCE_TOLERANCE = 1e-12
 PARALLEL_LINES_TOLERANCE = 1e-9
 MIN_POSITIONAL_SIGMA = 1e-9
 DAT_STATION_NAME_START_COLUMN = 12
 CAMERA_DEGREES_PER_PIXEL = 0.05
-FRAGMENT_GAP_THRESHOLD = 0.5  # in seconds
+FRAGMENT_GAP_THRESHOLD = 2.0     # INCREASED from 0.5 to 2.0 seconds
 
 # --- Data Structures ---
 
@@ -184,18 +184,26 @@ def _calculate_linear_fit_error(offsets: np.ndarray, obs_list: List[Dict]) -> fl
 def _split_obs_by_gaps(station_obs: List[Dict], debug: bool = False) -> List[Dict]:
     split_obs = []
     for station in station_obs:
-        if len(station['reltime']) < 2:
-            split_obs.append(station)
+        # 1. Skip completely if not enough data
+        if len(station['reltime']) < MIN_POINTS_FOR_EXP_FIT:
+            if debug: print(f"Skipping station '{station['site_info']['name']}' (too few points: {len(station['reltime'])}).")
             continue
+
         time_diffs = np.diff(station['reltime'])
         split_indices = np.where(time_diffs > FRAGMENT_GAP_THRESHOLD)[0] + 1
+        
         if len(split_indices) == 0:
             split_obs.append(station)
             continue
-        if debug: print(f"Fragmenting observation '{station['site_info']['name']}' due to time gap(s).")
+            
+        if debug: print(f"Fragmenting observation '{station['site_info']['name']}' due to time gap(s) > {FRAGMENT_GAP_THRESHOLD}s.")
         split_points = np.split(np.arange(len(station['reltime'])), split_indices)
+        
         for i, point_indices in enumerate(split_points):
-            if len(point_indices) == 0: continue
+            # 2. Filter out tiny fragments
+            if len(point_indices) < MIN_POINTS_FOR_EXP_FIT: 
+                continue
+                
             new_frag = station.copy()
             new_frag['site_info'] = station['site_info'].copy()
             new_frag['site_info']['name'] = f"{station['site_info']['name']}_frag{i+1}"
@@ -207,46 +215,102 @@ def _split_obs_by_gaps(station_obs: List[Dict], debug: bool = False) -> List[Dic
 def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False) -> np.ndarray:
     num_stations = len(station_obs)
     if num_stations < 2: return np.zeros(num_stations)
+    
+    # Store original order to return correct array later
     original_station_order_map = {obs['site_info']['name']: i for i, obs in enumerate(station_obs)}
-    station_obs.sort(key=lambda obs: obs['reltime'].min())
-    ref_obs, non_ref_obs = station_obs[0], station_obs[1:]
+    
+    # Sort by number of points (descending) to prioritize high-quality data
+    # We keep the reference to the original object so the map above works
+    sorted_obs = sorted(station_obs, key=lambda x: len(x['reltime']), reverse=True)
+    
+    # LIMIT COMPLEXITY:
+    # Only use the top N longest fragments for the expensive brute force triplet search.
+    # 7 stations = 35 combinations (fast). 30 stations = 4000 combinations (slow).
+    MAX_TRIPLET_STATIONS = 7
+    core_obs = sorted_obs[:MAX_TRIPLET_STATIONS]
+    
+    # Ensure they are sorted by time for the algorithm logic (ref = earliest)
+    core_obs.sort(key=lambda obs: obs['reltime'].min())
+    
+    ref_obs = core_obs[0]
+    non_ref_obs = core_obs[1:]
     ref_name = ref_obs.get('site_info', {}).get('name', 'Unknown')
-    if debug: print(f"Anchoring time offsets to reference station: '{ref_name}'")
-    A_rows, b_vals, num_unknowns = [], [], num_stations - 1
-    if num_stations >= 3:
-        all_triplets = list(itertools.combinations(range(num_stations), 3))
+    
+    if debug: 
+        print(f"Anchoring time offsets to reference station: '{ref_name}'")
+        print(f"Using top {len(core_obs)} fragments (of {num_stations} total) for core alignment.")
+
+    A_rows, b_vals = [], []
+    num_core_stations = len(core_obs)
+    num_unknowns = num_core_stations - 1
+
+    if num_core_stations >= 3:
+        all_triplets = list(itertools.combinations(range(num_core_stations), 3))
         if debug: print(f"Using robust triplet method. Performing {len(all_triplets)} 2D brute-force searches.")
+        
         for idx_i, idx_j, idx_k in all_triplets:
-            s_i, s_j, s_k = station_obs[idx_i], station_obs[idx_j], station_obs[idx_k]
-            def get_range(s_ref, s_off): return slice(s_ref['reltime'].min()-s_off['reltime'].max(), s_ref['reltime'].max()-s_off['reltime'].min(), TIME_OFFSET_BRUTE_STEP)
+            s_i, s_j, s_k = core_obs[idx_i], core_obs[idx_j], core_obs[idx_k]
+            
+            # Helper to check overlap
+            def get_range(s_ref, s_off): 
+                return slice(s_ref['reltime'].min()-s_off['reltime'].max(), s_ref['reltime'].max()-s_off['reltime'].min(), TIME_OFFSET_BRUTE_STEP)
+            
             range_j, range_k = get_range(s_i, s_j), get_range(s_i, s_k)
+            
+            # Skip if ranges are invalid/empty
             if range_j.start >= range_j.stop or range_k.start >= range_k.stop:
-                if debug:
-                    print(f"  -> Skipping triplet ({s_i['site_info']['name']}, {s_j['site_info']['name']}, {s_k['site_info']['name']}) due to insufficient data for overlap.")
-                    continue
+                continue
+                
             offsets = brute(lambda p: _calculate_quadratic_fit_error(p, [s_i, s_j, s_k]), (range_j, range_k), finish=None)
+            
             for offset, s_idx_off in [(offsets[0], idx_j), (offsets[1], idx_k)]:
                 row = np.zeros(num_unknowns)
-                if idx_i == 0: row[s_idx_off - 1] = 1.0
-                elif s_idx_off == 0: row[idx_i - 1] = -1.0
-                else: row[s_idx_off - 1], row[idx_i - 1] = 1.0, -1.0
+                # Logic to fill matrix based on index relationships relative to ref (idx 0)
+                if idx_i == 0: 
+                    row[s_idx_off - 1] = 1.0
+                elif s_idx_off == 0: 
+                    row[idx_i - 1] = -1.0
+                else: 
+                    row[s_idx_off - 1] = 1.0
+                    row[idx_i - 1] = -1.0
                 A_rows.append(row); b_vals.append(offset)
-    else:
-        if debug: print("Fewer than 3 stations. Using robust linear fit for pairwise search.")
-        s_i, s_j = station_obs[0], station_obs[1]
+    elif num_core_stations == 2:
+        if debug: print("Two stations. Using robust linear fit for pairwise search.")
+        s_i, s_j = core_obs[0], core_obs[1]
         brute_range = slice(s_i['reltime'].min() - s_j['reltime'].max(), s_i['reltime'].max() - s_j['reltime'].min(), TIME_OFFSET_BRUTE_STEP)
         offset_j_vs_i = brute(lambda p: _calculate_linear_fit_error([p], [s_i, s_j]), (brute_range,), finish=None)
         row = np.zeros(num_unknowns); row[0] = 1.0
         A_rows.append(row); b_vals.append(offset_j_vs_i)
-    coarse_offsets, _, _, _ = np.linalg.lstsq(np.array(A_rows), np.array(b_vals), rcond=None)
+
+    # Solve for the core stations
+    if A_rows:
+        coarse_offsets, _, _, _ = np.linalg.lstsq(np.array(A_rows), np.array(b_vals), rcond=None)
+    else:
+        coarse_offsets = np.zeros(num_unknowns)
+
     if debug: print(f"Least-squares on sub-problems found initial guess: {coarse_offsets}")
+
+    # Refine core
     result = minimize(lambda p: _calculate_quadratic_fit_error(p, [ref_obs] + non_ref_obs), x0=coarse_offsets, method='L-BFGS-B')
     fine_offsets = result.x if result.success else coarse_offsets
+    
     if not result.success: print(f"Warning: Fine-grained offset optimization may have failed: {result.message}")
+
+    # Map results back to the original array
     final_offsets_map = {ref_name: 0.0}
-    for i, obs in enumerate(non_ref_obs): final_offsets_map[obs['site_info']['name']] = fine_offsets[i]
+    for i, obs in enumerate(non_ref_obs): 
+        final_offsets_map[obs['site_info']['name']] = fine_offsets[i]
+        
+    # --- HANDLING REMAINING STATIONS ---
+    # Any station not in the "Core" list currently has no offset. 
+    # They will be aligned later by _refine_offsets_by_projection_method or _align_fragments_to_anchor_method
+    # but we initialize them to 0 here.
+    
     final_offsets_array = np.zeros(num_stations)
-    for name, offset in final_offsets_map.items(): final_offsets_array[original_station_order_map[name]] = offset
+    for name, offset in final_offsets_map.items(): 
+        if name in original_station_order_map:
+            final_offsets_array[original_station_order_map[name]] = offset
+            
     return final_offsets_array
 
 def _refine_offsets_by_projection_method(station_obs: List[Dict], initial_offsets: np.ndarray, debug: bool = False) -> np.ndarray:

@@ -730,9 +730,12 @@ def _create_subset_obs_data(full_obs_data, indices):
 def robust_fit_with_ransac(obs_data, raw_data, options):
     """
     Performs a robust trajectory fit using a multi-run RANSAC approach.
+    MODIFIED: Prioritizes TOTAL WEIGHT of inliers rather than just the COUNT.
     """
     random.seed(options['seed'])
     num_stations = len(raw_data['names'])
+    weights = raw_data['weight'] # Access weights directly
+
     if num_stations < 2:
         print("Not enough stations for RANSAC, falling back to simple fit.")
         return fit_track(obs_data, optimize=options['optimize']), obs_data, list(range(num_stations))
@@ -740,11 +743,14 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
     los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
 
-    if options['debug_ransac']: print("--- RANSAC Debugging Enabled ---")
+    if options['debug_ransac']: print("--- RANSAC Debugging Enabled (Weighted Mode) ---")
     candidate_sets = set()
 
     for run in range(options['ransac_runs']):
-        best_inlier_indices_this_run, best_fit_error_this_run = set(), float('inf')
+        best_inlier_indices_this_run = set()
+        best_weight_sum_this_run = -1.0 # Track weight instead of count
+        best_fit_error_this_run = float('inf')
+        
         for i in range(options['ransac_iterations']):
             while True:
                 sample_indices = random.sample(range(num_stations), 2)
@@ -764,11 +770,18 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
                 dist = (dist_line_line(track_ref, track_vec, pos_vectors[j], los_vectors[j]) + dist_line_line(track_ref, track_vec, pos_vectors[j + num_stations], los_vectors[j + num_stations])) / 2.0
                 if dist < options['ransac_threshold']: current_inlier_indices.add(j)
             
-            if len(current_inlier_indices) >= len(best_inlier_indices_this_run):
+            # [MODIFICATION 1] Calculate Total Weight
+            current_weight_sum = sum(weights[idx] for idx in current_inlier_indices)
+
+            # Check if this set is "heavier" (better) than the previous best
+            if current_weight_sum >= best_weight_sum_this_run:
                 _, _, _, current_chi2, _ = fit_track(_create_subset_obs_data(obs_data, current_inlier_indices), optimize=False)
-                if np.isfinite(current_chi2) and (len(current_inlier_indices) > len(best_inlier_indices_this_run) or current_chi2 < best_fit_error_this_run):
-                    best_fit_error_this_run = current_chi2
-                    best_inlier_indices_this_run = current_inlier_indices
+                if np.isfinite(current_chi2):
+                    # Prefer higher weight; if tied, prefer lower error
+                    if current_weight_sum > best_weight_sum_this_run or (current_weight_sum == best_weight_sum_this_run and current_chi2 < best_fit_error_this_run):
+                        best_fit_error_this_run = current_chi2
+                        best_weight_sum_this_run = current_weight_sum
+                        best_inlier_indices_this_run = current_inlier_indices
         
         if best_inlier_indices_this_run: candidate_sets.add(frozenset(best_inlier_indices_this_run))
 
@@ -798,11 +811,13 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
                     if calculated_speed < 8.0 or calculated_speed > 100.0:
                         penalty += 1e9 
 
-            current_score = (-len(indices_set), (penalty + final_error + 1) / (final_quality + 1e-9))
+            # [MODIFICATION 2] Primary sorting key is now Total Weight (negative for ascending sort)
+            total_weight = sum(weights[idx] for idx in indices_set)
+            current_score = (-total_weight, (penalty + final_error + 1) / (final_quality + 1e-9))
 
         if options['debug_ransac']:
             inlier_names = sorted([raw_data['names'][i] for i in indices_set])
-            print(f"Candidate {k+1}: {len(indices_set)} inliers, final_err={final_error:.2f}, quality={final_quality:.2f}, score={current_score[1]:.2f} -> {inlier_names}")
+            print(f"Candidate {k+1}: weight={total_weight:.1f}, inliers={len(indices_set)}, final_err={final_error:.2f}, score={current_score[1]:.2f} -> {inlier_names}")
 
         if current_score < best_final_model_score:
             best_final_model_score = current_score
@@ -815,7 +830,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     all_in_fit_results = fit_track(obs_data, optimize=True)
     all_in_error = all_in_fit_results[3]
     if options['debug_ransac']:
-        print(f"\n--- Final Sanity Check ---\nBest RANSAC result score: {best_final_model_score[1]:.2f} with {-best_final_model_score[0]} inliers.\nAll-in fit error: {all_in_error:.2f} with {num_stations} inliers.")
+        print(f"\n--- Final Sanity Check ---\nBest RANSAC result score: {best_final_model_score[1]:.2f} with weight {-best_final_model_score[0]:.1f}.\nAll-in fit error: {all_in_error:.2f} with {num_stations} inliers.")
     
     if all_in_error < options['all_in_tolerance']:
         if options['debug_ransac']: print("All-in error is below tolerance. Using all stations.")
@@ -825,7 +840,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         final_fit_results, final_obs_data, final_inlier_indices = best_final_model
 
     unique_inlier_names = {raw_data['names'][i] for i in final_inlier_indices}
-    print(f"Final solution uses {len(final_inlier_indices)} observations from {len(unique_inlier_names)} unique stations.")
+    print(f"Final solution uses {len(final_inlier_indices)} observations (Weight: {sum(weights[i] for i in final_inlier_indices):.1f}) from {len(unique_inlier_names)} unique stations.")
     return final_fit_results, final_obs_data, final_inlier_indices
 
 def _load_and_prepare_data(filepath):

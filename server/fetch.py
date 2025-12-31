@@ -11,7 +11,7 @@ This script performs the following actions for each supported language:
 5.  Optionally posts a notification to social media.
 Usage:
     python3 fetch.py <station_name> <ssh_port> <remote_dir>
-    python3 fetch.py <local_event_directory> [--fast] [--all]
+    python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen]
 """
 
 import argparse
@@ -247,7 +247,7 @@ def create_centroid_file(local_dir: Path):
     centroid_file = local_dir / 'centroid2.txt'
     
     if not event_file.is_file():
-        logging.warning(f"Event file not found: {event_file}")
+        # This is expected for some directories, silent return or debug log only
         return
 
     obs = configparser.ConfigParser()
@@ -277,11 +277,13 @@ def create_centroid_file(local_dir: Path):
             coordinates2.append((0,0))
 
     try:
+        # Attempt to find the observation file to get the station code
         obs_file = next(local_dir.glob('*[0-9][0-9].txt'))
         code = obs_file.read_text().split()[12]
     except (StopIteration, IndexError):
-        logging.error("Could not find an observation file or parse the station code.")
-        return
+        # Fallback: try to guess code from directory name if file parse fails
+        code = local_dir.parent.name.upper()
+        if len(code) > 3: code = code[:3]
 
     try:
         with centroid_file.open('w', encoding='utf-8') as f:
@@ -298,8 +300,9 @@ def create_centroid_file(local_dir: Path):
                     f"{main_timestamp}.{fractional_second} UTC"
                 )
                 f.write(output_line + '\n')
+        logging.info(f"Generated centroid2.txt for {local_dir}")
     except Exception as e:
-        logging.error(f"Failed to write centroid2.txt: {e}")
+        logging.error(f"Failed to write centroid2.txt in {local_dir}: {e}")
 
 
 def find_and_merge_event_directory(base_date: datetime.datetime, station: str, current_local_dir: Path):
@@ -643,7 +646,7 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
             logging.error(f"Failed to send tweet using key {key}: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     obs_filename = f"obs_{date.strftime('%Y-%m-%d_%H:%M:%S')}.txt"
@@ -677,7 +680,6 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             for proc in processes:
                 proc.wait()
                 
-                # UPDATED LOGIC:
                 if proc.returncode == 0:
                     logging.info(f"Job for {proc.args[2]} finished successfully (exit code 0).")
                 elif proc.returncode == 1:
@@ -706,6 +708,15 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             except Exception as e:
                 logging.warning(f"Failed to regenerate brightness plot for {event_file}: {e}")
 
+    # --- CRITICAL FIX: Ensure centroid2.txt exists for ALL stations ---
+    # In reprocessing mode (or if files were deleted), these might be missing.
+    # We iterate all subdirectories that look like station folders and regenerate them.
+    # This also ensures we have the option to use centroid2.txt even if requested to use orig.
+    logging.info("Ensuring centroid2.txt exists for all stations...")
+    for station_dir in event_dir.glob('*/*/'):
+        if (station_dir / 'event.txt').exists():
+             create_centroid_file(station_dir)
+    # -----------------------------------------------------------------
 
     station_codes, station_name_to_code = set(), {}
     try:
@@ -773,7 +784,19 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             fb2kml(str(res_filename))
             
             inlier_codes = set(metrack_info.inlier_stations)
-            centroid_files = [str(p) for p in event_dir.glob('*/*/centroid2.txt') if station_name_to_code.get(p.parts[-3]) in inlier_codes]
+            
+            # Use original centroid.txt if flag is set, otherwise default to centroid2.txt
+            target_centroid_file = 'centroid.txt' if use_orig_cen else 'centroid2.txt'
+            if use_orig_cen:
+                logging.info("Option --origcen selected: Using original 'centroid.txt' for speed profile analysis.")
+            
+            # Note: station_name_to_code maps 'dir_name' -> 'STATION_CODE'.
+            # metrack returns 'STATION_CODE'.
+            # p.parts[-3] gives us the directory name of the station (e.g. 'osl').
+            # We must map that dir name to a code to check against inlier_codes.
+            centroid_files = [str(p) for p in event_dir.glob(f'*/*/{target_centroid_file}') 
+                              if station_name_to_code.get(p.parts[-3]) in inlier_codes]
+            
             fbspd_results, fbspd_plot_data = calculate_speed_profile(str(res_filename), centroid_files, str(obs_filepath), **fbspd_opts)
             if not fbspd_results: raise ValueError("FBSPD calculation failed or returned no results.")
             entry_speed = fbspd_results['initial_speed']
@@ -987,7 +1010,7 @@ def main():
         description="Fetch and process meteor data, or reprocess an existing event directory.",
         usage="""
     To fetch:     python3 fetch.py <station> <port> <remote_dir>
-    To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all]
+    To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen]
         """
     )
     parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
@@ -1003,6 +1026,11 @@ def main():
         "--all",
         action="store_true",
         help="Skip elimination of outlier stations (disables RANSAC)."
+    )
+    parser.add_argument(
+        "--origcen",
+        action="store_true",
+        help="Use original centroid.txt data instead of calculated centroid2.txt."
     )
     
     args = parser.parse_args()
@@ -1034,7 +1062,7 @@ def main():
                 logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
-            process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all)
+            process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all, use_orig_cen=args.origcen)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -1049,6 +1077,9 @@ def main():
     
     if args.fast:
         logging.warning("--fast option is only supported for reprocessing mode. Ignoring.")
+    
+    if args.origcen:
+        logging.warning("--origcen option is only relevant for reprocessing mode logic, but will be passed along.")
 
     station = re.sub(r'\W', '', args.arg1)
     port = re.sub(r'\D', '', args.port)
@@ -1090,7 +1121,7 @@ def main():
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
     
     try:
-        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all)
+        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

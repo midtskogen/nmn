@@ -183,7 +183,7 @@ def fetch_data(station: str, port: str, remote_dir: str, local_dir: Path) -> boo
     """Fetches data from a remote station using rsync with retries."""
     local_dir.mkdir(parents=True, exist_ok=True)
     speed = Config.BW_LIMIT_SLOW if station == 'kristiansand' else Config.BW_LIMIT_DEFAULT
-    host = station if port == '0' else 'localhost'
+    host = station if port == '0' else '192.168.1.10'
     ssh_port = '22' if port == '0' else port
 
     rsync_cmd = [

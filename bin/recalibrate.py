@@ -4,7 +4,7 @@
 # Usage: recalibrate.py <Unix timestamp> <input pto file> <image file> <output pto file>
 import sys
 import ephem
-from datetime import datetime, UTC
+from datetime import datetime
 import math
 import pto_mapper
 import argparse
@@ -17,6 +17,13 @@ import subprocess
 from astropy.io import fits
 import configparser
 from stars import cat
+
+# Handle timezone import for compatibility
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 
 def setup_arg_parser():
     """Sets up and returns the argument parser."""
@@ -222,79 +229,88 @@ def recalibrate(timestamp, infile, picture, outfile, pos, **kwargs):
 
     if verbose: print("Generating star mask for feature detection...")
     
-    # Create a mask image with white circles at expected star locations
-    with Image(width=width, height=height, background=Color('black')) as stars_mask:
-        with Drawing() as draw:
-            draw.fill_color = Color('white')
-            for star in starlist:
-                draw.circle((star['x_exp'], star['y_exp']), (star['x_exp'] + pixel_radius, star['y_exp']))
-            draw(stars_mask)
-        stars_mask.gaussian_blur(blur_radius, blur_radius)
-
-        # Use the mask to highlight potential stars in the actual picture
-        with Image(filename=picture) as pic:
-            pic.gaussian_blur(radius=blur_radius/32, sigma=blur_radius/32) # Slight blur to reduce noise
-            with stars_mask.clone() as masked:
-                masked.composite(pic, operator='bumpmap', left=0, top=0)
-                
-                # Use a temporary file for solve-field
-                with tempfile.NamedTemporaryFile(prefix='recalibrate_', suffix='.png', delete=False) as temp:
-                    temp_name = temp.name
-                    # Explicitly set the format before saving to the file handle
-                    masked.format = 'png'
-                    masked.save(file=temp)
-
-    axyfile = os.path.splitext(temp_name)[0] + '.axy'
-    if verbose: print(f"Running solve-field to find actual star positions (sigma={sigma})...")
-    
-    try:
-        # solve-field finds star-like features and writes their coordinates to an .axy file
-        subprocess.run(
-            ['solve-field', '--sigma', str(sigma), '--just-augment', temp_name], 
-            check=True, stdout=out_stream, stderr=out_stream
-        )
-        with fits.open(axyfile) as hdul:
-            axy_data = hdul[1].data
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"Error: Failed to run solve-field. Is astrometry.net installed and in your PATH? Details: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        # Clean up temporary files
-        if os.path.exists(axyfile): os.unlink(axyfile)
-        if os.path.exists(temp_name): os.unlink(temp_name)
-
-    # Match found stars to expected stars
-    if verbose: print("Matching expected stars to found stars...")
-    remap = []
-    # FITS files are 1-indexed, so convert to 0-indexed pixel coordinates
-    found_stars = [(row[0]-1, row[1]-1) for row in axy_data]
-
-    for star in starlist:
-        x_expected, y_expected = star['x_exp'], star['y_exp']
-        min_dist = float('inf')
-        best_match = None
-        for (x_found, y_found) in found_stars:
-            d = math.hypot(x_found - x_expected, y_found - y_expected)
-            if d < min_dist:
-                min_dist = d
-                best_match = (x_found, y_found)
+    # FIX: Use TemporaryDirectory to contain all solve-field debris (including tmp.fits)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        temp_name = os.path.join(tmp_dir, 'recalibrate_input.png')
         
-        # Only consider a match if it's within the search radius
-        if min_dist <= pixel_radius:
-            remap.append((x_expected, y_expected, best_match[0], best_match[1]))
+        # Create a mask image with white circles at expected star locations
+        with Image(width=width, height=height, background=Color('black')) as stars_mask:
+            with Drawing() as draw:
+                draw.fill_color = Color('white')
+                for star in starlist:
+                    draw.circle((star['x_exp'], star['y_exp']), (star['x_exp'] + pixel_radius, star['y_exp']))
+                draw(stars_mask)
+            stars_mask.gaussian_blur(blur_radius, blur_radius)
 
-    if verbose:
-        print(f'Stars expected: {len(starlist)}')
-        print(f'Stars found by solve-field: {len(found_stars)}')
-        print(f'Stars successfully remapped: {len(remap)}')
-        for (x1, y1, x2, y2) in remap:
-            print(f'  {x1:8.3f},{y1:8.3f} -> {x2:8.3f},{y2:8.3f}')
+            # Use the mask to highlight potential stars in the actual picture
+            with Image(filename=picture) as pic:
+                pic.gaussian_blur(radius=blur_radius/32, sigma=blur_radius/32) # Slight blur to reduce noise
+                with stars_mask.clone() as masked:
+                    masked.composite(pic, operator='bumpmap', left=0, top=0)
+                    
+                    # Save into the temporary directory
+                    masked.format = 'png'
+                    masked.save(filename=temp_name)
+
+        axyfile = os.path.splitext(temp_name)[0] + '.axy'
+        if verbose: print(f"Running solve-field to find actual star positions (sigma={sigma})...")
+        
+        # FIX: Force solve-field (and any internal C-tools it calls like image2pnm) to use 
+        # our temporary directory for any temp file creation (like tmp.fits).
+        env = os.environ.copy()
+        env['TMPDIR'] = tmp_dir
+        env['TEMP'] = tmp_dir
+        env['TMP'] = tmp_dir
+
+        try:
+            # solve-field finds star-like features and writes their coordinates to an .axy file
+            # --dir ensures standard output files go to tmp_dir
+            # env vars ensure temp/intermediate files go to tmp_dir
+            subprocess.run(
+                ['solve-field', '--sigma', str(sigma), '--just-augment', '--dir', tmp_dir, temp_name], 
+                check=True, stdout=out_stream, stderr=out_stream, env=env
+            )
+            with fits.open(axyfile) as hdul:
+                axy_data = hdul[1].data
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"Error: Failed to run solve-field. Is astrometry.net installed and in your PATH? Details: {e}", file=sys.stderr)
+            sys.exit(1)
+        
+        # Match found stars to expected stars
+        if verbose: print("Matching expected stars to found stars...")
+        remap = []
+        # FITS files are 1-indexed, so convert to 0-indexed pixel coordinates
+        found_stars = [(row[0]-1, row[1]-1) for row in axy_data]
+
+        for star in starlist:
+            x_expected, y_expected = star['x_exp'], star['y_exp']
+            min_dist = float('inf')
+            best_match = None
+            for (x_found, y_found) in found_stars:
+                d = math.hypot(x_found - x_expected, y_found - y_expected)
+                if d < min_dist:
+                    min_dist = d
+                    best_match = (x_found, y_found)
             
-    if not remap:
-        print("Error: Could not remap any stars. No control points generated. Try increasing the search radius or checking image quality.", file=sys.stderr)
-        sys.exit(1)
+            # Only consider a match if it's within the search radius
+            if min_dist <= pixel_radius:
+                remap.append((x_expected, y_expected, best_match[0], best_match[1]))
+
+        if verbose:
+            print(f'Stars expected: {len(starlist)}')
+            print(f'Stars found by solve-field: {len(found_stars)}')
+            print(f'Stars successfully remapped: {len(remap)}')
+            for (x1, y1, x2, y2) in remap:
+                print(f'  {x1:8.3f},{y1:8.3f} -> {x2:8.3f},{y2:8.3f}')
+            
+        if not remap:
+            print("Error: Could not remap any stars. No control points generated. Try increasing the search radius or checking image quality.", file=sys.stderr)
+            sys.exit(1)
+    # The TemporaryDirectory context manager ends here, automatically cleaning up 
+    # everything in tmp_dir, including 'tmp.fits', .axy, .png, etc.
 
     # Write a temporary PTO file for Hugin tools
+    # We use NamedTemporaryFile here because these tools need a path but don't generate untracked debris
     with tempfile.NamedTemporaryFile(prefix='opt_', suffix='.pto', delete=False, mode='w') as temp_pto:
         temp_pto_name = temp_pto.name
     
@@ -304,11 +320,9 @@ def recalibrate(timestamp, infile, picture, outfile, pos, **kwargs):
     # Run Hugin's cpclean and autooptimiser to refine the PTO parameters
     try:
         if verbose: print(f"Running cpclean on {temp_pto_name}...")
-        # cpclean removes outlier control points
         subprocess.run(['cpclean', '-n', '1', '-o', temp_pto_name, temp_pto_name], check=True, stdout=out_stream, stderr=out_stream)
         
         if verbose: print(f"Running autooptimiser on {temp_pto_name}...")
-        # autooptimiser refines the image position and lens parameters
         subprocess.run(['autooptimiser', '-n', '-o', outfile, temp_pto_name], check=True, stdout=out_stream, stderr=out_stream)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(f"Error: Failed to run Hugin tools (cpclean/autooptimiser). Are they in your PATH? Details: {e}", file=sys.stderr)
@@ -329,7 +343,6 @@ def main():
     if args.configfile:
         config_files = [args.configfile]
     else:
-        # Default search order, with corrected path for user's config
         config_files = [os.path.expanduser('~/meteor.cfg'), '/etc/meteor.cfg']
 
     read_files = config.read(config_files)
@@ -346,20 +359,20 @@ def main():
         except (configparser.NoSectionError, configparser.NoOptionError):
             return None
 
-    # Step 1: Get location values and store them in temporary variables
+    # Step 1: Get location values
     lat = get_config_or_arg('astronomy', 'latitude', args.latitude)
     lon = get_config_or_arg('astronomy', 'longitude', args.longitude)
     elev = get_config_or_arg('astronomy', 'elevation', args.elevation, is_float=True)
     temp = get_config_or_arg('astronomy', 'temperature', args.temperature, is_float=True)
     pressure = get_config_or_arg('astronomy', 'pressure', args.pressure, is_float=True)
 
-    # Step 2: Validate that the essential location data exists
+    # Step 2: Validate
     if lat is None or lon is None or elev is None:
         print("Error: Observer location (latitude, longitude, elevation) must be provided.", file=sys.stderr)
         print("Please provide them via command-line arguments (-y, -x, -e) or a config file.", file=sys.stderr)
         sys.exit(1)
 
-    # Step 3: Now that validation is complete, create and configure the observer
+    # Step 3: Configure observer
     pos = ephem.Observer()
     pos.lat = str(lat)
     pos.lon = str(lon)
@@ -369,22 +382,19 @@ def main():
     if pressure is not None:
         pos.pressure = pressure
 
-    # Set the time of observation
     try:
         pos.date = datetime.fromtimestamp(float(args.timestamp), UTC)
     except ValueError:
         print(f"Error: Invalid timestamp '{args.timestamp}'", file=sys.stderr)
         sys.exit(1)
 
-    # Check sun's altitude to ensure it's dark enough for stars to be visible
     sun = ephem.Sun()
     sun.compute(pos)
     sun_alt_deg = math.degrees(sun.alt)
     if sun_alt_deg > args.sunalt:
         print(f"Sun is too high (altitude: {sun_alt_deg:.2f} deg, limit: {args.sunalt:.2f} deg). Skipping recalibration.")
-        sys.exit(0) # Exit successfully as this is a conditional skip, not an error.
+        sys.exit(0)
 
-    # Pass all keyword arguments to the main function
     recalibrate(
         args.timestamp, args.infile, args.picture, args.outfile, pos, 
         image=args.image, radius=args.radius, lensopt=args.lensopt, 

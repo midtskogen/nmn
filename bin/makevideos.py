@@ -321,10 +321,12 @@ def create_logo_overlay(width, height, logo_paths, output_path=None):
     placed in the Top-Left, Top-Right, and Bottom-Right corners respectively.
     Returns the path to the saved overlay image.
     """
+    # FIX: Track if we created the temp file so we can delete it if generation fails
+    created_temp = False
     if output_path is None:
-        # Create a temp file if no path specified
         fd, output_path = tempfile.mkstemp(suffix=".png")
         os.close(fd)
+        created_temp = True
 
     try:
         # Create transparent base
@@ -351,6 +353,9 @@ def create_logo_overlay(width, height, logo_paths, output_path=None):
 
     except Exception as e:
         print(f"Error creating logo overlay: {e}", file=sys.stderr)
+        # Cleanup orphaned temp file if processing failed
+        if created_temp and os.path.exists(output_path):
+            os.remove(output_path)
         return None
 
 def add_logos(base_image_path, output_path, logo_paths, verbose=False):

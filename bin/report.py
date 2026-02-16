@@ -93,7 +93,7 @@ def acquire_lock():
         print("Lock released.")
 
 
-def run_video_creation(config: configparser.ConfigParser, event_file_path: Path, start_timestamp: float, video_name: str) -> Optional[list]:
+def run_video_creation(config: configparser.ConfigParser, event_file_path: Path, start_timestamp: float, video_name: str, nologos: bool = False) -> Optional[list]:
     """Runs makevideos.py script and returns its output."""
     duration = math.ceil(config.getfloat('trail', 'duration'))
     # Use the event directory itself as the video directory
@@ -107,6 +107,8 @@ def run_video_creation(config: configparser.ConfigParser, event_file_path: Path,
         "--length", str(duration),
         video_name
     ]
+    if nologos:
+        command.insert(1, "--nologos")
     print(f"Running command: {' '.join(command)}")
     try:
         proc = subprocess.run(command, cwd=event_dir, capture_output=True, text=True, check=True)
@@ -257,11 +259,17 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
 
 def main():
     """Main execution function."""
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <event.txt>")
+    nologos = False
+    argv = sys.argv[1:]
+    if "--nologos" in argv:
+        nologos = True
+        argv = [a for a in argv if a != "--nologos"]
+
+    if len(argv) != 1:
+        print(f"Usage: {sys.argv[0]} [--nologos] <event.txt>")
         sys.exit(1)
 
-    event_file_path = Path(sys.argv[1])
+    event_file_path = Path(argv[0])
     if not event_file_path.is_file():
         print(f"Error: File not found at {event_file_path}", file=sys.stderr)
         sys.exit(1)
@@ -280,7 +288,7 @@ def main():
     video_name = f"{station_name}-{event_timestamp_str}"
 
     with acquire_lock():
-        video_output = run_video_creation(config, event_file_path, start_timestamp, video_name)
+        video_output = run_video_creation(config, event_file_path, start_timestamp, video_name, nologos=nologos)
         if not video_output:
             sys.exit(1)
 

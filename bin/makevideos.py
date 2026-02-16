@@ -700,22 +700,31 @@ def _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbo
     grid_labels_transparent_path = f"{tmpdir}/grid-labels-transparent.png"
     set_image_opacity(grid_labels_path, grid_labels_transparent_path, OVERLAY_OPACITY, verbose=verbose)
     
-    # 3. Create Logo Overlay Layer (Dynamic Size based on video)
-    # Get actual video resolution - USE SOURCE
-    vw, vh = get_video_resolution(filenames['source'])
-    logo_layer_path = f"{tmpdir}/logo_layer_full.png"
-    create_logo_overlay(vw, vh, logo_paths, logo_layer_path)
+    # 3. Prepare final overlay for grid outputs
+    # If logos are disabled, we use only the transparent grid.
+    final_overlay_path = grid_labels_transparent_path
+    logo_layer_path = None
+    if logo_paths is not None:
+        # Create Logo Overlay Layer (Dynamic Size based on video)
+        # Get actual video resolution - USE SOURCE
+        vw, vh = get_video_resolution(filenames['source'])
+        logo_layer_path = f"{tmpdir}/logo_layer_full.png"
+        create_logo_overlay(vw, vh, logo_paths, logo_layer_path)
 
-    # 4. Composite Logos onto the Transparent Grid
-    # This ensures mp4grid gets both grid and logos
-    final_overlay_path = f"{tmpdir}/grid_plus_logos.png"
-    alpha_composite_images(grid_labels_transparent_path, logo_layer_path, final_overlay_path, verbose=verbose)
+        # Composite Logos onto the Transparent Grid
+        # This ensures mp4grid gets both grid and logos
+        final_overlay_path = f"{tmpdir}/grid_plus_logos.png"
+        alpha_composite_images(grid_labels_transparent_path, logo_layer_path, final_overlay_path, verbose=verbose)
 
     print("-> Creating final full view images and videos...")
     
     # --- Create [prefix]-orig.mp4 (Original Video + Logos) ---
+    # If logos are disabled, create a clean copy.
     # USE SOURCE
-    overlay_video_with_image(filenames['source'], logo_layer_path, filenames['orig'], verbose=verbose)
+    if logo_layer_path is not None:
+        overlay_video_with_image(filenames['source'], logo_layer_path, filenames['orig'], verbose=verbose)
+    else:
+        shutil.copyfile(filenames['source'], filenames['orig'])
 
     # 5. Composite Final Overlay (Grid+Logos) onto the clean stacked JPG to create [prefix]-grid.jpg
     alpha_composite_images(filenames['jpg'], final_overlay_path, filenames['jpggrid'], verbose=verbose)
@@ -738,21 +747,30 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
     # 2. Transparency
     future_transparent_grid = executor.submit(lambda: set_image_opacity(future_grid_png.result() and grid_labels_path, f"{tmpdir}/grid-labels-transparent.png", OVERLAY_OPACITY, verbose))
     
-    # 3. Create Logo Layer (Dynamic Size)
-    # Determine video resolution (Synchronous is fine, it's fast) - USE SOURCE
-    vw, vh = get_video_resolution(filenames['source'])
-    logo_layer_path = f"{tmpdir}/logo_layer_full.png"
-    future_logo_layer = executor.submit(create_logo_overlay, vw, vh, logo_paths, logo_layer_path)
+    # 3. Create final overlay (grid or grid+logos)
+    if logo_paths is not None:
+        # Determine video resolution (Synchronous is fine, it's fast) - USE SOURCE
+        vw, vh = get_video_resolution(filenames['source'])
+        logo_layer_path = f"{tmpdir}/logo_layer_full.png"
+        future_logo_layer = executor.submit(create_logo_overlay, vw, vh, logo_paths, logo_layer_path)
 
-    # 4. Composite Logos onto Transparent Grid
-    final_overlay_path = f"{tmpdir}/grid_plus_logos.png"
-    future_final_overlay = executor.submit(lambda: alpha_composite_images(future_transparent_grid.result(), future_logo_layer.result(), final_overlay_path, verbose))
+        # Composite Logos onto Transparent Grid
+        final_overlay_path = f"{tmpdir}/grid_plus_logos.png"
+        future_final_overlay = executor.submit(lambda: alpha_composite_images(future_transparent_grid.result(), future_logo_layer.result(), final_overlay_path, verbose))
+    else:
+        future_logo_layer = None
+        final_overlay_path = f"{tmpdir}/grid-labels-transparent.png"
+        future_final_overlay = executor.submit(lambda: future_transparent_grid.result())
 
     print("-> Submitting final full view image and video tasks...")
     
     # --- Create [prefix]-orig.mp4 (Original Video + Logos) ---
-    # We use the future_logo_layer result directly on the original video - USE SOURCE
-    future_orig_mp4 = executor.submit(lambda: overlay_video_with_image(filenames['source'], future_logo_layer.result(), filenames['orig'], verbose))
+    # If logos are disabled, create a clean copy.
+    # USE SOURCE
+    if future_logo_layer is not None:
+        future_orig_mp4 = executor.submit(lambda: overlay_video_with_image(filenames['source'], future_logo_layer.result(), filenames['orig'], verbose))
+    else:
+        future_orig_mp4 = executor.submit(lambda: shutil.copyfile(filenames['source'], filenames['orig']))
 
     # 5. Create [prefix]-grid.jpg (Clean JPG + GridWithLogos)
     future_jpg_grid = executor.submit(lambda: alpha_composite_images(future_stacked_jpg.result() and filenames['jpg'], future_final_overlay.result(), filenames['jpggrid'], verbose))
@@ -848,14 +866,17 @@ def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, v
     set_image_opacity(grid_path, gnomonic_grid_transparent, OVERLAY_OPACITY, verbose=verbose)
     
     # --- PROJECTION IMAGE CREATION (TALL 1920x2560) ---
-    # Create a tall logo layer for the static JPG
-    logo_layer_tall = f"{tmpdir}/logo_layer_tall.png"
-    # Using 2560 height to place logos at the very top and very bottom of the strip
-    create_logo_overlay(1920, 2560, logo_paths, logo_layer_tall)
-    
-    # Composite Tall Grid + Tall Logos
-    overlay_tall = f"{tmpdir}/overlay_tall.png"
-    alpha_composite_images(gnomonic_grid_transparent, logo_layer_tall, overlay_tall, verbose=verbose)
+    # If logos are disabled, use only the transparent grid.
+    overlay_tall = gnomonic_grid_transparent
+    if logo_paths is not None:
+        # Create a tall logo layer for the static JPG
+        logo_layer_tall = f"{tmpdir}/logo_layer_tall.png"
+        # Using 2560 height to place logos at the very top and very bottom of the strip
+        create_logo_overlay(1920, 2560, logo_paths, logo_layer_tall)
+        
+        # Composite Tall Grid + Tall Logos
+        overlay_tall = f"{tmpdir}/overlay_tall.png"
+        alpha_composite_images(gnomonic_grid_transparent, logo_layer_tall, overlay_tall, verbose=verbose)
     
     # Create final [prefix]-gnomonic-grid.jpg
     alpha_composite_images(filenames['gnomonic'], overlay_tall, filenames['gnomonicgrid'], verbose=verbose)
@@ -895,10 +916,12 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
     stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['source']} {raw_gnomonic_mp4}"
     future_stitch = executor.submit(lambda: run_command(future_modified_pto.result() and stitch_cmd_mp4, "Creating gnomonic video", verbose))
 
-    # Create 1080p Logo Layer
-    logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
-    # Ensure this exists (might have been created in full view, but parallel safety says create again or check)
-    create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
+    # Create 1080p Logo Layer (optional)
+    logo_layer_1080p = None
+    if logo_paths is not None:
+        logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
+        # Ensure this exists (might have been created in full view, but parallel safety says create again or check)
+        create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
 
     # 3. GNOMONIC IMAGE/GRID PIPELINE
     future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, logo_paths, verbose)
@@ -908,7 +931,11 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
     future_stitch.result() # Wait for raw stitching
     
     # A. Watermark the Base Gnomonic Video -> [prefix]-gnomonic.mp4
-    overlay_video_with_image(raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+    # If logos are disabled, keep the base video clean.
+    if logo_layer_1080p is not None:
+        overlay_video_with_image(raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+    else:
+        shutil.copyfile(raw_gnomonic_mp4, filenames['gnomonicmp4'])
     
     # B. Create Grid Video: Overlay CLEAN grid onto WATERMARKED base video -> [prefix]-gnomonic-grid.mp4
     # This prevents double logos (ghosting) while ensuring correct placement.
@@ -935,13 +962,18 @@ def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, v
     stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['source']} {raw_gnomonic_mp4}"
     run_command(stitch_cmd_mp4, "Creating gnomonic video", verbose)
     
-    # Prepare Logo Layer
-    logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
-    if not Path(logo_layer_1080p).exists():
-        create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
+    # Prepare Logo Layer (optional)
+    logo_layer_1080p = None
+    if logo_paths is not None:
+        logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
+        if not Path(logo_layer_1080p).exists():
+            create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
 
     # A. Watermark Base Video
-    overlay_video_with_image(raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+    if logo_layer_1080p is not None:
+        overlay_video_with_image(raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+    else:
+        shutil.copyfile(raw_gnomonic_mp4, filenames['gnomonicmp4'])
     
     # B. Overlay Grid (Clean) on Watermarked Video
     overlay_video_with_image(filenames['gnomonicmp4'], grid_assets["cropped_grid"], filenames['gnomonicgridmp4'], verbose=verbose)
@@ -964,7 +996,7 @@ def search_for_videos(video_dir, start_unix):
         found_files.append(found_file)
     return found_files
 
-def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
+def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose, nologos=False):
     """Runs the script in client mode."""
     print("--- Running in Client Mode ---")
 
@@ -1080,11 +1112,13 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
             'gnomonic_corr_grid_pto': 'gnomonic_corr_grid.pto'
         }
         
-        with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
-        with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
-        with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
+        logo_paths = None
+        if not nologos:
+            with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
+            with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
+            with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
 
-        logo_paths = {'nmn': f"{tmpdir}/nmn.png", 'sbsdnb': f"{tmpdir}/sbsdnb.png", 'as7': f"{tmpdir}/as7.png"}
+            logo_paths = {'nmn': f"{tmpdir}/nmn.png", 'sbsdnb': f"{tmpdir}/sbsdnb.png", 'as7': f"{tmpdir}/as7.png"}
 
         stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
         run_command(stack_cmd, "Stacking video frames to create JPG", verbose)
@@ -1104,10 +1138,12 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
             run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg", verbose)
             
             # Watermark the Gnomonic Image
-            add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose)
+            if logo_paths is not None:
+                add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose)
 
         # Watermark the Stacked Image
-        add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose)
+        if logo_paths is not None:
+            add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose)
 
         try:
             event_data = get_event_data("event.txt")
@@ -1120,7 +1156,7 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose):
 def main(args):
     """Main function to orchestrate the video processing pipeline."""
     if args.client:
-        run_client_mode(args.file_prefix, args.video_dir, args.start, args.length, args.verbose)
+        run_client_mode(args.file_prefix, args.video_dir, args.start, args.length, args.verbose, nologos=args.nologos)
         return
         
     if args.video_dir or args.start is not None or args.length is not None:
@@ -1131,11 +1167,13 @@ def main(args):
     if args.nothreads: print("--- Multithreading disabled ---")
     
     with tempfile.TemporaryDirectory() as tmpdir:
-        with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
-        with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
-        with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
+        logo_paths = None
+        if not args.nologos:
+            with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
+            with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
+            with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
 
-        logo_paths = {'nmn': f"{tmpdir}/nmn.png", 'sbsdnb': f"{tmpdir}/sbsdnb.png", 'as7': f"{tmpdir}/as7.png"}
+            logo_paths = {'nmn': f"{tmpdir}/nmn.png", 'sbsdnb': f"{tmpdir}/sbsdnb.png", 'as7': f"{tmpdir}/as7.png"}
 
         event_data = get_event_data('event.txt')
         name = args.file_prefix
@@ -1211,22 +1249,25 @@ def main(args):
              print(f"Warning: {meteorcrop_script.name} not found. Skipping automatic cropping.", file=sys.stderr)
 
         # Watermark the base images (clean stacked and gnomonic) at the end
-        add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose=args.verbose)
-        if gnomonic_enabled and Path(filenames['gnomonic']).exists():
-             add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose=args.verbose)
+        if logo_paths is not None:
+            add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose=args.verbose)
+            if gnomonic_enabled and Path(filenames['gnomonic']).exists():
+                 add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose=args.verbose)
 
 
         # --- HEVC Transcoding Step ---
         print("\n--- Finalizing Videos ---")
         
         # We create a 1080p overlay specifically for the HEVC transcode process
-        with tempfile.TemporaryDirectory() as hevc_tmp:
-            # Determine actual video resolution for the overlay - USE FULL because we are replacing it
-            if Path(filenames['full']).exists():
-                vw, vh = get_video_resolution(filenames['full'])
-                hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
-                create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
-                handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
+        # (Only relevant when logos are enabled)
+        if logo_paths is not None:
+            with tempfile.TemporaryDirectory() as hevc_tmp:
+                # Determine actual video resolution for the overlay - USE FULL because we are replacing it
+                if Path(filenames['full']).exists():
+                    vw, vh = get_video_resolution(filenames['full'])
+                    hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
+                    create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
+                    handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
 
     # Update event.txt before finishing
     update_event_file(event_data)
@@ -1255,6 +1296,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("file_prefix", help="The base name for input/output files.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed info.")
+    parser.add_argument("--nologos", action="store_true", help="Skip watermark/logo overlays on videos and images.")
     
     client_group = parser.add_argument_group('Client Mode')
     client_group.add_argument("--client", action="store_true", help="Run in client mode.")

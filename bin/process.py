@@ -88,6 +88,11 @@ def get_args():
         default=900,
         help="Timeout in seconds for waiting for low system load. Defaults to 900."
     )
+    parser.add_argument(
+        "--nologos",
+        action="store_true",
+        help="Skip watermark/logo overlays when generating videos/images."
+    )
     return parser.parse_args()
 
 
@@ -234,7 +239,7 @@ def run_command(command: list, cwd: Path) -> subprocess.CompletedProcess:
         sys.exit(e.returncode)
 
 
-def run_video_processing(event_config, station_config, event_dir: Path) -> tuple:
+def run_video_processing(event_config, station_config, event_dir: Path, nologos: bool = False) -> tuple:
     """Runs the makevideos.py script and calculates corrected duration."""
     videostart_str_full = event_config.get('video', 'start')
     cleaned_videostart_str = videostart_str_full.rsplit('(', 1)[0].strip()
@@ -243,7 +248,10 @@ def run_video_processing(event_config, station_config, event_dir: Path) -> tuple
     station_name = station_config.get('station', 'name')
     base_name = f"{station_name}-{videostart_ts.strftime('%Y%m%d%H%M%S')}"
 
-    proc = run_command([Settings.MAKEVIDEOS_SCRIPT, base_name], cwd=event_dir)
+    command = [Settings.MAKEVIDEOS_SCRIPT, base_name]
+    if nologos:
+        command.insert(1, "--nologos")
+    proc = run_command(command, cwd=event_dir)
     output = proc.stdout.split()
 
     start_az, start_alt = float(output[-5]), float(output[-4])
@@ -415,7 +423,7 @@ def main():
     wait_for_safe_cpu(args.timeout)
 
     try:
-        proc_results = run_video_processing(event_config, station_config, event_dir)
+        proc_results = run_video_processing(event_config, station_config, event_dir, nologos=args.nologos)
 
         event_config, station_config, event_dir = load_configs(args.event_file)
 

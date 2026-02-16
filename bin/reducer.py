@@ -32,6 +32,16 @@ from recalibrate import recalibrate
 from timestamp import get_timestamp
 import pto_mapper
 
+
+LAUNCHER_DEFAULTS = {
+    'station_display': '',
+    'cam_num': '',
+    'date': None,
+    'hour': '00',
+    'minute': '00',
+    'duration': '1',
+}
+
 # --- Globals for temp file cleanup ---
 temp_files_to_clean = []
 temp_dirs = []
@@ -95,6 +105,8 @@ class LauncherDialog:
         station_combo = ttk.Combobox(frame, textvariable=self.station_var, width=25)
         station_combo['values'] = sorted(list(self.station_map.keys()))
         station_combo.grid(column=1, row=0, sticky=(tk.W, tk.E))
+        if LAUNCHER_DEFAULTS.get('station_display'):
+            self.station_var.set(LAUNCHER_DEFAULTS['station_display'])
         
         # Camera
         ttk.Label(frame, text="Camera:").grid(column=0, row=1, sticky=tk.W, pady=5)
@@ -102,6 +114,8 @@ class LauncherDialog:
         cam_combo = ttk.Combobox(frame, textvariable=self.cam_var, width=5)
         cam_combo['values'] = ['1', '2', '3', '4', '5', '6', '7']
         cam_combo.grid(column=1, row=1, sticky=tk.W)
+        if LAUNCHER_DEFAULTS.get('cam_num'):
+            self.cam_var.set(LAUNCHER_DEFAULTS['cam_num'])
         
         # --- Date/Time with Stepper Buttons ---
         now = datetime.now()
@@ -111,7 +125,8 @@ class LauncherDialog:
         date_frame = ttk.Frame(frame)
         date_frame.grid(column=1, row=2, sticky=tk.W)
         ttk.Button(date_frame, text="<", width=2, command=lambda: self._adjust_date(-1)).pack(side=tk.LEFT)
-        self.date_var = tk.StringVar(value=now.strftime('%Y%m%d'))
+        default_date = LAUNCHER_DEFAULTS.get('date') or now.strftime('%Y%m%d')
+        self.date_var = tk.StringVar(value=default_date)
         ttk.Entry(date_frame, textvariable=self.date_var, width=10).pack(side=tk.LEFT, padx=2)
         ttk.Button(date_frame, text=">", width=2, command=lambda: self._adjust_date(1)).pack(side=tk.LEFT)
         
@@ -120,7 +135,7 @@ class LauncherDialog:
         hour_frame = ttk.Frame(frame)
         hour_frame.grid(column=1, row=3, sticky=tk.W)
         ttk.Button(hour_frame, text="<", width=2, command=lambda: self._adjust_hour(-1)).pack(side=tk.LEFT)
-        self.hour_var = tk.StringVar(value="00")
+        self.hour_var = tk.StringVar(value=LAUNCHER_DEFAULTS.get('hour', '00'))
         ttk.Entry(hour_frame, textvariable=self.hour_var, width=4).pack(side=tk.LEFT, padx=2)
         ttk.Button(hour_frame, text=">", width=2, command=lambda: self._adjust_hour(1)).pack(side=tk.LEFT)
 
@@ -129,13 +144,13 @@ class LauncherDialog:
         min_frame = ttk.Frame(frame)
         min_frame.grid(column=1, row=4, sticky=tk.W)
         ttk.Button(min_frame, text="<", width=2, command=lambda: self._adjust_minute(-1)).pack(side=tk.LEFT)
-        self.min_var = tk.StringVar(value="00")
+        self.min_var = tk.StringVar(value=LAUNCHER_DEFAULTS.get('minute', '00'))
         ttk.Entry(min_frame, textvariable=self.min_var, width=4).pack(side=tk.LEFT, padx=2)
         ttk.Button(min_frame, text=">", width=2, command=lambda: self._adjust_minute(1)).pack(side=tk.LEFT)
 
         # Duration
         ttk.Label(frame, text="Duration (min):").grid(column=0, row=5, sticky=tk.W, pady=5)
-        self.duration_var = tk.StringVar(value="1")
+        self.duration_var = tk.StringVar(value=LAUNCHER_DEFAULTS.get('duration', '1'))
         dur_spin = ttk.Spinbox(frame, from_=1, to=1440, textvariable=self.duration_var, width=5)
         dur_spin.grid(column=1, row=5, sticky=tk.W)
 
@@ -205,6 +220,12 @@ class LauncherDialog:
             return
 
         hostname = self.station_map[station_display]
+        LAUNCHER_DEFAULTS['station_display'] = station_display
+        LAUNCHER_DEFAULTS['cam_num'] = cam_num
+        LAUNCHER_DEFAULTS['date'] = date_str
+        LAUNCHER_DEFAULTS['hour'] = hour_str
+        LAUNCHER_DEFAULTS['minute'] = min_str
+        LAUNCHER_DEFAULTS['duration'] = str(duration)
         self.fetch_button.config(state=tk.DISABLED)
 
         try:
@@ -572,6 +593,7 @@ class Zoom_Advanced(ttk.Frame):
         self.upload_dir = kwargs.get('upload_dir')
         self.pto_dirty = False
         self.restart = False
+        self.star_objects = 128
         
         self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
         self.canvas.update()
@@ -729,6 +751,15 @@ class Zoom_Advanced(ttk.Frame):
         is_control_pressed = (event.state & 0x4) != 0
         if is_control_pressed and event.keysym.lower() == 'z': self.undo(); return
         if is_control_pressed and event.keysym.lower() == 'y': self.redo(); return
+
+        if event.keysym == 'Insert':
+            self.star_objects = min(500, self.star_objects + 10)
+            self.show_image()
+            return
+        if event.keysym == 'Delete':
+            self.star_objects = max(10, self.star_objects - 10)
+            self.show_image()
+            return
 
         key_char = event.char
         is_upper = key_char.isupper()
@@ -1042,119 +1073,36 @@ class Zoom_Advanced(ttk.Frame):
             messagebox.showwarning("Upload Error", "No points selected. Cannot determine upload timestamp.")
             return
             
-        upload_window = tk.Toplevel(self.master)
-        upload_window.title("Upload Progress")
-        upload_window.geometry("700x450")
-        text_widget = tk.Text(upload_window, wrap=tk.WORD, height=25, width=90, bg="black", fg="gray90", font=("monospace", 9))
-        text_widget.pack(padx=10, pady=10, expand=True, fill=tk.BOTH)
-        text_widget.tag_config("red", foreground="#ff5555")
-        close_button = tk.Button(upload_window, text="Close", command=upload_window.destroy, state=tk.DISABLED)
-        close_button.pack(pady=5)
+        first_point_frame = self.positions[0]['frame']
+        first_timestamp = self.timestamps[first_point_frame]
 
-        def log_to_window(message, tag=None):
-            def _update_gui():
-                if tag: text_widget.insert(tk.END, str(message) + "\n", tag)
-                else: text_widget.insert(tk.END, str(message) + "\n")
-                text_widget.see(tk.END)
-            self.master.after_idle(_update_gui)
+        temp_event = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_event.txt", dir="/tmp")
+        temp_event.close()
+        self.save_event_txt(filepath=temp_event.name)
 
-        def _upload_task():
-            temp_files = {} 
-            auto_calibrate_mode = False
-            match = None
-            if not self.is_calibrate_mode:
-                log_to_window("Checking for auto-deployment mode...")
-                if self.upload_dir and self.upload_hostname:
-                    match = re.match(r'/meteor/cam(\d+)', self.upload_dir)
-                    if match:
-                        cam_num = match.group(1)
-                        log_to_window(f"  - Path matched. Will auto-deploy to cam{cam_num} on {self.upload_hostname}.")
-                        auto_calibrate_mode = True 
-                    else: log_to_window(f"  - Path '{self.upload_dir}' does not match /meteor/camX. Skipping auto-deployment.")
-                else: log_to_window("  - Upload target not specified. Skipping auto-deployment.")
+        temp_centroid = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_centroid.txt", dir="/tmp")
+        temp_centroid.close()
+        self.save_centroid_txt(filepath=temp_centroid.name)
 
-            try:
-                log_to_window("Getting timestamp from first point...")
-                first_point_frame = self.positions[0]['frame']
-                first_timestamp = self.timestamps[first_point_frame]
-                dt = datetime.fromtimestamp(first_timestamp, timezone.utc)
-                date_dir = dt.strftime("%Y%m%d")
-                time_dir = dt.strftime("%H%M%S")
+        temp_lens_path = ""
+        if self.pto_dirty:
+            temp_lens = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_lens.pto", dir="/tmp")
+            temp_lens.close()
+            pto_mapper.write_pto_file(self.pto_data, temp_lens.name)
+            temp_lens_path = temp_lens.name
 
-                if auto_calibrate_mode:
-                    self.is_calibrate_mode = True
-                    self.hostname = self.upload_hostname 
-                    self.cam_num = match.group(1)       
-                    self.date_str = date_dir             
-
-                remote_subdir = f"{self.upload_dir.rstrip('/')}/events/{date_dir}/{time_dir}"
-                log_to_window(f"Target directory: {self.upload_hostname}:{remote_subdir}")
-                log_to_window(f"Running: ssh {self.upload_hostname} mkdir -p {remote_subdir}")
-                proc = subprocess.run(['ssh', self.upload_hostname, 'mkdir', '-p', remote_subdir], 
-                                      capture_output=True, text=True, check=True, errors='ignore')
-                if proc.stderr: log_to_window(f"STDERR:\n{proc.stderr.strip()}")
-
-                log_to_window("Saving local files to temporary location...")
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_event.txt", dir="/tmp") as f:
-                    self.save_event_txt(filepath=f.name)
-                    temp_files['event.txt'] = f.name
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_centroid.txt", dir="/tmp") as f:
-                    self.save_centroid_txt(filepath=f.name)
-                    temp_files['centroid.txt'] = f.name
-                if self.pto_dirty:
-                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_lens.pto", dir="/tmp") as f:
-                        pto_mapper.write_pto_file(self.pto_data, f.name)
-                        temp_files['lens.pto'] = f.name
-
-                if not temp_files: log_to_window("No files to upload."); return
-                log_to_window("Copying files via scp...")
-                for dest_name, local_path in temp_files.items():
-                    remote_destination = f"{self.upload_hostname}:{remote_subdir}/{dest_name}"
-                    log_to_window(f"  - Copying {local_path} to {remote_destination}...")
-                    proc = subprocess.run(['scp', local_path, remote_destination], capture_output=True, text=True, check=True, errors='ignore')
-                    if proc.stderr: log_to_window(f"    - SCP STDERR for {dest_name}: {proc.stderr.strip()}")
-                
-                log_to_window("  - SCP complete.")
-                if 'lens.pto' in temp_files and self.is_calibrate_mode:
-                    log_to_window("Deploying new calibration (lens.pto)...")
-                    self._save_and_deploy_calibration(temp_files['lens.pto'], log_callback=log_to_window)
-                    self.pto_dirty = False 
-                elif 'lens.pto' in temp_files:
-                    log_to_window("  - Calibration changed, but not in --calibrate mode. Skipping deployment.")
-                    self.pto_dirty = False 
-
-                log_to_window("Running remote report script...")
-                report_script = "/home/meteor/bin/report.py"
-                remote_event_file = f"{remote_subdir}/event.txt"
-                log_to_window(f"Running: ssh {self.upload_hostname} {report_script} {remote_event_file}")
-                proc = subprocess.run(['ssh', self.upload_hostname, report_script, remote_event_file], capture_output=True, text=True, check=False, errors='ignore')
-                log_to_window("\n--- Report Output ---")
-                if proc.stdout: log_to_window(proc.stdout.strip())
-                if proc.stderr: log_to_window(f"STDERR:\n{proc.stderr.strip()}")
-                log_to_window("--- End of Report ---")
-                log_to_window("Upload finished", "red")
-            except subprocess.CalledProcessError as e:
-                log_to_window(f"\n--- COMMAND FAILED ---")
-                log_to_window(f"Command: {' '.join(e.cmd)}")
-                log_to_window(f"Return Code: {e.returncode}")
-                if e.stdout: log_to_window(f"STDOUT:\n{e.stdout.strip()}")
-                if e.stderr: log_to_window(f"STDERR:\n{e.stderr.strip()}")
-            except Exception as e:
-                log_to_window(f"\n--- UNEXPECTED ERROR ---")
-                log_to_window(str(e))
-            finally:
-                log_to_window("Cleaning up temporary local files...")
-                for f_name, f_path in temp_files.items():
-                    try: os.remove(f_path)
-                    except OSError: pass
-                if auto_calibrate_mode:
-                    self.is_calibrate_mode = False
-                    self.hostname = None
-                    self.cam_num = None
-                    self.date_str = None
-                def _enable_button(): close_button.config(state=tk.NORMAL)
-                self.master.after_idle(_enable_button)
-        threading.Thread(target=_upload_task, daemon=True).start()
+        cmd = [
+            sys.executable, os.path.abspath(__file__),
+            "--upload-worker",
+            "--upload-hostname", self.upload_hostname,
+            "--upload-dir", self.upload_dir,
+            "--upload-timestamp", str(first_timestamp),
+            "--upload-event-file", temp_event.name,
+            "--upload-centroid-file", temp_centroid.name,
+            "--upload-lens-file", temp_lens_path,
+        ]
+        subprocess.Popen([c for c in cmd if c != ""], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.pto_dirty = False
 
     def load_event_file(self, filepath):
         try:
@@ -1172,6 +1120,7 @@ class Zoom_Advanced(ttk.Frame):
                     event_positions_xy.append((float(x_str), float(y_str)))
             event_timestamps = [float(t) for t in timestamps_str.split(' ')]
             frame_indices = []
+
             tolerance = 1.0 / args.fps
             app_ts_map = {round(ts, 2): i for i, ts in enumerate(self.timestamps)}
 
@@ -1206,7 +1155,7 @@ class Zoom_Advanced(ttk.Frame):
                 ts_obj = datetime.fromtimestamp(self.timestamps[frame_idx], timezone.utc)
                 brightness_val = event_brightnesses[i] if i < len(event_brightnesses) else "0.0"
                 self.centroid[frame_idx] = f'{frame_idx} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} {brightness_val} {args.name} {ts_obj.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
-            
+
             if self.positions:
                 self.update_curve_fit()
                 self.update_prediction()
@@ -1310,7 +1259,7 @@ class Zoom_Advanced(ttk.Frame):
                 point_info_text = f"\n  marked pos = {azimuth:.2f}, {altitude:.2f}, brightness = {brightness:.2f}"
                 break
         
-        all_stars = brightstar(self.pto_data, pos, 6.5, -30, int(128*self.imscale), map_to_source_image=True, include_img_idx=True)
+        all_stars = brightstar(self.pto_data, pos, 6.5, -30, int(self.star_objects), map_to_source_image=True, include_img_idx=True)
         stars = [s[1:] for s in all_stars if s[0] == self.image_index]
 
         self.x = x1 / self.imscale; self.y = y1 / self.imscale
@@ -1415,6 +1364,7 @@ class Zoom_Advanced(ttk.Frame):
             help_text_content = ("\n" * 6 +
                 "  NAVIGATION: arrows=move frame, pgup/dn=move 10 frames, mouse wheel=zoom, LMB=drag, RMB=mark & next\n" +
                 "  MAIN: q=quit, h=toggle help, i=toggle star info, g=toggle brightness graph\n" +
+                "  STARS: red dots=stars, i=toggle star labels, Ins/Del=more/less stars (10..500, brightest)\n" +
                 "  EDITING: Ctrl+Z=undo, Ctrl+Y=redo, x=snap to line, X=undo snap, t=temp. space, T=undo temp.\n" +
                 "  CALIBRATION: ?=open dialog, o=optimise orientation, O=undo optimisation, *=reset orientation\n" +
                 "  FINE-TUNE: p/P=pitch, y/Y=yaw, r/R=roll, z/Z=hfov, a/A,b/B,c/C=radial, d/D,e/E=radial shift\n" +
@@ -1559,6 +1509,7 @@ def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_ca
             timestamp(timestamps, files, start_idx)
             if timestamps[start_idx] is not None: report_progress_callback()
         return
+
     if timestamps[start_idx] is None:
         timestamp(timestamps, files, start_idx)
         if timestamps[start_idx] is not None: report_progress_callback()
@@ -1619,10 +1570,131 @@ def scp_file(hostname, remote_path):
         if 'local_path' in locals() and os.path.exists(local_path): os.remove(local_path)
         return None
 
+
+def run_upload_worker(args):
+    upload_root = tk.Tk()
+    upload_root.title("Upload Progress")
+    upload_root.geometry("700x450")
+    text_widget = tk.Text(upload_root, wrap=tk.WORD, height=25, width=90, bg="black", fg="gray90", font=("monospace", 9))
+    text_widget.pack(padx=10, pady=10, expand=True, fill=tk.BOTH)
+    text_widget.tag_config("red", foreground="#ff5555")
+    close_button = tk.Button(upload_root, text="Close", command=upload_root.destroy, state=tk.DISABLED)
+    close_button.pack(pady=5)
+
+    def log_to_window(message, tag=None):
+        if tag:
+            text_widget.insert(tk.END, str(message) + "\n", tag)
+        else:
+            text_widget.insert(tk.END, str(message) + "\n")
+        text_widget.see(tk.END)
+        upload_root.update_idletasks()
+
+    def _upload_task():
+        try:
+            ts = float(args.upload_timestamp)
+            dt = datetime.fromtimestamp(ts, timezone.utc)
+            date_dir = dt.strftime("%Y%m%d")
+            time_dir = dt.strftime("%H%M%S")
+
+            remote_subdir = f"{args.upload_dir.rstrip('/')}/events/{date_dir}/{time_dir}"
+            log_to_window(f"Target directory: {args.upload_hostname}:{remote_subdir}")
+            log_to_window(f"Running: ssh {args.upload_hostname} mkdir -p {remote_subdir}")
+            proc = subprocess.run(['ssh', args.upload_hostname, 'mkdir', '-p', remote_subdir], capture_output=True, text=True, check=True, errors='ignore')
+            if proc.stderr:
+                log_to_window(f"STDERR:\n{proc.stderr.strip()}")
+
+            files_to_upload = {
+                'event.txt': args.upload_event_file,
+                'centroid.txt': args.upload_centroid_file,
+            }
+            if args.upload_lens_file:
+                files_to_upload['lens.pto'] = args.upload_lens_file
+
+            log_to_window("Copying files via scp...")
+            for dest_name, local_path in files_to_upload.items():
+                remote_destination = f"{args.upload_hostname}:{remote_subdir}/{dest_name}"
+                log_to_window(f"  - Copying {local_path} to {remote_destination}...")
+                proc = subprocess.run(['scp', local_path, remote_destination], capture_output=True, text=True, check=True, errors='ignore')
+                if proc.stderr:
+                    log_to_window(f"    - SCP STDERR for {dest_name}: {proc.stderr.strip()}")
+
+            log_to_window("  - SCP complete.")
+
+            if args.upload_lens_file:
+                match = re.match(r'/meteor/cam(\d+)', args.upload_dir)
+                if match:
+                    cam_num = match.group(1)
+                    log_to_window(f"Deploying new calibration (lens.pto) to cam{cam_num} on {args.upload_hostname}...")
+                    local_pto_path = args.upload_lens_file
+                    remote_pto_dated = f"/meteor/cam{cam_num}/lens-{date_dir}.pto"
+                    remote_grid_dated = f"/meteor/cam{cam_num}/grid-{date_dir}.png"
+                    remote_pto_link = f"/meteor/cam{cam_num}/lens.pto"
+                    remote_grid_link = f"/meteor/cam{cam_num}/grid.png"
+                    drawgrid_script = "/home/meteor/bin/drawgrid.py"
+                    remote_full_path = f"{args.upload_hostname}:{remote_pto_dated}"
+                    log_to_window(f"  - Copying {local_pto_path} to {remote_full_path}...")
+                    subprocess.run(['scp', local_pto_path, remote_full_path], check=True, capture_output=True, text=True, errors='ignore')
+                    remote_command = (f"{drawgrid_script} {remote_pto_dated} {remote_grid_dated} && "
+                                      f"rm -f {remote_pto_link} {remote_grid_link} && "
+                                      f"ln -s {remote_pto_dated} {remote_pto_link} && "
+                                      f"ln -s {remote_grid_dated} {remote_grid_link}")
+                    log_to_window("  - Running remote commands to update grid and links...")
+                    subprocess.run(['ssh', args.upload_hostname, remote_command], check=True, capture_output=True, text=True, errors='ignore')
+                    log_to_window("  - Remote deployment successful.")
+
+            log_to_window("Running remote report script...")
+            report_script = "/home/meteor/bin/report.py"
+            remote_event_file = f"{remote_subdir}/event.txt"
+            log_to_window(f"Running: ssh {args.upload_hostname} {report_script} {remote_event_file}")
+            proc = subprocess.run(['ssh', args.upload_hostname, report_script, remote_event_file], capture_output=True, text=True, check=False, errors='ignore')
+            log_to_window("\n--- Report Output ---")
+            if proc.stdout:
+                log_to_window(proc.stdout.strip())
+            if proc.stderr:
+                log_to_window(f"STDERR:\n{proc.stderr.strip()}")
+            log_to_window("--- End of Report ---")
+            log_to_window("Upload finished", "red")
+        except subprocess.CalledProcessError as e:
+            log_to_window(f"\n--- COMMAND FAILED ---")
+            log_to_window(f"Command: {' '.join(e.cmd)}")
+            log_to_window(f"Return Code: {e.returncode}")
+            if e.stdout:
+                log_to_window(f"STDOUT:\n{e.stdout.strip()}")
+            if e.stderr:
+                log_to_window(f"STDERR:\n{e.stderr.strip()}")
+        except Exception as e:
+            log_to_window(f"\n--- UNEXPECTED ERROR ---")
+            log_to_window(str(e))
+        finally:
+            log_to_window("Cleaning up temporary local files...")
+            for p in [args.upload_event_file, args.upload_centroid_file, args.upload_lens_file]:
+                if p:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            close_button.config(state=tk.NORMAL)
+
+    threading.Thread(target=_upload_task, daemon=False).start()
+    upload_root.mainloop()
+
 if __name__ == '__main__':
     atexit.register(cleanup_temp_resources)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+    if '--upload-worker' in sys.argv:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--upload-worker', action='store_true')
+        parser.add_argument('--upload-hostname', required=True)
+        parser.add_argument('--upload-dir', required=True)
+        parser.add_argument('--upload-timestamp', required=True)
+        parser.add_argument('--upload-event-file', required=True)
+        parser.add_argument('--upload-centroid-file', required=True)
+        parser.add_argument('--upload-lens-file', default='')
+        wargs = parser.parse_args()
+        run_upload_worker(wargs)
+        sys.exit(0)
 
     while True:
         args = None

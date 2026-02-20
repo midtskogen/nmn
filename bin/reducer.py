@@ -1099,9 +1099,28 @@ class Zoom_Advanced(ttk.Frame):
             "--upload-timestamp", str(first_timestamp),
             "--upload-event-file", temp_event.name,
             "--upload-centroid-file", temp_centroid.name,
-            "--upload-lens-file", temp_lens_path,
         ]
-        subprocess.Popen([c for c in cmd if c != ""], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if temp_lens_path:
+            cmd.extend(["--upload-lens-file", temp_lens_path])
+
+        proc = subprocess.Popen([c for c in cmd if c != ""], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+
+        def _check_upload_worker_started():
+            rc = proc.poll()
+            if rc is None:
+                return
+
+            messagebox.showerror(
+                "Upload Error",
+                f"Upload worker exited immediately (exit code {rc})."
+            )
+
+        try:
+            self.master.after(500, _check_upload_worker_started)
+            self.master.after(2000, _check_upload_worker_started)
+        except Exception:
+            pass
         self.pto_dirty = False
 
     def load_event_file(self, filepath):
@@ -1582,12 +1601,22 @@ def run_upload_worker(args):
     close_button.pack(pady=5)
 
     def log_to_window(message, tag=None):
-        if tag:
-            text_widget.insert(tk.END, str(message) + "\n", tag)
-        else:
-            text_widget.insert(tk.END, str(message) + "\n")
-        text_widget.see(tk.END)
-        upload_root.update_idletasks()
+        msg = str(message) + "\n"
+
+        def _append():
+            try:
+                if tag:
+                    text_widget.insert(tk.END, msg, tag)
+                else:
+                    text_widget.insert(tk.END, msg)
+                text_widget.see(tk.END)
+            except Exception:
+                pass
+
+        try:
+            upload_root.after(0, _append)
+        except Exception:
+            pass
 
     def _upload_task():
         try:
@@ -1673,7 +1702,21 @@ def run_upload_worker(args):
                         os.remove(p)
                     except OSError:
                         pass
-            close_button.config(state=tk.NORMAL)
+
+            def _finish_ui():
+                try:
+                    close_button.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+                try:
+                    upload_root.after(10000, upload_root.destroy)
+                except Exception:
+                    pass
+
+            try:
+                upload_root.after(0, _finish_ui)
+            except Exception:
+                pass
 
     threading.Thread(target=_upload_task, daemon=False).start()
     upload_root.mainloop()

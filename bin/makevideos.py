@@ -331,14 +331,119 @@ def create_logo_overlay(width, height, logo_paths, output_path=None):
     try:
         # Create transparent base
         base_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        
+
+        if isinstance(logo_paths, dict) and logo_paths.get('__credit__'):
+            text = str(logo_paths.get('text', '') or '')
+            pos = str(logo_paths.get('pos', 'lower-right') or 'lower-right')
+            font_name = str(logo_paths.get('font', 'Helvetica') or 'Helvetica')
+            try:
+                font_size = int(logo_paths.get('size', 24) or 24)
+            except (TypeError, ValueError):
+                font_size = 24
+
+            draw = ImageDraw.Draw(base_img)
+
+            font = None
+            try:
+                font = ImageFont.truetype(font_name, font_size)
+            except Exception:
+                try:
+                    font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+                except Exception:
+                    font = ImageFont.load_default()
+
+            margin = 16
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+
+            if ',' in pos:
+                try:
+                    x_str, y_str = pos.split(',', 1)
+                    x = int(x_str.strip())
+                    y = int(y_str.strip())
+                except Exception:
+                    x = width - text_w - margin
+                    y = height - text_h - margin
+            else:
+                pos_norm = pos.strip().lower().replace('_', '-').replace(' ', '-')
+                if pos_norm in ('lr', 'lower-right', 'bottom-right', 'br'):
+                    x = width - text_w - margin
+                    y = height - text_h - margin
+                elif pos_norm in ('ll', 'lower-left', 'bottom-left', 'bl'):
+                    x = margin
+                    y = height - text_h - margin
+                elif pos_norm in ('ur', 'upper-right', 'top-right', 'tr'):
+                    x = width - text_w - margin
+                    y = margin
+                elif pos_norm in ('ul', 'upper-left', 'top-left', 'tl'):
+                    x = margin
+                    y = margin
+                else:
+                    x = width - text_w - margin
+                    y = height - text_h - margin
+
+            x = max(0, min(width - text_w, x))
+            y = max(0, min(height - text_h, y))
+
+            try:
+                draw.text((x, y), text, font=font, fill=(255, 255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 200))
+            except TypeError:
+                draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+
+            base_img.save(output_path)
+            return output_path
+
+        if isinstance(logo_paths, dict) and logo_paths.get('__custom_logos__'):
+            logos = logo_paths.get('logos') or []
+            margin = 16
+
+            def _corner_xy(corner, lw, lh):
+                corner = (corner or 'lower-right').strip().lower().replace('_', '-').replace(' ', '-')
+                if corner in ('lr', 'lower-right', 'bottom-right', 'br'):
+                    return width - lw - margin, height - lh - margin
+                if corner in ('ll', 'lower-left', 'bottom-left', 'bl'):
+                    return margin, height - lh - margin
+                if corner in ('ur', 'upper-right', 'top-right', 'tr'):
+                    return width - lw - margin, margin
+                if corner in ('ul', 'upper-left', 'top-left', 'tl'):
+                    return margin, margin
+                return width - lw - margin, height - lh - margin
+
+            for item in logos:
+                logo_file = (item or {}).get('file')
+                if not logo_file:
+                    continue
+                pos = str((item or {}).get('pos') or '')
+                try:
+                    with Image.open(logo_file).convert("RGBA") as logo_img:
+                        lw, lh = logo_img.width, logo_img.height
+                        if ',' in pos:
+                            try:
+                                x_str, y_str = pos.split(',', 1)
+                                x = int(x_str.strip())
+                                y = int(y_str.strip())
+                            except Exception:
+                                x, y = _corner_xy('lower-right', lw, lh)
+                        else:
+                            x, y = _corner_xy(pos or 'lower-right', lw, lh)
+
+                        x = max(0, min(width - lw, x))
+                        y = max(0, min(height - lh, y))
+                        base_img.paste(logo_img, (x, y), logo_img)
+                except Exception as e:
+                    print(f"Warning: Could not add custom logo '{logo_file}': {e}", file=sys.stderr)
+
+            base_img.save(output_path)
+            return output_path
+
         with Image.open(logo_paths['nmn']).convert("RGBA") as nmn_logo, \
              Image.open(logo_paths['sbsdnb']).convert("RGBA") as sbsdnb_logo, \
              Image.open(logo_paths['as7']).convert("RGBA") as as7_logo:
 
             # 1. NMN Logo (Top Left)
             base_img.paste(nmn_logo, (16, 16), nmn_logo)
-            
+
             # 2. SBSDNB Logo (Top Right)
             sbsdnb_x = width - sbsdnb_logo.width - 16
             base_img.paste(sbsdnb_logo, (sbsdnb_x, 16), sbsdnb_logo)
@@ -347,7 +452,7 @@ def create_logo_overlay(width, height, logo_paths, output_path=None):
             as7_x = width - as7_logo.width - 16
             as7_y = height - as7_logo.height - 16
             base_img.paste(as7_logo, (as7_x, as7_y), as7_logo)
-            
+
         base_img.save(output_path)
         return output_path
 
@@ -996,7 +1101,7 @@ def search_for_videos(video_dir, start_unix):
         found_files.append(found_file)
     return found_files
 
-def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose, nologos=False):
+def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose, nologos=False, credit=None, creditpos='lower-right', creditsize=24, creditfont='Helvetica', logo_placements=None):
     """Runs the script in client mode."""
     print("--- Running in Client Mode ---")
 
@@ -1113,7 +1218,11 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose, nol
         }
         
         logo_paths = None
-        if not nologos:
+        if credit:
+            logo_paths = {'__credit__': True, 'text': credit, 'pos': creditpos, 'size': creditsize, 'font': creditfont}
+        elif logo_placements:
+            logo_paths = {'__custom_logos__': True, 'logos': logo_placements}
+        elif not nologos:
             with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
             with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
             with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
@@ -1156,7 +1265,19 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose, nol
 def main(args):
     """Main function to orchestrate the video processing pipeline."""
     if args.client:
-        run_client_mode(args.file_prefix, args.video_dir, args.start, args.length, args.verbose, nologos=args.nologos)
+        run_client_mode(
+            args.file_prefix,
+            args.video_dir,
+            args.start,
+            args.length,
+            args.verbose,
+            nologos=args.nologos,
+            credit=args.credit,
+            creditpos=args.creditpos,
+            creditsize=args.creditsize,
+            creditfont=args.creditfont,
+            logo_placements=getattr(args, 'logo_placements', None),
+        )
         return
         
     if args.video_dir or args.start is not None or args.length is not None:
@@ -1168,7 +1289,11 @@ def main(args):
     
     with tempfile.TemporaryDirectory() as tmpdir:
         logo_paths = None
-        if not args.nologos:
+        if args.credit:
+            logo_paths = {'__credit__': True, 'text': args.credit, 'pos': args.creditpos, 'size': args.creditsize, 'font': args.creditfont}
+        elif getattr(args, 'logo_placements', None):
+            logo_paths = {'__custom_logos__': True, 'logos': args.logo_placements}
+        elif not args.nologos:
             with open(f"{tmpdir}/nmn.png", "wb") as f: f.write(base64.b64decode(NMN_LOGO_B64))
             with open(f"{tmpdir}/sbsdnb.png", "wb") as f: f.write(base64.b64decode(SBSDNB_LOGO_B64))
             with open(f"{tmpdir}/as7.png", "wb") as f: f.write(base64.b64decode(AS7_LOGO_B64))
@@ -1294,9 +1419,27 @@ if __name__ == "__main__":
         description="Processes meteor observation videos.",
         formatter_class=argparse.RawTextHelpFormatter
     )
+
+    class _LogoSequenceAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            seq = getattr(namespace, 'logo_sequence', None)
+            if seq is None:
+                seq = []
+                setattr(namespace, 'logo_sequence', seq)
+            if option_string == '--logo':
+                seq.append(('logo', values))
+            elif option_string == '--logopos':
+                seq.append(('pos', values))
+
     parser.add_argument("file_prefix", help="The base name for input/output files.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed info.")
     parser.add_argument("--nologos", action="store_true", help="Skip watermark/logo overlays on videos and images.")
+    parser.add_argument("--credit", default="", help="Overlay a credit string instead of logos.")
+    parser.add_argument("--creditpos", default="lower-right", help="Credit position: lower-right (default), lower-left, upper-right, upper-left, or x,y.")
+    parser.add_argument("--creditsize", type=int, default=24, help="Credit font size. Default: 24.")
+    parser.add_argument("--creditfont", default="Helvetica", help="Credit font name/path. Default: Helvetica.")
+    parser.add_argument("--logo", dest="logo_sequence", action=_LogoSequenceAction, default=[], help="Add a custom logo (typically PNG with alpha). Can be specified multiple times.")
+    parser.add_argument("--logopos", dest="logo_sequence", action=_LogoSequenceAction, default=[], help="Position for the previous --logo: lower-right/lower-left/upper-right/upper-left or x,y. Can be repeated.")
     
     client_group = parser.add_argument_group('Client Mode')
     client_group.add_argument("--client", action="store_true", help="Run in client mode.")
@@ -1308,6 +1451,38 @@ if __name__ == "__main__":
     full_group.add_argument("--nothreads", action="store_true", help="Disable multithreading.")
 
     args = parser.parse_args()
+
+    # Parse ordered --logo/--logopos into placements
+    logo_placements = []
+    last_corner = None
+    corners_clockwise = ['lower-right', 'upper-right', 'upper-left', 'lower-left']
+    for kind, value in (getattr(args, 'logo_sequence', None) or []):
+        if kind == 'logo':
+            logo_placements.append({'file': value, 'pos': None})
+        elif kind == 'pos':
+            if not logo_placements:
+                parser.error("--logopos must follow a --logo")
+            logo_placements[-1]['pos'] = value
+
+    if logo_placements:
+        for idx, p in enumerate(logo_placements):
+            if p.get('pos'):
+                pos_norm = str(p['pos']).strip().lower().replace('_', '-').replace(' ', '-')
+                if ',' not in pos_norm and pos_norm in corners_clockwise:
+                    last_corner = pos_norm
+                continue
+
+            if last_corner is None:
+                last_corner = 'lower-right'
+            else:
+                try:
+                    last_i = corners_clockwise.index(last_corner)
+                    last_corner = corners_clockwise[(last_i + 1) % len(corners_clockwise)]
+                except ValueError:
+                    last_corner = 'lower-right'
+            p['pos'] = last_corner
+
+    args.logo_placements = logo_placements
 
     if args.client and (args.video_dir is None or args.start is None or args.length is None):
         parser.error("--client mode requires --video-dir, --start, and --length.")

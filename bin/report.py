@@ -93,7 +93,18 @@ def acquire_lock():
         print("Lock released.")
 
 
-def run_video_creation(config: configparser.ConfigParser, event_file_path: Path, start_timestamp: float, video_name: str, nologos: bool = False) -> Optional[list]:
+def run_video_creation(
+    config: configparser.ConfigParser,
+    event_file_path: Path,
+    start_timestamp: float,
+    video_name: str,
+    nologos: bool = False,
+    credit: str = "",
+    creditpos: str = "lower-right",
+    creditsize: int = 24,
+    creditfont: str = "Helvetica",
+    logo_sequence: Optional[list] = None,
+) -> Optional[list]:
     """Runs makevideos.py script and returns its output."""
     duration = math.ceil(config.getfloat('trail', 'duration'))
     # Use the event directory itself as the video directory
@@ -107,7 +118,18 @@ def run_video_creation(config: configparser.ConfigParser, event_file_path: Path,
         "--length", str(duration),
         video_name
     ]
-    if nologos:
+    if logo_sequence:
+        command[1:1] = list(logo_sequence)
+    if credit:
+        command.insert(1, "--credit")
+        command.insert(2, credit)
+        command.insert(3, "--creditpos")
+        command.insert(4, creditpos)
+        command.insert(5, "--creditsize")
+        command.insert(6, str(creditsize))
+        command.insert(7, "--creditfont")
+        command.insert(8, creditfont)
+    elif nologos:
         command.insert(1, "--nologos")
     print(f"Running command: {' '.join(command)}")
     try:
@@ -260,13 +282,82 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
 def main():
     """Main execution function."""
     nologos = False
+    credit = ""
+    creditpos = "lower-right"
+    creditsize = 24
+    creditfont = "Helvetica"
+    logo_sequence = []
     argv = sys.argv[1:]
-    if "--nologos" in argv:
-        nologos = True
-        argv = [a for a in argv if a != "--nologos"]
+    usage = f"Usage: {sys.argv[0]} [--nologos] [--credit <string> [--creditpos <pos>] [--creditsize <size>] [--creditfont <font>]] [--logo <file> [--logopos <pos>]]... <event.txt>"
+
+    remaining = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--nologos":
+            nologos = True
+            i += 1
+            continue
+
+        if a == "--credit":
+            if i + 1 >= len(argv):
+                print(usage)
+                sys.exit(1)
+            credit = argv[i + 1]
+            i += 2
+            continue
+
+        if a == "--creditpos":
+            if i + 1 >= len(argv):
+                print(usage)
+                sys.exit(1)
+            creditpos = argv[i + 1]
+            i += 2
+            continue
+
+        if a == "--creditsize":
+            if i + 1 >= len(argv):
+                print(usage)
+                sys.exit(1)
+            try:
+                creditsize = int(argv[i + 1])
+            except ValueError:
+                print(f"Invalid --creditsize value: {argv[i + 1]}")
+                sys.exit(1)
+            i += 2
+            continue
+
+        if a == "--creditfont":
+            if i + 1 >= len(argv):
+                print(usage)
+                sys.exit(1)
+            creditfont = argv[i + 1]
+            i += 2
+            continue
+
+        if a == "--logo":
+            if i + 1 >= len(argv):
+                print(usage)
+                sys.exit(1)
+            logo_sequence.extend(["--logo", argv[i + 1]])
+            i += 2
+            continue
+
+        if a == "--logopos":
+            if i + 1 >= len(argv):
+                print(usage)
+                sys.exit(1)
+            logo_sequence.extend(["--logopos", argv[i + 1]])
+            i += 2
+            continue
+
+        remaining.append(a)
+        i += 1
+
+    argv = remaining
 
     if len(argv) != 1:
-        print(f"Usage: {sys.argv[0]} [--nologos] <event.txt>")
+        print(usage)
         sys.exit(1)
 
     event_file_path = Path(argv[0])
@@ -288,7 +379,18 @@ def main():
     video_name = f"{station_name}-{event_timestamp_str}"
 
     with acquire_lock():
-        video_output = run_video_creation(config, event_file_path, start_timestamp, video_name, nologos=nologos)
+        video_output = run_video_creation(
+            config,
+            event_file_path,
+            start_timestamp,
+            video_name,
+            nologos=nologos,
+            credit=credit,
+            creditpos=creditpos,
+            creditsize=creditsize,
+            creditfont=creditfont,
+            logo_sequence=logo_sequence,
+        )
         if not video_output:
             sys.exit(1)
 

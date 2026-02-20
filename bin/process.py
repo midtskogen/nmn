@@ -27,6 +27,7 @@ import ephem
 import matplotlib
 import psutil
 from dateutil.parser import parse as dt_parse
+from typing import Optional
 
 # Use a non-interactive backend for matplotlib
 matplotlib.use('Agg')
@@ -92,6 +93,41 @@ def get_args():
         "--nologos",
         action="store_true",
         help="Skip watermark/logo overlays when generating videos/images."
+    )
+
+    parser.add_argument(
+        "--credit",
+        default="",
+        help="Overlay a credit string instead of logos when generating videos/images."
+    )
+    parser.add_argument(
+        "--creditpos",
+        default="lower-right",
+        help="Credit position: lower-right (default), lower-left, upper-right, upper-left, or x,y."
+    )
+    parser.add_argument(
+        "--creditsize",
+        type=int,
+        default=24,
+        help="Credit font size. Default: 24."
+    )
+    parser.add_argument(
+        "--creditfont",
+        default="Helvetica",
+        help="Credit font name/path. Default: Helvetica."
+    )
+
+    parser.add_argument(
+        "--logo",
+        action="append",
+        default=[],
+        help="Add a custom logo (typically PNG with alpha). Can be specified multiple times."
+    )
+    parser.add_argument(
+        "--logopos",
+        action="append",
+        default=[],
+        help="Position for the corresponding --logo entry. Can be repeated. If fewer are given than --logo, remaining logos use automatic clockwise placement."
     )
     return parser.parse_args()
 
@@ -239,7 +275,18 @@ def run_command(command: list, cwd: Path) -> subprocess.CompletedProcess:
         sys.exit(e.returncode)
 
 
-def run_video_processing(event_config, station_config, event_dir: Path, nologos: bool = False) -> tuple:
+def run_video_processing(
+    event_config,
+    station_config,
+    event_dir: Path,
+    nologos: bool = False,
+    credit: str = "",
+    creditpos: str = "lower-right",
+    creditsize: int = 24,
+    creditfont: str = "Helvetica",
+    logos: Optional[list] = None,
+    logopos: Optional[list] = None,
+) -> tuple:
     """Runs the makevideos.py script and calculates corrected duration."""
     videostart_str_full = event_config.get('video', 'start')
     cleaned_videostart_str = videostart_str_full.rsplit('(', 1)[0].strip()
@@ -249,7 +296,30 @@ def run_video_processing(event_config, station_config, event_dir: Path, nologos:
     base_name = f"{station_name}-{videostart_ts.strftime('%Y%m%d%H%M%S')}"
 
     command = [Settings.MAKEVIDEOS_SCRIPT, base_name]
-    if nologos:
+    if credit:
+        command.insert(1, "--credit")
+        command.insert(2, credit)
+        command.insert(3, "--creditpos")
+        command.insert(4, creditpos)
+        command.insert(5, "--creditsize")
+        command.insert(6, str(creditsize))
+        command.insert(7, "--creditfont")
+        command.insert(8, creditfont)
+    elif logos:
+        # Preserve ordering and pairing: each --logopos applies to the --logo before it.
+        # Here we support a simple pairing where the Nth --logopos corresponds to the Nth --logo.
+        # If fewer positions are provided, makevideos.py will auto-place remaining logos clockwise.
+        insert_at = 1
+        positions = list(logopos or [])
+        for i, lf in enumerate(list(logos)):
+            command.insert(insert_at, "--logo")
+            command.insert(insert_at + 1, str(lf))
+            insert_at += 2
+            if i < len(positions) and positions[i]:
+                command.insert(insert_at, "--logopos")
+                command.insert(insert_at + 1, str(positions[i]))
+                insert_at += 2
+    elif nologos:
         command.insert(1, "--nologos")
     proc = run_command(command, cwd=event_dir)
     output = proc.stdout.split()
@@ -423,7 +493,18 @@ def main():
     wait_for_safe_cpu(args.timeout)
 
     try:
-        proc_results = run_video_processing(event_config, station_config, event_dir, nologos=args.nologos)
+        proc_results = run_video_processing(
+            event_config,
+            station_config,
+            event_dir,
+            nologos=args.nologos,
+            credit=args.credit,
+            creditpos=args.creditpos,
+            creditsize=args.creditsize,
+            creditfont=args.creditfont,
+            logos=args.logo,
+            logopos=args.logopos,
+        )
 
         event_config, station_config, event_dir = load_configs(args.event_file)
 

@@ -384,6 +384,15 @@ class RecalibrateDialog:
         log_file_path = tempfile.mktemp(suffix=".log", dir="/tmp")
 
         try:
+            starttime = None
+            try:
+                if getattr(self.zoom, 'timestamps', None):
+                    starttime = float(self.zoom.timestamps[0])
+            except Exception:
+                starttime = None
+            if starttime is None:
+                starttime = datetime.now(timezone.utc).timestamp()
+
             with open(log_file_path, 'w') as log_f:
                 with contextlib.redirect_stdout(log_f):
                     recalibrate(
@@ -454,9 +463,45 @@ def read_frames(filename, directory, skip_seconds=0, total_seconds=None):
     sys.stdout.write(f"\rProgress: [{'#' * bar_length}] {total_frames}/{total_frames} (100%)\n\n")
     if proc.wait() != 0: raise ffmpeg.Error('ffmpeg', None, proc.stderr.read())
 
+
+def read_first_frame(filename, directory, skip_seconds=0):
+    print(f"Decoding first frame of {filename}...")
+    input_kwargs = {}
+    if skip_seconds > 0:
+        input_kwargs['ss'] = skip_seconds
+    stream = ffmpeg.input(filename, **input_kwargs).output(f'{directory}/%04d.tif', vframes=1, format='image2', vsync=0).overwrite_output()
+    args = ['ffmpeg'] + stream.get_args()
+    proc = subprocess.run(args, capture_output=True, text=True, errors='ignore')
+    if proc.returncode != 0:
+        raise ffmpeg.Error('ffmpeg', None, proc.stderr)
+
+
+def parse_start_time_arg(s):
+    if not s:
+        return None
+    st = str(s).strip()
+    if st.upper().endswith('UTC'):
+        st = st[:-3].strip()
+    for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
+        try:
+            return datetime.strptime(st, fmt).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            pass
+    try:
+        iso = st.replace('Z', '+00:00')
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
 def timestamp(timestamps, files, i):
     if i < len(timestamps) and timestamps[i] is not None: return timestamps[i]
-    datetime_obj = get_timestamp(files[i])
+    try:
+        datetime_obj = get_timestamp(files[i])
+    except FileNotFoundError:
+        return None
     if not datetime_obj: datetime_obj = get_timestamp(files[i], robust=True)
     
     if datetime_obj:
@@ -527,26 +572,12 @@ class Zoom_Advanced(ttk.Frame):
     def __init__(self, mainframe, files, timestamps, pto_data, image_index, **kwargs):
         ttk.Frame.__init__(self, master=mainframe)
         self.master.title('Click Coords')
+        self.frames_ready = kwargs.pop('frames_ready', True)
         self.overlay = []
         self.canvas = tk.Canvas(self.master, highlightthickness=0, cursor="draft_small", bg="black")
         self.canvas.grid(row=0, column=0, sticky='nswe')
         self.master.rowconfigure(0, weight=1)
         self.master.columnconfigure(0, weight=1)
-        
-        self.canvas.bind('<Configure>', self.show_image)
-        self.canvas.bind('<ButtonPress-1>', self.move_from)
-        self.canvas.bind('<B1-Motion>', self.move_to)
-        self.canvas.bind('<MouseWheel>', self.wheel)
-        self.canvas.bind('<Button-5>', self.wheel)
-        self.canvas.bind('<Button-4>', self.wheel)
-        self.canvas.bind('<Left>', self.left_key)
-        self.canvas.bind('<Right>', self.right_key)
-        self.canvas.bind('<Prior>', self.page_up)
-        self.canvas.bind('<Next>', self.page_down)
-        self.canvas.bind('<Key>', self.key)
-        self.canvas.bind('<Button-3>', self.click)
-        self.canvas.bind("<Motion>", self.moved)
-        self.canvas.focus_set()
 
         self.mousepos = "\n"
         self.files = files
@@ -558,6 +589,8 @@ class Zoom_Advanced(ttk.Frame):
         self.num = 0
         self.image = Image.open(files[0])
         self.width, self.height = self.image.size
+        self.x = 0.0
+        self.y = 0.0
         self.imscale = 1.0
         self.delta = 1.05
         self.contrast = 1
@@ -568,6 +601,10 @@ class Zoom_Advanced(ttk.Frame):
         self.show_info = 0
         self.show_graph = 1
         self.boost = 1
+        self.star_objects = 128
+        self.restart = False
+        self.load_cancel_event = threading.Event()
+        self.load_thread = None
         self.offsetx = 0
         self.offsety = 0
         self.undo_stack = []
@@ -592,14 +629,52 @@ class Zoom_Advanced(ttk.Frame):
         self.upload_hostname = kwargs.get('upload_hostname')
         self.upload_dir = kwargs.get('upload_dir')
         self.pto_dirty = False
-        self.restart = False
-        self.star_objects = 128
-        
-        self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
-        self.canvas.update()
 
-        if self.is_calibrate_mode:
-            self.master.after(100, self._auto_recalibrate)
+        self.container = self.canvas.create_rectangle(0, 0, self.width, self.height, width=0)
+
+        self.canvas.bind('<Configure>', self.show_image)
+        self.canvas.bind('<ButtonPress-1>', self.move_from)
+        self.canvas.bind('<B1-Motion>', self.move_to)
+        self.canvas.bind('<MouseWheel>', self.wheel)
+        self.canvas.bind('<Button-5>', self.wheel)
+        self.canvas.bind('<Button-4>', self.wheel)
+        self.canvas.bind('<Left>', self.left_key)
+        self.canvas.bind('<Right>', self.right_key)
+        self.canvas.bind('<Prior>', self.page_up)
+        self.canvas.bind('<Next>', self.page_down)
+        self.canvas.bind('<Key>', self.key)
+        self.canvas.bind('<Button-3>', self.click)
+        self.canvas.bind("<Motion>", self.moved)
+        self.canvas.bind('<ButtonRelease-1>', self.drag_release)
+        self.canvas.focus_set()
+
+        self.show_image()
+
+    def cancel_background_load(self, wait=False, timeout=2.0):
+        try:
+            self.load_cancel_event.set()
+        except Exception:
+            pass
+        if wait and self.load_thread and self.load_thread.is_alive():
+            try:
+                self.load_thread.join(timeout=timeout)
+            except Exception:
+                pass
+
+    def set_sequence(self, files, timestamps):
+        self.files = files
+        self.timestamps = timestamps
+        if self.num >= len(self.files):
+            self.num = 0
+        if len(self.centroid) != len(self.files):
+            self.centroid = [None] * len(self.files)
+        self.frames_ready = True
+        try:
+            self.image = Image.open(self.files[self.num])
+        except Exception:
+            pass
+        self._create_background_image()
+        self._update_highlight_state()
         self.show_image()
         
     def _image_coords_to_celestial(self, x, y):
@@ -669,6 +744,8 @@ class Zoom_Advanced(ttk.Frame):
         dialog.recal()
 
     def moved(self, event):
+        if not hasattr(self, 'x'):
+            return
         x, y = event.x / self.imscale + self.x, event.y / self.imscale + self.y
         x += self.offsetx
         y += self.offsety
@@ -736,8 +813,12 @@ class Zoom_Advanced(ttk.Frame):
         btn_frame.pack(fill=tk.X, pady=5)
         btn_frame.pack_configure(anchor=tk.CENTER)
 
-        def quit_app(): top.destroy(); sys.exit(0)
-        def new_event(): self.restart = True; top.destroy(); self.master.destroy()
+        def quit_app():
+            self.cancel_background_load(wait=True)
+            top.destroy(); sys.exit(0)
+        def new_event():
+            self.cancel_background_load(wait=True)
+            self.restart = True; top.destroy(); self.master.destroy()
         def cancel(): top.destroy()
 
         tk.Button(btn_frame, text="Quit App", command=quit_app, width=10).pack(side=tk.LEFT, padx=10)
@@ -849,6 +930,15 @@ class Zoom_Advanced(ttk.Frame):
         
         img_temp_filename, old_lens_filename, new_lens_filename, log_file_path = None, None, None, None
         try:
+            starttime = None
+            try:
+                if getattr(self, 'timestamps', None):
+                    starttime = float(self.timestamps[0])
+            except Exception:
+                starttime = None
+            if starttime is None:
+                starttime = datetime.now(timezone.utc).timestamp()
+
             with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".png") as img_f:
                 self.image.save(img_f, format='PNG')
                 img_temp_filename = img_f.name
@@ -875,11 +965,14 @@ class Zoom_Advanced(ttk.Frame):
                 self.show_image() 
             self.master.after_idle(_update_gui_success)
         except Exception as e:
-            def _update_gui_error():
-                messagebox.showerror("Optimization Error", str(e))
+            err_msg = str(e)
+            def _update_gui_error(err_msg=err_msg):
+                messagebox.showerror("Optimization Error", err_msg)
                 if self.last_orientation_backup:
                     self.img_data.update(self.last_orientation_backup)
                     self.last_orientation_backup = None
+                    self.pto_dirty = True
+                self.show_image() 
             self.master.after_idle(_update_gui_error)
         finally:
             def _update_gui_finish():
@@ -1194,6 +1287,8 @@ class Zoom_Advanced(ttk.Frame):
                         break
 
     def change_image(self, new_num):
+        if not self.frames_ready:
+            return
         if 0 <= new_num < len(self.files):
             self.num = new_num
             self.image = Image.open(self.files[self.num])
@@ -1253,7 +1348,28 @@ class Zoom_Advanced(ttk.Frame):
         return img_a
 
     def show_image(self, event=None):
-        bbox1 = self.canvas.bbox(self.container)
+        if not hasattr(self, 'container'):
+            return
+        try:
+            if not self.canvas.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            bbox1 = self.canvas.bbox(self.container)
+        except tk.TclError:
+            return
+        if not bbox1:
+            try:
+                self.canvas.coords(self.container, 0, 0, self.width * self.imscale, self.height * self.imscale)
+            except Exception:
+                pass
+            try:
+                bbox1 = self.canvas.bbox(self.container)
+            except tk.TclError:
+                return
+        if not bbox1:
+            bbox1 = (0, 0, self.width * self.imscale, self.height * self.imscale)
         bbox2 = (self.canvas.canvasx(0), self.canvas.canvasy(0),
                  self.canvas.canvasx(self.canvas.winfo_width()), self.canvas.canvasy(self.canvas.winfo_height()))
         scroll_bbox = [min(bbox1[0], bbox2[0]), min(bbox1[1], bbox2[1]), max(bbox1[2], bbox2[2]), max(bbox1[3], bbox2[3])]
@@ -1492,6 +1608,8 @@ class Zoom_Advanced(ttk.Frame):
             self.curve_orientation = 'x_is_f_of_y'
             
     def click(self, event):
+        if not self.frames_ready:
+            return
         self._save_state_for_undo()
         existing_frames = {p['frame'] for p in self.positions}
         if self.num in existing_frames:
@@ -1521,14 +1639,20 @@ class Zoom_Advanced(ttk.Frame):
         self._create_or_update_centroid(self.num, (x, y))
         self.right_key(event)
 
-def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_callback):
+def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_callback, cancel_event=None):
+    if cancel_event is not None and cancel_event.is_set():
+        return
     if start_idx > end_idx: return
     if start_idx == end_idx:
+        if cancel_event is not None and cancel_event.is_set():
+            return
         if timestamps[start_idx] is None:
             timestamp(timestamps, files, start_idx)
             if timestamps[start_idx] is not None: report_progress_callback()
         return
 
+    if cancel_event is not None and cancel_event.is_set():
+        return
     if timestamps[start_idx] is None:
         timestamp(timestamps, files, start_idx)
         if timestamps[start_idx] is not None: report_progress_callback()
@@ -1538,6 +1662,8 @@ def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_ca
     if timestamps[start_idx] is not None and timestamps[start_idx] == timestamps[end_idx]:
         frames_filled = 0
         for i in range(start_idx + 1, end_idx):
+            if cancel_event is not None and cancel_event.is_set():
+                return
             if timestamps[i] is None:
                 timestamps[i] = timestamps[start_idx]
                 frames_filled += 1
@@ -1545,10 +1671,10 @@ def _recursive_extract(timestamps, files, start_idx, end_idx, report_progress_ca
         return
     if end_idx <= start_idx + 1: return
     mid_idx = (start_idx + end_idx) // 2
-    _recursive_extract(timestamps, files, start_idx, mid_idx, report_progress_callback)
-    _recursive_extract(timestamps, files, mid_idx + 1, end_idx, report_progress_callback)
+    _recursive_extract(timestamps, files, start_idx, mid_idx, report_progress_callback, cancel_event=cancel_event)
+    _recursive_extract(timestamps, files, mid_idx + 1, end_idx, report_progress_callback, cancel_event=cancel_event)
 
-def extract_timestamps(files):
+def extract_timestamps(files, cancel_event=None):
     total_files = len(files)
     if not files: return []
     raw_timestamps = [None] * total_files
@@ -1566,8 +1692,10 @@ def extract_timestamps(files):
     def _report_progress(num_frames=1):
         progress_state['processed_count'] += num_frames
         _update_progress_bar()
-    _recursive_extract(raw_timestamps, files, 0, total_files - 1, _report_progress)
+    _recursive_extract(raw_timestamps, files, 0, total_files - 1, _report_progress, cancel_event=cancel_event)
     for i in range(total_files):
+        if cancel_event is not None and cancel_event.is_set():
+            break
         if raw_timestamps[i] is None:
             timestamp(raw_timestamps, files, i)
             if raw_timestamps[i] is not None: _report_progress()
@@ -1884,52 +2012,11 @@ if __name__ == '__main__':
                 args.ptofile = temp_pto_path
             except Exception as e: sys.exit(f"Error during JSON to PTO conversion: {e}")
 
-        images = []
-        seconds_to_skip = args.skip
-        seconds_to_load = args.total
-        loaded_duration = 0.0
+        is_video_mode = bool(args.imgfiles and args.imgfiles[0].lower().endswith('.mp4'))
 
-        for f in args.imgfiles:
-            if f.lower().endswith('.mp4'):
-                if seconds_to_load is not None and loaded_duration >= seconds_to_load: break
-                try:
-                    probe = ffmpeg.probe(f)
-                    video_duration = float(next(s['duration'] for s in probe['streams'] if s['codec_type'] == 'video'))
-                except: continue
-
-                if seconds_to_skip > 0:
-                    if seconds_to_skip >= video_duration:
-                        seconds_to_skip -= video_duration
-                        continue
-                    else:
-                        current_file_skip = seconds_to_skip
-                        seconds_to_skip = 0
-                else: current_file_skip = 0
-
-                current_file_load_duration = None
-                if seconds_to_load is not None:
-                    remaining_to_load = seconds_to_load - loaded_duration
-                    available_in_video = video_duration - current_file_skip
-                    current_file_load_duration = min(remaining_to_load, available_in_video)
-                    if current_file_load_duration <= 0: break
-
-                temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp")
-                temp_dirs.append(temp_dir)
-                try:
-                    read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
-                    decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))
-                    images.extend(decoded_files)
-                    duration_this_run = len(decoded_files) / args.fps
-                    loaded_duration += duration_this_run
-                except Exception as e: print(f"Error processing {f}: {e}", file=sys.stderr)
-            else: images.append(os.path.abspath(f))
-
-        if not images: sys.exit("No image files found.")
-
-        timestamps = [None] * len(images)
-        fps = args.fps 
-
-        if args.imgfiles and args.imgfiles[0].lower().endswith('.mp4'):
+        # Determine FPS early for consistent timestamp interpolation.
+        fps = args.fps
+        if is_video_mode:
             try:
                 probe = ffmpeg.probe(args.imgfiles[0])
                 video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
@@ -1943,73 +2030,56 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"Could not extract FPS from metadata, assuming 25. Error: {e}")
                 fps = 25.0
-        elif fps == 10: fps = 25.0
+        elif fps == 10:
+            fps = 25.0
         args.fps = fps
 
-        starttime = None
-        
-        if args.start is None:
-            raw_timestamps = extract_timestamps(images)
-            print("Validating extracted timestamps...")
-            
-            valid_timestamps = [t for t in raw_timestamps if t is not None]
-            valid_count = len(valid_timestamps)
-            
-            is_valid = False
-            if valid_count > len(raw_timestamps) * 0.5:
-                # 1. Check for identical timestamps (static time or placeholder dates)
-                unique_vals = set(valid_timestamps)
-                sorted_valid = sorted(valid_timestamps)
-                total_duration = sorted_valid[-1] - sorted_valid[0]
-                
-                # Reject if duration is effectively zero OR very few unique timestamps exist
-                if len(valid_timestamps) > 1 and (total_duration <= 0.001 or len(unique_vals) < 2):
-                    print("Validation Failed: Timestamps are mostly identical or static.")
-                    is_valid = False
-                else:
-                    is_valid = True
-                    # 2. Check for unrealistic jumps via interpolation
-                    interp_test = interpolate_timestamps(raw_timestamps)
-                    expected_duration = len(images) / args.fps
-                    duration_ocr = interp_test[-1] - interp_test[0]
-                    
-                    if duration_ocr < expected_duration * 0.1 or duration_ocr > expected_duration * 5.0:
-                         print(f"Validation Failed: OCR Duration {duration_ocr:.2f}s mismatches expected {expected_duration:.2f}s.")
-                         is_valid = False
-            
-            if is_valid:
-                print("Timestamps extracted successfully via OCR.")
-                timestamps = interpolate_timestamps(raw_timestamps)
-                starttime = timestamps[0]
-            else:
-                print("OCR timestamp extraction considered invalid.")
-        
-        if starttime is None:
-            print("Attempting timestamp fallback strategies...")
-            filename_match = None
-            first_vid = args.imgfiles[0] if args.imgfiles else ""
-            match = re.search(r'(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})', os.path.basename(first_vid))
-            if match:
-                y, m, d, H, M, S = map(int, match.groups())
-                try:
-                    starttime = datetime(y, m, d, H, M, S, tzinfo=timezone.utc).timestamp()
-                    print(f"Recovered start time from filename: {datetime.fromtimestamp(starttime, timezone.utc)}")
-                except ValueError: pass
-            
-            if starttime is None and calibrate_info.get('selected_datetime'):
-                starttime = calibrate_info['selected_datetime'].timestamp()
-                print(f"Using selected time from launcher/calibrate: {datetime.fromtimestamp(starttime, timezone.utc)}")
+        # --- Quick-start: decode and timestamp only the first frame ---
+        images = []
+        timestamps = []
+        frames_ready = True
 
-            if starttime is None and args.start:
-                try:
-                    starttime = datetime.strptime(args.start, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()
-                    print(f"Using time from --date argument: {datetime.fromtimestamp(starttime, timezone.utc)}")
-                except: pass
+        if is_video_mode:
+            frames_ready = False
+            temp_dir_first = tempfile.TemporaryDirectory(prefix="clickcoords_first_", dir="/tmp")
+            temp_dirs.append(temp_dir_first)
+            try:
+                read_first_frame(args.imgfiles[0], temp_dir_first.name, skip_seconds=args.skip)
+                decoded_first = sorted(glob.glob(temp_dir_first.name + "/*.tif"))
+                if not decoded_first:
+                    raise RuntimeError("No first frame decoded")
+                images = [decoded_first[0]]
+            except Exception as e:
+                sys.exit(f"Failed to decode first frame: {e}")
 
+            # Timestamp just the first frame (fast).
+            ts0 = None
+            try:
+                dt0 = get_timestamp(images[0])
+                if not dt0:
+                    dt0 = get_timestamp(images[0], robust=True)
+                if dt0:
+                    ts0 = dt0.timestamp()
+            except Exception:
+                ts0 = None
+            if ts0 is None:
+                ts0 = datetime.now(timezone.utc).timestamp()
+            if args.start is not None:
+                parsed = parse_start_time_arg(args.start)
+                if parsed is not None:
+                    ts0 = parsed
+            timestamps = [ts0]
+        else:
+            # Image mode: keep existing behavior (already fast enough).
+            for f in args.imgfiles:
+                images.append(os.path.abspath(f))
+            if not images:
+                sys.exit("No image files found.")
+            starttime = None
+            if args.start is not None:
+                starttime = parse_start_time_arg(args.start)
             if starttime is None:
-                print("All timestamp recovery methods failed. Defaulting to current system time.")
                 starttime = datetime.now(timezone.utc).timestamp()
-
             timestamps = [starttime + (i / args.fps) for i in range(len(images))]
 
         try:
@@ -2025,7 +2095,141 @@ if __name__ == '__main__':
 
         window = tk.Tk()
         window.geometry("1600x960")
-        app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image, **calibrate_info)
+        app = Zoom_Advanced(window, files=images, timestamps=timestamps, pto_data=pto_data, image_index=args.image, frames_ready=frames_ready, **calibrate_info)
+
+        def _on_window_close():
+            try:
+                app.cancel_background_load(wait=False)
+            except Exception:
+                pass
+            window.destroy()
+
+        try:
+            window.protocol("WM_DELETE_WINDOW", _on_window_close)
+        except Exception:
+            pass
+
+        if is_video_mode:
+            def _load_full_sequence():
+                full_images = []
+                seconds_to_skip = args.skip
+                seconds_to_load = args.total
+                loaded_duration = 0.0
+
+                for f in args.imgfiles:
+                    if app.load_cancel_event.is_set():
+                        return
+                    if f.lower().endswith('.mp4'):
+                        if seconds_to_load is not None and loaded_duration >= seconds_to_load:
+                            break
+                        try:
+                            probe = ffmpeg.probe(f)
+                            video_duration = float(next(s['duration'] for s in probe['streams'] if s['codec_type'] == 'video'))
+                        except Exception:
+                            continue
+
+                        if seconds_to_skip > 0:
+                            if seconds_to_skip >= video_duration:
+                                seconds_to_skip -= video_duration
+                                continue
+                            else:
+                                current_file_skip = seconds_to_skip
+                                seconds_to_skip = 0
+                        else:
+                            current_file_skip = 0
+
+                        current_file_load_duration = None
+                        if seconds_to_load is not None:
+                            remaining_to_load = seconds_to_load - loaded_duration
+                            available_in_video = video_duration - current_file_skip
+                            current_file_load_duration = min(remaining_to_load, available_in_video)
+                            if current_file_load_duration <= 0:
+                                break
+
+                        temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp")
+                        temp_dirs.append(temp_dir)
+                        read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
+                        decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))
+                        full_images.extend(decoded_files)
+                        loaded_duration += len(decoded_files) / args.fps
+                    else:
+                        full_images.append(os.path.abspath(f))
+
+                if not full_images:
+                    raise RuntimeError("No frames decoded")
+
+                if app.load_cancel_event.is_set():
+                    return
+
+                # Full timestamp extraction (slow)
+                starttime_local = None
+                raw_timestamps = None
+                if args.start is None:
+                    raw_timestamps = extract_timestamps(full_images, cancel_event=app.load_cancel_event)
+                    if app.load_cancel_event.is_set():
+                        return
+                    valid_timestamps = [t for t in raw_timestamps if t is not None]
+                    valid_count = len(valid_timestamps)
+                    is_valid = False
+                    if valid_count > len(raw_timestamps) * 0.5:
+                        unique_vals = set(valid_timestamps)
+                        sorted_valid = sorted(valid_timestamps)
+                        total_duration = sorted_valid[-1] - sorted_valid[0]
+                        if len(valid_timestamps) > 1 and (total_duration <= 0.001 or len(unique_vals) < 2):
+                            is_valid = False
+                        else:
+                            is_valid = True
+                            interp_test = interpolate_timestamps(raw_timestamps)
+                            expected_duration = len(full_images) / args.fps
+                            duration_ocr = interp_test[-1] - interp_test[0]
+                            if duration_ocr < expected_duration * 0.1 or duration_ocr > expected_duration * 5.0:
+                                is_valid = False
+
+                    if is_valid:
+                        full_timestamps = interpolate_timestamps(raw_timestamps)
+                        starttime_local = full_timestamps[0]
+                    else:
+                        full_timestamps = [None] * len(full_images)
+                else:
+                    starttime_local = parse_start_time_arg(args.start)
+                    full_timestamps = [None] * len(full_images)
+
+                if starttime_local is None:
+                    first_vid = args.imgfiles[0] if args.imgfiles else ""
+                    match = re.search(r'(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})', os.path.basename(first_vid))
+                    if match:
+                        y, m, d, H, M, S = map(int, match.groups())
+                        try:
+                            starttime_local = datetime(y, m, d, H, M, S, tzinfo=timezone.utc).timestamp()
+                        except ValueError:
+                            starttime_local = None
+
+                if starttime_local is None and calibrate_info.get('selected_datetime'):
+                    starttime_local = calibrate_info['selected_datetime'].timestamp()
+                if starttime_local is None:
+                    starttime_local = datetime.now(timezone.utc).timestamp()
+
+                if not raw_timestamps or full_timestamps[0] is None:
+                    full_timestamps = [starttime_local + (i / args.fps) for i in range(len(full_images))]
+
+                if app.load_cancel_event.is_set():
+                    return
+
+                def _apply_loaded_sequence():
+                    if app.load_cancel_event.is_set():
+                        return
+                    try:
+                        app.set_sequence(full_images, full_timestamps)
+                    except Exception:
+                        pass
+
+                try:
+                    window.after(0, _apply_loaded_sequence)
+                except Exception:
+                    pass
+
+            app.load_thread = threading.Thread(target=_load_full_sequence, daemon=True)
+            app.load_thread.start()
 
         if args.event_file: app.load_event_file(args.event_file)
         window.mainloop()

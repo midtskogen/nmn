@@ -15,6 +15,7 @@ output generation. The main `metrack` function remains backward-compatible.
 import argparse
 import configparser
 import datetime
+import math
 import io
 import os
 import sys
@@ -79,6 +80,72 @@ if 'Pillow' in AVAILABLE_LIBS:
 EARTH_RADIUS_KM = 6371.0
 WGS84_FLATTENING = 1.0 / 298.257223563
 WGS84_E_SQ = 2 * WGS84_FLATTENING - WGS84_FLATTENING**2
+
+ATM_SCALE_HEIGHT_KM = 7.0
+
+
+def _refraction_deg_apparent_minus_true(alt_deg: float, pressure_hpa: float = 1010.0, temp_c: float = 10.0) -> float:
+    """Approximate atmospheric refraction in degrees: (apparent altitude) - (true altitude).
+
+    Uses Bennett's formula (1982) with standard pressure/temperature scaling.
+    Returns 0 for very low/negative altitudes.
+    """
+    try:
+        alt = float(alt_deg)
+    except Exception:
+        return 0.0
+
+    if not math.isfinite(alt):
+        return 0.0
+    if alt < -1.0:
+        return 0.0
+
+    alt_eff = max(0.1, min(89.9, alt))
+    # Bennett (1982): R[arcmin] = 1.02 / tan((alt + 10.3/(alt+5.11)) deg)
+    r_arcmin = 1.02 / math.tan(math.radians(alt_eff + 10.3 / (alt_eff + 5.11)))
+    # Simple scaling to local P,T.
+    r_arcmin *= (pressure_hpa / 1010.0) * (283.0 / (273.0 + temp_c))
+    return float(r_arcmin / 60.0)
+
+
+def _finite_distance_refraction_scale(height_km: float) -> float:
+    """Scale refraction for a source at finite height inside the atmosphere.
+
+    For a source at height h, only the atmosphere below h contributes.
+    Approximate by fraction of atmospheric mass below h for an exponential
+    atmosphere: f = 1 - exp(-h/H).
+    """
+    try:
+        h = float(height_km)
+    except Exception:
+        return 1.0
+    if not math.isfinite(h):
+        return 1.0
+    h = max(0.0, h)
+    return float(1.0 - math.exp(-h / ATM_SCALE_HEIGHT_KM))
+
+
+def _estimate_cross_heights_km(track_start, track_end, obs_data) -> List[float]:
+    """Estimate height (km) of the meteor along each line of sight using current geometry."""
+    n = len(obs_data['longitudes'])
+    if track_start is None or track_end is None or n == 0:
+        return [float('nan')] * n
+    track_vec = (track_end - track_start)
+    norm = float(np.linalg.norm(track_vec))
+    if norm < 1e-9:
+        return [float('nan')] * n
+    track_vec /= norm
+
+    pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
+    los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
+    heights_km = []
+    for pos, los in zip(pos_vectors, los_vectors):
+        try:
+            los_pos, _ = closest_point(pos, track_start, los, track_vec, return_points=True)
+            heights_km.append(float(xyz2lonlat(los_pos)[2]))
+        except Exception:
+            heights_km.append(float('nan'))
+    return heights_km
 
 class MetrackInfo:
     """Structure for storing information about a fitted meteor track."""
@@ -278,6 +345,27 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
         if not options.get('azonly', False) and cross_pos:
             los_lons, los_lats, _ = zip(*[xyz2lonlat(p) for p in cross_pos])
             all_lons.extend(los_lons); all_lats.extend(los_lats)
+
+        extra_markers = options.get('extra_markers')
+        if extra_markers:
+            for m in extra_markers:
+                try:
+                    all_lons.append(float(m.get('lon')))
+                    all_lats.append(float(m.get('lat')))
+                except Exception:
+                    continue
+
+        extra_paths = options.get('extra_paths')
+        if extra_paths:
+            for p in extra_paths:
+                try:
+                    lons = p.get('lons') or []
+                    lats = p.get('lats') or []
+                    all_lons.extend([float(x) for x in lons])
+                    all_lats.extend([float(y) for y in lats])
+                except Exception:
+                    continue
+
         lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1
         lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
     elif options.get('borders') is not None:
@@ -331,9 +419,49 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
         ax.plot([start_lon, end_lon], [start_lat, end_lat], color='blue', linewidth=2, transform=ccrs.PlateCarree(), label=translations.get("plot_map_legend_trajectory", "Fitted Trajectory"))
         ax.annotate('', xy=(end_lon, end_lat), xytext=(start_lon, start_lat), arrowprops=dict(facecolor='blue', edgecolor='blue', arrowstyle='->'), transform=ccrs.PlateCarree())
 
+    extra_paths = options.get('extra_paths')
+    if extra_paths:
+        for p in extra_paths:
+            try:
+                lats = p.get('lats')
+                lons = p.get('lons')
+                if not lats or not lons:
+                    continue
+                pcolor = str(p.get('color', '#ff00ff'))
+                ax.plot(lons, lats, color=pcolor, linewidth=1.5, alpha=0.7, transform=ccrs.PlateCarree(), label=None)
+            except Exception:
+                continue
+
+    extra_markers = options.get('extra_markers')
+    if extra_markers:
+        for m in extra_markers:
+            try:
+                mlat = float(m.get('lat'))
+                mlon = float(m.get('lon'))
+                mlabel = str(m.get('label', ''))
+                mcolor = str(m.get('color', '#ff00ff'))
+                mlabel_color = str(m.get('label_color', mcolor))
+                mkind = str(m.get('kind', '')).lower()
+                msymbol = str(m.get('symbol', 'o' if mkind in ('infra_source', 'source') else 'X'))
+                msize = float(m.get('size', 7.0))
+
+                ax.plot(
+                    mlon, mlat,
+                    marker=msymbol,
+                    markersize=msize,
+                    color=mcolor,
+                    markeredgecolor=mcolor,
+                    transform=ccrs.PlateCarree(),
+                    label=mlabel or None,
+                )
+                if mlabel:
+                    ax.text(mlon + 0.05, mlat + 0.05, mlabel, color=mlabel_color, transform=ccrs.PlateCarree())
+            except Exception:
+                continue
+
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys())
+    ax.legend(by_label.values(), by_label.keys(), loc='upper right')
 
     if 'save' in options.get('doplot', ''):
         filename = output_filename or 'map.svg'
@@ -405,6 +533,30 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     site_lons, site_lats = obs_data['longitudes'], obs_data['latitudes']; n_obs = len(site_lons) // 2; all_lons = list(site_lons); all_lats = list(site_lats)
     if not options['azonly'] and track_start is not None:
         start_lon, start_lat, _ = xyz2lonlat(track_start); end_lon, end_lat, _ = xyz2lonlat(track_end); all_lons.extend([start_lon, end_lon]); all_lats.extend([start_lat, end_lat])
+
+    # Ensure extra overlays influence map borders (e.g., infrasound sites/rings)
+    try:
+        extra_markers = options.get('extra_markers')
+        if extra_markers:
+            for m in extra_markers:
+                try:
+                    all_lons.append(float(m.get('lon')))
+                    all_lats.append(float(m.get('lat')))
+                except Exception:
+                    continue
+        extra_paths = options.get('extra_paths')
+        if extra_paths:
+            for p in extra_paths:
+                try:
+                    lons = p.get('lons') or []
+                    lats = p.get('lats') or []
+                    if lons and lats:
+                        all_lons.extend([float(x) for x in lons if x is not None])
+                        all_lats.extend([float(y) for y in lats if y is not None])
+                except Exception:
+                    continue
+    except Exception:
+        pass
     center_lon = np.mean(all_lons); center_lat = np.mean(all_lats); proj = ccrs.Gnomonic(central_longitude=center_lon, central_latitude=center_lat)
     lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1; lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
     fig_map, ax_map = pylab.subplots(figsize=(10, 10), subplot_kw={'projection': proj}); ax_map.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree()); lat_span = abs(lat_top - lat_bot); zoom_level = int(np.log2(360 / (lat_span + 1.5))); zoom_level = max(6, min(zoom_level, 10))
@@ -552,6 +704,130 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             traces.extend([go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), showlegend=False, hoverinfo='none'), go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), showlegend=False, hoverinfo='none')])
 
     x_min_km, x_max_km, y_min_km, y_max_km = x_min_m / 1000.0, x_max_m / 1000.0, y_min_m / 1000.0, y_max_m / 1000.0; grid_center_km = {'x': (x_min_km + x_max_km) / 2.0, 'y': (y_min_km + y_max_km) / 2.0}; norm_factor = 245.0
+
+    extra_paths = options.get('extra_paths')
+    if extra_paths:
+        for p in extra_paths:
+            try:
+                lats = p.get('lats')
+                lons = p.get('lons')
+                if not lats or not lons:
+                    continue
+                pcolor = str(p.get('color', '#ff00ff'))
+                plabel = str(p.get('label', ''))
+                pz = 0.0
+                if p.get('elev_km') is not None:
+                    pz = float(p.get('elev_km'))
+                elif p.get('elev_m') is not None:
+                    pz = float(p.get('elev_m')) / 1000.0
+                px, py = project_points(list(lons), list(lats))
+                # If station metadata is present, tilt the ring so it is anchored at the station elevation.
+                # We ramp z from station elev (at ring center) to pz (at ring radius).
+                st_lat = p.get('station_lat')
+                st_lon = p.get('station_lon')
+                st_elev_km = 0.0
+                if p.get('station_elev_km') is not None:
+                    st_elev_km = float(p.get('station_elev_km'))
+                elif p.get('station_elev_m') is not None:
+                    st_elev_km = float(p.get('station_elev_m')) / 1000.0
+
+                z_ring = [pz] * len(px)
+                sx = sy = None
+                if st_lat is not None and st_lon is not None:
+                    sx_arr, sy_arr = project_points([float(st_lon)], [float(st_lat)])
+                    sx, sy = float(sx_arr[0]), float(sy_arr[0])
+                    # Determine ring radius in the same projected units (km)
+                    rs = []
+                    for i in range(len(px)):
+                        dx = float(px[i]) - sx
+                        dy = float(py[i]) - sy
+                        rs.append(math.hypot(dx, dy))
+                    rmax = max(rs) if rs else 0.0
+                    if rmax > 1e-6:
+                        z_ring = [st_elev_km + (r / rmax) * (pz - st_elev_km) for r in rs]
+
+                traces.append(go.Scatter3d(
+                    x=list(px), y=list(py), z=z_ring,
+                    mode='lines',
+                    line=dict(color=pcolor, width=3),
+                    name=plabel or 'path',
+                    showlegend=False,
+                    hoverinfo='none',
+                    opacity=0.55,
+                ))
+
+                # Optional: show a slanted "curtain" from the ground station to the ring altitude.
+                # This makes it obvious that the constraint is centered at the station.
+                if st_lat is not None and st_lon is not None:
+                    if sx is None or sy is None:
+                        sx_arr, sy_arr = project_points([float(st_lon)], [float(st_lat)])
+                        sx, sy = float(sx_arr[0]), float(sy_arr[0])
+                    # Downsample to keep HTML reasonable
+                    step = int(p.get('curtain_step', 4))
+                    step = max(1, step)
+                    cx = []
+                    cy = []
+                    cz = []
+                    for i in range(0, len(px), step):
+                        # ground -> ring point
+                        cx.extend([sx, float(px[i]), None])
+                        cy.extend([sy, float(py[i]), None])
+                        # clip below ground
+                        z_to = float(z_ring[i]) if i < len(z_ring) else float(pz)
+                        cz.extend([max(0.0, float(st_elev_km)), max(0.0, z_to), None])
+                    traces.append(go.Scatter3d(
+                        x=cx, y=cy, z=cz,
+                        mode='lines',
+                        line=dict(color=pcolor, width=1),
+                        showlegend=False,
+                        hoverinfo='none',
+                        opacity=0.25,
+                        name=(plabel + " curtain") if plabel else 'curtain',
+                    ))
+            except Exception:
+                continue
+
+    extra_markers = options.get('extra_markers')
+    if extra_markers:
+        for m in extra_markers:
+            try:
+                mlat = float(m.get('lat'))
+                mlon = float(m.get('lon'))
+                mlabel = str(m.get('label', ''))
+                mcolor = str(m.get('color', '#ff00ff'))
+                mlabel_color = str(m.get('label_color', mcolor))
+                mz = 0.0
+                if m.get('elev_km') is not None:
+                    mz = float(m.get('elev_km'))
+                elif m.get('elev_m') is not None:
+                    mz = float(m.get('elev_m')) / 1000.0
+                msymbol = str(m.get('plotly_symbol', m.get('symbol', 'circle')))
+                msize = float(m.get('size', 7.0))
+                mx, my = project_points([mlon], [mlat])
+
+                traces.append(go.Scatter3d(
+                    x=[mx[0]], y=[my[0]], z=[mz],
+                    mode='markers+text' if mlabel else 'markers',
+                    marker=dict(size=msize, color=mcolor, symbol=msymbol, opacity=float(m.get('opacity', 0.95))),
+                    text=[mlabel] if mlabel else None,
+                    textposition='top center',
+                    textfont=dict(color=mlabel_color, size=10),
+                    name=mlabel or 'marker',
+                    showlegend=True,
+                    hoverinfo='none',
+                ))
+
+                if m.get('drop_to_ground'):
+                    traces.append(go.Scatter3d(
+                        x=[mx[0], mx[0]], y=[my[0], my[0]], z=[mz, 0],
+                        mode='lines',
+                        line=dict(color=mcolor, width=3),
+                        showlegend=False,
+                        hoverinfo='none',
+                        opacity=0.6,
+                    ))
+            except Exception:
+                continue
     
     # Calculate track midpoint for camera centering
     track_mid = (track_start + track_end) / 2.0
@@ -568,6 +844,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     
     layout = go.Layout(
         title=translations.get("plot_map_interactive_title", "Meteor's Atmospheric Trajectory"), title_x=0.5, title_y=0.92, 
+        showlegend=False,
         scene=dict(
             xaxis=dict(title=translations.get("plot_map_interactive_xaxis", "East/West Distance (km)"), range=[x_min_km, x_max_km], showspikes=True, spikethickness=1), 
             yaxis=dict(title=translations.get("plot_map_interactive_yaxis", "North/South Distance (km)"), range=[y_min_km, y_max_km], showspikes=True, spikethickness=1), 
@@ -584,6 +861,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     )
     
     fig = go.Figure(data=traces, layout=layout, frames=frames)
+    fig.update_layout(showlegend=False)
     filename = output_filename or "map.html"
     fig.write_html(filename, include_plotlyjs='cdn')
 
@@ -1042,6 +1320,8 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
     if not raw_data:
         print(f"Error: No valid data found in {inname}")
         return MetrackInfo(), None
+
+    use_ransac = bool(options.get('use_ransac', True))
     
     if borders and not options.get('autoborders'): options['borders'] = borders
     else: options['borders'] = None
@@ -1053,13 +1333,32 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
                      'full_obs_data': full_obs_data, 'inlier_indices': list(range(len(raw_data['names'])))}
         return MetrackInfo(), plot_data
 
-    use_ransac = options.get('use_ransac', True)
-    if use_ransac:
-        fit_results, inlier_obs_data, inlier_indices = robust_fit_with_ransac(full_obs_data, raw_data, options)
-    else:
+    def _run_fit(obs_data_for_fit):
+        if use_ransac:
+            return robust_fit_with_ransac(obs_data_for_fit, raw_data, options)
         print("RANSAC disabled. Using standard fit on all data.")
-        fit_results = fit_track(full_obs_data, optimize=options.get('optimize', True))
-        inlier_obs_data, inlier_indices = full_obs_data, list(range(len(raw_data['names'])))
+        fr = fit_track(obs_data_for_fit, optimize=options.get('optimize', True))
+        return fr, obs_data_for_fit, list(range(len(raw_data['names'])))
+
+    options.setdefault('refraction', True)
+    full_obs_data_fit = full_obs_data
+
+    if options.get('refraction', True):
+        fit_initial, inlier_obs_initial, inlier_idx_initial = _run_fit(full_obs_data)
+        if fit_initial[0] is not None:
+            heights_km = _estimate_cross_heights_km(fit_initial[0], fit_initial[1], full_obs_data)
+            alt_corr = []
+            for alt_app, h_km in zip(full_obs_data['altitudes'], heights_km):
+                r_inf = _refraction_deg_apparent_minus_true(float(alt_app))
+                scale = _finite_distance_refraction_scale(float(h_km))
+                alt_corr.append(float(alt_app) - float(r_inf) * float(scale))
+            try:
+                full_obs_data_fit = dict(full_obs_data)
+                full_obs_data_fit['altitudes'] = np.asarray(alt_corr, dtype=float)
+            except Exception:
+                full_obs_data_fit = full_obs_data
+
+    fit_results, inlier_obs_data, inlier_indices = _run_fit(full_obs_data_fit)
 
     if fit_results[0] is None:
         print("Could not determine a valid track. Aborting.")
@@ -1072,10 +1371,10 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
 
     if not is_plausible and use_ransac:
         print("\nWarning: RANSAC solution is physically implausible. Attempting fallback...")
-        fit_results = fit_track(full_obs_data, optimize=False)
+        fit_results = fit_track(full_obs_data_fit, optimize=False)
         if fit_results[0] is None:
             print("Fallback fit also failed. Aborting."); return MetrackInfo(), None
-        inlier_obs_data = full_obs_data; inlier_indices = list(range(len(raw_data['names'])))
+        inlier_obs_data = full_obs_data_fit; inlier_indices = list(range(len(raw_data['names'])))
         info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
 
     if 'showerassoc' in AVAILABLE_LIBS:
@@ -1083,13 +1382,13 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
 
     # Prepare data for plotting functions
     final_track_vec = (track_end - track_start); final_track_vec /= np.linalg.norm(final_track_vec)
-    all_pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data['longitudes'], full_obs_data['latitudes'], full_obs_data['heights_m'])]
-    all_los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data['altitudes'], full_obs_data['azimuths'], full_obs_data['longitudes'], full_obs_data['latitudes'])]
+    all_pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'], full_obs_data_fit['heights_m'])]
+    all_los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data_fit['altitudes'], full_obs_data_fit['azimuths'], full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'])]
     cross_pos_all = [closest_point(pos, track_start, los, final_track_vec, return_points=True)[0] for pos, los in zip(all_pos_vectors, all_los_vectors)]
 
     plot_data = {
         'track_start': track_start, 'track_end': track_end, 'cross_pos_inliers': cross_pos_inliers,
-        'cross_pos_all': cross_pos_all, 'full_obs_data': full_obs_data, 'inlier_obs_data': inlier_obs_data,
+        'cross_pos_all': cross_pos_all, 'full_obs_data': full_obs_data_fit, 'inlier_obs_data': inlier_obs_data,
         'inlier_indices': inlier_indices
     }
     return info, plot_data
@@ -1173,6 +1472,7 @@ def main():
     parser.add_argument('--all-in-tolerance', type=float, default=1.0, help="Error tolerance to accept a fit with all stations.")
     parser.add_argument('--seed', type=int, default=0, help="Random seed for RANSAC.")
     parser.add_argument('--debug-ransac', action='store_true', help="Enable RANSAC debug prints.")
+    parser.add_argument('--no-refraction', action='store_false', dest='refraction', default=True, help="Disable atmospheric refraction correction.")
     
     args = parser.parse_args()
 

@@ -119,13 +119,51 @@ def get_video_properties_ffprobe(video_path: str) -> typing.Optional[dict]:
     if not os.path.exists(video_path):
         log.warning(f"Video file not found: '{video_path}'. Skipping.")
         return None
-    command = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,duration", "-of", "json", video_path]
+
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "format=duration:stream=width,height,r_frame_rate,duration,nb_read_frames,nb_frames",
+        "-of",
+        "json",
+        video_path,
+    ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True)
-        data = json.loads(result.stdout)["streams"][0]
-        num, den = map(int, data["r_frame_rate"].split('/'))
-        data["fps"], data["duration"] = num / den, float(data.get("duration", 0))
-        if not all(k in data for k in ["width", "height", "fps", "duration"]): raise ValueError("Missing essential video stream data.")
+        payload = json.loads(result.stdout)
+        stream = payload["streams"][0]
+
+        r_frame_rate = stream.get("r_frame_rate", "0/0")
+        num, den = map(int, r_frame_rate.split("/"))
+        fps = (num / den) if den else 0.0
+
+        format_duration = float(payload.get("format", {}).get("duration") or 0.0)
+        stream_duration = float(stream.get("duration") or 0.0)
+
+        duration = format_duration if format_duration > 0 else stream_duration
+
+        if duration <= 0 and fps > 0:
+            nb_read_frames = stream.get("nb_read_frames")
+            nb_frames = stream.get("nb_frames")
+            frame_count = nb_read_frames if nb_read_frames not in (None, "N/A", "") else nb_frames
+            if frame_count not in (None, "N/A", ""):
+                duration = float(frame_count) / fps
+
+        if duration <= 0:
+            raise ValueError("Could not determine video duration (format, stream, or derived duration are missing/invalid).")
+
+        data = {
+            "width": int(stream["width"]),
+            "height": int(stream["height"]),
+            "fps": float(fps),
+            "duration": float(duration),
+        }
+        if not all(k in data for k in ["width", "height", "fps", "duration"]):
+            raise ValueError("Missing essential video stream data.")
         return data
     except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError, ValueError, KeyError) as e:
         log.error(f"Could not read valid properties from '{video_path}' using ffprobe: {e}")

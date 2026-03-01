@@ -8,6 +8,7 @@ import sys
 import argparse
 from pathlib import Path
 from collections import namedtuple
+import json
 import simplekml
 
 # --- Constants for KML Styling ---
@@ -119,9 +120,30 @@ def fb2kml(inname: str = ''):
     input_path = Path(inname)
     output_path = input_path.with_suffix('.kml')
 
+    infra_fit_path = input_path.parent / 'infra_fit.json'
+    infra_fit = None
+    if infra_fit_path.exists():
+        try:
+            infra_fit = json.loads(infra_fit_path.read_text(encoding='utf-8'))
+        except Exception:
+            infra_fit = None
+
     try:
         trajectory, observers = parse_res_file(input_path)
         kml_doc = create_kml(input_path.stem, trajectory, observers)
+
+        if infra_fit and 'lat' in infra_fit and 'lon' in infra_fit:
+            try:
+                lat = float(infra_fit['lat'])
+                lon = float(infra_fit['lon'])
+                alt_m = float(infra_fit.get('elev_m', 0.0))
+                p = kml_doc.newpoint(name="Infrasound source", coords=[(lon, lat, alt_m)])
+                p.altitudemode = simplekml.AltitudeMode.absolute
+                p.style.iconstyle.icon.href = KML_POINT_ICON
+                p.style.iconstyle.color = simplekml.Color.magenta
+                p.style.iconstyle.scale = 0.8
+            except Exception:
+                pass
         kml_doc.save(output_path)
         print(f"✅ KML file successfully created: {output_path}")
 

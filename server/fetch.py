@@ -64,6 +64,105 @@ except ImportError:
     WINDPROFILE_AVAILABLE = False
 
 
+def _collect_infra_sites(event_dir: Path):
+    sites = []
+    try:
+        for p in sorted(event_dir.glob('*/cam*/infra.txt')):
+            try:
+                cfg = configparser.ConfigParser()
+                cfg.read(p)
+                if not cfg.has_section('arrival') or not cfg.has_option('arrival', 'time'):
+                    continue
+                station = cfg.get('station', 'name', fallback=p.parent.parent.name)
+                code = cfg.get('station', 'code', fallback=str(station)[:3].upper()).strip()
+                lat = cfg.getfloat('station', 'latitude', fallback=None)
+                lon = cfg.getfloat('station', 'longitude', fallback=None)
+                elev_m = cfg.getfloat('station', 'elevation', fallback=0.0)
+                if lat is None or lon is None:
+                    continue
+                sites.append({'code': code, 'station': station, 'lat': float(lat), 'lon': float(lon), 'elev_m': float(elev_m)})
+            except Exception:
+                continue
+    except Exception:
+        return []
+
+    # Deduplicate by code
+    uniq = {}
+    for s in sites:
+        c = str(s.get('code') or '').strip()
+        if c and c not in uniq:
+            uniq[c] = s
+    return list(uniq.values())
+
+
+def _fetch_infra_wind_profiles(event_dir: Path, event_timestamp: float):
+    if not WINDPROFILE_AVAILABLE:
+        return
+    try:
+        sites = _collect_infra_sites(event_dir)
+        if not sites:
+            return
+        for s in sites:
+            try:
+                code = str(s.get('code') or '').strip() or 'XXX'
+                out_csv = event_dir / f"wind_profile_{code}.csv"
+                if out_csv.exists() and out_csv.stat().st_size > 50:
+                    continue
+                ok, matched_time = windprofile.get_wind_profile(
+                    float(s['lat']),
+                    float(s['lon']),
+                    float(event_timestamp),
+                    str(out_csv),
+                )
+                if ok:
+                    logging.info(f"Fetched wind profile for infrasound site {code} ({matched_time}) -> {out_csv}")
+                else:
+                    logging.info(f"No wind profile available for infrasound site {code}")
+            except Exception as e:
+                logging.warning(f"Failed to fetch wind profile for infrasound site {s.get('code')}: {e}")
+    except Exception:
+        return
+
+
+def _pick_infra_fit_for_mapping(infra_fit: dict, min_elev_km: float = 5.0, max_elev_km: float = 80.0):
+    try:
+        if not infra_fit or 'lat' not in infra_fit or 'lon' not in infra_fit:
+            return None, None
+
+        def _in_range(d: dict) -> bool:
+            try:
+                elev_km = float(d.get('elev_m', 0.0)) / 1000.0
+                return bool(min_elev_km <= elev_km <= max_elev_km)
+            except Exception:
+                return False
+
+        if _in_range(infra_fit):
+            return infra_fit, 'primary'
+
+        base = infra_fit.get('base_solution') if isinstance(infra_fit.get('base_solution'), dict) else None
+        refined = infra_fit.get('refined_solution') if isinstance(infra_fit.get('refined_solution'), dict) else None
+
+        fallback = None
+        reason = None
+        if base and _in_range(base):
+            fallback = base
+            reason = 'base_solution'
+        elif refined and _in_range(refined):
+            fallback = refined
+            reason = 'refined_solution'
+
+        if fallback is None:
+            return None, None
+
+        out = dict(infra_fit)
+        for k in ('lat', 'lon', 'elev_m', 't0_unix'):
+            if k in fallback:
+                out[k] = fallback.get(k)
+        return out, reason
+    except Exception:
+        return None, None
+
+
 class Config:
     """Configuration constants for the script."""
     # Base directory for all meteor data on the local server
@@ -267,20 +366,28 @@ def create_centroid_file(local_dir: Path):
 
     coordinates2 = []
     for c in coordinates:
-        az3_str, alt3_str = c.split(',')
-        p3 = to_cartesian(float(az3_str), float(alt3_str))
-        t = np.cross(np.cross(p1, p2), np.cross(p3, np.cross(p1, p2)))
-        norm_t = np.linalg.norm(t)
-        if norm_t > 0:
-            coordinates2.append(from_cartesian(t / norm_t))
-        else:
-            coordinates2.append((0,0))
+        try:
+            if ',' not in c:
+                raise ValueError("missing comma")
+            az3_str, alt3_str = c.split(',', 1)
+            p3 = to_cartesian(float(az3_str), float(alt3_str))
+            t = np.cross(np.cross(p1, p2), np.cross(p3, np.cross(p1, p2)))
+            norm_t = np.linalg.norm(t)
+            if norm_t > 0:
+                coordinates2.append(from_cartesian(t / norm_t))
+            else:
+                coordinates2.append((0, 0))
+        except Exception as e:
+            logging.warning(f"Skipping malformed coordinate token '{c}' in {event_file}: {e}")
+            coordinates2.append((0, 0))
 
     try:
         # Attempt to find the observation file to get the station code
-        obs_file = next(local_dir.glob('*[0-9][0-9].txt'))
-        code = obs_file.read_text().split()[12]
-    except (StopIteration, IndexError):
+        code = obs.get('station', 'code', fallback='').strip()
+        if not code:
+            obs_file = next(local_dir.glob('*[0-9][0-9].txt'))
+            code = obs_file.read_text().split()[12]
+    except (StopIteration, IndexError, configparser.NoOptionError, configparser.NoSectionError):
         # Fallback: try to guess code from directory name if file parse fails
         code = local_dir.parent.name.upper()
         if len(code) > 3: code = code[:3]
@@ -465,10 +572,18 @@ def generate_station_html_report(output_path: Path, event_dir: Path, translation
             ts_str = ts_utc.strftime('%Y%m%d%H%M%S')
             
             code = ''
-            obs_txt_file = event_file.parent / f"{station}-{ts_str}.txt"
-            if obs_txt_file.exists():
-                try: code = obs_txt_file.read_text().split()[12]
-                except IndexError: pass
+            try:
+                code = cfg.get('station', 'code', fallback='').strip()
+            except Exception:
+                code = ''
+
+            if not code:
+                obs_txt_file = event_file.parent / f"{station}-{ts_str}.txt"
+                if obs_txt_file.exists():
+                    try:
+                        code = obs_txt_file.read_text().split()[12]
+                    except IndexError:
+                        pass
 
             html_template = """
 <div class="container">
@@ -498,6 +613,38 @@ if (file_exists($specific_brightness_path)) {{
     $display_brightness_path = $default_brightness_path;
     $display_brightness_url = $default_brightness_url;
 }}
+
+$preview_img_path = null;
+$preview_img_url = null;
+$preview_href_url = null;
+
+if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{
+    $preview_img_path = "{station}/{cam}/{station_ts}-gnomonic-grid.jpg";
+    $preview_img_url = "{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg";
+    if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{
+        $preview_href_url = "{url_base}/{cam}/{station_ts}-gnomonic.mp4";
+    }} else {{
+        $preview_href_url = $preview_img_url;
+    }}
+}} elseif (file_exists("{station}/{cam}/{station_ts}-grid.jpg")) {{
+    $preview_img_path = "{station}/{cam}/{station_ts}-grid.jpg";
+    $preview_img_url = "{url_base}/{cam}/{station_ts}-grid.jpg";
+    if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{
+        $preview_href_url = "{url_base}/{cam}/{station_ts}-grid.mp4";
+    }} else {{
+        $preview_href_url = $preview_img_url;
+    }}
+}} elseif (file_exists("{station}/{cam}/{station_ts}.jpg")) {{
+    $preview_img_path = "{station}/{cam}/{station_ts}.jpg";
+    $preview_img_url = "{url_base}/{cam}/{station_ts}.jpg";
+    if (file_exists("{station}/{cam}/{station_ts}-orig.mp4")) {{
+        $preview_href_url = "{url_base}/{cam}/{station_ts}-orig.mp4";
+    }} elseif (file_exists("{station}/{cam}/{station_ts}.mp4")) {{
+        $preview_href_url = "{url_base}/{cam}/{station_ts}.mp4";
+    }} else {{
+        $preview_href_url = $preview_img_url;
+    }}
+}}
 ?>
     <div style="text-align: center;">
         <?php if (file_exists($webm_path)) {{ ?>
@@ -507,7 +654,7 @@ if (file_exists($specific_brightness_path)) {{
         <?php }} ?>
     </div>
 <table><tr><td valign=top>
-<a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4"><img src="{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg" width=768 alt="gnomonic"></a>
+<?php if ($preview_img_path !== null) {{ ?><a href="<?php echo $preview_href_url; ?>"><img src="<?php echo $preview_img_url; ?>" width=768 alt="preview"></a><?php }} ?>
 </td>
 <td valign=top>
 <table border=1>
@@ -646,12 +793,217 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
             logging.error(f"Failed to send tweet using key {key}: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     obs_filename = f"obs_{date.strftime('%Y-%m-%d_%H:%M:%S')}.txt"
     obs_filepath = event_dir / obs_filename
     res_filename = obs_filepath.with_suffix('.res')
+
+    if infrasound_only:
+        logging.info("--- INFRASOUND MODE: Skipping pre-processing and running only infrasound fit. ---")
+        original_cwd = Path.cwd()
+        infra_fit = None
+        try:
+            os.chdir(event_dir)
+        except Exception as e:
+            logging.error(f"Failed to change directory to {event_dir}: {e}")
+            return
+
+        try:
+            infra_files = list(event_dir.glob('*/cam*/infra.txt'))
+            if len(infra_files) >= 3:
+                _fetch_infra_wind_profiles(event_dir, date.timestamp())
+                infra_out = event_dir / 'infra_fit.json'
+                infra_report = event_dir / 'infra_fit_report.txt'
+                cmd = [
+                    sys.executable,
+                    str(Config.BIN_DIR / 'infra_fit.py'),
+                    str(event_dir),
+                    '--output', str(infra_out),
+                    '--report', str(infra_report),
+                ]
+                if verbose:
+                    cmd.append('--verbose')
+                if verbose:
+                    env = os.environ.copy()
+                    env.setdefault('OMP_NUM_THREADS', '1')
+                    env.setdefault('OPENBLAS_NUM_THREADS', '1')
+                    env.setdefault('MKL_NUM_THREADS', '1')
+                    env.setdefault('NUMEXPR_NUM_THREADS', '1')
+                    p = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+                    try:
+                        if p.stdout is not None:
+                            for line in p.stdout:
+                                try:
+                                    print(line, end='')
+                                except Exception:
+                                    pass
+                    finally:
+                        proc = p.wait()
+                    class _R:
+                        pass
+                    rr = _R()
+                    rr.returncode = int(proc)
+                    proc = rr
+                else:
+                    env = os.environ.copy()
+                    env.setdefault('OMP_NUM_THREADS', '1')
+                    env.setdefault('OPENBLAS_NUM_THREADS', '1')
+                    env.setdefault('MKL_NUM_THREADS', '1')
+                    env.setdefault('NUMEXPR_NUM_THREADS', '1')
+                    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+                if proc.returncode != 0:
+                    if verbose:
+                        logging.warning(
+                            "Infrasound fit failed. "
+                            f"returncode={proc.returncode}"
+                        )
+                    else:
+                        stderr_snip = (proc.stderr or '').strip()[:400]
+                        stdout_snip = (proc.stdout or '').strip()[:400]
+                        logging.warning(
+                            "Infrasound fit failed. "
+                            f"returncode={proc.returncode} stdout={stdout_snip} stderr={stderr_snip}"
+                        )
+                    if infra_report.exists():
+                        logging.warning(f"Infrasound fit report: {infra_report}")
+                else:
+                    logging.info(f"Infrasound fit JSON: {infra_out}")
+                    if infra_report.exists():
+                        logging.info(f"Infrasound fit report: {infra_report}")
+                    try:
+                        infra_fit = json.loads(infra_out.read_text(encoding='utf-8'))
+                    except Exception:
+                        infra_fit = None
+            else:
+                logging.info("No/insufficient infra.txt files found (need >=3). Skipping infrasound fit.")
+        except Exception as e:
+            logging.warning(f"Infrasound fit step failed: {e}", exc_info=True)
+
+        # Regenerate maps (best-effort) using existing obs_*.txt and metrack trajectory solve.
+        try:
+            if not obs_filepath.exists():
+                logging.warning(f"Observation file not found, cannot regenerate maps: {obs_filepath}")
+                return
+
+            metrack_opts = {
+                'timestamp': date.timestamp(),
+                'optimize': True,
+                'use_ransac': True,
+                'seed': 0,
+                'ransac_threshold': 1.0,
+                'ransac_iterations': 10,
+                'ransac_runs': 100,
+                'debug_ransac': False,
+                'all_in_tolerance': 1.0
+            }
+
+            metrack_info, metrack_plot_data = calculate_trajectory(str(obs_filepath), **metrack_opts)
+            if not metrack_plot_data:
+                raise ValueError('Metrack calculation returned no plot data')
+
+            for lang in SUPPORTED_LANGS:
+                translations = load_translations(lang)
+                file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+
+                plot_opts = {
+                    'doplot': 'save',
+                    'interactive': True,
+                    'autoborders': True,
+                    'azonly': False,
+                    'mapres': 'i'
+                }
+
+                infra_fit_for_maps, infra_pick_reason = _pick_infra_fit_for_mapping(infra_fit)
+                if infra_fit_for_maps and 'lat' in infra_fit_for_maps and 'lon' in infra_fit_for_maps:
+                    try:
+                        elev_km = float(infra_fit_for_maps.get('elev_m', 0.0)) / 1000.0
+                        if 5.0 <= elev_km <= 80.0:
+                            if infra_pick_reason and infra_pick_reason != 'primary':
+                                logging.info(
+                                    f"Infrasound fit elevation out of range; using {infra_pick_reason} for map marker. "
+                                    f"elev_km={elev_km:.3f}"
+                                )
+                            extra_markers = []
+                            extra_markers.append({
+                                'kind': 'infra_source',
+                                'lat': float(infra_fit_for_maps['lat']),
+                                'lon': float(infra_fit_for_maps['lon']),
+                                'elev_m': float(infra_fit_for_maps.get('elev_m', 0.0)),
+                                'label': (lambda _t0: (translations.get('infrasound_source', 'Infrasound source') + (f" {_t0}" if _t0 else "")))(
+                                    (datetime.datetime.fromtimestamp(float(infra_fit_for_maps.get('t0_unix')), tz=datetime.timezone.utc).strftime('%H:%M:%S')
+                                     if infra_fit_for_maps.get('t0_unix') is not None else "")
+                                ),
+                                'color': '#006400',
+                                'label_color': 'black',
+                                'symbol': 'o',
+                                'plotly_symbol': 'circle',
+                                'size': 7,
+                                'drop_to_ground': True,
+                            })
+
+                            infra_sites = infra_fit.get('stations_all') or infra_fit.get('stations') or []
+                            for st in infra_sites:
+                                try:
+                                    st_code = str(st.get('code', '')).strip()
+                                    st_name = str(st.get('station', '')).strip()
+                                    st_label = st_code or st_name
+                                    is_inlier = bool(st.get('is_inlier', True))
+                                    extra_markers.append({
+                                        'kind': 'infra_detection',
+                                        'lat': float(st.get('lat')),
+                                        'lon': float(st.get('lon')),
+                                        'elev_m': float(st.get('elev_m', 0.0)),
+                                        'label': st_label,
+                                        'color': '#006400' if is_inlier else '#777777',
+                                        'label_color': '#006400' if is_inlier else '#777777',
+                                        'symbol': '^' if is_inlier else 'o',
+                                        'plotly_symbol': 'triangle-up' if is_inlier else 'circle',
+                                        'size': 5 if is_inlier else 4,
+                                        'drop_to_ground': False,
+                                        'opacity': 0.9 if is_inlier else 0.55,
+                                    })
+                                except Exception:
+                                    continue
+
+                            plot_opts['extra_markers'] = extra_markers
+
+                            paths = []
+                            for ring in ((infra_fit.get('isochrones') if isinstance(infra_fit, dict) else None) or (infra_fit_for_maps.get('isochrones') or [])):
+                                try:
+                                    paths.append({
+                                        'label': f"Isochrone {ring.get('code','')}",
+                                        'color': '#006400',
+                                        'lats': ring.get('lats'),
+                                        'lons': ring.get('lons'),
+                                        'elev_km': float(ring.get('alt_km', elev_km)),
+                                        'station_lat': ring.get('station_lat'),
+                                        'station_lon': ring.get('station_lon'),
+                                        'station_elev_m': ring.get('station_elev_m'),
+                                    })
+                                except Exception:
+                                    continue
+                            if paths:
+                                plot_opts['extra_paths'] = paths
+                    except Exception:
+                        pass
+
+                generate_metrack_plots(metrack_info, metrack_plot_data, plot_opts, translations=translations, output_prefix=file_prefix)
+
+                for svg_name in ["height.svg", "map.svg"]:
+                    svg_path = event_dir / f"{file_prefix}{svg_name}"
+                    if svg_path.exists():
+                        svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_MAP_DPI)
+        except Exception as e:
+            logging.warning(f"Failed to regenerate maps in --infrasound mode: {e}", exc_info=True)
+        finally:
+            try:
+                os.chdir(original_cwd)
+            except Exception:
+                pass
+        return
     
     if not fast:
         # Run process.py for ALL event.txt files in PARALLEL
@@ -715,7 +1067,10 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
     logging.info("Ensuring centroid2.txt exists for all stations...")
     for station_dir in event_dir.glob('*/*/'):
         if (station_dir / 'event.txt').exists():
-             create_centroid_file(station_dir)
+             try:
+                 create_centroid_file(station_dir)
+             except Exception as e:
+                 logging.error(f"Failed to generate centroid2.txt in {station_dir}: {e}", exc_info=True)
     # -----------------------------------------------------------------
 
     station_codes, station_name_to_code = set(), {}
@@ -796,10 +1151,19 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             # We must map that dir name to a code to check against inlier_codes.
             centroid_files = [str(p) for p in event_dir.glob(f'*/*/{target_centroid_file}') 
                               if station_name_to_code.get(p.parts[-3]) in inlier_codes]
-            
-            fbspd_results, fbspd_plot_data = calculate_speed_profile(str(res_filename), centroid_files, str(obs_filepath), **fbspd_opts)
-            if not fbspd_results: raise ValueError("FBSPD calculation failed or returned no results.")
-            entry_speed = fbspd_results['initial_speed']
+
+            entry_speed = None
+            fbspd_plot_data = None
+            try:
+                fbspd_results, fbspd_plot_data = calculate_speed_profile(
+                    str(res_filename), centroid_files, str(obs_filepath), **fbspd_opts
+                )
+                if fbspd_results and 'initial_speed' in fbspd_results:
+                    entry_speed = fbspd_results['initial_speed']
+                else:
+                    logging.warning("FBSPD calculation returned no results. Continuing without speed profile.")
+            except Exception as e:
+                logging.warning(f"FBSPD calculation failed. Continuing without speed profile: {e}", exc_info=True)
 
             az, alt = calc_azalt(resdat.lat1[0], resdat.long1[0], resdat.height[0], resdat.lat1[1], resdat.long1[1], resdat.height[1])
             placename = get_location_from_coords(resdat.lat1[1], resdat.long1[1])
@@ -809,7 +1173,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             
             # --- Core Analysis Data Storage ---
             orbit_data_base = {'valid': False, 'entry_speed': entry_speed, 'az': az, 'alt': alt}
-            if entry_speed > 9.8:
+            if entry_speed is not None and entry_speed > 9.8:
                 # Capture the raw shower name (likely in default language/Norwegian)
                 ra, dec, (rp, ecc, inc, lnode, argp, m0, t0), raw_shower_name, _, valid = orbit(
                     True, entry_speed, 0, str(res_filename), date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), doplot=''
@@ -891,81 +1255,342 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     'azonly': False,
                     'mapres': 'i'
                 }
-                
-                generate_metrack_plots(analysis_results['metrack_info'], analysis_results['metrack_plot_data'], 
-                                       plot_opts, translations=translations, output_prefix=file_prefix)
 
+                try:
+                    infra_fit = analysis_results.get('infra_fit')
+                    infra_fit_for_maps, infra_pick_reason = _pick_infra_fit_for_mapping(infra_fit)
+                    if infra_fit_for_maps and 'lat' in infra_fit_for_maps and 'lon' in infra_fit_for_maps:
+                        elev_km = float(infra_fit_for_maps.get('elev_m', 0.0)) / 1000.0
+                        if 5.0 <= elev_km <= 80.0:
+                            if infra_pick_reason and infra_pick_reason != 'primary':
+                                logging.info(
+                                    f"Infrasound fit elevation out of range; using {infra_pick_reason} for map marker. "
+                                    f"elev_km={elev_km:.3f}"
+                                )
+                            extra_markers = []
+
+                            extra_markers.append({
+                                'kind': 'infra_source',
+                                'lat': float(infra_fit_for_maps['lat']),
+                                'lon': float(infra_fit_for_maps['lon']),
+                                'elev_m': float(infra_fit_for_maps.get('elev_m', 0.0)),
+                                'label': (lambda _t0: (translations.get('infrasound_source', 'Infrasound source') + (f" {_t0}" if _t0 else "")))(
+                                    (datetime.datetime.fromtimestamp(float(infra_fit_for_maps.get('t0_unix')), tz=datetime.timezone.utc).strftime('%H:%M:%S')
+                                     if infra_fit_for_maps.get('t0_unix') is not None else "")
+                                ),
+                                'color': '#006400',
+                                'label_color': 'black',
+                                'symbol': 'o',
+                                'plotly_symbol': 'circle',
+                                'size': 7,
+                                'drop_to_ground': True,
+                            })
+
+                            # Detection locations (include outliers too)
+                            infra_sites = infra_fit.get('stations_all') or infra_fit.get('stations') or []
+                            for st in infra_sites:
+                                try:
+                                    st_code = str(st.get('code', '')).strip()
+                                    st_name = str(st.get('station', '')).strip()
+                                    st_label = st_code or st_name
+                                    is_inlier = bool(st.get('is_inlier', True))
+                                    extra_markers.append({
+                                        'kind': 'infra_detection',
+                                        'lat': float(st.get('lat')),
+                                        'lon': float(st.get('lon')),
+                                        'elev_m': 0.0,
+                                        'label': st_label,
+                                        'color': '#006400' if is_inlier else '#777777',
+                                        'label_color': '#006400' if is_inlier else '#777777',
+                                        'symbol': '^' if is_inlier else 'o',
+                                        'plotly_symbol': 'triangle-up' if is_inlier else 'circle',
+                                        'size': 5 if is_inlier else 4,
+                                        'drop_to_ground': False,
+                                        'opacity': 0.9 if is_inlier else 0.55,
+                                    })
+                                except Exception:
+                                    continue
+
+                            plot_opts['extra_markers'] = extra_markers
+
+                            # Wind-corrected rings (isochrones)
+                            paths = []
+                            for ring in ((infra_fit.get('isochrones') if isinstance(infra_fit, dict) else None) or (infra_fit_for_maps.get('isochrones') or [])):
+                                try:
+                                    paths.append({
+                                        'label': f"Isochrone {ring.get('code','')}",
+                                        'color': '#006400',
+                                        'lats': ring.get('lats'),
+                                        'lons': ring.get('lons'),
+                                        'elev_km': float(ring.get('alt_km', elev_km)),
+                                        'station_lat': ring.get('station_lat'),
+                                        'station_lon': ring.get('station_lon'),
+                                        'station_elev_m': ring.get('station_elev_m'),
+                                    })
+                                except Exception:
+                                    continue
+                            if paths:
+                                plot_opts['extra_paths'] = paths
+                except Exception:
+                    pass
+            
+            generate_metrack_plots(analysis_results['metrack_info'], analysis_results['metrack_plot_data'], 
+                                   plot_opts, translations=translations, output_prefix=file_prefix)
+
+            if analysis_results.get('fbspd_plot_data') is not None:
                 generate_speed_plots(analysis_results['fbspd_plot_data'], 
                                      translations=translations, output_prefix=file_prefix)
+            else:
+                logging.info("Skipping speed plots (no FBSPD plot data available).")
 
-                if current_orbit_data['valid']:
-                     orbit(True, current_orbit_data['entry_speed'], 0, str(res_filename), 
-                           date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', 
-                           interactive=True, translations=translations, output_prefix=file_prefix)
-                
-                dpi_map = {'map.svg': Config.SVG_MAP_DPI, 'orbit.svg': Config.SVG_ORBIT_DPI}
-                for svg_name in ["posvstime.svg", "spd_acc.svg", "orbit.svg", "height.svg", "map.svg"]:
-                    svg_path = event_dir / f"{file_prefix}{svg_name}"
-                    if svg_path.exists():
-                        dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
-                        svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
-                
-                generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", 
-                                                   analysis_results['resdat'], 
-                                                   current_orbit_data, 
-                                                   analysis_results['placename'], 
-                                                   translations, lang)
+            if current_orbit_data['valid']:
+                 orbit(True, current_orbit_data['entry_speed'], 0, str(res_filename), 
+                       date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', 
+                       interactive=True, translations=translations, output_prefix=file_prefix)
+            
+            dpi_map = {'map.svg': Config.SVG_MAP_DPI, 'orbit.svg': Config.SVG_ORBIT_DPI}
+            for svg_name in ["posvstime.svg", "spd_acc.svg", "orbit.svg", "height.svg", "map.svg"]:
+                svg_path = event_dir / f"{file_prefix}{svg_name}"
+                if svg_path.exists():
+                    dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
+                    svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
+            
+            generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", 
+                                               analysis_results['resdat'], 
+                                               current_orbit_data, 
+                                               analysis_results['placename'], 
+                                               translations, lang)
         
         except Exception as e:
             logging.error(f"Failed to generate output for language '{lang}': {e}", exc_info=True)
 
-    if is_multistation and analysis_results and WINDPROFILE_AVAILABLE:
-        try:
-            end_height_km = analysis_results['resdat'].height[1]
-            if 10 <= end_height_km <= 40:
-                wind_csv_path = event_dir / "wind_profile.csv"
-                success = False
-                matched_time = None
-                
-                logging.info(f"End altitude {end_height_km:.1f} km is between 10-40 km. Fetching wind profile.")
-                end_lat = analysis_results['resdat'].lat1[1]
-                end_lon = analysis_results['resdat'].long1[1]
-                event_timestamp = date.timestamp()
-                
-                success, matched_time = windprofile.get_wind_profile(
-                    end_lat, 
-                    end_lon, 
-                    event_timestamp, 
-                    str(wind_csv_path)
-                )
-
-                if success:
-                    if not fast:
-                        logging.info(f"Successfully fetched wind data for {matched_time}")
+    if is_multistation and analysis_results:
+        if WINDPROFILE_AVAILABLE:
+            try:
+                end_height_km = analysis_results['resdat'].height[1]
+                if 10 <= end_height_km <= 40:
+                    wind_csv_path = event_dir / "wind_profile.csv"
+                    success = False
+                    matched_time = None
                     
-                    for lang in SUPPORTED_LANGS:
-                        translations = load_translations(lang)
-                        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-                        
-                        windprofile.generate_wind_plot(
-                            str(wind_csv_path), 
-                            translations, 
-                            matched_time, 
-                            file_prefix
-                        )
-                        
-                        svg_path = event_dir / f"{file_prefix}wind_profile.svg"
-                        if svg_path.exists():
-                            svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_DEFAULT_DPI)
-                        else:
-                            logging.warning(f"Wind profile SVG not found: {svg_path}")
-                elif not fast:
-                    logging.warning("Failed to get wind profile data.")
-            else:
-                logging.info(f"End altitude {end_height_km:.1f} km is outside 10-40 km range. Skipping wind profile.")
+                    logging.info(f"End altitude {end_height_km:.1f} km is between 10-40 km. Fetching wind profile.")
+                    end_lat = analysis_results['resdat'].lat1[1]
+                    end_lon = analysis_results['resdat'].long1[1]
+                    event_timestamp = date.timestamp()
+                    
+                    success, matched_time = windprofile.get_wind_profile(
+                        end_lat, 
+                        end_lon, 
+                        event_timestamp, 
+                        str(wind_csv_path)
+                    )
 
+                    if success:
+                        if not fast:
+                            logging.info(f"Successfully fetched wind data for {matched_time}")
+                        
+                        for lang in SUPPORTED_LANGS:
+                            translations = load_translations(lang)
+                            file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                            
+                            windprofile.generate_wind_plot(
+                                str(wind_csv_path), 
+                                translations, 
+                                matched_time, 
+                                file_prefix
+                            )
+                            
+                            svg_path = event_dir / f"{file_prefix}wind_profile.svg"
+                            if svg_path.exists():
+                                svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_DEFAULT_DPI)
+                            else:
+                                logging.warning(f"Wind profile SVG not found: {svg_path}")
+                    elif not fast:
+                        logging.warning("Failed to get wind profile data.")
+                else:
+                    logging.info(f"End altitude {end_height_km:.1f} km is outside 10-40 km range. Skipping wind profile.")
+
+            except Exception as e:
+                logging.error(f"Failed to generate wind profile: {e}", exc_info=True)
+
+        # --- Infrasound fit (after wind profile if available) ---
+        try:
+            infra_files = list(event_dir.glob('*/cam*/infra.txt'))
+            if len(infra_files) >= 3:
+                _fetch_infra_wind_profiles(event_dir, date.timestamp())
+                infra_out = event_dir / 'infra_fit.json'
+                infra_report = event_dir / 'infra_fit_report.txt'
+                cmd = [
+                    sys.executable,
+                    str(Config.BIN_DIR / 'infra_fit.py'),
+                    str(event_dir),
+                    '--output', str(infra_out),
+                    '--report', str(infra_report),
+                ]
+                if verbose:
+                    cmd.append('--verbose')
+                if verbose:
+                    env = os.environ.copy()
+                    env.setdefault('OMP_NUM_THREADS', '1')
+                    env.setdefault('OPENBLAS_NUM_THREADS', '1')
+                    env.setdefault('MKL_NUM_THREADS', '1')
+                    env.setdefault('NUMEXPR_NUM_THREADS', '1')
+                    p = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+                    try:
+                        if p.stdout is not None:
+                            for line in p.stdout:
+                                try:
+                                    print(line, end='')
+                                except Exception:
+                                    pass
+                    finally:
+                        rc = p.wait()
+                    class _R:
+                        pass
+                    rr = _R()
+                    rr.returncode = int(rc)
+                    proc = rr
+                else:
+                    env = os.environ.copy()
+                    env.setdefault('OMP_NUM_THREADS', '1')
+                    env.setdefault('OPENBLAS_NUM_THREADS', '1')
+                    env.setdefault('MKL_NUM_THREADS', '1')
+                    env.setdefault('NUMEXPR_NUM_THREADS', '1')
+                    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+                if proc.returncode != 0:
+                    if verbose:
+                        msg = (
+                            "Infrasound fit failed. Continuing without infrasound source. "
+                            f"returncode={proc.returncode}"
+                        )
+                    else:
+                        stderr_snip = (proc.stderr or '').strip()[:400]
+                        stdout_snip = (proc.stdout or '').strip()[:400]
+                        msg = (
+                            "Infrasound fit failed. Continuing without infrasound source. "
+                            f"returncode={proc.returncode} "
+                            f"stdout={stdout_snip} "
+                            f"stderr={stderr_snip}"
+                        )
+                    logging.warning(msg)
+                    if infra_report.exists():
+                        logging.warning(f"Infrasound fit report: {infra_report}")
+                elif infra_out.exists():
+                    try:
+                        analysis_results['infra_fit'] = json.loads(infra_out.read_text(encoding='utf-8'))
+                        if analysis_results['infra_fit'].get('summary'):
+                            logging.info(f"Infrasound fit: {analysis_results['infra_fit'].get('summary')}")
+                        if infra_report.exists():
+                            logging.info(f"Infrasound fit report: {infra_report}")
+                    except Exception as e:
+                        logging.warning(f"Could not read {infra_out}: {e}")
+
+                    # Re-generate KML so it can include the infrasound source placemark.
+                    try:
+                        fb2kml(str(res_filename))
+                    except Exception as e:
+                        logging.warning(f"Failed to regenerate KML after infrasound fit: {e}")
+
+                    # Re-generate maps so marker is present even if outputs were already generated.
+                    try:
+                        for lang in SUPPORTED_LANGS:
+                            translations = load_translations(lang)
+                            file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+
+                            plot_opts = {
+                                'doplot': 'save',
+                                'interactive': True,
+                                'autoborders': True,
+                                'azonly': False,
+                                'mapres': 'i',
+                            }
+                            try:
+                                infra_fit = analysis_results.get('infra_fit')
+                                if infra_fit and 'lat' in infra_fit and 'lon' in infra_fit:
+                                    elev_km = float(infra_fit.get('elev_m', 0.0)) / 1000.0
+                                    if 5.0 <= elev_km <= 80.0:
+                                        extra_markers = []
+
+                                        extra_markers.append({
+                                            'kind': 'infra_source',
+                                            'lat': float(infra_fit['lat']),
+                                            'lon': float(infra_fit['lon']),
+                                            'elev_m': float(infra_fit.get('elev_m', 0.0)),
+                                            'label': (lambda _t0: (translations.get('infrasound_source', 'Infrasound source') + (f" {_t0}" if _t0 else "")))(
+                                                (datetime.datetime.fromtimestamp(float(infra_fit.get('t0_unix')), tz=datetime.timezone.utc).strftime('%H:%M:%S')
+                                                 if infra_fit.get('t0_unix') is not None else "")
+                                            ),
+                                            'color': '#006400',
+                                            'label_color': 'black',
+                                            'symbol': 'o',
+                                            'plotly_symbol': 'circle',
+                                            'size': 7,
+                                            'drop_to_ground': True,
+                                        })
+
+                                        infra_sites = infra_fit.get('stations_all') or infra_fit.get('stations') or []
+                                        for st in infra_sites:
+                                            try:
+                                                st_code = str(st.get('code', '')).strip()
+                                                st_name = str(st.get('station', '')).strip()
+                                                st_label = st_code or st_name
+                                                is_inlier = bool(st.get('is_inlier', True))
+                                                extra_markers.append({
+                                                    'kind': 'infra_detection',
+                                                    'lat': float(st.get('lat')),
+                                                    'lon': float(st.get('lon')),
+                                                    'elev_m': 0.0,
+                                                    'label': st_label,
+                                                    'color': '#006400' if is_inlier else '#777777',
+                                                    'label_color': '#006400' if is_inlier else '#777777',
+                                                    'symbol': '^' if is_inlier else 'o',
+                                                    'plotly_symbol': 'triangle-up' if is_inlier else 'circle',
+                                                    'size': 5 if is_inlier else 4,
+                                                    'drop_to_ground': False,
+                                                    'opacity': 0.9 if is_inlier else 0.55,
+                                                })
+                                            except Exception:
+                                                continue
+
+                                        plot_opts['extra_markers'] = extra_markers
+
+                                        paths = []
+                                        for ring in (infra_fit.get('isochrones') or []):
+                                            try:
+                                                paths.append({
+                                                    'label': f"Isochrone {ring.get('code','')}",
+                                                    'color': '#006400',
+                                                    'lats': ring.get('lats'),
+                                                    'lons': ring.get('lons'),
+                                                    'elev_km': float(ring.get('alt_km', elev_km)),
+                                                    'station_lat': ring.get('station_lat'),
+                                                    'station_lon': ring.get('station_lon'),
+                                                    'station_elev_m': ring.get('station_elev_m'),
+                                                })
+                                            except Exception:
+                                                continue
+                                        if paths:
+                                            plot_opts['extra_paths'] = paths
+                            except Exception:
+                                pass
+
+                            generate_metrack_plots(
+                                analysis_results['metrack_info'],
+                                analysis_results['metrack_plot_data'],
+                                plot_opts,
+                                translations=translations,
+                                output_prefix=file_prefix,
+                            )
+
+                            svg_path = event_dir / f"{file_prefix}map.svg"
+                            if svg_path.exists():
+                                svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_MAP_DPI)
+                    except Exception as e:
+                        logging.warning(f"Failed to regenerate maps after infrasound fit: {e}")
+            else:
+                logging.info("No/insufficient infra.txt files found (need >=3). Skipping infrasound fit.")
         except Exception as e:
-            logging.error(f"Failed to generate wind profile: {e}", exc_info=True)
+            logging.warning(f"Infrasound fit step failed. Continuing: {e}", exc_info=True)
 
 
     if is_multistation and analysis_results:
@@ -1032,6 +1657,17 @@ def main():
         action="store_true",
         help="Use original centroid.txt data instead of calculated centroid2.txt."
     )
+    parser.add_argument(
+        "--infrasound",
+        action="store_true",
+        help="For reprocessing mode: skip pre-processing and only run infrasound fitting (infra_fit.py) for the event."
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output (passes --verbose to infra_fit.py and prints progress)."
+    )
     
     args = parser.parse_args()
 
@@ -1062,7 +1698,7 @@ def main():
                 logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
-            process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all, use_orig_cen=args.origcen)
+            process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -1121,7 +1757,7 @@ def main():
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
     
     try:
-        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen)
+        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:
@@ -1130,7 +1766,12 @@ def main():
 
 if __name__ == '__main__':
     fetch_foreign_script = Path(__file__).parent / 'fetch_foreign.sh'
-    if len(sys.argv) == 4 and fetch_foreign_script.exists():
+    try:
+        argv = sys.argv[1:]
+        legacy_remote_fetch_mode = (len(argv) == 3 and all((not str(a).startswith('-')) for a in argv))
+    except Exception:
+        legacy_remote_fetch_mode = False
+    if legacy_remote_fetch_mode and fetch_foreign_script.exists():
         try:
             run_command([str(fetch_foreign_script)])
         except Exception as e:

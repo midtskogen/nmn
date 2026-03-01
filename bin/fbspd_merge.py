@@ -41,6 +41,11 @@ DAT_STATION_NAME_START_COLUMN = 12
 CAMERA_DEGREES_PER_PIXEL = 0.05
 FRAGMENT_GAP_THRESHOLD = 2.0     # INCREASED from 0.5 to 2.0 seconds
 
+# Safety guard: scipy.optimize.brute() creates full grids (np.mgrid) and can
+# allocate enormous arrays if the search ranges are too large.
+MAX_BRUTE_GRID_POINTS_1D = 200000
+MAX_BRUTE_GRID_POINTS_2D = 200000
+
 # --- Data Structures ---
 
 class ResData:
@@ -106,13 +111,47 @@ def get_sitecoord_fromdat(inname: str) -> List[Tuple[str, float, float, float]]:
         for line in f:
             words = line.split()
             if not words or words[0].startswith('#') or words[0] == 'borders': continue
-            lon, lat, height_km = float(words[0]), float(words[1]), 0.0
+
+            # Support both legacy *.dat format:
+            #   SITE LON LAT ... ELEV_M
+            # and metrack/obs_*.txt format (produced by process.py):
+            #   LON LAT START_AZ END_AZ START_ALT END_ALT ... CODE START_TIME ELEV_M
             try:
-                height_km = float(words[-1]) / 1000.0; last_name_idx = -2
-            except (ValueError, IndexError): last_name_idx = -1
-            name = " ".join(words[DAT_STATION_NAME_START_COLUMN:last_name_idx])
-            sitecoords.append((name, lon, lat, height_km))
-    return sitecoords
+                float(words[0])
+                is_metrack = True
+            except ValueError:
+                is_metrack = False
+
+            if is_metrack:
+                try:
+                    lon = float(words[0])
+                    lat = float(words[1])
+                    site = words[12]
+                    height_km = float(words[14]) / 1000.0
+                    sitecoords.append((site, lon, lat, height_km))
+                except Exception:
+                    continue
+            else:
+                site = words[0]
+                lon, lat, height_km = float(words[1]), float(words[2]), 0.0
+                try:
+                    height_km = float(words[-1]) / 1000.0; last_name_idx = -2
+                except (ValueError, IndexError):
+                    last_name_idx = -1
+                name = " ".join(words[DAT_STATION_NAME_START_COLUMN:last_name_idx])
+                sitecoords.append((site, float(lon), float(lat), float(height_km)))
+
+    # Some .dat files may contain duplicate station codes; keep first occurrence
+    # to avoid confusing downstream matching and debug output.
+    seen = set()
+    deduped = []
+    for site, lon, lat, elev in sitecoords:
+        if site in seen:
+            continue
+        seen.add(site)
+        deduped.append((site, lon, lat, elev))
+
+    return deduped
 
 # --- Coordinate and Vector Functions ---
 
@@ -244,6 +283,16 @@ def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False
     num_core_stations = len(core_obs)
     num_unknowns = num_core_stations - 1
 
+    def _slice_n_points(s: slice) -> int:
+        if s.step is None or s.step == 0:
+            return 0
+        if s.start is None or s.stop is None:
+            return 0
+        width = float(s.stop) - float(s.start)
+        if width <= 0:
+            return 0
+        return int(np.ceil(width / float(s.step)))
+
     if num_core_stations >= 3:
         all_triplets = list(itertools.combinations(range(num_core_stations), 3))
         if debug: print(f"Using robust triplet method. Performing {len(all_triplets)} 2D brute-force searches.")
@@ -261,7 +310,20 @@ def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False
             if range_j.start >= range_j.stop or range_k.start >= range_k.stop:
                 continue
                 
-            offsets = brute(lambda p: _calculate_quadratic_fit_error(p, [s_i, s_j, s_k]), (range_j, range_k), finish=None)
+            n_j = _slice_n_points(range_j)
+            n_k = _slice_n_points(range_k)
+            if n_j <= 0 or n_k <= 0:
+                continue
+
+            if (n_j * n_k) > MAX_BRUTE_GRID_POINTS_2D:
+                if debug:
+                    print(
+                        f"Warning: Skipping 2D brute-force timing search for triplet due to huge grid: "
+                        f"{n_j} x {n_k} points (>{MAX_BRUTE_GRID_POINTS_2D}). Falling back to 0 offsets."
+                    )
+                offsets = np.array([0.0, 0.0])
+            else:
+                offsets = brute(lambda p: _calculate_quadratic_fit_error(p, [s_i, s_j, s_k]), (range_j, range_k), finish=None)
             
             for offset, s_idx_off in [(offsets[0], idx_j), (offsets[1], idx_k)]:
                 row = np.zeros(num_unknowns)
@@ -278,7 +340,17 @@ def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False
         if debug: print("Two stations. Using robust linear fit for pairwise search.")
         s_i, s_j = core_obs[0], core_obs[1]
         brute_range = slice(s_i['reltime'].min() - s_j['reltime'].max(), s_i['reltime'].max() - s_j['reltime'].min(), TIME_OFFSET_BRUTE_STEP)
-        offset_j_vs_i = brute(lambda p: _calculate_linear_fit_error([p], [s_i, s_j]), (brute_range,), finish=None)
+
+        n_1d = _slice_n_points(brute_range)
+        if n_1d > MAX_BRUTE_GRID_POINTS_1D:
+            if debug:
+                print(
+                    f"Warning: Skipping 1D brute-force timing search due to huge grid: "
+                    f"{n_1d} points (>{MAX_BRUTE_GRID_POINTS_1D}). Falling back to 0 offset."
+                )
+            offset_j_vs_i = 0.0
+        else:
+            offset_j_vs_i = brute(lambda p: _calculate_linear_fit_error([p], [s_i, s_j]), (brute_range,), finish=None)
         row = np.zeros(num_unknowns); row[0] = 1.0
         A_rows.append(row); b_vals.append(offset_j_vs_i)
 

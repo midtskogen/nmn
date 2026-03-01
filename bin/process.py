@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import time
+import calendar
 from pathlib import Path
 import re
 import ephem
@@ -141,12 +142,39 @@ def load_configs(event_file: Path) -> tuple:
     event_dir = event_file.parent
     station_cfg_file = event_dir / 'meteor.cfg'
 
-    if not station_cfg_file.is_file():
-        print(f"Error: meteor.cfg not found in '{event_dir}'")
-        sys.exit(1)
-
     event_config = configparser.ConfigParser()
     event_config.read(event_file)
+
+    if not station_cfg_file.is_file():
+        print(f"Warning: meteor.cfg not found in '{event_dir}', creating a minimal one.")
+        station_cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_station_config = configparser.ConfigParser()
+        tmp_station_config['station'] = {}
+        tmp_station_config['astronomy'] = {}
+
+        station_code = event_dir.parent.name.upper()
+        station_name = event_dir.parent.name
+        cam_name = event_dir.name
+
+        tmp_station_config['station']['code'] = station_code[:3] if len(station_code) > 3 else station_code
+        tmp_station_config['station']['name'] = f"{station_name}-{cam_name}"
+
+        if event_config.has_section('summary'):
+            lat = event_config.get('summary', 'latitude', fallback='0')
+            lon = event_config.get('summary', 'longitude', fallback='0')
+            elev = event_config.get('summary', 'elevation', fallback='0')
+        else:
+            lat, lon, elev = '0', '0', '0'
+
+        tmp_station_config['astronomy']['latitude'] = lat
+        tmp_station_config['astronomy']['longitude'] = lon
+        tmp_station_config['astronomy']['elevation'] = elev
+
+        try:
+            with station_cfg_file.open('w', encoding='utf-8') as f:
+                tmp_station_config.write(f)
+        except Exception as e:
+            print(f"Warning: Failed to write generated meteor.cfg to '{station_cfg_file}': {e}")
 
     station_config = configparser.ConfigParser()
     station_config.read(station_cfg_file)
@@ -272,7 +300,7 @@ def run_command(command: list, cwd: Path) -> subprocess.CompletedProcess:
         print(f"Return Code: {e.returncode}")
         print(f"STDOUT: {e.stdout}")
         print(f"STDERR: {e.stderr}")
-        sys.exit(e.returncode)
+        raise
 
 
 def run_video_processing(
@@ -322,10 +350,13 @@ def run_video_processing(
     elif nologos:
         command.insert(1, "--nologos")
     proc = run_command(command, cwd=event_dir)
-    output = proc.stdout.split()
 
-    start_az, start_alt = float(output[-5]), float(output[-4])
-    end_az, end_alt = float(output[-2]), float(output[-1])
+    stdout_value = (proc.stdout or '').strip()
+    matches = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", stdout_value)
+    if len(matches) < 4:
+        raise ValueError(f"makevideos.py did not return 4 numeric values in stdout. stdout={stdout_value!r}")
+
+    start_az, start_alt, end_az, end_alt = map(float, matches[-4:])
 
     original_arc = event_config.getfloat('trail', 'arc')
     original_duration = event_config.getfloat('trail', 'duration')
@@ -426,7 +457,7 @@ def write_data_files(event_config, station_config, event_dir: Path):
         start_az, start_alt = event_config.get('summary', 'startpos').split()
         end_az, end_alt = event_config.get('summary', 'endpos').split()
         duration = event_config.getfloat('summary', 'duration')
-        start_time_unix = time.mktime(videostart_ts.utctimetuple()) + videostart_ts.microsecond / 1e6
+        start_time_unix = calendar.timegm(videostart_ts.utctimetuple()) + videostart_ts.microsecond / 1e6
 
         line = (f"{lon} {lat} {start_az} {end_az} {start_alt} {end_alt} 1 "
                 f"{duration:.2f} 400 128 255 255 {code} {start_time_unix:.2f} {elev}\n")
@@ -435,7 +466,9 @@ def write_data_files(event_config, station_config, event_dir: Path):
     centroid_file = event_dir / 'centroid.txt'
     with centroid_file.open('w', encoding='utf-8') as f:
         for i, (ts, coord) in enumerate(zip(timestamps, coordinates)):
-            az, alt = coord.split(',')
+            if ',' not in coord:
+                continue
+            az, alt = coord.split(',', 1)
             dt = ts - timestamps[0]
             gm_time = time.gmtime(ts)
             frac_sec = f"{(ts % 1):.2f}"[2:]
@@ -450,12 +483,128 @@ def write_data_files(event_config, station_config, event_dir: Path):
             dt = ts - timestamps[0]
             f.write(f"{dt:.2f} {b} {s} {fb}\n")
 
+
+def sanitize_event_config(event_config: configparser.ConfigParser) -> configparser.ConfigParser:
+    if not event_config.has_section('trail'):
+        return event_config
+
+    def _parse_float_tokens(raw: str) -> list:
+        out = []
+        for tok in (raw or '').split():
+            try:
+                v = float(tok)
+            except Exception:
+                continue
+            if v < 0:
+                continue
+            out.append(v)
+        return out
+
+    def _parse_coord_tokens(raw: str) -> list:
+        out = []
+        for tok in (raw or '').split():
+            if ',' not in tok:
+                continue
+            a, b = tok.split(',', 1)
+            try:
+                float(a)
+                float(b)
+            except Exception:
+                continue
+            out.append(f"{a},{b}")
+        return out
+
+    def _parse_numeric_tokens_allow_neg(raw: str) -> list:
+        out = []
+        for tok in (raw or '').split():
+            try:
+                out.append(float(tok))
+            except Exception:
+                continue
+        return out
+
+    timestamps = _parse_float_tokens(event_config.get('trail', 'timestamps', fallback=''))
+    coordinates = _parse_coord_tokens(event_config.get('trail', 'coordinates', fallback=''))
+    ams_coords = _parse_coord_tokens(event_config.get('trail', 'ams_coords', fallback=''))
+    brightness = _parse_numeric_tokens_allow_neg(event_config.get('trail', 'brightness', fallback=''))
+    size = _parse_numeric_tokens_allow_neg(event_config.get('trail', 'size', fallback=''))
+    frame_brightness = _parse_numeric_tokens_allow_neg(event_config.get('trail', 'frame_brightness', fallback=''))
+
+    candidates = [len(timestamps), len(coordinates)]
+    if brightness:
+        candidates.append(len(brightness))
+    if size:
+        candidates.append(len(size))
+    if frame_brightness:
+        candidates.append(len(frame_brightness))
+
+    n = min(candidates) if candidates else 0
+    if n <= 0:
+        return event_config
+
+    timestamps = timestamps[:n]
+    coordinates = coordinates[:n]
+    if ams_coords:
+        ams_coords = ams_coords[:n]
+    if brightness:
+        brightness = brightness[:n]
+    if size:
+        size = size[:n]
+    if frame_brightness:
+        frame_brightness = frame_brightness[:n]
+
+    event_config.set('trail', 'timestamps', ' '.join(f"{t:.3f}" for t in timestamps))
+    event_config.set('trail', 'coordinates', ' '.join(coordinates))
+    if ams_coords:
+        event_config.set('trail', 'ams_coords', ' '.join(ams_coords))
+    if brightness:
+        event_config.set('trail', 'brightness', ' '.join(str(b) for b in brightness))
+    if size:
+        event_config.set('trail', 'size', ' '.join(str(s) for s in size))
+    if frame_brightness:
+        event_config.set('trail', 'frame_brightness', ' '.join(str(fb) for fb in frame_brightness))
+
+    event_config.set('trail', 'frames', str(n))
+    if len(timestamps) >= 2:
+        event_config.set('trail', 'duration', f"{(timestamps[-1] - timestamps[0]):.2f}")
+
+    if not event_config.has_section('summary'):
+        event_config.add_section('summary')
+    try:
+        start_az, start_alt = coordinates[0].split(',', 1)
+        end_az, end_alt = coordinates[-1].split(',', 1)
+        event_config.set('summary', 'startpos', f"{start_az} {start_alt}")
+        event_config.set('summary', 'endpos', f"{end_az} {end_alt}")
+        if len(timestamps) >= 2:
+            event_config.set('summary', 'duration', f"{(timestamps[-1] - timestamps[0]):.2f}")
+    except Exception:
+        pass
+
+    return event_config
+
 def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: list):
     """Generates translated brightness plots for all supported languages."""
     print("Generating multilingual brightness plots...")
     if not timestamps or not brightness:
         print("Warning: No data available to generate brightness plot.")
         return
+
+    try:
+        valid_b = [b for b in brightness if math.isfinite(b)]
+        if not valid_b or max(valid_b) <= 0:
+            print("Warning: Brightness data missing (all values <= 0). Skipping brightness plots.")
+            return
+    except Exception:
+        # If validation fails for any reason, proceed with existing behavior.
+        pass
+
+    n = min(len(timestamps), len(brightness))
+    if n < 2:
+        print("Warning: Not enough aligned data to generate brightness plot.")
+        return
+
+    timestamps = timestamps[:n]
+    brightness = brightness[:n]
 
     time_axis = [t - timestamps[0] for t in timestamps]
 
@@ -493,31 +642,98 @@ def main():
     wait_for_safe_cpu(args.timeout)
 
     try:
-        proc_results = run_video_processing(
-            event_config,
-            station_config,
-            event_dir,
-            nologos=args.nologos,
-            credit=args.credit,
-            creditpos=args.creditpos,
-            creditsize=args.creditsize,
-            creditfont=args.creditfont,
-            logos=args.logo,
-            logopos=args.logopos,
-        )
+        proc_results = None
+        try:
+            proc_results = run_video_processing(
+                event_config,
+                station_config,
+                event_dir,
+                nologos=args.nologos,
+                credit=args.credit,
+                creditpos=args.creditpos,
+                creditsize=args.creditsize,
+                creditfont=args.creditfont,
+                logos=args.logo,
+                logopos=args.logopos,
+            )
+        except Exception as e:
+            msg = str(e)
+            if "makevideos.py did not return 4 numeric values" in msg:
+                # Avoid flooding logs with full stdout; show a short hint instead.
+                stdout_part = ""
+                try:
+                    stdout_part = msg.split("stdout=", 1)[1]
+                except Exception:
+                    stdout_part = ""
+                stdout_part = stdout_part.strip()
+                if len(stdout_part) > 240:
+                    stdout_part = stdout_part[:240] + "..."
+                print(
+                    "Warning: makevideos.py ran but did not print start/end az/alt to stdout; "
+                    "falling back to existing trail coordinates. "
+                    f"Details: {stdout_part}"
+                )
+            else:
+                print(f"Warning: Video processing failed; continuing with existing trail data: {e}")
 
         event_config, station_config, event_dir = load_configs(args.event_file)
 
-        update_event_summary(event_config, station_config, proc_results)
-        run_classification(event_config, event_dir)
+        if proc_results is not None:
+            update_event_summary(event_config, station_config, proc_results)
+        else:
+            if not event_config.has_section('summary'):
+                event_config.add_section('summary')
+
+            coords = event_config.get('trail', 'coordinates', fallback='').split()
+            valid_coords = [c for c in coords if ',' in c]
+            if valid_coords:
+                try:
+                    start_az, start_alt = valid_coords[0].split(',', 1)
+                    end_az, end_alt = valid_coords[-1].split(',', 1)
+                    event_config.set('summary', 'startpos', f"{start_az} {start_alt}")
+                    event_config.set('summary', 'endpos', f"{end_az} {end_alt}")
+                except Exception:
+                    pass
+
+            if not event_config.has_option('summary', 'duration'):
+                try:
+                    duration = event_config.getfloat('trail', 'duration')
+                    event_config.set('summary', 'duration', f"{duration:.2f}")
+                except Exception:
+                    pass
+
+            if not event_config.has_option('summary', 'timestamp'):
+                ts = event_config.get('video', 'start', fallback='')
+                if ts:
+                    event_config.set('summary', 'timestamp', ts)
+
+            if station_config.has_section('astronomy'):
+                if not event_config.has_option('summary', 'latitude'):
+                    event_config.set('summary', 'latitude', station_config.get('astronomy', 'latitude', fallback='0'))
+                if not event_config.has_option('summary', 'longitude'):
+                    event_config.set('summary', 'longitude', station_config.get('astronomy', 'longitude', fallback='0'))
+                if not event_config.has_option('summary', 'elevation'):
+                    event_config.set('summary', 'elevation', station_config.get('astronomy', 'elevation', fallback='0'))
+
+        try:
+            run_classification(event_config, event_dir)
+        except Exception as e:
+            print(f"Warning: Classification failed; continuing: {e}")
+
+        event_config = sanitize_event_config(event_config)
+
         with args.event_file.open('w', encoding='utf-8') as f:
             event_config.write(f)
 
         write_data_files(event_config, station_config, event_dir)
-        
-        timestamps = [float(t) for t in event_config.get('trail', 'timestamps').split()]
-        brightness = [float(b) for b in event_config.get('trail', 'brightness').split()]
-        generate_brightness_plots(event_dir, timestamps, brightness)
+
+        try:
+            timestamps = [float(t) for t in event_config.get('trail', 'timestamps').split()]
+            brightness = [float(b) for b in event_config.get('trail', 'brightness').split()]
+            generate_brightness_plots(event_dir, timestamps, brightness)
+        except Exception as e:
+            print(f"Warning: Failed to generate brightness plots: {e}")
+
         sys.exit(0)
 
     except Exception as e:

@@ -21,6 +21,7 @@ import sys
 import tempfile
 import traceback
 import termios
+import configparser
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import math
@@ -50,6 +51,9 @@ except ImportError as e:
 # --- Script Constants ---
 OVERLAY_OPACITY = 0.40
 BIN_DIR = Path(__file__).parent.resolve()
+
+# Used to report az/alt endpoints even if the video pipeline fails.
+LAST_AZALT_COORDS = None
 
 # --- Helper Functions ---
 def refraction(alt):
@@ -117,6 +121,13 @@ def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
     if verbose:
         print(f"   Pixel Coords: {pixel_coords}")
         print(f"   Az/Alt Coords: {azalt_coords}")
+
+    global LAST_AZALT_COORDS
+    try:
+        if azalt_coords and len(azalt_coords) >= 4:
+            LAST_AZALT_COORDS = tuple(float(x) for x in azalt_coords[:4])
+    except Exception:
+        pass
 
     sx, sy, ex, ey = pixel_coords
 
@@ -1101,7 +1112,7 @@ def search_for_videos(video_dir, start_unix):
         found_files.append(found_file)
     return found_files
 
-def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose, nologos=False, credit=None, creditpos='lower-right', creditsize=24, creditfont='Helvetica', logo_placements=None):
+def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=False, nologos=False, credit="", creditpos="lower-right", creditsize=24, creditfont="Helvetica", logo_placements=None):
     """Runs the script in client mode."""
     print("--- Running in Client Mode ---")
 
@@ -1241,6 +1252,20 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose, nol
 
         if gnomonic_image_path:
             recalibrate_gnomonic_view(event_data, filenames, verbose)
+
+            try:
+                clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+                if Path(filenames['jpg']).exists() and not clean_stacked.exists():
+                    shutil.copyfile(filenames['jpg'], str(clean_stacked))
+            except Exception:
+                pass
+
+            try:
+                clean_gnomonic = Path(f"{filenames['name']}-gnomonic-clean.jpg")
+                if Path(filenames['gnomonic']).exists() and not clean_gnomonic.exists():
+                    shutil.copyfile(filenames['gnomonic'], str(clean_gnomonic))
+            except Exception:
+                pass
             
             # Run crop on CLEAN images
             meteorcrop_cmd = f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} ."
@@ -1301,6 +1326,18 @@ def main(args):
             logo_paths = {'nmn': f"{tmpdir}/nmn.png", 'sbsdnb': f"{tmpdir}/sbsdnb.png", 'as7': f"{tmpdir}/as7.png"}
 
         event_data = get_event_data('event.txt')
+
+        # Seed endpoint reporting from event.txt immediately so we can provide
+        # start/end az/alt even if we later skip or fail the video pipeline.
+        global LAST_AZALT_COORDS
+        try:
+            if 'start_azalt' in event_data and 'end_azalt' in event_data:
+                saz, salt = event_data['start_azalt'].split(',', 1)
+                eaz, ealt = event_data['end_azalt'].split(',', 1)
+                LAST_AZALT_COORDS = (float(saz), float(salt), float(eaz), float(ealt))
+        except Exception:
+            pass
+
         name = args.file_prefix
         
         filenames = {
@@ -1332,6 +1369,15 @@ def main(args):
         else:
             filenames['source'] = filenames['full']
 
+        # If the source video is missing, skip the expensive pipeline steps.
+        # The caller may be reprocessing or only needs derived coordinates.
+        if not Path(filenames['source']).exists():
+            print(
+                f"Warning: Source video not found: '{filenames['source']}'. Skipping video pipeline.",
+                file=sys.stderr
+            )
+            return
+
         event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
         pos_label = f"{event_data.get('latitude', 0):.4f}N {event_data.get('longitude', 0):.4f}E"
         event_data['label'] = f"{event_data.get('clock', '')}\n{pos_label}"
@@ -1359,6 +1405,20 @@ def main(args):
                     print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
 
                 future_full_view.result()
+
+        try:
+            clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+            if Path(filenames['jpg']).exists() and not clean_stacked.exists():
+                shutil.copyfile(filenames['jpg'], str(clean_stacked))
+        except Exception:
+            pass
+
+        try:
+            clean_gnomonic = Path(f"{filenames['name']}-gnomonic-clean.jpg")
+            if gnomonic_enabled and Path(filenames['gnomonic']).exists() and not clean_gnomonic.exists():
+                shutil.copyfile(filenames['gnomonic'], str(clean_gnomonic))
+        except Exception:
+            pass
 
         # --- KEY CHANGE: Generate fireball.jpg BEFORE watermarking ---
         # This ensures the crop happens on the clean images
@@ -1394,15 +1454,16 @@ def main(args):
                     create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
                     handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
 
-    # Update event.txt before finishing
-    update_event_file(event_data)
+        # Update event.txt before finishing
+        update_event_file(event_data)
 
     print("\n--- Pipeline Finished ---")
 
     if event_data.get('refined_coords'):
         s_az, s_alt, e_az, e_alt = event_data['refined_coords']
-        print(f"Start: {s_az:.2f} {s_alt:.2f}  End: {e_az:.2f} {e_alt:.2f}")
-
+        print(f"{s_az:.2f} {s_alt:.2f} {e_az:.2f} {e_alt:.2f}")
+    else:
+        pass
 
 def check_pid(pid):
     """Check For the existence of a unix pid."""
@@ -1452,6 +1513,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    def _credit_cli_provided(argv: list[str]) -> bool:
+        for a in argv[1:]:
+            if a == '--credit' or a.startswith('--credit='):
+                return True
+        return False
+
     # Parse ordered --logo/--logopos into placements
     logo_placements = []
     last_corner = None
@@ -1483,6 +1550,20 @@ if __name__ == "__main__":
             p['pos'] = last_corner
 
     args.logo_placements = logo_placements
+
+    if not _credit_cli_provided(sys.argv):
+        credit_path = Path('credit.txt')
+        if credit_path.exists():
+            try:
+                credit_txt = credit_path.read_text(encoding='utf-8', errors='replace')
+            except Exception:
+                credit_txt = ''
+            credit_compact = ' '.join(str(credit_txt).split()).strip()
+            if credit_compact:
+                args.credit = credit_compact
+            else:
+                args.nologos = True
+                args.credit = ''
 
     if args.client and (args.video_dir is None or args.start is None or args.length is None):
         parser.error("--client mode requires --video-dir, --start, and --length.")
@@ -1517,6 +1598,50 @@ if __name__ == "__main__":
         print(f"\n--- An unexpected error occurred: {e} ---", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
     finally:
+        # Always print az/alt endpoints so caller scripts can proceed even if
+        # the video pipeline failed (e.g. missing mp4, missing lens.pto).
+        def _azalt_from_event_txt() -> tuple[float, float, float, float] | None:
+            event_path = Path('event.txt')
+            if not event_path.exists():
+                return None
+            cfg = configparser.ConfigParser()
+            cfg.read(event_path)
+
+            # Prefer [summary] if present
+            if cfg.has_section('summary'):
+                sp = cfg.get('summary', 'startpos', fallback='').strip().split()
+                ep = cfg.get('summary', 'endpos', fallback='').strip().split()
+                if len(sp) >= 2 and len(ep) >= 2:
+                    try:
+                        return float(sp[0]), float(sp[1]), float(ep[0]), float(ep[1])
+                    except Exception:
+                        pass
+
+            # Fallback: use first/last valid trail coordinate
+            if cfg.has_section('trail'):
+                coords = cfg.get('trail', 'coordinates', fallback='').split()
+                valid = [c for c in coords if ',' in c]
+                if valid:
+                    try:
+                        saz, salt = valid[0].split(',', 1)
+                        eaz, ealt = valid[-1].split(',', 1)
+                        return float(saz), float(salt), float(eaz), float(ealt)
+                    except Exception:
+                        pass
+            return None
+
+        try:
+            coords = LAST_AZALT_COORDS
+            if coords is None:
+                coords = _azalt_from_event_txt()
+            if coords is None:
+                coords = (0.0, 0.0, 0.0, 0.0)
+            # Keep stdout machine-readable for downstream scripts: 4 floats only.
+            print(f"{coords[0]:.2f} {coords[1]:.2f} {coords[2]:.2f} {coords[3]:.2f}")
+        except Exception:
+            # Never fail during shutdown/reporting.
+            print("0.00 0.00 0.00 0.00")
+
         if lockfile.exists() and lockfile.read_text() == str(os.getpid()):
             lockfile.unlink()
         

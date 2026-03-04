@@ -805,8 +805,8 @@ def _precompile_numba_functions():
     
     print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, padsides, enhance):
-    mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=False)
+def reproject_images(pto_file, input_files, output_file, pad, use_seam, level_subsample, seam_subsample, num_cores, padsides, enhance, force_video_dims: bool = False):
+    mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
     if len(input_files) != num_images:
@@ -1502,6 +1502,7 @@ def main():
     parser.add_argument("--seam-subsample", type=int, default=16, help="Subsampling factor for the seam finder to improve performance. Higher is faster. (default: 16)")
     parser.add_argument("--level-freq", type=int, default=8, help="Frequency of seam leveling recalculation for videos (in frames). (default: 8)")
     parser.add_argument("--enhance", action='store_true', help="Apply an adaptive enhancement filter to reduce noise and artifacts.")
+    parser.add_argument("--force-video-dims", action='store_true', help="Force codec-safe output dimensions (video rules) even when input files are images.")
     
     sync_group = parser.add_argument_group('Video Synchronization Options')
     sync_group.add_argument("--sync", action='store_true', help="Synchronize video streams by their embedded timestamps before stitching.")
@@ -1537,7 +1538,7 @@ def main():
     # --- Main Execution with Global Error Handling ---
     try:
         if is_image_input:
-            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, padsides_set, args.enhance)
+            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, args.seamless, args.level_subsample, args.seam_subsample, num_cores, padsides_set, args.enhance, force_video_dims=args.force_video_dims)
         elif is_video_input:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file, 

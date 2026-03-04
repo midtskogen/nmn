@@ -386,7 +386,16 @@ def extract_meteor_track(image_path: Path, pto_path: Path, event_dir: Path, back
     stitcher_path = Path(__file__).parent.resolve() / "stitcher.py"
 
     # 1. Stitch the source image using the generated PTO file.
-    stitcher_cmd = [sys.executable, str(stitcher_path), "--pad", "128", str(pto_path), str(image_path), str(stitched_track_path)]
+    stitcher_cmd = [
+        sys.executable,
+        str(stitcher_path),
+        "--pad",
+        "128",
+        "--force-video-dims",
+        str(pto_path),
+        str(image_path),
+        str(stitched_track_path),
+    ]
     subprocess.run(stitcher_cmd, check=True, capture_output=True)
 
     # Save a copy of the original stitched image before background removal.

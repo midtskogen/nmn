@@ -1218,6 +1218,8 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
 
             generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
 
+            current_orbit_data = {'valid': False}
+
             if is_multistation and analysis_results:
                 logging.info(f"Generating translated plots and reports for [{lang}]")
                 
@@ -1334,8 +1336,13 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 except Exception:
                     pass
             
-            generate_metrack_plots(analysis_results['metrack_info'], analysis_results['metrack_plot_data'], 
-                                   plot_opts, translations=translations, output_prefix=file_prefix)
+            metrack_info = analysis_results.get('metrack_info') if isinstance(analysis_results, dict) else None
+            metrack_plot_data = analysis_results.get('metrack_plot_data') if isinstance(analysis_results, dict) else None
+            if metrack_info is not None and metrack_plot_data is not None:
+                generate_metrack_plots(metrack_info, metrack_plot_data,
+                                       plot_opts, translations=translations, output_prefix=file_prefix)
+            else:
+                logging.info("Skipping metrack plots (no metrack data available).")
 
             if analysis_results.get('fbspd_plot_data') is not None:
                 generate_speed_plots(analysis_results['fbspd_plot_data'], 
@@ -1343,10 +1350,10 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             else:
                 logging.info("Skipping speed plots (no FBSPD plot data available).")
 
-            if current_orbit_data['valid']:
-                 orbit(True, current_orbit_data['entry_speed'], 0, str(res_filename), 
-                       date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', 
-                       interactive=True, translations=translations, output_prefix=file_prefix)
+            if is_multistation and analysis_results and current_orbit_data.get('valid'):
+                orbit(True, current_orbit_data['entry_speed'], 0, str(res_filename), 
+                      date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', 
+                      interactive=True, translations=translations, output_prefix=file_prefix)
             
             dpi_map = {'map.svg': Config.SVG_MAP_DPI, 'orbit.svg': Config.SVG_ORBIT_DPI}
             for svg_name in ["posvstime.svg", "spd_acc.svg", "orbit.svg", "height.svg", "map.svg"]:
@@ -1355,11 +1362,12 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
                     svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
             
-            generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", 
-                                               analysis_results['resdat'], 
-                                               current_orbit_data, 
-                                               analysis_results['placename'], 
-                                               translations, lang)
+            if is_multistation and analysis_results:
+                generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", 
+                                                   analysis_results['resdat'], 
+                                                   current_orbit_data, 
+                                                   analysis_results['placename'], 
+                                                   translations, lang)
         
         except Exception as e:
             logging.error(f"Failed to generate output for language '{lang}': {e}", exc_info=True)

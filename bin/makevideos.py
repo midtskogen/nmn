@@ -29,6 +29,20 @@ import pto_mapper
 import errno
 import datetime
 
+# Used for NFS/cross-device safe moves (avoid shutil.move() metadata/copy2 pitfalls).
+def _safe_move_file(src: str, dst: str) -> None:
+    try:
+        os.replace(src, dst)
+        return
+    except OSError as e:
+        if getattr(e, "errno", None) != errno.EXDEV:
+            raise
+
+    shutil.copyfile(src, dst)
+    try:
+        os.unlink(src)
+    except Exception:
+        pass
 
 # Assuming user-provided scripts are in the same directory or python path.
 try:
@@ -641,7 +655,7 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
 
             # Rename the original file
             print(f"      - Renaming {video_file.name} to {hevc_file_path.name}")
-            shutil.move(str(video_file), str(hevc_file_path))
+            _safe_move_file(str(video_file), str(hevc_file_path))
 
             # Transcode the renamed file back to the original filename with H.264
             # IMPORTANT: Removed overlay logic here to keep the "original" filename clean.
@@ -661,7 +675,7 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
                 print(f"FFmpeg stderr:\n{e.stderr.decode('utf8')}", file=sys.stderr)
                 # Attempt to move the file back if transcoding fails
                 print(f"      - Transcoding failed. Restoring original file name.", file=sys.stderr)
-                shutil.move(str(hevc_file_path), str(video_file))
+                _safe_move_file(str(hevc_file_path), str(video_file))
 
         else:
             print(f"   ...Done: Codec is not HEVC.")
@@ -736,11 +750,56 @@ def get_event_data(event_file):
 def update_event_file(event_data, filepath="event.txt"):
     """Updates event.txt with refined brightness data."""
     if 'brightness' not in event_data or not event_data['brightness']:
-        return
+        pass
 
     print("-> Updating event.txt with refined brightness data...")
     try:
         lines = Path(filepath).read_text().splitlines()
+
+        regenerated_coords = None
+        if event_data.get('refined_coords'):
+            try:
+                in_trail = False
+                positions_tokens = None
+                for raw_line in lines:
+                    if raw_line.strip() == '[trail]':
+                        in_trail = True
+                        continue
+                    if raw_line.strip().startswith('['):
+                        in_trail = False
+                    if not in_trail or '=' not in raw_line:
+                        continue
+                    k, v = (part.strip() for part in raw_line.strip().split('=', 1))
+                    if k == 'positions':
+                        positions_tokens = v.split()
+                        break
+
+                if positions_tokens:
+                    lens_pto_data = pto_mapper.parse_pto_file('lens.pto')
+                    scale = lens_pto_data[0]['w'] / 360.0
+                    new_coords = []
+                    for tok in positions_tokens:
+                        try:
+                            px_str, py_str = tok.split(',', 1)
+                            px, py = float(px_str), float(py_str)
+                        except Exception:
+                            continue
+
+                        pano = pto_mapper.map_image_to_pano(lens_pto_data, 0, px, py)
+                        if not pano:
+                            continue
+                        az = round(pano[0] / scale, 2)
+                        alt = refraction(90 - (pano[1] / scale))
+                        new_coords.append(f"{az:.2f},{alt:.2f}")
+
+                    if len(new_coords) >= 2:
+                        s_az, s_alt, e_az, e_alt = event_data['refined_coords']
+                        new_coords[0] = f"{s_az:.2f},{s_alt:.2f}"
+                        new_coords[-1] = f"{e_az:.2f},{e_alt:.2f}"
+                        regenerated_coords = new_coords
+            except Exception:
+                regenerated_coords = None
+
         new_lines = []
         in_trail_section = False
         was_updated = False
@@ -752,17 +811,39 @@ def update_event_file(event_data, filepath="event.txt"):
                 in_trail_section = False
 
             key = line.split('=')[0].strip() if '=' in line else None
+            line_value = line.split('=', 1)[1].strip() if '=' in line else ""
             
-            if in_trail_section and key == 'brightness':
-                brightness_str = " ".join(map(str, event_data['brightness']))
-                new_lines.append(f"brightness = {brightness_str}")
+            if in_trail_section and key == 'brightness' and 'brightness' in event_data and event_data['brightness']:
+                try:
+                    brightness_vals = [float(b) for b in event_data['brightness']]
+                except Exception:
+                    brightness_vals = []
+
+                if brightness_vals and any(b != 0.0 for b in brightness_vals):
+                    brightness_str = " ".join(map(str, event_data['brightness']))
+                    new_lines.append(f"brightness = {brightness_str}")
+                    was_updated = True
+                else:
+                    new_lines.append(line)
+            elif in_trail_section and key == 'coordinates' and regenerated_coords:
+                try:
+                    new_lines.append(f"coordinates = {' '.join(regenerated_coords)}")
+                    was_updated = True
+                except Exception:
+                    new_lines.append(line)
+            elif key == 'startpos' and event_data.get('refined_coords'):
+                s_az, s_alt, _, _ = event_data['refined_coords']
+                new_lines.append(f"startpos = {s_az:.2f} {s_alt:.2f}")
+                was_updated = True
+            elif key == 'endpos' and event_data.get('refined_coords'):
+                _, _, e_az, e_alt = event_data['refined_coords']
+                new_lines.append(f"endpos = {e_az:.2f} {e_alt:.2f}")
                 was_updated = True
             else:
                 new_lines.append(line)
 
         if not was_updated:
-             print(f"Warning: 'brightness' key not found in [trail] section of {filepath}. File not updated.", file=sys.stderr)
-             return
+            return
 
         Path(filepath).write_text("\n".join(new_lines) + "\n")
         print(f"   ...Done: Updated brightness in {filepath}.")
@@ -901,6 +982,20 @@ def _run_full_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbos
 
 # --- Gnomonic View Processing Helpers ---
 
+def _safe_move_file(src: str, dst: str) -> None:
+    try:
+        os.replace(src, dst)
+        return
+    except OSError as e:
+        if getattr(e, "errno", None) != 18:
+            raise
+
+    shutil.copyfile(src, dst)
+    try:
+        os.unlink(src)
+    except Exception as unlink_err:
+        print(f"Warning: Could not remove temporary file '{src}': {unlink_err}", file=sys.stderr)
+
 def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked_jpg_path, padding_value=1024):
     """Generates the base gnomonic projection image (clean)."""
     azalt_start = event_data.get('start_azalt')
@@ -921,7 +1016,11 @@ def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked
                         f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
     run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
     
-    shutil.move(tmp_gnomonic_jpg, filenames['gnomonic'])
+    try:
+        _safe_move_file(tmp_gnomonic_jpg, filenames['gnomonic'])
+    except PermissionError as e:
+        print(f"Warning: Could not move '{tmp_gnomonic_jpg}' to '{filenames['gnomonic']}' due to permissions: {e}", file=sys.stderr)
+        return None
     
     print(f"   ...Done: Generated base gnomonic image '{filenames['gnomonic']}'.")
     return filenames['gnomonic']
@@ -943,6 +1042,39 @@ def recalibrate_gnomonic_view(event_data, filenames, verbose):
     else:
         shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
 
+def refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose, padding_value=1024):
+    """Refines endpoints and recenters the gnomonic projection PTO around the refined midpoint."""
+    # Ensure gnomonic_corr_grid_pto exists for the refinement mapping.
+    try:
+        if not Path(filenames.get('gnomonic_corr_grid_pto', '')).exists():
+            recalibrate_gnomonic_view(event_data, filenames, verbose)
+    except Exception:
+        pass
+
+    refined_data = calculate_refined_endpoints(event_data, filenames, verbose)
+    if not refined_data:
+        return None
+
+    event_data['refined_coords'] = refined_data.get('azalt')
+
+    try:
+        s_az, s_alt, e_az, e_alt = event_data['refined_coords']
+        refined_start = f"{s_az:.2f},{s_alt:.2f}"
+        refined_end = f"{e_az:.2f},{e_alt:.2f}"
+
+        if event_data.get('start_azalt') != refined_start or event_data.get('end_azalt') != refined_end:
+            event_data['start_azalt'] = refined_start
+            event_data['end_azalt'] = refined_end
+
+            generate_gnomonic_projection(
+                event_data, filenames, tmpdir, verbose, filenames['jpg'], padding_value=padding_value
+            )
+            recalibrate_gnomonic_view(event_data, filenames, verbose)
+    except Exception as e:
+        print(f"Warning: Failed to recenter gnomonic projection using refined endpoints: {e}", file=sys.stderr)
+
+    return refined_data
+
 def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
     """Generates the grid, and draws labels and marker crosses."""
     grid_path = filenames['gnomonic_corr_grid_png']
@@ -961,18 +1093,12 @@ def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
     draw_text_on_image(grid_path, event_data['label'], grid_path, verbose=verbose)
     return grid_path
 
-def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, verbose):
+def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, verbose, refined_data=None):
     """
     Creates the gnomonic grid, applies logos, and produces the final composite image.
     Handles the difference between Tall JPG projection and Cropped Video projection.
     """
     recalibrate_gnomonic_view(event_data, filenames, verbose)
-    
-    refined_data = calculate_refined_endpoints(event_data, filenames, verbose)
-    if refined_data:
-        event_data['refined_coords'] = refined_data.get('azalt')
-        if refined_data.get('brightness'):
-            event_data['brightness'] = refined_data.get('brightness')
 
     # 1. Generate Base Grid (Tall) with dynamic star labels
     grid_path = _generate_decorated_grid(event_data, filenames, refined_data, verbose)
@@ -1023,6 +1149,8 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
                                                  event_data, filenames, tmpdir, verbose, stacked_jpg_path)
     future_gnomonic_base_image.result() 
 
+    refined_data = refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose)
+
     # 2. GNOMONIC VIDEO PIPELINE
     future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
                                           filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
@@ -1040,7 +1168,7 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
         create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
 
     # 3. GNOMONIC IMAGE/GRID PIPELINE
-    future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, logo_paths, verbose)
+    future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, logo_paths, verbose, refined_data)
 
     # 4. FINAL ASSEMBLY
     grid_assets = future_grid_assets.result() # Contains CLEAN cropped grid
@@ -1066,8 +1194,10 @@ def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, v
     # 1. Generate base gnomonic image (clean).
     generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, filenames['jpg'])
 
+    refined_data = refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose)
+
     # 2. Create the decorated grid (returns clean cropped grid)
-    grid_assets = _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, verbose)
+    grid_assets = _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, verbose, refined_data)
 
     # 3. Create Gnomonic Video
     print("-> Creating final gnomonic video...")
@@ -1247,11 +1377,12 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
         event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
 
         gnomonic_image_path = generate_gnomonic_projection(
-            event_data, filenames, tmpdir, verbose, filenames['jpg'], padding_value=32
+            event_data, filenames, tmpdir, verbose, filenames['jpg']
         )
 
         if gnomonic_image_path:
             recalibrate_gnomonic_view(event_data, filenames, verbose)
+            refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose, padding_value=1024)
 
             try:
                 clean_stacked = Path(f"{filenames['name']}-clean.jpg")
@@ -1267,13 +1398,16 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
             except Exception:
                 pass
             
-            # Run crop on CLEAN images
-            meteorcrop_cmd = f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} ."
+            # Run crop on CLEAN images and regenerate videos too
+            meteorcrop_cmd = f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} --mode both ."
             run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg", verbose)
             
             # Watermark the Gnomonic Image
             if logo_paths is not None:
                 add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose)
+
+        # Update event.txt before returning so client mode persists refined values too.
+        update_event_file(event_data)
 
         # Watermark the Stacked Image
         if logo_paths is not None:
@@ -1426,7 +1560,7 @@ def main(args):
         if meteorcrop_script.exists():
             try:
                 # meteorcrop.py typically takes the directory '.' as argument
-                meteorcrop_cmd = f"{sys.executable} {meteorcrop_script} ."
+                meteorcrop_cmd = f"{sys.executable} {meteorcrop_script} --mode both ."
                 run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg (on clean images)", args.verbose)
             except Exception as e:
                 print(f"Warning: Failed to run meteorcrop.py: {e}", file=sys.stderr)

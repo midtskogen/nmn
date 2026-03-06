@@ -400,8 +400,11 @@ def extract_meteor_track(image_path: Path, pto_path: Path, event_dir: Path, back
 
     # Save a copy of the original stitched image before background removal.
     orig_output_path = event_dir / Settings.OUTPUT_ORIG_FILENAME
-    shutil.copy(str(stitched_track_path), str(orig_output_path))
-    print(f"Saved original stitched image as '{orig_output_path.name}'")
+    try:
+        shutil.copyfile(str(stitched_track_path), str(orig_output_path))
+        print(f"Saved original stitched image as '{orig_output_path.name}'")
+    except Exception as e:
+        print(f"Warning: Could not write '{orig_output_path.name}': {e}", file=sys.stderr)
 
     print("Applying luminance-gated background removal to image...")
     # Use the numpy-based subtraction function for consistency.
@@ -505,8 +508,11 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
         subprocess.run(final_cmd, check=True, capture_output=True)
         
         print(f"Saving original video ({final_orig_video_path.name})...")
-        shutil.copy(str(original_vid), str(final_orig_video_path))
-        print(f"✅ Saved '{final_orig_video_path.name}'")
+        try:
+            shutil.copyfile(str(original_vid), str(final_orig_video_path))
+            print(f"✅ Saved '{final_orig_video_path.name}'")
+        except Exception as e:
+            print(f"Warning: Could not write '{final_orig_video_path.name}': {e}", file=sys.stderr)
     
     print(f"✅ Success! Created '{final_video_path.name}'")
 

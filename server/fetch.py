@@ -166,7 +166,7 @@ def _pick_infra_fit_for_mapping(infra_fit: dict, min_elev_km: float = 5.0, max_e
 class Config:
     """Configuration constants for the script."""
     # Base directory for all meteor data on the local server
-    BASE_HTTP_DIR = Path('/home/httpd/norskmeteornettverk.no')
+    BASE_HTTP_DIR = Path(__file__).resolve().parents[1]
     METEOR_DATA_DIR = BASE_HTTP_DIR / 'meteor'
     BIN_DIR = BASE_HTTP_DIR / 'bin'
 

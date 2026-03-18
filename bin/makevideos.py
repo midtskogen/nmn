@@ -1372,6 +1372,16 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
 
         stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['full']}"
         run_command(stack_cmd, "Stacking video frames to create JPG", verbose)
+
+        # Always write a clean stacked image snapshot BEFORE any watermarking.
+        # Client mode is often re-run in an existing directory, so we must not
+        # reuse a potentially stale/contaminated -clean.jpg from a prior run.
+        try:
+            clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+            if Path(filenames['jpg']).exists():
+                shutil.copyfile(filenames['jpg'], str(clean_stacked))
+        except Exception:
+            pass
         
         event_data = get_event_data("event.txt")
         event_data['recalibrate'] = event_data.get('manual', 0) == 0 and event_data.get('sunalt', 0) < -9
@@ -1385,13 +1395,6 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
             refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose, padding_value=1024)
 
             try:
-                clean_stacked = Path(f"{filenames['name']}-clean.jpg")
-                if Path(filenames['jpg']).exists() and not clean_stacked.exists():
-                    shutil.copyfile(filenames['jpg'], str(clean_stacked))
-            except Exception:
-                pass
-
-            try:
                 clean_gnomonic = Path(f"{filenames['name']}-gnomonic-clean.jpg")
                 if Path(filenames['gnomonic']).exists() and not clean_gnomonic.exists():
                     shutil.copyfile(filenames['gnomonic'], str(clean_gnomonic))
@@ -1399,7 +1402,18 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
                 pass
             
             # Run crop on CLEAN images and regenerate videos too
-            meteorcrop_cmd = f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} --mode both ."
+            clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+            try:
+                if clean_stacked.exists() and Path(filenames['jpg']).exists():
+                    shutil.copyfile(str(clean_stacked), str(filenames['jpg']))
+            except Exception:
+                pass
+            meteorcrop_cmd = (
+                f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} --mode both"
+                f" --source-video {filenames['full']}"  # force clean source video
+                f" ."
+            )
+            print(f"   meteorcrop sources: video='{filenames['full']}' image='{filenames['jpg']}'")
             run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg", verbose)
             
             # Watermark the Gnomonic Image

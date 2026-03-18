@@ -37,9 +37,10 @@ import matplotlib.pyplot as plt
 class Settings:
     """Configuration constants for the script."""
     # Path to the script that processes video files
-    MAKEVIDEOS_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/makevideos.py')
-    CROP_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/meteorcrop.py')
-    METEOR_TEST_SCRIPT = Path('/home/httpd/norskmeteornettverk.no/bin/predict.py')
+    _BIN_DIR = Path(__file__).resolve().parent
+    MAKEVIDEOS_SCRIPT = _BIN_DIR / 'makevideos.py'
+    CROP_SCRIPT = _BIN_DIR / 'meteorcrop.py'
+    METEOR_TEST_SCRIPT = _BIN_DIR / 'predict.py'
 
     # --- CPU-based concurrency limiting settings ---
     # The threshold is now a percentage (0-100). 

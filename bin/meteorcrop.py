@@ -123,6 +123,12 @@ def get_args() -> argparse.Namespace:
         default="image",
         help="Specify the output mode: 'image', 'video', or 'both'. Defaults to 'image'.",
     )
+    parser.add_argument(
+        "--source-video",
+        type=Path,
+        default=None,
+        help="Optional explicit source video path to use instead of auto-detection.",
+    )
     return parser.parse_args()
 
 
@@ -613,8 +619,8 @@ def process_image_mode(event_dir: Path, pto_path: Path, background_plate_path: P
     Decoupled from video mode to avoid artifact inheritance from video processing.
     """
     print("\nProcessing image to extract meteor track...")
-            
-    # Smart image path deduction: 
+
+    # Smart image path deduction:
     # If video is 'video_hevc.mp4', image is 'video.jpg' (not 'video_hevc.jpg')
     if "_hevc" in source_video_path.name:
         source_image_name = source_video_path.name.replace("_hevc", "").replace(".mp4", ".jpg")
@@ -671,28 +677,37 @@ def main():
         final_w, final_h = create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
         
         # --- Source Detection Logic ---
-        # 1. Gather all mp4s
-        candidates = list(event_dir.glob("*.mp4"))
-        # 2. Exclude derived/processed videos
-        # --- KEY FIX: EXCLUDE -orig.mp4 TO PREVENT WRONG SOURCE SELECTION ---
-        candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name and "-orig" not in v.name]
-        
-        # 3. Prefer HEVC if available
-        hevc_vid = next((v for v in candidates if "_hevc" in v.name), None)
-        std_vid = next((v for v in candidates if "_hevc" not in v.name), None)
-        
-        source_video_path = hevc_vid if hevc_vid else std_vid
+        if args.source_video is not None:
+            source_video_path = args.source_video.resolve()
+        else:
+            # 1. Gather all mp4s
+            candidates = list(event_dir.glob("*.mp4"))
+            # 2. Exclude derived/processed videos
+            # --- KEY FIX: EXCLUDE -orig.mp4 TO PREVENT WRONG SOURCE SELECTION ---
+            candidates = [v for v in candidates if "-gnomonic" not in v.name and "-grid" not in v.name and "fireball" not in v.name and "-orig" not in v.name]
+            
+            # 3. Prefer HEVC if available
+            hevc_vid = next((v for v in candidates if "_hevc" in v.name), None)
+            std_vid = next((v for v in candidates if "_hevc" not in v.name), None)
+            
+            source_video_path = hevc_vid if hevc_vid else std_vid
 
         if not source_video_path:
             raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
+
+        if not source_video_path.is_file():
+            raise FileNotFoundError(f"Source video not found: '{source_video_path}'")
         
         background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
 
         # --- Mode-Specific Processing ---
 
         if args.mode == "video" or args.mode == "both":
-            # Always clean up stitched video afterwards to keep things tidy
-            create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h, delete_stitched_vid=True)
+            # Create shared background plate once.
+            background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
+            
+            # Process video and create all outputs.
+            create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h)
             
         if args.mode == "image" or args.mode == "both":
             # Process image independently using the best available static image source

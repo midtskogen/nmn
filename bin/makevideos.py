@@ -1556,7 +1556,7 @@ def main(args):
 
         try:
             clean_stacked = Path(f"{filenames['name']}-clean.jpg")
-            if Path(filenames['jpg']).exists() and not clean_stacked.exists():
+            if Path(filenames['jpg']).exists():
                 shutil.copyfile(filenames['jpg'], str(clean_stacked))
         except Exception:
             pass
@@ -1573,6 +1573,12 @@ def main(args):
         meteorcrop_script = BIN_DIR / 'meteorcrop.py'
         if meteorcrop_script.exists():
             try:
+                try:
+                    clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+                    if clean_stacked.exists() and Path(filenames['jpg']).exists():
+                        shutil.copyfile(str(clean_stacked), str(filenames['jpg']))
+                except Exception:
+                    pass
                 # meteorcrop.py typically takes the directory '.' as argument
                 meteorcrop_cmd = f"{sys.executable} {meteorcrop_script} --mode both ."
                 run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg (on clean images)", args.verbose)

@@ -165,10 +165,18 @@ def _pick_infra_fit_for_mapping(infra_fit: dict, min_elev_km: float = 5.0, max_e
 
 class Config:
     """Configuration constants for the script."""
-    # Base directory for all meteor data on the local server
-    BASE_HTTP_DIR = Path(__file__).resolve().parents[1]
+    # Script/code base directory (this checkout)
+    CODE_BASE_DIR = Path(__file__).resolve().parents[1]
+
+    # Base directory for all meteor data on the local server.
+    # Prefer the canonical server path if it exists to avoid writing into a
+    # different tree during fetch mode.
+    _CANONICAL_HTTP_DIR = Path('/home/httpd/norskmeteornettverk.no')
+    BASE_HTTP_DIR = _CANONICAL_HTTP_DIR if _CANONICAL_HTTP_DIR.exists() else CODE_BASE_DIR
+
     METEOR_DATA_DIR = BASE_HTTP_DIR / 'meteor'
-    BIN_DIR = BASE_HTTP_DIR / 'bin'
+    # Always use scripts from this checkout to avoid running stale code.
+    BIN_DIR = CODE_BASE_DIR / 'bin'
 
     # Bandwidth limit for rsync in KB/s
     BW_LIMIT_DEFAULT = '1000'

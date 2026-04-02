@@ -1552,6 +1552,15 @@ def main(args):
             # Change filenames['full'] to filenames['source']
             stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['source']}"
             run_command(stack_cmd, "Stacking video frames to create JPG", args.verbose)
+
+            # Always write a clean stacked image snapshot BEFORE any watermarking.
+            try:
+                clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+                if Path(filenames['jpg']).exists():
+                    shutil.copyfile(filenames['jpg'], str(clean_stacked))
+            except Exception:
+                pass
+
             _run_full_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
             if gnomonic_enabled:
                 _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
@@ -1560,6 +1569,16 @@ def main(args):
                 # Change filenames['full'] to filenames['source']
                 stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['source']}"
                 future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", args.verbose)
+
+                # Ensure the clean stacked snapshot is taken as soon as stacking completes,
+                # before any other tasks can apply logos or modify the stacked JPG.
+                future_stacked_jpg.result()
+                try:
+                    clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+                    if Path(filenames['jpg']).exists():
+                        shutil.copyfile(filenames['jpg'], str(clean_stacked))
+                except Exception:
+                    pass
 
                 future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
                 
@@ -1570,13 +1589,6 @@ def main(args):
                     print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
 
                 future_full_view.result()
-
-        try:
-            clean_stacked = Path(f"{filenames['name']}-clean.jpg")
-            if Path(filenames['jpg']).exists():
-                shutil.copyfile(filenames['jpg'], str(clean_stacked))
-        except Exception:
-            pass
 
         try:
             clean_gnomonic = Path(f"{filenames['name']}-gnomonic-clean.jpg")
@@ -1597,7 +1609,12 @@ def main(args):
                 except Exception:
                     pass
                 # meteorcrop.py typically takes the directory '.' as argument
-                meteorcrop_cmd = f"{sys.executable} {meteorcrop_script} --mode both ."
+                meteorcrop_cmd = (
+                    f"{sys.executable} {meteorcrop_script} --mode both"
+                    f" --source-video {filenames['source']}"
+                    f" ."
+                )
+                print(f"   meteorcrop sources: video='{filenames['source']}' image='{filenames['jpg']}'")
                 run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg (on clean images)", args.verbose)
             except Exception as e:
                 print(f"Warning: Failed to run meteorcrop.py: {e}", file=sys.stderr)

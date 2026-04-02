@@ -261,15 +261,37 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
             f"Problematic values might be startpos='{start_pos_str}' or endpos='{end_pos_str}'. Original error: {e}"
         ) from e
 
+    def _az_to_pano_x(az_deg: float) -> float:
+        return az_deg * pano_w / 360.0
 
-    start_pano_x = start_az * pano_w / 360.0
+    def _normalize_pano_x_pair(start_x: float, end_x: float) -> Tuple[float, float]:
+        """Normalize end_x so the track uses the shortest wrap-around distance."""
+        if abs(end_x - start_x) > (pano_w / 2.0):
+            if end_x > start_x:
+                end_x -= pano_w
+            else:
+                end_x += pano_w
+        return start_x, end_x
+
+
+    start_pano_x = _az_to_pano_x(start_az)
+    end_pano_x = _az_to_pano_x(end_az)
+    start_pano_x, end_pano_x = _normalize_pano_x_pair(start_pano_x, end_pano_x)
+
     start_pano_y = (90.0 - start_alt) * pano_h / 180.0
-    end_pano_x = end_az * pano_w / 360.0
     end_pano_y = (90.0 - end_alt) * pano_h / 180.0
 
     # Map panoramic coordinates to source image coordinates
     start_result = pto_mapper.map_pano_to_image(pto_data, start_pano_x, start_pano_y)
     end_result = pto_mapper.map_pano_to_image(pto_data, end_pano_x, end_pano_y)
+
+    if not start_result or not end_result:
+        # Fallback: mapping implementation may require pano coords to be within [0, w).
+        # Preserve shortest-distance normalization by wrapping both into range.
+        start_x_wrapped = start_pano_x % pano_w
+        end_x_wrapped = end_pano_x % pano_w
+        start_result = start_result or pto_mapper.map_pano_to_image(pto_data, start_x_wrapped, start_pano_y)
+        end_result = end_result or pto_mapper.map_pano_to_image(pto_data, end_x_wrapped, end_pano_y)
 
     if not start_result:
         raise ProjectionError("Could not map start coordinates to an image.")
@@ -290,6 +312,12 @@ def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: Li
     # Add padding and round width to be divisible by 32 for video codec compatibility
     padded_len = track_len + 3 * final_h
     final_w = (int(padded_len) + 31) & -32
+
+    if final_w > 16384:
+        raise ValueError(
+            "Computed fireball crop width exceeds H.264 limits, indicating bad track geometry. "
+            f"final_w={final_w} final_h={final_h} track_len={track_len:.2f} start_xy={start_xy} end_xy={end_xy}"
+        )
 
     pto_data = pto_mapper.parse_pto_file(str(base_pto_path))
     global_options, images = pto_data

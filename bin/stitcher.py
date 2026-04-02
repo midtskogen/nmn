@@ -1187,6 +1187,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
+    if final_w > 16384:
+        raise ValueError(f"Output width {final_w} exceeds codec limits for H.264/libx264. PTO='{pto_file}'")
     num_images = len(mappings)
     if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")
     

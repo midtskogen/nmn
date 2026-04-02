@@ -266,7 +266,7 @@ def generate_wind_plot(csv_path, translations: dict, matched_data_time: str, out
         # Plot 1: Wind Speed
         ax1.plot(wind_speeds_raw, altitudes_km_raw, 'b-') # Use original data
         ax1.set_xlabel(translations.get("wind_speed_ms", "Wind Speed (m/s)"), fontsize=12)
-        ax1.set_ylabel(translations.get("altitude_km", "Altitude (km)"), fontsize=12)
+        ax1.set_ylabel(translations.get("plot_height_y_label", "Altitude (km)"), fontsize=12)
         ax1.grid(True, linestyle='--', alpha=0.6)
         ax1.set_ylim(0, 30) # Lock Y-axis from 0 to 30 km
 

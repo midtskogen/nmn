@@ -31,6 +31,15 @@ import sys
 import time
 from pathlib import Path
 
+# Ensure local project modules are importable even when this script is executed via symlink
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_DIR = _SCRIPT_DIR.parent
+_BIN_DIR = _PROJECT_DIR / 'bin'
+_SRC_DIR = _PROJECT_DIR / 'src'
+for _p in (_BIN_DIR, _SRC_DIR, _PROJECT_DIR):
+    if _p.exists():
+        sys.path.insert(0, str(_p))
+
 # Third-party library imports
 import numpy as np
 import pytz

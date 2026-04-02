@@ -53,6 +53,7 @@
     "plot_map_interactive_zaxis": "Korkeus (km)",
     "plot_interactive_play": "▶ Toista",
     "plot_interactive_pause": "⏸ Tauko",
+    "infrasound_source": "Infraäänen lähde",
     "videos": "Videot:",
     "images": "Kuvat:",
     "text_files": "Tekstitiedostot:",

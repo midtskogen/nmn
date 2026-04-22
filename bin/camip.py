@@ -31,8 +31,8 @@ def ip_to_hex(ip: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Change IP address of DVRIP camera")
     parser.add_argument("new_ip", help="New IP address with optional /mask (e.g. 192.168.76.75/24)")
-    parser.add_argument("original_ip", nargs='?', default="192.168.1.10",
-                        help="Current IP of the camera (default: 192.168.1.10)")
+    parser.add_argument("original_ip", nargs='?', default="192.168.2.10",
+                        help="Current IP of the camera (default: 192.168.2.10)")
     parser.add_argument("-p", "--password", default="", help="Password for the camera (default: empty)")
     args = parser.parse_args()
 

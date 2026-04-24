@@ -232,6 +232,23 @@ def generate_wind_plot(csv_path, translations: dict, matched_data_time: str, out
             logging.warning("No data found to plot in wind profile CSV.")
             return
 
+        # --- Compute speed-weighted mean wind direction (circular mean) ---
+        # This is used to center the x-axis to avoid 0/360 wrap-around in the plot.
+        dirs_deg = np.asarray(wind_dirs_raw, dtype=float)
+        speeds = np.asarray(wind_speeds_raw, dtype=float)
+        weights = np.clip(speeds, 0.0, None)
+        if not np.isfinite(weights).all() or float(np.sum(weights)) <= 0.0:
+            weights = np.ones_like(dirs_deg)
+
+        dirs_rad = np.deg2rad(dirs_deg)
+        mean_sin = float(np.sum(weights * np.sin(dirs_rad)))
+        mean_cos = float(np.sum(weights * np.cos(dirs_rad)))
+        mean_dir_deg = float(np.mod(np.rad2deg(np.arctan2(mean_sin, mean_cos)) + 360.0, 360.0))
+
+        # Shift each direction to the equivalent angle closest to mean_dir_deg.
+        # Resulting values live in [mean-180, mean+180), which greatly reduces jumps.
+        wind_dirs_centered = ((dirs_deg - mean_dir_deg + 540.0) % 360.0) - 180.0 + mean_dir_deg
+        
         # --- Process Wind Direction for wrapping ---
         # We need to find jumps > 180 degrees (e.g., 350 -> 10) and insert NaN
         # to break the line plot.
@@ -239,20 +256,20 @@ def generate_wind_plot(csv_path, translations: dict, matched_data_time: str, out
         alt_plot = []
         dir_plot = []
         
-        if len(wind_dirs_raw) > 0:
+        if len(wind_dirs_centered) > 0:
             # Add the first point
             alt_plot.append(altitudes_km_raw[0])
-            dir_plot.append(wind_dirs_raw[0])
+            dir_plot.append(float(wind_dirs_centered[0]))
             
             # Iterate from the second point
-            for i in range(1, len(wind_dirs_raw)):
+            for i in range(1, len(wind_dirs_centered)):
                 # Get the last valid (non-NaN) plotted value
                 j = -1
                 while j >= -len(dir_plot) and np.isnan(dir_plot[j]):
                     j -= 1
                 prev_dir = dir_plot[j]
 
-                curr_dir = wind_dirs_raw[i]
+                curr_dir = float(wind_dirs_centered[i])
 
                 # This is the wrap-around check
                 if abs(curr_dir - prev_dir) > 180:
@@ -292,8 +309,14 @@ def generate_wind_plot(csv_path, translations: dict, matched_data_time: str, out
         # Plot 2: Wind Direction
         ax2.plot(dir_plot, alt_plot, 'r-') # Use processed data with NaNs
         ax2.set_xlabel(translations.get("wind_direction_deg", "Wind Direction (°)"), fontsize=12)
-        ax2.set_xticks([0, 90, 180, 270, 360])
-        ax2.set_xlim(0, 360)
+
+        # Center x-axis around the speed-weighted mean direction.
+        x_left = mean_dir_deg - 180.0
+        x_right = mean_dir_deg + 180.0
+        xticks = [x_left, mean_dir_deg - 90.0, mean_dir_deg, mean_dir_deg + 90.0, x_right]
+        ax2.set_xticks(xticks)
+        ax2.set_xticklabels([f"{int(np.round(t)) % 360:d}" for t in xticks])
+        ax2.set_xlim(x_left, x_right)
         ax2.grid(True, linestyle='--', alpha=0.6)
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])

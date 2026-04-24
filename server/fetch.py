@@ -210,7 +210,11 @@ class Config:
 # --- Internationalization (i18n) Setup ---
 SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi']
 DEFAULT_LANG = 'nb'
-LOC_DIR = Config.BIN_DIR / 'loc'
+_LOC_DIR_CANDIDATES = [
+    Config.BIN_DIR / 'loc',
+    Config.CODE_BASE_DIR.parent / 'bin' / 'loc',
+]
+LOC_DIR = next((p for p in _LOC_DIR_CANDIDATES if p.is_dir()), _LOC_DIR_CANDIDATES[0])
 
 def load_translations(lang_code: str) -> dict:
     """Loads the translation dictionary for a given language, with fallback to default."""

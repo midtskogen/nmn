@@ -1180,20 +1180,32 @@ class Zoom_Advanced(ttk.Frame):
             print("Upload target not configured. Use --upload-target HOST:DIR.")
             return
 
-        if not self.positions:
-            messagebox.showwarning("Upload Error", "No points selected. Cannot determine upload timestamp.")
+        # Check if this is a calibration-only upload (no track, but dirty PTO)
+        calibration_only = not self.positions and self.pto_dirty
+
+        if not self.positions and not self.pto_dirty:
+            messagebox.showwarning("Upload Error", "No points selected and no calibration changes. Nothing to upload.")
             return
-            
-        first_point_frame = self.positions[0]['frame']
-        first_timestamp = self.timestamps[first_point_frame]
 
-        temp_event = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_event.txt", dir="/tmp")
-        temp_event.close()
-        self.save_event_txt(filepath=temp_event.name)
+        if self.positions:
+            first_point_frame = self.positions[0]['frame']
+            first_timestamp = self.timestamps[first_point_frame]
+        else:
+            # Use current time for calibration-only upload
+            first_timestamp = datetime.now(timezone.utc).timestamp()
 
-        temp_centroid = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_centroid.txt", dir="/tmp")
-        temp_centroid.close()
-        self.save_centroid_txt(filepath=temp_centroid.name)
+        temp_event_path = ""
+        temp_centroid_path = ""
+        if not calibration_only:
+            temp_event = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_event.txt", dir="/tmp")
+            temp_event.close()
+            self.save_event_txt(filepath=temp_event.name)
+            temp_event_path = temp_event.name
+
+            temp_centroid = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix="_centroid.txt", dir="/tmp")
+            temp_centroid.close()
+            self.save_centroid_txt(filepath=temp_centroid.name)
+            temp_centroid_path = temp_centroid.name
 
         temp_lens_path = ""
         if self.pto_dirty:
@@ -1208,14 +1220,16 @@ class Zoom_Advanced(ttk.Frame):
             "--upload-hostname", self.upload_hostname,
             "--upload-dir", self.upload_dir,
             "--upload-timestamp", str(first_timestamp),
-            "--upload-event-file", temp_event.name,
-            "--upload-centroid-file", temp_centroid.name,
         ]
 
+        if temp_event_path:
+            cmd.extend(["--upload-event-file", temp_event_path])
+        if temp_centroid_path:
+            cmd.extend(["--upload-centroid-file", temp_centroid_path])
         if temp_lens_path:
             cmd.extend(["--upload-lens-file", temp_lens_path])
 
-        proc = subprocess.Popen([c for c in cmd if c != ""], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
 
         def _check_upload_worker_started():
             rc = proc.poll()
@@ -1771,29 +1785,35 @@ def run_upload_worker(args):
             date_dir = dt.strftime("%Y%m%d")
             time_dir = dt.strftime("%H%M%S")
 
-            remote_subdir = f"{args.upload_dir.rstrip('/')}/events/{date_dir}/{time_dir}"
-            log_to_window(f"Target directory: {args.upload_hostname}:{remote_subdir}")
-            log_to_window(f"Running: ssh {args.upload_hostname} mkdir -p {remote_subdir}")
-            proc = subprocess.run(['ssh', args.upload_hostname, 'mkdir', '-p', remote_subdir], capture_output=True, text=True, check=True, errors='ignore')
-            if proc.stderr:
-                log_to_window(f"STDERR:\n{proc.stderr.strip()}")
+            # Check if this is a calibration-only upload
+            has_event_files = bool(args.upload_event_file and args.upload_centroid_file)
 
-            files_to_upload = {
-                'event.txt': args.upload_event_file,
-                'centroid.txt': args.upload_centroid_file,
-            }
-            if args.upload_lens_file:
-                files_to_upload['lens.pto'] = args.upload_lens_file
-
-            log_to_window("Copying files via scp...")
-            for dest_name, local_path in files_to_upload.items():
-                remote_destination = f"{args.upload_hostname}:{remote_subdir}/{dest_name}"
-                log_to_window(f"  - Copying {local_path} to {remote_destination}...")
-                proc = subprocess.run(['scp', local_path, remote_destination], capture_output=True, text=True, check=True, errors='ignore')
+            if has_event_files:
+                remote_subdir = f"{args.upload_dir.rstrip('/')}/events/{date_dir}/{time_dir}"
+                log_to_window(f"Target directory: {args.upload_hostname}:{remote_subdir}")
+                log_to_window(f"Running: ssh {args.upload_hostname} mkdir -p {remote_subdir}")
+                proc = subprocess.run(['ssh', args.upload_hostname, 'mkdir', '-p', remote_subdir], capture_output=True, text=True, check=True, errors='ignore')
                 if proc.stderr:
-                    log_to_window(f"    - SCP STDERR for {dest_name}: {proc.stderr.strip()}")
+                    log_to_window(f"STDERR:\n{proc.stderr.strip()}")
 
-            log_to_window("  - SCP complete.")
+                files_to_upload = {
+                    'event.txt': args.upload_event_file,
+                    'centroid.txt': args.upload_centroid_file,
+                }
+                if args.upload_lens_file:
+                    files_to_upload['lens.pto'] = args.upload_lens_file
+
+                log_to_window("Copying files via scp...")
+                for dest_name, local_path in files_to_upload.items():
+                    remote_destination = f"{args.upload_hostname}:{remote_subdir}/{dest_name}"
+                    log_to_window(f"  - Copying {local_path} to {remote_destination}...")
+                    proc = subprocess.run(['scp', local_path, remote_destination], capture_output=True, text=True, check=True, errors='ignore')
+                    if proc.stderr:
+                        log_to_window(f"    - SCP STDERR for {dest_name}: {proc.stderr.strip()}")
+
+                log_to_window("  - SCP complete.")
+            else:
+                log_to_window("Calibration-only upload (no event files).")
 
             if args.upload_lens_file:
                 match = re.match(r'/meteor/cam(\d+)', args.upload_dir)
@@ -1817,17 +1837,18 @@ def run_upload_worker(args):
                     subprocess.run(['ssh', args.upload_hostname, remote_command], check=True, capture_output=True, text=True, errors='ignore')
                     log_to_window("  - Remote deployment successful.")
 
-            log_to_window("Running remote report script...")
-            report_script = "/home/meteor/bin/report.py"
-            remote_event_file = f"{remote_subdir}/event.txt"
-            log_to_window(f"Running: ssh {args.upload_hostname} {report_script} {remote_event_file}")
-            proc = subprocess.run(['ssh', args.upload_hostname, report_script, remote_event_file], capture_output=True, text=True, check=False, errors='ignore')
-            log_to_window("\n--- Report Output ---")
-            if proc.stdout:
-                log_to_window(proc.stdout.strip())
-            if proc.stderr:
-                log_to_window(f"STDERR:\n{proc.stderr.strip()}")
-            log_to_window("--- End of Report ---")
+            if has_event_files:
+                log_to_window("Running remote report script...")
+                report_script = "/home/meteor/bin/report.py"
+                remote_event_file = f"{remote_subdir}/event.txt"
+                log_to_window(f"Running: ssh {args.upload_hostname} {report_script} {remote_event_file}")
+                proc = subprocess.run(['ssh', args.upload_hostname, report_script, remote_event_file], capture_output=True, text=True, check=False, errors='ignore')
+                log_to_window("\n--- Report Output ---")
+                if proc.stdout:
+                    log_to_window(proc.stdout.strip())
+                if proc.stderr:
+                    log_to_window(f"STDERR:\n{proc.stderr.strip()}")
+                log_to_window("--- End of Report ---")
             log_to_window("Upload finished", "red")
         except subprocess.CalledProcessError as e:
             log_to_window(f"\n--- COMMAND FAILED ---")
@@ -1878,8 +1899,8 @@ if __name__ == '__main__':
         parser.add_argument('--upload-hostname', required=True)
         parser.add_argument('--upload-dir', required=True)
         parser.add_argument('--upload-timestamp', required=True)
-        parser.add_argument('--upload-event-file', required=True)
-        parser.add_argument('--upload-centroid-file', required=True)
+        parser.add_argument('--upload-event-file', default='')
+        parser.add_argument('--upload-centroid-file', default='')
         parser.add_argument('--upload-lens-file', default='')
         wargs = parser.parse_args()
         run_upload_worker(wargs)

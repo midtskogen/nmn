@@ -18,12 +18,14 @@ import argparse
 import atexit
 import configparser
 import datetime
+import errno
 import fcntl
 import glob
 import io
 import json
 import logging
 import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -318,9 +320,14 @@ def fetch_data(station: str, port: str, remote_dir: str, local_dir: Path) -> boo
         result = run_command(rsync_cmd, stream_output=True)
         if result.returncode == 0:
             logging.info("Rsync completed successfully.")
-            ssh_cmd = ['ssh', '-o', 'StrictHostKeyChecking=no', '-p', ssh_port,
-                       f'meteor@{host}', 'touch', f'{remote_dir}/uploaded']
-            run_command(ssh_cmd)
+            ssh_cmd = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=5',
+                       '-p', ssh_port, f'meteor@{host}', 'touch', f'{remote_dir}/uploaded']
+            try:
+                subprocess.run(ssh_cmd, check=False, capture_output=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                logging.warning("SSH touch command timed out, but data was fetched successfully.")
+            except Exception as e:
+                logging.warning(f"SSH touch command failed: {e}")
             return True
         logging.warning(f"Rsync failed. Retrying in {Config.RETRY_DELAY_SECONDS} seconds...")
         time.sleep(Config.RETRY_DELAY_SECONDS)
@@ -1831,10 +1838,51 @@ def main():
     try:
         lock_fd = lock_path.open('w')
         logging.info(f"Acquiring exclusive lock on {lock_path} ...")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        logging.info("Lock acquired. Starting process_event().")
-        
-        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
+        # Try to acquire lock with 20-minute timeout, then steal if stale
+        lock_acquired = False
+        stole_lock = False
+        for attempt in range(1200):  # 1200 attempts * 1 second = 20 minutes
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_acquired = True
+                break
+            except IOError as e:
+                if e.errno != errno.EAGAIN and e.errno != errno.EACCES:
+                    raise
+                time.sleep(1)
+        if not lock_acquired:
+            # Steal the lock - assume it's stale after 20 minutes
+            logging.warning(f"Lock held for 20+ minutes, assuming stale. Stealing lock on {lock_path}")
+            try:
+                lock_fd.close()
+                lock_path.unlink(missing_ok=True)
+                lock_fd = lock_path.open('w')
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_acquired = True
+                stole_lock = True
+                logging.info("Lock stolen successfully.")
+            except Exception as e:
+                logging.error(f"Failed to steal lock: {e}")
+                sys.exit("Lock acquisition failed.")
+        if stole_lock:
+            logging.info("Starting process_event() with stolen lock.")
+        else:
+            logging.info("Lock acquired. Starting process_event().")
+
+        # Run process_event with a 30-minute timeout to prevent indefinite hangs
+        def _run_process_event():
+            process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
+
+        proc = multiprocessing.Process(target=_run_process_event)
+        proc.start()
+        proc.join(timeout=1800)  # 30 minutes
+        if proc.is_alive():
+            logging.error("process_event() timed out after 30 minutes. Terminating...")
+            proc.terminate()
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.kill()
+            sys.exit("Processing timeout.")
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

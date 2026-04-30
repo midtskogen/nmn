@@ -18,6 +18,7 @@ import argparse
 import atexit
 import configparser
 import datetime
+import fcntl
 import glob
 import io
 import json
@@ -807,7 +808,8 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
                 check=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
+                timeout=120
             )
             logging.info(f"Successfully sent tweet using key {key}.")
         except Exception as e:
@@ -1027,39 +1029,74 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
         return
     
     if not fast:
-        # Run process.py for ALL event.txt files in PARALLEL
+        # Run process.py for all station event.txt files (bounded parallelism)
         report_script = Config.BIN_DIR / 'process.py'
         event_files = sorted(event_dir.glob('*/*/event.txt'))
         
         if not event_files:
             logging.warning("No station event.txt files found. Skipping process.py.")
-        
-        processes = [] # List to hold Popen objects
-        for event_file in event_files:
-            report_log = event_file.parent / "report.log" # Generic log name
-            report_cmd = [sys.executable, str(report_script), str(event_file)]
-            logging.info(f"--- Spawning {report_script.name} for {event_file} ---")
-            try:
-                with report_log.open('w') as log_file:
-                   proc = subprocess.Popen(report_cmd, stdout=log_file, stderr=log_file)
-                   processes.append(proc)
-                   # Wait 3 seconds before spawning the next process to stagger load
-                   time.sleep(3)
-            except Exception as e:
-                logging.error(f"Failed to spawn process.py for {event_file}: {e}")
-                
-        if processes:
-            logging.info(f"Waiting for {len(processes)} station processing jobs to complete...")
-            for proc in processes:
-                proc.wait()
-                
-                if proc.returncode == 0:
-                    logging.info(f"Job for {proc.args[2]} finished successfully (exit code 0).")
-                elif proc.returncode == 1:
-                    logging.info(f"Job for {proc.args[2]} was discarded (exit code 1).")
+
+        max_jobs = 2
+        try:
+            max_jobs = int(os.environ.get('NMN_PROCESS_PY_JOBS', '2'))
+        except Exception:
+            max_jobs = 2
+        if max_jobs < 1:
+            max_jobs = 1
+
+        pending = list(event_files)
+        running = []
+        if pending:
+            logging.info(f"Running station processing jobs with up to {max_jobs} parallel processes...")
+
+        while pending or running:
+            while pending and len(running) < max_jobs:
+                event_file = pending.pop(0)
+                report_log = event_file.parent / 'report.log'
+                report_cmd = [sys.executable, str(report_script), str(event_file)]
+                logging.info(f"--- Spawning {report_script.name} for {event_file} ---")
+                try:
+                    log_file = report_log.open('w')
+                    proc = subprocess.Popen(
+                        report_cmd,
+                        cwd=str(event_file.parent),
+                        stdout=log_file,
+                        stderr=log_file,
+                    )
+                    running.append((proc, log_file))
+                    time.sleep(1)
+                except Exception as e:
+                    logging.error(f"Failed to spawn process.py for {event_file}: {e}")
+
+            still_running = []
+            for proc, log_file in running:
+                rc = proc.poll()
+                if rc is None:
+                    still_running.append((proc, log_file))
+                    continue
+
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
+
+                try:
+                    job_path = proc.args[-1] if isinstance(proc.args, (list, tuple)) and len(proc.args) > 1 else str(proc.args)
+                except Exception:
+                    job_path = '<unknown>'
+
+                if rc == 0:
+                    logging.info(f"Job for {job_path} finished successfully (exit code 0).")
+                elif rc == 1:
+                    logging.info(f"Job for {job_path} was discarded (exit code 1).")
                 else:
-                    logging.warning(f"Job for {proc.args[2]} failed with exit code {proc.returncode}.")
-            
+                    logging.warning(f"Job for {job_path} failed with exit code {rc}.")
+
+            running = still_running
+            if running:
+                time.sleep(1)
+
+        if event_files:
             logging.info("All station processing jobs finished.")
     else:
         # --fast mode: Skip process.py, but regenerate brightness plots manually
@@ -1785,11 +1822,28 @@ def main():
     proc_time_str = final_event_dir.name
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
     
+    # Acquire an exclusive lock on the event directory so that concurrent
+    # fetch.py instances (for different stations of the same event) do not
+    # run process_event() simultaneously.  The second instance will block
+    # here until the first finishes, then re-process with all station data.
+    lock_path = final_event_dir / '.process_event.lock'
+    lock_fd = None
     try:
+        lock_fd = lock_path.open('w')
+        logging.info(f"Acquiring exclusive lock on {lock_path} ...")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        logging.info("Lock acquired. Starting process_event().")
+        
         process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            except Exception:
+                pass
         logging.info("--- Script finished. ---")
 
 

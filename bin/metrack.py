@@ -18,6 +18,7 @@ import datetime
 import math
 import io
 import os
+import socket
 import sys
 import time
 import random
@@ -401,10 +402,14 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     lat_span = abs(lat_top - lat_bot)
     zoom_level = max(6, min(int(np.log2(360 / (lat_span + 1))), 9))
     
+    old_timeout = socket.getdefaulttimeout()
     try:
+        socket.setdefaulttimeout(30)
         ax.add_image(OSM(), zoom_level)
     except Exception:
         ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
+    finally:
+        socket.setdefaulttimeout(old_timeout)
     
     ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
     gl = ax.gridlines(draw_labels=True, color='gray', alpha=0.5, linestyle='--', linewidth=0.5)

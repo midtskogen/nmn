@@ -105,8 +105,8 @@ def get_args():
     parser.add_argument(
         "--timeout",
         type=int,
-        default=900,
-        help="Timeout in seconds for waiting for low system load. Defaults to 900."
+        default=36000,
+        help="Timeout in seconds for waiting for low system load. Defaults to 36000 (10 hours)."
     )
     parser.add_argument(
         "--nologos",
@@ -298,7 +298,8 @@ def wait_for_safe_cpu(timeout: int):
             print(f"Current CPU: {current_cpu:.1f}%. Threshold: {Settings.MAX_CPU_PERCENT}%")
             sys.exit(1)
 
-        print(f"CPU usage ({current_cpu:.1f}%) is too high. Waiting 5s...")
+        elapsed = int(time.time() - start_time)
+        print(f"CPU usage ({current_cpu:.1f}%) is too high. Waiting 5s... (waited {elapsed}s)")
         time.sleep(5)
 
 

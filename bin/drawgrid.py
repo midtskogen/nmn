@@ -68,6 +68,8 @@ def main():
     parser.add_argument("--radec", help="use RA/DEC instead of az/alt", action="store_true")
     parser.add_argument("--verbose", help="more verbose labels", action="store_true")
     parser.add_argument("--refract", help="Apply atmospheric refraction correction (Az/Alt mode only).", action="store_true")
+    parser.add_argument("--base-image", dest='base_image', help='Load an existing PNG and draw annotations on top (skip grid generation)', type=str)
+    parser.add_argument("--annotations-only", dest='annotations_only', help='Only draw star annotations on a transparent canvas (no grid)', action="store_true")
 
     parser.add_argument(action='store', dest='infile', help='input .pto file')
     parser.add_argument(action='store', dest='outfile', help='output grid file (default "grid.png")', default="grid.png", nargs='?')
@@ -442,7 +444,10 @@ def main():
                     textlist.append((' ' + lontext, angle+90, x+3*math.cos(angle/180*math.pi), y+3*math.sin(angle/180*math.pi), 'left'))
                     textlist.append((str(int(alt)) + ' ', angle2+90, x+4*math.cos(angle2/180*math.pi), y+4*math.sin(angle2/180*math.pi), 'right'))
 
-    image = wand.image.Image(width=int(round(width * args.xscale)), height=int(round(height * args.yscale)), background=wand.color.Color('transparent'))
+    if args.base_image:
+        image = wand.image.Image(filename=args.base_image)
+    else:
+        image = wand.image.Image(width=int(round(width * args.xscale)), height=int(round(height * args.yscale)), background=wand.color.Color('transparent'))
 
     def writetext(draw, text, x, y, angle, alignment):
         if x < 0 or y < 0:
@@ -458,23 +463,24 @@ def main():
         draw.translate(-x-offset, -y+offset)
 
     with wand.drawing.Drawing() as draw:
-        draw.fill_color = wand.color.Color('none')
-        draw.stroke_color = wand.color.Color('grey50')
-        draw.stroke_opacity = 0.5
-        for line in small_list:
-            draw.polyline(line)
-        draw.stroke_opacity = 0.8
-        draw.stroke_color = wand.color.Color('yellow')
-        for line in big_list:
-            draw.polyline(line)
+        if not args.base_image and not args.annotations_only:
+            draw.fill_color = wand.color.Color('none')
+            draw.stroke_color = wand.color.Color('grey50')
+            draw.stroke_opacity = 0.5
+            for line in small_list:
+                draw.polyline(line)
+            draw.stroke_opacity = 0.8
+            draw.stroke_color = wand.color.Color('yellow')
+            for line in big_list:
+                draw.polyline(line)
 
-        draw.font = 'helvetica'
-        draw.fill_color = wand.color.Color('yellow')
-        draw.stroke_color = wand.color.Color('transparent')
-        draw.stroke_opacity = 0
-        draw.font_size = 14
-        for text, angle, x, y, alignment in textlist:
-            writetext(draw, text, x, y, angle, alignment)
+            draw.font = 'helvetica'
+            draw.fill_color = wand.color.Color('yellow')
+            draw.stroke_color = wand.color.Color('transparent')
+            draw.stroke_opacity = 0
+            draw.font_size = 14
+            for text, angle, x, y, alignment in textlist:
+                writetext(draw, text, x, y, angle, alignment)
 
         if pos.date and pos.lat and pos.long and args.timestamp:
             stars = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects)

@@ -1,6 +1,23 @@
 <?php
 $BASE_DIR = dirname($_SERVER['SCRIPT_FILENAME']);
 
+// --- Language ---
+$supported_langs = ['nb_NO', 'en_GB'];
+$lang_code = 'nb_NO';
+if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
+    $lang_code = $_COOKIE['lang'];
+} elseif (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
+    $bl = str_replace('-', '_', substr($_SERVER['HTTP_ACCEPT_LANGUAGE'], 0, 5));
+    if (in_array($bl, $supported_langs)) $lang_code = $bl;
+    else {
+        $short = substr($bl, 0, 2);
+        foreach ($supported_langs as $s) { if (substr($s, 0, 2) === $short) { $lang_code = $s; break; } }
+    }
+}
+$lang_file = $BASE_DIR . '/lang/' . $lang_code . '.json';
+$lang = file_exists($lang_file) ? (json_decode(file_get_contents($lang_file), true) ?: []) : [];
+function t($key, $lang) { return htmlspecialchars($lang[$key] ?? $key); }
+
 $stream_file  = $BASE_DIR . '/stream_time_tracker.json';
 $quota_file   = $BASE_DIR . '/quota_tracker.json';
 $access_file  = $BASE_DIR . '/access_log.json';
@@ -196,11 +213,11 @@ function fmt_bytes($bytes) {
 }
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="<?= htmlspecialchars(str_replace('_', '-', $lang_code)) ?>">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Usage Statistics — Norsk Meteornettverk</title>
+<title><?= t('usage_title', $lang) ?> — Norsk Meteornettverk</title>
 <link rel="stylesheet" href="../css/bootstrap.min.css">
 <style>
   body { background: #0d1117; color: #e6edf3; font-family: system-ui, sans-serif; }
@@ -230,10 +247,10 @@ function fmt_bytes($bytes) {
 <div class="d-flex align-items-center mb-4 gap-3">
   <img src="../nmn.png" height="40" alt="NMN">
   <div>
-    <h1 class="mb-0" style="font-size:1.5rem">Usage Statistics</h1>
-    <div class="text-muted" style="font-size:.85rem">Norsk Meteornettverk — camera access &amp; streaming data</div>
+    <h1 class="mb-0" style="font-size:1.5rem"><?= t('usage_title', $lang) ?></h1>
+    <div class="text-muted" style="font-size:.85rem"><?= $lang['usage_subtitle'] ?? 'Norsk Meteornettverk' ?></div>
   </div>
-  <div class="ms-auto text-muted" style="font-size:.8rem">Generated <?= htmlspecialchars(date('Y-m-d H:i:s T')) ?></div>
+  <div class="ms-auto text-muted" style="font-size:.8rem"><?= t('usage_generated', $lang) ?> <?= htmlspecialchars(date('Y-m-d H:i:s T')) ?></div>
 </div>
 
 <!-- Summary cards -->
@@ -246,28 +263,30 @@ $total_ips          = count($all_ips);
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-3"><div class="card p-3 text-center">
     <div class="stat-num"><?= $total_days ?></div>
-    <div class="stat-label">Days with activity</div>
+    <div class="stat-label"><?= t('usage_days_active', $lang) ?></div>
   </div></div>
   <div class="col-6 col-md-3"><div class="card p-3 text-center">
     <div class="stat-num"><?= $total_ips ?></div>
-    <div class="stat-label">Unique IPs (all time)</div>
+    <div class="stat-label"><?= t('usage_unique_ips', $lang) ?></div>
   </div></div>
   <div class="col-6 col-md-3"><div class="card p-3 text-center">
     <div class="stat-num"><?= fmt_duration($total_stream_s_all) ?></div>
-    <div class="stat-label">Total streaming time</div>
+    <div class="stat-label"><?= t('usage_total_stream', $lang) ?></div>
   </div></div>
   <div class="col-6 col-md-3"><div class="card p-3 text-center">
     <div class="stat-num"><?= fmt_bytes($total_bytes_all) ?></div>
-    <div class="stat-label">Total downloaded</div>
+    <div class="stat-label"><?= t('usage_total_downloaded', $lang) ?></div>
   </div></div>
 </div>
 
 <!-- Tabs -->
 <ul class="nav nav-tabs mb-3" id="mainTabs">
-  <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-daily">Daily</button></li>
-  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-stations">By Station</button></li>
-  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ips">By IP / Country</button></li>
-  <?php if ($access_summary): ?><li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-access">Actions</button></li><?php endif; ?>
+  <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-daily"><?= t('usage_tab_daily', $lang) ?></button></li>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-stations"><?= t('usage_tab_stations', $lang) ?></button></li>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ips"><?= t('usage_tab_ips', $lang) ?></button></li>
+  <?php if ($access_summary): ?><li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-access"><?= t('usage_tab_actions', $lang) ?></button></li><?php endif; ?>
+  <li class="nav-item ms-auto"><button class="nav-link" onclick="document.cookie='lang=nb_NO;path=/;max-age=31536000';location.reload()" title="Norsk">🇳🇴</button></li>
+  <li class="nav-item"><button class="nav-link" onclick="document.cookie='lang=en_GB;path=/;max-age=31536000';location.reload()" title="English">🇬🇧</button></li>
 </ul>
 
 <div class="tab-content">
@@ -280,7 +299,7 @@ $total_ips          = count($all_ips);
   <div class="card p-3">
     <table class="table table-sm table-hover mb-0">
       <thead><tr>
-        <th>Date</th><th>Unique IPs</th><th>Streaming time</th><th>Downloaded</th><th style="min-width:120px">Stream bar</th>
+        <th><?= t('usage_col_date', $lang) ?></th><th><?= t('usage_col_unique_ips', $lang) ?></th><th><?= t('usage_col_stream', $lang) ?></th><th><?= t('usage_col_downloaded', $lang) ?></th><th style="min-width:120px"><?= t('usage_col_stream', $lang) ?></th>
       </tr></thead>
       <tbody>
       <?php
@@ -306,7 +325,7 @@ $total_ips          = count($all_ips);
   <div class="card p-3">
     <table class="table table-sm table-hover mb-0">
       <thead><tr>
-        <th>Station</th><th>Total streaming</th><th>Total downloaded</th><th style="min-width:140px">Streaming bar</th>
+        <th><?= t('usage_col_station', $lang) ?></th><th><?= t('usage_col_total_stream', $lang) ?></th><th><?= t('usage_col_total_downloaded', $lang) ?></th><th style="min-width:140px"><?= t('usage_col_stream', $lang) ?></th>
       </tr></thead>
       <tbody>
       <?php
@@ -344,7 +363,7 @@ $total_ips          = count($all_ips);
 
 <!-- IPS TAB -->
 <div class="tab-pane fade" id="tab-ips">
-  <div class="mb-2 text-muted" style="font-size:.82rem">Country lookup via ip-api.com (server-side, cached). Top 50 IPs by streaming time shown. Unresolved IPs load on next refresh.</div>
+  <div class="mb-2 text-muted" style="font-size:.82rem"><?= t('usage_geoip_note', $lang) ?></div>
   <?php
   // Build country totals for the chart (server-side)
   $country_totals_php = [];
@@ -363,7 +382,7 @@ $total_ips          = count($all_ips);
   <div class="card p-3">
     <table class="table table-sm table-hover mb-0" id="ip-table">
       <thead><tr>
-        <th>IP Address</th><th class="country-cell">Country</th><th>Streaming time</th><th>Downloaded</th><th>Stations used</th>
+        <th><?= t('usage_col_ip', $lang) ?></th><th class="country-cell"><?= t('usage_col_country', $lang) ?></th><th><?= t('usage_col_stream', $lang) ?></th><th><?= t('usage_col_downloaded', $lang) ?></th><th><?= t('usage_col_stations_used', $lang) ?></th>
       </tr></thead>
       <tbody>
       <?php foreach ($top_ips as $ip => $total_s):
@@ -403,9 +422,9 @@ $total_ips          = count($all_ips);
 <?php if ($access_summary): ?>
 <div class="tab-pane fade" id="tab-access">
   <div class="card p-3">
-    <h3 style="font-size:1rem" class="mb-3">API actions (last 7 days)</h3>
+    <h3 style="font-size:1rem" class="mb-3"><?= t('usage_actions_title', $lang) ?></h3>
     <table class="table table-sm table-hover mb-0">
-      <thead><tr><th>Action</th><th>Count</th><th style="min-width:140px">Bar</th></tr></thead>
+      <thead><tr><th><?= t('usage_col_action', $lang) ?></th><th><?= t('usage_col_count', $lang) ?></th><th style="min-width:140px"></th></tr></thead>
       <tbody>
       <?php
       $max_ac = max(1, max($access_summary));
@@ -522,7 +541,7 @@ const countryLabels = <?= json_encode(array_keys($chart_countries)) ?>;
 const countryValues = <?= json_encode(array_values(array_map(fn($s) => round($s/60), $chart_countries))) ?>;
 
 if (countryLabels.length === 0) {
-    document.getElementById('chartCountries').parentElement.innerHTML = '<p class="text-muted p-3">No IP data yet.</p>';
+    document.getElementById('chartCountries').parentElement.innerHTML = '<p class="text-muted p-3"><?= t('usage_no_ip_data', $lang) ?></p>';
 } else {
     new Chart(document.getElementById('chartCountries'), {
       type: 'doughnut',

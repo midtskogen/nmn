@@ -458,61 +458,67 @@ const countryChart = new Chart(ctxCountries, {
   options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b949e' } } } }
 });
 
-// GeoIP lookup — batched to respect free tier limits
+// GeoIP lookup — ip-api.com free tier, one request per IP with a small delay
 const ipRows = [...document.querySelectorAll('#ip-table tbody tr')];
-const ipList = ipRows.map(r => r.querySelector('[data-ip]')?.dataset.ip).filter(Boolean);
+
+// Build ip -> stream_seconds map from server-injected data (avoids parsing formatted text)
+const ipStreamSeconds = <?= json_encode(array_map(fn($s) => round($s), $ip_totals)) ?>;
 
 const countryTotals = {};
 const countryNames  = {};
 let resolved = 0;
+const ipList = ipRows.map(r => r.querySelector('[data-ip]')?.dataset.ip).filter(Boolean);
+
+function flag(cc) {
+    if (!cc || cc.length !== 2) return '';
+    return String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E0 - 65 + c.charCodeAt(0)));
+}
 
 function processCountryData(ip, country, countryCode) {
     const row  = ipRows.find(r => r.querySelector('[data-ip]')?.dataset.ip === ip);
     const cell = row?.querySelector('[data-ip]');
-    if (!cell) return;
-    const flag = countryCode
-        ? String.fromCodePoint(...[...countryCode.toUpperCase()].map(c => 0x1F1E0 - 65 + c.charCodeAt(0)))
-        : '';
-    cell.innerHTML = `<span class="flag">${flag}</span> ${country || ip}`;
-    // Accumulate streaming seconds per country
-    const streamSecs = parseFloat(row.cells[2]?.textContent) || 0; // displayed as formatted, use index
-    countryTotals[country] = (countryTotals[country] || 0) + streamSecs;
-    countryNames[country]  = flag + ' ' + country;
+    if (cell) {
+        const f = flag(countryCode);
+        cell.innerHTML = `<span class="flag">${f}</span> ${country || ip}`;
+    }
+    const label = country || ip;
+    const secs  = ipStreamSeconds[ip] || 0;
+    countryTotals[label] = (countryTotals[label] || 0) + secs;
+    countryNames[label]  = flag(countryCode) + ' ' + label;
     resolved++;
     if (resolved === ipList.length) updateCountryChart();
 }
 
 function updateCountryChart() {
-    const sorted = Object.entries(countryTotals).sort((a,b) => b[1]-a[1]).slice(0,15);
+    const sorted  = Object.entries(countryTotals).sort((a,b) => b[1]-a[1]).slice(0,15);
     const palette = ['#1f6feb','#3fb950','#f78166','#d2a8ff','#ffa657','#79c0ff','#56d364','#ff7b72','#bc8cff','#e3b341','#58a6ff','#7ee787','#ffa198','#cae8ff','#ffd700'];
     countryChart.data.labels   = sorted.map(([c]) => countryNames[c] || c);
-    countryChart.data.datasets = [{ data: sorted.map(([,v]) => v), backgroundColor: palette.slice(0, sorted.length) }];
+    countryChart.data.datasets = [{ data: sorted.map(([,v]) => Math.round(v/60)), backgroundColor: palette.slice(0, sorted.length) }];
     countryChart.update();
 }
 
-// Batch requests: ip-api.com allows up to 100 IPs per POST (free)
-async function batchGeoIP(ips) {
-    try {
-        const resp = await fetch('http://ip-api.com/batch?fields=query,country,countryCode', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(ips.map(ip => ({ query: ip })))
-        });
-        const results = await resp.json();
-        for (const r of results) {
-            processCountryData(r.query, r.country || r.query, r.countryCode || '');
+// Sequential lookups with 200ms delay to respect free-tier rate limit (45 req/min)
+async function resolveIPs() {
+    for (const ip of ipList) {
+        try {
+            const r = await fetch(`https://ip-api.com/json/${ip}?fields=country,countryCode,status`);
+            const d = await r.json();
+            if (d.status === 'success') {
+                processCountryData(ip, d.country, d.countryCode);
+            } else {
+                processCountryData(ip, ip, '');
+            }
+        } catch(e) {
+            processCountryData(ip, ip, '');
         }
-    } catch(e) {
-        for (const ip of ips) processCountryData(ip, ip, '');
+        await new Promise(res => setTimeout(res, 220));
     }
 }
 
-// Split into batches of 100
-for (let i = 0; i < ipList.length; i += 100) {
-    batchGeoIP(ipList.slice(i, i + 100));
-}
 if (ipList.length === 0) {
     document.getElementById('chartCountries').parentElement.innerHTML = '<p class="text-muted p-3">No IP data yet.</p>';
+} else {
+    resolveIPs();
 }
 </script>
 </body>

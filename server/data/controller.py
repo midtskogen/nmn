@@ -13,7 +13,21 @@ from datetime import datetime, timedelta, timezone
 from PIL import Image
 
 # --- Configuration (Defined first to avoid circular dependency issues) ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def _find_base_dir():
+    """Return the directory containing the live data files (stations.json etc).
+    When this script is invoked via its real path (e.g. as a subprocess spawned
+    by a symlink-invoked parent), __file__ resolves to nmn/server/data/ which
+    lacks stations.json. We walk candidate symlinks to find the right directory.
+    """
+    candidate = os.path.dirname(os.path.abspath(__file__))
+    if os.path.exists(os.path.join(candidate, 'stations.json')):
+        return candidate
+    real = os.path.realpath(__file__)
+    for d in ['/var/www/html/data', os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data')]:
+        if os.path.exists(os.path.join(d, 'stations.json')):
+            return d
+    return candidate
+BASE_DIR = _find_base_dir()
 STATIONS_FILE = os.path.join(BASE_DIR, 'stations.json')
 DOWNLOAD_DIR = os.path.join(BASE_DIR, 'download')
 LOG_DIR = os.path.join(BASE_DIR, 'logs')

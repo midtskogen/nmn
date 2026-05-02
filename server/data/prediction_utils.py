@@ -19,7 +19,15 @@ except ImportError as e:
 
 # --- Configuration Constants ---
 # Establishes base paths for all necessary directories and configuration files.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def _find_base_dir():
+    candidate = os.path.dirname(os.path.abspath(__file__))
+    if os.path.exists(os.path.join(candidate, 'stations.json')):
+        return candidate
+    for d in ['/var/www/html/data', os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data')]:
+        if os.path.exists(os.path.join(d, 'stations.json')):
+            return d
+    return candidate
+BASE_DIR = _find_base_dir()
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 LOCK_DIR = os.path.join(BASE_DIR, 'locks')
 CACHE_DIR = os.path.join(BASE_DIR, 'cache')

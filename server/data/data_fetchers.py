@@ -24,7 +24,15 @@ except ImportError:
 
 # --- Configuration ---
 # Establishes base paths for all necessary directories and configuration files.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def _find_base_dir():
+    candidate = os.path.dirname(os.path.abspath(__file__))
+    if os.path.exists(os.path.join(candidate, 'stations.json')):
+        return candidate
+    for d in ['/var/www/html/data', os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data')]:
+        if os.path.exists(os.path.join(d, 'stations.json')):
+            return d
+    return candidate
+BASE_DIR = _find_base_dir()
 STATIONS_FILE = os.path.join(BASE_DIR, 'stations.json')
 CACHE_DIR = os.path.join(BASE_DIR, 'cache')
 CAMERAS_FILE = os.path.join(BASE_DIR, 'cameras.json')

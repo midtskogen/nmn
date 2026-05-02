@@ -4,6 +4,7 @@ $BASE_DIR = dirname($_SERVER['SCRIPT_FILENAME']);
 $stream_file  = $BASE_DIR . '/stream_time_tracker.json';
 $quota_file   = $BASE_DIR . '/quota_tracker.json';
 $access_file  = $BASE_DIR . '/access_log.json';
+$geoip_cache  = $BASE_DIR . '/cache/geoip_cache.json';
 
 function read_json($path) {
     if (!file_exists($path)) return [];
@@ -19,6 +20,38 @@ function read_ndjson($path) {
         if (is_array($r)) $rows[] = $r;
     }
     return $rows;
+}
+
+// --- Server-side GeoIP lookup with persistent cache ---
+// Resolves up to 10 unknown IPs per page load; results cached indefinitely.
+function resolve_geoip($ips, $cache_file) {
+    $cache = read_json($cache_file);
+    $changed = false;
+    $resolved = 0;
+    foreach ($ips as $ip) {
+        if (isset($cache[$ip])) continue;
+        if ($resolved >= 10) break; // rate-limit: max 10 new lookups per page load
+        $url = "http://ip-api.com/json/{$ip}?fields=country,countryCode,status";
+        $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+        $json = @file_get_contents($url, false, $ctx);
+        if ($json) {
+            $d = json_decode($json, true);
+            if (isset($d['status']) && $d['status'] === 'success') {
+                $cache[$ip] = ['country' => $d['country'], 'cc' => $d['countryCode']];
+            } else {
+                $cache[$ip] = ['country' => '', 'cc' => ''];
+            }
+        } else {
+            $cache[$ip] = ['country' => '', 'cc' => ''];
+        }
+        $changed = true;
+        $resolved++;
+        usleep(220000); // 220ms between requests
+    }
+    if ($changed) {
+        @file_put_contents($cache_file, json_encode($cache, JSON_PRETTY_PRINT));
+    }
+    return $cache;
 }
 
 $stream_data = read_json($stream_file);
@@ -127,6 +160,9 @@ foreach ($stream_by_day as $date => $ips) {
 }
 arsort($ip_totals);
 $top_ips = array_slice($ip_totals, 0, 50, true);
+
+// Resolve countries server-side (cached)
+$geoip = resolve_geoip(array_keys($top_ips), $geoip_cache);
 
 // --- Access log summary (last 7 days) ---
 $access_summary = [];
@@ -302,7 +338,19 @@ $total_ips          = count($all_ips);
 
 <!-- IPS TAB -->
 <div class="tab-pane fade" id="tab-ips">
-  <div class="mb-2 text-muted" style="font-size:.82rem">Country lookup uses ip-api.com (client-side, free). Top 50 IPs by streaming time shown.</div>
+  <div class="mb-2 text-muted" style="font-size:.82rem">Country lookup via ip-api.com (server-side, cached). Top 50 IPs by streaming time shown. Unresolved IPs load on next refresh.</div>
+  <?php
+  // Build country totals for the chart (server-side)
+  $country_totals_php = [];
+  foreach ($top_ips as $ip => $secs) {
+      $country = $geoip[$ip]['country'] ?? '';
+      $cc      = $geoip[$ip]['cc'] ?? '';
+      $label   = $country ?: $ip;
+      $country_totals_php[$label] = ($country_totals_php[$label] ?? 0) + $secs;
+  }
+  arsort($country_totals_php);
+  $chart_countries = array_slice($country_totals_php, 0, 15, true);
+  ?>
   <div class="card p-3 mb-3">
     <canvas id="chartCountries"></canvas>
   </div>
@@ -312,10 +360,18 @@ $total_ips          = count($all_ips);
         <th>IP Address</th><th class="country-cell">Country</th><th>Streaming time</th><th>Stations used</th>
       </tr></thead>
       <tbody>
-      <?php foreach ($top_ips as $ip => $total_s): ?>
+      <?php foreach ($top_ips as $ip => $total_s):
+          $country = $geoip[$ip]['country'] ?? '';
+          $cc      = $geoip[$ip]['cc'] ?? '';
+          $flag = '';
+          if (strlen($cc) === 2) {
+              $flag = mb_convert_encoding('&#' . (0x1F1E0 - 65 + ord($cc[0])) . ';', 'UTF-8', 'HTML-ENTITIES')
+                    . mb_convert_encoding('&#' . (0x1F1E0 - 65 + ord($cc[1])) . ';', 'UTF-8', 'HTML-ENTITIES');
+          }
+      ?>
       <tr>
         <td><?= htmlspecialchars($ip) ?></td>
-        <td class="country-cell" data-ip="<?= htmlspecialchars($ip) ?>"><span class="text-muted">…</span></td>
+        <td class="country-cell"><?= $flag ? $flag . ' ' : '' ?><?= htmlspecialchars($country ?: ($geoip[$ip] ?? null ? '?' : '…')) ?></td>
         <td><?= fmt_duration($total_s) ?></td>
         <td><?php
           $stations_for_ip = [];
@@ -450,75 +506,28 @@ new Chart(document.getElementById('chartStations'), {
   }
 });
 
-// Country pie chart (filled after GeoIP lookups)
-const ctxCountries = document.getElementById('chartCountries').getContext('2d');
-const countryChart = new Chart(ctxCountries, {
-  type: 'doughnut',
-  data: { labels: ['Loading…'], datasets: [{ data: [1], backgroundColor: ['#21262d'] }] },
-  options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b949e' } } } }
-});
+// Country doughnut chart — data resolved server-side
+const palette = ['#1f6feb','#3fb950','#f78166','#d2a8ff','#ffa657','#79c0ff','#56d364','#ff7b72','#bc8cff','#e3b341','#58a6ff','#7ee787','#ffa198','#cae8ff','#ffd700'];
+const countryLabels = <?= json_encode(array_keys($chart_countries)) ?>;
+const countryValues = <?= json_encode(array_values(array_map(fn($s) => round($s/60), $chart_countries))) ?>;
 
-// GeoIP lookup — ip-api.com free tier, one request per IP with a small delay
-const ipRows = [...document.querySelectorAll('#ip-table tbody tr')];
-
-// Build ip -> stream_seconds map from server-injected data (avoids parsing formatted text)
-const ipStreamSeconds = <?= json_encode(array_map(fn($s) => round($s), $ip_totals)) ?>;
-
-const countryTotals = {};
-const countryNames  = {};
-let resolved = 0;
-const ipList = ipRows.map(r => r.querySelector('[data-ip]')?.dataset.ip).filter(Boolean);
-
-function flag(cc) {
-    if (!cc || cc.length !== 2) return '';
-    return String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E0 - 65 + c.charCodeAt(0)));
-}
-
-function processCountryData(ip, country, countryCode) {
-    const row  = ipRows.find(r => r.querySelector('[data-ip]')?.dataset.ip === ip);
-    const cell = row?.querySelector('[data-ip]');
-    if (cell) {
-        const f = flag(countryCode);
-        cell.innerHTML = `<span class="flag">${f}</span> ${country || ip}`;
-    }
-    const label = country || ip;
-    const secs  = ipStreamSeconds[ip] || 0;
-    countryTotals[label] = (countryTotals[label] || 0) + secs;
-    countryNames[label]  = flag(countryCode) + ' ' + label;
-    resolved++;
-    if (resolved === ipList.length) updateCountryChart();
-}
-
-function updateCountryChart() {
-    const sorted  = Object.entries(countryTotals).sort((a,b) => b[1]-a[1]).slice(0,15);
-    const palette = ['#1f6feb','#3fb950','#f78166','#d2a8ff','#ffa657','#79c0ff','#56d364','#ff7b72','#bc8cff','#e3b341','#58a6ff','#7ee787','#ffa198','#cae8ff','#ffd700'];
-    countryChart.data.labels   = sorted.map(([c]) => countryNames[c] || c);
-    countryChart.data.datasets = [{ data: sorted.map(([,v]) => Math.round(v/60)), backgroundColor: palette.slice(0, sorted.length) }];
-    countryChart.update();
-}
-
-// Sequential lookups with 200ms delay to respect free-tier rate limit (45 req/min)
-async function resolveIPs() {
-    for (const ip of ipList) {
-        try {
-            const r = await fetch(`https://ip-api.com/json/${ip}?fields=country,countryCode,status`);
-            const d = await r.json();
-            if (d.status === 'success') {
-                processCountryData(ip, d.country, d.countryCode);
-            } else {
-                processCountryData(ip, ip, '');
-            }
-        } catch(e) {
-            processCountryData(ip, ip, '');
-        }
-        await new Promise(res => setTimeout(res, 220));
-    }
-}
-
-if (ipList.length === 0) {
+if (countryLabels.length === 0) {
     document.getElementById('chartCountries').parentElement.innerHTML = '<p class="text-muted p-3">No IP data yet.</p>';
 } else {
-    resolveIPs();
+    new Chart(document.getElementById('chartCountries'), {
+      type: 'doughnut',
+      data: {
+        labels: countryLabels,
+        datasets: [{ data: countryValues, backgroundColor: palette.slice(0, countryLabels.length) }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#8b949e' } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.raw} min` } }
+        }
+      }
+    });
 }
 </script>
 </body>

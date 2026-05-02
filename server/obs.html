@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Meld fra om meteor</title>
+    <title data-translate="page_title">Meld fra om meteor</title>
 
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -19,6 +19,31 @@
       } 
       .card {
         margin-bottom: 1.5rem;
+      }
+
+      .checklist-illustration {
+        max-width: 420px;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      .checklist-illustration img {
+        width: 100%;
+        height: auto;
+        border-radius: 0.75rem;
+        box-shadow: 0 .5rem 1rem rgba(0,0,0,.15);
+      }
+      
+      /* Language switcher */
+      .language-switcher a {
+          text-decoration: none;
+          margin: 0 0.25em;
+          opacity: 0.7;
+          transition: opacity 0.2s;
+          display: inline-block;
+          font-size: 1.5rem;
+      }
+      .language-switcher a:hover {
+          opacity: 1;
       }
       
       /* Utility to disable text selection during drag */
@@ -40,9 +65,16 @@
       #hidden-map-container {
 	  position: absolute;
 	  left: -8192px; /* Position it far off-screen */
-	  width: 800px;  /* Define a fixed size for consistent output */
-	  height: 600px;
+	  width: 1200px;  /* Define a fixed size for consistent output */
+	  height: 1200px;
 	  z-index: -1;   /* Ensure it's not accidentally interactive */
+      }
+
+      #hidden-sky-container {
+	  position: absolute;
+	  left: -8192px;
+	  top: 0;
+	  z-index: -1;
       }
 
       #map.leaflet-grabbing {
@@ -217,87 +249,151 @@
         color: white;
         font-size: 1.5rem;
       }
+
+      .step-card {
+        scroll-margin-top: 90px;
+      }
+
+      .step-header-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+      }
+
+      .step-header-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
     </style>
   </head>
   <body>
     <div id="hidden-map-container"></div>
+    <div id="hidden-sky-container"></div>
     <div id="main-content">
         <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
           <div class="container-fluid">
             <a class="navbar-brand" href="#">
               <img src="/nmn_white.png" alt="NMN Logo">
-              Norsk meteornettverk
+              <span data-translate="nmn">Norsk meteornettverk</span>
             </a>
+            <div class="language-switcher ms-auto">
+                <a href="?lang=nb_NO" title="Norsk">🇳🇴</a>
+                <a href="?lang=en_GB" title="English">🇬🇧</a>
+                <a href="?lang=de_DE" title="Deutsch">🇩🇪</a>
+                <a href="?lang=cs_CZ" title="Čeština">🇨🇿</a>
+                <a href="?lang=fi_FI" title="Suomi">🇫🇮</a>
+            </div>
           </div>
         </nav>
 
         <div class="container-fluid mt-4">
           <div class="text-center mb-4">
-            <h1>Meld fra om en meteor</h1>
-            <p class="lead">Følg stega under for å gi en nøyaktig rapport.</p>
+            <h1 data-translate="main_title">Meld fra om en meteor</h1>
+            <p class="lead" data-translate="main_subtitle">Følg stega under for å gi en nøyaktig rapport.</p>
           </div>
 
           <form id="reportForm">
-            <div class="card" id="step-1">
+            <div class="card step-card" id="step-0">
               <div class="card-header">
-                <h5><strong>Steg 1: Tidspunkt for observasjon (norsk, lokal tid)</strong></h5>
+                <div class="step-header-bar">
+                  <h6 class="mb-0"><strong data-translate="step0_title">Steg 0: Endre språk</strong></h6>
+                  <div class="step-header-actions"></div>
+                </div>
+              </div>
+              <div class="card-body py-2">
+                <div class="d-flex align-items-center">
+                  <span class="me-2" data-translate="step0_desc">Endre språk:</span>
+                  <div class="language-switcher">
+                    <a href="?lang=nb_NO" title="Norsk" data-lang="nb_NO">🇳🇴</a>
+                    <a href="?lang=en_GB" title="English" data-lang="en_GB">🇬🇧</a>
+                    <a href="?lang=de_DE" title="Deutsch" data-lang="de_DE">🇩🇪</a>
+                    <a href="?lang=cs_CZ" title="Čeština" data-lang="cs_CZ">🇨🇿</a>
+                    <a href="?lang=fi_FI" title="Suomi" data-lang="fi_FI">🇫🇮</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card step-card" id="step-1">
+              <div class="card-header">
+                <div class="step-header-bar">
+                  <h5 class="mb-0"><strong data-translate="step1_title">Steg 1: Tidspunkt for observasjon (lokal tid)</strong><span id="step1-timezone" class="text-muted fw-normal ms-2" style="font-size: 0.9em;"></span></h5>
+                  <div class="step-header-actions">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="next" data-step="1" data-translate="step_nav_next">Neste</button>
+                  </div>
+                </div>
               </div>
               <div class="card-body">
                 <div class="row">
                   <div class="col-md-6 mb-3">
-                    <label for="sighting_date_display" class="form-label">Dato</label>
+                    <label for="sighting_date_display" class="form-label" data-translate="date_label">Dato</label>
                     <div class="input-group position-relative">
-                        <input type="text" class="form-control" id="sighting_date_display" placeholder="dd/mm/åååå" required readonly style="pointer-events: none;">
-                        <span class="input-group-text" aria-hidden="true"><i class="bi bi-calendar"></i></span>
-                        <input type="date" id="sighting_date_picker_native" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;">
+                        <input type="text" class="form-control" id="sighting_date_display" placeholder="dd/mm/åååå" required autocomplete="off" inputmode="numeric">
+                        <span class="input-group-text position-relative" aria-hidden="true"><i class="bi bi-calendar"></i>
+                          <input type="date" id="sighting_date_picker_native" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;">
+                        </span>
+                        <button class="btn btn-outline-secondary" type="button" id="date-today-btn" data-translate="today_button">i dag</button>
+                        <button class="btn btn-outline-secondary" type="button" id="date-yesterday-btn" data-translate="yesterday_button">I går</button>
                     </div>
                     <input type="hidden" id="sighting_date" name="sighting_date">
                     <input type="hidden" id="sighting_time" name="sighting_time">
                   </div>
                   <div class="col-md-6 mb-3">
-                    <label for="sighting_hour" class="form-label">Klokkeslett</label>
-                    <div class="input-group">
+                    <label for="sighting_hour" class="form-label" data-translate="time_label">Klokkeslett</label>
+                    <div class="input-group" id="time-native-group">
+                      <input type="time" class="form-control" id="sighting_time_native" step="1" required>
+                    </div>
+
+                    <div class="input-group" id="time-desktop-group" style="display:none">
+                      <input type="text" class="form-control" id="sighting_time_desktop_display" placeholder="HH:MM:SS" required readonly>
+                      <button class="btn btn-outline-secondary" type="button" id="time-desktop-open-btn"><i class="bi bi-clock"></i></button>
+                    </div>
+
+                    <div style="display:none">
                       <select class="form-select" id="sighting_hour" name="sighting_hour" required>
-                        <option value="">Time</option>
+                        <option value="" data-translate="hour_option">Time</option>
                       </select>
-                      <span class="input-group-text">:</span>
                       <select class="form-select" id="sighting_minute" name="sighting_minute" required>
-                        <option value="">Minutt</option>
+                        <option value="" data-translate="minute_option">Minutt</option>
                       </select>
-                      <span class="input-group-text">:</span>
                       <select class="form-select" id="sighting_second" name="sighting_second">
-                        <option value="">Sek</option>
+                        <option value="" data-translate="second_option">Sek</option>
                       </select>
                     </div>
+
+                    <div class="form-text" id="time-24h-readout"></div>
                   </div>
                 </div>
                 
                 <div class="mt-3">
-                  <label class="form-label">Hvor sikker er du på tidspunktet?</label>
+                  <label class="form-label" data-translate="time_accuracy_label">Hvor sikker er du på tidspunktet?</label>
                   <div id="time-accuracy-options">
                     <div class="form-check form-check-inline">
                       <input class="form-check-input" type="radio" name="time_accuracy" id="acc_unknown" value="unknown" checked>
-                      <label class="form-check-label" for="acc_unknown">Veit ikke</label>
+                      <label class="form-check-label" for="acc_unknown" data-translate="acc_unknown">Veit ikke</label>
                     </div>
                     <div class="form-check form-check-inline">
                       <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm1" value="pm1">
-                      <label class="form-check-label" for="acc_pm1">±1 minutt</label>
+                      <label class="form-check-label" for="acc_pm1" data-translate="acc_pm1">±1 minutt</label>
                     </div>
                     <div class="form-check form-check-inline">
                       <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm5" value="pm5">
-                      <label class="form-check-label" for="acc_pm5">±5 minutt</label>
+                      <label class="form-check-label" for="acc_pm5" data-translate="acc_pm5">±5 minutt</label>
                     </div>
                     <div class="form-check form-check-inline">
                       <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm15" value="pm15">
-                      <label class="form-check-label" for="acc_pm15">±15 minutt</label>
+                      <label class="form-check-label" for="acc_pm15" data-translate="acc_pm15">±15 minutt</label>
                     </div>
                     <div class="form-check form-check-inline">
                       <input class="form-check-input" type="radio" name="time_accuracy" id="acc_pm30" value="pm30">
-                      <label class="form-check-label" for="acc_pm30">±30 minutt</label>
+                      <label class="form-check-label" for="acc_pm30" data-translate="acc_pm30">±30 minutt</label>
                     </div>
                     <div class="form-check form-check-inline">
                       <input class="form-check-input" type="radio" name="time_accuracy" id="acc_gt30" value="gt30">
-                      <label class="form-check-label" for="acc_gt30">mer enn 30 minutts usikkerhet</label>
+                      <label class="form-check-label" for="acc_gt30" data-translate="acc_gt30">mer enn 30 minutts usikkerhet</label>
                     </div>
                   </div>
                 </div>
@@ -307,19 +403,29 @@
               </div>
             </div>
 
-            <div class="card" id="step-2">
+            <div class="card step-card" id="step-2">
               <div class="card-header">
-                <h5><strong>Steg 2: Hvor var du da du så meteoren?</strong></h5>
+                <div class="step-header-bar">
+                  <h5 class="mb-0"><strong data-translate="step2_title">Steg 2: Hvor var du da du så meteoren?</strong></h5>
+                  <div class="step-header-actions">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="prev" data-step="2" data-translate="step_nav_prev">Forrige</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="next" data-step="2" data-translate="step_nav_next">Neste</button>
+                  </div>
+                </div>
               </div>
               <div class="card-body">
-                <p>Plasser en markør på kartet som viser nøyaktig hvor du stod.  Du kan zoome og panorere.</p>
+                <p data-translate="step2_desc">Plasser en markør på kartet som viser nøyaktig hvor du stod. Du kan zoome og panorere.</p>
+                <div class="d-flex align-items-center gap-2 mb-3">
+                  <button type="button" class="btn btn-outline-primary btn-sm" id="use-my-location-btn" data-translate="use_my_location_btn">Bruk posisjonen min</button>
+                  <div class="form-text" id="use-my-location-status"></div>
+                </div>
                 <div class="row mb-3">
                   <div class="col-md-6">
-                    <label for="obs_lat" class="form-label">Breddegrad</label>
+                    <label for="obs_lat" class="form-label" data-translate="latitude_label">Breddegrad</label>
                     <input type="number" step="any" class="form-control" id="obs_lat" name="latitude" required>
                   </div>
                   <div class="col-md-6">
-                    <label for="obs_lon" class="form-label">Lengdegrad</label>
+                    <label for="obs_lon" class="form-label" data-translate="longitude_label">Lengdegrad</label>
                     <input type="number" step="any" class="form-control" id="obs_lon" name="longitude" required>
                   </div>
                 </div>
@@ -327,12 +433,18 @@
               </div>
             </div>
 
-            <div class="card" id="step-3">
+            <div class="card step-card" id="step-3">
               <div class="card-header">
-                <h5><strong>Steg 3: Vis meteorens bane over himmelen</strong></h5>
+                <div class="step-header-bar">
+                  <h5 class="mb-0"><strong data-translate="step3_title">Steg 3: Vis meteorens bane over himmelen</strong></h5>
+                  <div class="step-header-actions">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="prev" data-step="3" data-translate="step_nav_prev">Forrige</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="next" data-step="3" data-translate="step_nav_next">Neste</button>
+                  </div>
+                </div>
               </div>
               <div class="card-body">
-                <p>Plasser et start- og sluttpunkt for meteoren.  Du kan zoome og panorere.  Kontroller retningene i kartet over.  På en mobiltelefon kan det hjelpe å vende den 90°.</p>
+                <p data-translate="step3_desc">Plasser et start- og sluttpunkt for meteoren. Du kan zoome og panorere. Kontroller retningene i kartet over. På en mobiltelefon kan det hjelpe å vende den 90°.</p>
                 <div id="sky-panorama">
                   <canvas id="sky-grid-canvas"></canvas>
                   <div id="celestial-container"></div>
@@ -341,35 +453,35 @@
                     <div class="pip-line" id="pip-start-line"></div>
                     <div class="pip-line" id="pip-end-line"></div>
                     <div class="pip-center-dot"></div>
-                    <span class="pip-label north">N</span>
-                    <span class="pip-label east">Ø</span>
-                    <span class="pip-label south">S</span>
-                    <span class="pip-label west">V</span>
+                    <span class="pip-label north" data-translate="compass_n">N</span>
+                    <span class="pip-label east" data-translate="compass_e">Ø</span>
+                    <span class="pip-label south" data-translate="compass_s">S</span>
+                    <span class="pip-label west" data-translate="compass_w">V</span>
                   </div>
                 </div>
                  <div class="row mt-3">
                   <div class="col-md-6">
-                    <h6>Startpunkt</h6>
+                    <h6 data-translate="start_point_label">Startpunkt</h6>
                     <div class="input-group mb-2">
-                      <span class="input-group-text" style="width: 80px;">Retning</span>
+                      <span class="input-group-text" style="width: 90px;" data-translate="direction_label">Retning</span>
                       <input type="number" step="any" class="form-control" id="start_az" name="bearing1" required>
                       <span class="input-group-text">°</span>
                     </div>
                     <div class="input-group">
-                      <span class="input-group-text" style="width: 80px;">Høgde</span>
+                      <span class="input-group-text" style="width: 90px;" data-translate="altitude_label">Høgde</span>
                       <input type="number" step="any" class="form-control" id="start_alt" name="alt1" required>
                       <span class="input-group-text">°</span>
                     </div>
                   </div>
                   <div class="col-md-6">
-                    <h6>Sluttpunkt</h6>
+                    <h6 data-translate="end_point_label">Sluttpunkt</h6>
                     <div class="input-group mb-2">
-                      <span class="input-group-text" style="width: 80px;">Retning</span>
+                      <span class="input-group-text" style="width: 90px;" data-translate="direction_label">Retning</span>
                       <input type="number" step="any" class="form-control" id="end_az" name="bearing2" required>
                       <span class="input-group-text">°</span>
                     </div>
                     <div class="input-group">
-                      <span class="input-group-text" style="width: 80px;">Høgde</span>
+                      <span class="input-group-text" style="width: 90px;" data-translate="altitude_label">Høgde</span>
                       <input type="number" step="any" class="form-control" id="end_alt" name="alt2" required>
                       <span class="input-group-text">°</span>
                     </div>
@@ -378,207 +490,223 @@
               </div>
             </div>
             
-            <div class="card" id="step-4">
+            <div class="card step-card" id="step-4">
                 <div class="card-header">
-                    <h5><strong>Steg 4: Andre opplysninger</strong></h5>
+                    <div class="step-header-bar">
+                      <h5 class="mb-0"><strong data-translate="step4_title">Steg 4: Andre opplysninger</strong></h5>
+                      <div class="step-header-actions">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="prev" data-step="4" data-translate="step_nav_prev">Forrige</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="next" data-step="4" data-translate="step_nav_next">Neste</button>
+                      </div>
+                    </div>
                 </div>
                 <div class="card-body">
                     <div class="mb-3">
-                        <label class="form-label"><strong>Dominerende farge:</strong></label>
+                        <label class="form-label"><strong data-translate="color_label">Dominerende farge:</strong></label>
                         <div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_unknown" value="unknown" checked>
-                                <label class="form-check-label" for="color_unknown">Usikker</label>
+                                <label class="form-check-label" for="color_unknown" data-translate="color_unknown">Usikker</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_white" value="white">
-                                <label class="form-check-label" for="color_white">hvit</label>
+                                <label class="form-check-label" for="color_white" data-translate="color_white">hvit</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_green" value="green">
-                                <label class="form-check-label" for="color_green">grønn</label>
+                                <label class="form-check-label" for="color_green" data-translate="color_green">grønn</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_blue" value="blue">
-                                <label class="form-check-label" for="color_blue">blå</label>
+                                <label class="form-check-label" for="color_blue" data-translate="color_blue">blå</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_yellow" value="yellow">
-                                <label class="form-check-label" for="color_yellow">gul</label>
+                                <label class="form-check-label" for="color_yellow" data-translate="color_yellow">gul</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_orange" value="orange">
-                                <label class="form-check-label" for="color_orange">oransje</label>
+                                <label class="form-check-label" for="color_orange" data-translate="color_orange">oransje</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_red" value="red">
-                                <label class="form-check-label" for="color_red">rød</label>
+                                <label class="form-check-label" for="color_red" data-translate="color_red">rød</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="dominant_color" id="color_other" value="other">
-                                <label class="form-check-label" for="color_other">annen</label>
+                                <label class="form-check-label" for="color_other" data-translate="color_other">annen</label>
                             </div>
                         </div>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label"><strong>Største lysstyrke:</strong></label>
+                        <label class="form-label"><strong data-translate="brightness_label">Største lysstyrke:</strong></label>
                         <div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="brightness" id="bright_unknown" value="unknown" checked>
-                                <label class="form-check-label" for="bright_unknown">Usikker</label>
+                                <label class="form-check-label" for="bright_unknown" data-translate="bright_unknown">Usikker</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="brightness" id="bright_stars" value="stars">
-                                <label class="form-check-label" for="bright_stars">som de klareste stjernene</label>
+                                <label class="form-check-label" for="bright_stars" data-translate="bright_stars">som de klareste stjernene</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="brightness" id="bright_brighter" value="brighter">
-                                <label class="form-check-label" for="bright_brighter">litt sterkere enn stjernene</label>
+                                <label class="form-check-label" for="bright_brighter" data-translate="bright_brighter">litt sterkere enn stjernene</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="brightness" id="bright_muchbrighter" value="muchbrighter">
-                                <label class="form-check-label" for="bright_muchbrighter">mye sterkere enn stjernene men terrenge lyste ikke opp</label>
+                                <label class="form-check-label" for="bright_muchbrighter" data-translate="bright_muchbrighter">mye sterkere enn stjernene men terrenget lyste ikke opp</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="brightness" id="bright_lit" value="lit">
-                                <label class="form-check-label" for="bright_lit">terrenget lyste opp</label>
+                                <label class="form-check-label" for="bright_lit" data-translate="bright_lit">terrenget lyste opp</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="brightness" id="bright_daylight" value="daylight">
-                                <label class="form-check-label" for="bright_daylight">nesten som daglys</label>
+                                <label class="form-check-label" for="bright_daylight" data-translate="bright_daylight">nesten som daglys</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="brightness" id="bright_fulldaylight" value="fulldaylight">
-                                <label class="form-check-label" for="bright_fulldaylight">fullt daglys</label>
+                                <label class="form-check-label" for="bright_fulldaylight" data-translate="bright_fulldaylight">fullt daglys</label>
                             </div>
                         </div>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label"><strong>Hvor lenge var meteoren synlig:</strong></label>
+                        <label class="form-label"><strong data-translate="duration_label">Hvor lenge var meteoren synlig:</strong></label>
                         <div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="duration" id="dur_unknown" value="unknown" checked>
-                                <label class="form-check-label" for="dur_unknown">Usikker</label>
+                                <label class="form-check-label" for="dur_unknown" data-translate="dur_unknown">Usikker</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="duration" id="dur_lt2" value="lt2">
-                                <label class="form-check-label" for="dur_lt2">under 2 sekund</label>
+                                <label class="form-check-label" for="dur_lt2" data-translate="dur_lt2">under 2 sekund</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="duration" id="dur_2_4" value="2-4">
-                                <label class="form-check-label" for="dur_2_4">2 - 4 sekund</label>
+                                <label class="form-check-label" for="dur_2_4" data-translate="dur_2_4">2 - 4 sekund</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="duration" id="dur_4_8" value="4-8">
-                                <label class="form-check-label" for="dur_4_8">4 - 8 sekund</label>
+                                <label class="form-check-label" for="dur_4_8" data-translate="dur_4_8">4 - 8 sekund</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="duration" id="dur_8_16" value="8-16">
-                                <label class="form-check-label" for="dur_8_16">8 - 16 sekund</label>
+                                <label class="form-check-label" for="dur_8_16" data-translate="dur_8_16">8 - 16 sekund</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="duration" id="dur_gt16" value="gt16">
-                                <label class="form-check-label" for="dur_gt16">mer enn 16 sekund</label>
+                                <label class="form-check-label" for="dur_gt16" data-translate="dur_gt16">mer enn 16 sekund</label>
                             </div>
                         </div>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label"><strong>Annet</strong></label>
+                        <label class="form-label"><strong data-translate="other_label">Annet</strong></label>
                         <div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_afterglow" value="afterglow">
-                                <label class="form-check-label" for="other_afterglow">etterglød</label>
+                                <label class="form-check-label" for="other_afterglow" data-translate="other_afterglow">etterglød</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_smoke" value="smoke">
-                                <label class="form-check-label" for="other_smoke">røykspor</label>
+                                <label class="form-check-label" for="other_smoke" data-translate="other_smoke">røykspor</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_fragmentation" value="fragmentation">
-                                <label class="form-check-label" for="other_fragmentation">oppsplitting</label>
+                                <label class="form-check-label" for="other_fragmentation" data-translate="other_fragmentation">oppsplitting</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_explosion" value="explosion">
-                                <label class="form-check-label" for="other_explosion">eksplosjon</label>
+                                <label class="form-check-label" for="other_explosion" data-translate="other_explosion">eksplosjon</label>
                             </div>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="checkbox" name="other_phenomena" id="other_sound" value="sound">
-                                <label class="form-check-label" for="other_sound">lyd/drønn</label>
+                                <label class="form-check-label" for="other_sound" data-translate="other_sound">lyd/drønn</label>
                             </div>
                         </div>
                     </div>
                     <div id="sound-delay-section" class="mb-3 p-3 border rounded bg-light" style="display: none;">
-                        <label class="form-label fw-bold"><strong>Hvor lang tid gikk det fra du så meteoren til du hørte noe?</strong></label>
+                        <label class="form-label fw-bold"><strong data-translate="sound_delay_label">Hvor lang tid gikk det fra du så meteoren til du hørte noe?</strong></label>
                         <div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="sound_delay" id="delay_unknown" value="unknown" checked>
-                                <label class="form-check-label" for="delay_unknown">Usikker</label>
+                                <label class="form-check-label" for="delay_unknown" data-translate="delay_unknown">Usikker</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="sound_delay" id="delay_lt30s" value="lt30s">
-                                <label class="form-check-label" for="delay_lt30s">mindre enn 30 sekund</label>
+                                <label class="form-check-label" for="delay_lt30s" data-translate="delay_lt30s">mindre enn 30 sekund</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="sound_delay" id="delay_30s_1m" value="30s-1m">
-                                <label class="form-check-label" for="delay_30s_1m">30 sekund til ett minutt</label>
+                                <label class="form-check-label" for="delay_30s_1m" data-translate="delay_30s_1m">30 sekund til ett minutt</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="sound_delay" id="delay_1m_1.5m" value="1m-1.5m">
-                                <label class="form-check-label" for="delay_1m_1.5m">ett minutt til halvannet minutt</label>
+                                <label class="form-check-label" for="delay_1m_1.5m" data-translate="delay_1m_1.5m">ett minutt til halvannet minutt</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="sound_delay" id="delay_1.5m_2m" value="1.5m-2m">
-                                <label class="form-check-label" for="delay_1.5m_2m">halvannet minutt til to minutt</label>
+                                <label class="form-check-label" for="delay_1.5m_2m" data-translate="delay_1.5m_2m">halvannet minutt til to minutt</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="sound_delay" id="delay_gt2m" value="gt2m">
-                                <label class="form-check-label" for="delay_gt2m">mer enn to minutt</label>
+                                <label class="form-check-label" for="delay_gt2m" data-translate="delay_gt2m">mer enn to minutt</label>
                             </div>
                         </div>
                     </div>
                     <div class="mb-3">
-                        <label for="more_info" class="form-label"><strong>Fortell gjerne mer om observasjonen:</strong></label>
+                        <label for="more_info" class="form-label"><strong data-translate="more_info_label">Fortell gjerne mer om observasjonen:</strong></label>
                         <textarea class="form-control" id="more_info" name="more_info" rows="4"></textarea>
                     </div>
                 </div>
             </div>
 
-            <div class="card" id="step-5">
+            <div class="card step-card" id="step-5">
                 <div class="card-header">
-                    <h5><strong>Steg 5: Kontaktinformasjon (frivillig)</strong></h5>
+                    <div class="step-header-bar">
+                      <h5 class="mb-0"><strong data-translate="step5_title">Steg 5: Kontaktinformasjon (frivillig)</strong></h5>
+                      <div class="step-header-actions">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="prev" data-step="5" data-translate="step_nav_prev">Forrige</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="next" data-step="5" data-translate="step_nav_next">Neste</button>
+                      </div>
+                    </div>
                 </div>
                 <div class="card-body">
                     <div class="mb-3">
-                        <label for="contact_name" class="form-label"><strong>Navn:</strong></label>
+                        <label for="contact_name" class="form-label"><strong data-translate="name_label">Navn:</strong></label>
                         <input type="text" class="form-control" id="contact_name" name="contact_name">
                     </div>
                     <div class="mb-3">
-                        <label for="contact_phone" class="form-label"><strong>Telefonnummer:</strong></label>
+                        <label for="contact_phone" class="form-label"><strong data-translate="phone_label">Telefonnummer:</strong></label>
                         <input type="tel" class="form-control" id="contact_phone" name="contact_phone" pattern="[+0-9\s]+">
-                        <div class="invalid-feedback">Vennligst oppgi et gyldig telefonnummer (kun tall, +, og mellomrom).</div>
+                        <div class="invalid-feedback" data-translate="invalid_phone">Vennligst oppgi et gyldig telefonnummer (kun tall, +, og mellomrom).</div>
                     </div>
                     <div class="mb-3">
-                        <label for="contact_email" class="form-label"><strong>E-post:</strong></label>
+                        <label for="contact_email" class="form-label"><strong data-translate="email_label">E-post:</strong></label>
                         <input type="email" class="form-control" id="contact_email" name="contact_email">
-                        <div class="invalid-feedback">Vennligst oppgi en gyldig e-postadresse.</div>
-                    </div>
                 </div>
+              </div>
             </div>
 
-            <div class="card" id="step-6">
-                <div class="card-header">
-                    <h5><strong>Steg 6: Last opp bilder eller videoer</strong></h5>
-                </div>
+                <div class="card step-card" id="step-6">
+                  <div class="card-header">
+                    <div class="step-header-bar">
+                      <h5 class="mb-0"><strong data-translate="step6_title">Steg 6: Last opp bilder eller videoer</strong></h5>
+                      <div class="step-header-actions">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="prev" data-step="6" data-translate="step_nav_prev">Forrige</button>
+                      </div>
+                    </div>
+                  </div>
                 <div class="card-body">
                     <div class="mb-3">
                         <input class="form-control" type="file" id="file-input-main" multiple accept="image/*,video/*">
-                        <small class="form-text text-muted">Velg éi eller flere filer. Maks 10 filer, 50 MB totalt.</small>
+                        <small class="form-text text-muted" data-translate="file_upload_info">Velg éi eller flere filer. Maks 10 filer, 50 MB totalt.</small>
                     </div>
                     <div id="file-list" class="list-group"></div>
-                    <div id="file-limit-error" class="text-danger mt-2" style="display: none;">
+                    <div id="file-limit-error" class="text-danger mt-2" style="display: none;" data-translate="file_limit_error">
                         Du kan maksimalt laste opp 10 filer.
                     </div>
-                    <div id="file-size-error" class="text-danger mt-2" style="display: none;">
+                    <div id="file-size-error" class="text-danger mt-2" style="display: none;" data-translate="file_size_error">
                         Total filstørrelse overstiger 50 MB. Vennligst fjern en fil for å fortsette.
                     </div>
                 </div>
@@ -586,48 +714,95 @@
 
             <div id="form-error" class="alert alert-danger mt-3" role="alert" style="display: none;"></div>
             <div class="d-grid mt-4">
-              <button type="button" class="btn btn-primary btn-lg" id="submit-btn">Send rapport</button>
+              <button type="button" class="btn btn-primary btn-lg" id="submit-btn" data-translate="submit_btn" disabled>Send rapport</button>
             </div>
           </form>
 
+          <div class="modal fade" id="timePickerModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content">
+                <div class="modal-header">
+                  <h5 class="modal-title" data-translate="time_picker_title">Velg klokkeslett</h5>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                  <div class="row g-2">
+                    <div class="col-4">
+                      <label class="form-label" data-translate="hour_option">Time</label>
+                      <select class="form-select" id="desktop_hour" size="10" style="height: 12rem;"></select>
+                    </div>
+                    <div class="col-4">
+                      <label class="form-label" data-translate="minute_option">Minutt</label>
+                      <select class="form-select" id="desktop_minute" size="10" style="height: 12rem;"></select>
+                    </div>
+                    <div class="col-4">
+                      <label class="form-label" data-translate="second_option">Sek</label>
+                      <select class="form-select" id="desktop_second" size="10" style="height: 12rem;"></select>
+                    </div>
+                  </div>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" data-translate="cancel_button">Avbryt</button>
+                  <button type="button" class="btn btn-primary" id="timePickerOkBtn" data-translate="ok_button">OK</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="card mt-5" id="sjekkliste">
             <div class="card-header">
-                <h5><strong>Sjekkliste</strong></h5>
+                <h5><strong data-translate="checklist_title">Sjekkliste</strong></h5>
             </div>
             <div class="card-body">
-                <p>Følgende sjekkliste kan være nyttig for å vurdere om du har sett ei ildkule (kraftig meteor). Er ikke disse tingene oppfylt, har du antakelig sett noe annet (fyrverkeri, nødbluss, kinesisk lykt, satellitt, fly, ordinært stjerneskudd, osv).</p>
-                <ul>
-                    <li> <i>Beveger seg raskt over himmelen, langt raskere enn et fly.</i></li>
-                    <li> <i>Beveger seg i rett linje, svinger ikke, snur ikke.</i></li>
-                    <li> <i>Lyser kraftigere enn noen stjerne eller planet på himmelen.</i></li>
-                    <li> <i>Er ikke synlig foran terreng/trær/tett skydekke.</i></li>
-                    <li> <i>Er synlig i mindre enn et halvminutt, oftest 1 - 10 sekund.</i></li>
-                </ul>
-                <p>Andre observasjoner kan være av interesse, også om du ikke så noen ildkule direkte:</p>
-                <ul>
-                    <li> <i>Plutselig opplysning av terrenget (så skygger kommer til syne om det er klarvær).</i></li>
-                    <li> <i>Lysende stripe eller flekk på himmelen som gradvis blir svakere.</i></li>
-                    <li> <i>Drønn eller smell som ikke kan tilskrives torden eller menneskelig aktivitet.</i></li>
-                </ul>
-                <p>Merk: Mens torden følger få sekund etter et lyn, vil det vanligvis gå minst et minutt før et drønn kan høres etter ei ildkule.</p>
+                <p data-translate="checklist_intro">Følgende sjekkliste kan være nyttig for å vurdere om du har sett ei ildkule (kraftig meteor). Er ikke disse tingene oppfylt, har du antakelig sett noe annet (fyrverkeri, nødbluss, kinesisk lykt, satellitt, fly, ordinært stjerneskudd, osv).</p>
+
+                <div class="row g-4 align-items-start">
+                  <div class="col-12 col-lg-8">
+                    <ul>
+                        <li data-translate="checklist1"><i>Beveger seg raskt over himmelen, langt raskere enn et fly.</i></li>
+                        <li data-translate="checklist2"><i>Beveger seg i rett linje, svinger ikke, snur ikke.</i></li>
+                        <li data-translate="checklist3"><i>Lyser kraftigere enn noen stjerne eller planet på himmelen.</i></li>
+                        <li data-translate="checklist4"><i>Er ikke synlig foran terreng/trær/tett skydekke.</i></li>
+                        <li data-translate="checklist5"><i>Er synlig i mindre enn et halvminutt, oftest 1 - 10 sekund.</i></li>
+                    </ul>
+                    <p data-translate="checklist_other_intro">Andre observasjoner kan være av interesse, også om du ikke så noen ildkule direkte:</p>
+                    <ul>
+                        <li data-translate="checklist_other1"><i>Plutselig opplysning av terrenget (så skygger kommer til syne om det er klarvær).</i></li>
+                        <li data-translate="checklist_other2"><i>Lysende stripe eller flekk på himmelen som gradvis blir svakere.</i></li>
+                        <li data-translate="checklist_other3"><i>Drønn eller smell som ikke kan tilskrives torden eller menneskelig aktivitet.</i></li>
+                    </ul>
+                    <p data-translate="checklist_note">Merk: Mens torden følger få sekund etter et lyn, vil det vanligvis gå minst et minutt før et drønn kan høres etter ei ildkule.</p>
+                  </div>
+                  <div class="col-12 col-lg-4">
+                    <figure class="checklist-illustration">
+                      <img src="flystripe.jpg" class="img-fluid" alt="Kondensstripe fra fly i solnedgang">
+                      <figcaption class="mt-2 text-muted small">
+                        <span data-translate="checklist_flystripe_caption">Dette er IKKE en meteor, men en kondensstripe fra et fly i solnedgang.</span>
+                      </figcaption>
+                    </figure>
+                  </div>
+                </div>
             </div>
           </div>
 
         </div>
 
-        <footer class="text-center text-muted py-4">Norsk meteornettverk</footer>
+        <footer class="text-center text-muted py-4" data-translate="footer">Norsk meteornettverk</footer>
     </div>
     <div id="submission-overlay">
         <div class="spinner-border text-light" role="status">
-          <span class="visually-hidden">Loading...</span>
+          <span class="visually-hidden" data-translate="loading">Loading...</span>
         </div>
-        <span class="ms-3">Sender rapport...</span>
+        <span class="ms-3" data-translate="sending_report">Sender rapport...</span>
     </div>
 
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
       // /js/leaflet.js
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/js/tz-lookup.js"></script>
+    <script src="/js/luxon.min.js"></script>
     <script src="/js/astronomy.browser.min.js">
       // https://cdn.jsdelivr.net/npm/astronomy-engine@2.1.19/astronomy.browser.min.js
     </script> 
@@ -638,11 +813,739 @@
     </script>
 
     <script>
+        // --- TRANSLATION LOGIC ---
+
+        const translations = {
+            "nb_NO": {
+                "page_title": "Meld fra om meteor",
+                "nmn": "Norsk meteornettverk",
+                "main_title": "Meld fra om en meteor",
+                "main_subtitle": "Følg stega under for å gi en nøyaktig rapport.",
+                "step0_title": "Steg 0: Endre språk",
+                "step0_desc": "Endre språk:",
+                "step_nav_prev": "Forrige",
+                "step_nav_next": "Neste",
+                "step1_title": "Steg 1: Tidspunkt for observasjon (lokal tid)",
+                "date_label": "Dato",
+                "date_placeholder": "dd.mm.åååå",
+                "today_button": "I dag",
+                "yesterday_button": "I går",
+                "time_label": "Klokkeslett",
+                "hour_option": "Time",
+                "minute_option": "Minutt",
+                "second_option": "Sek",
+                "time_picker_title": "Velg klokkeslett",
+                "ok_button": "OK",
+                "cancel_button": "Avbryt",
+                "time_accuracy_label": "Hvor sikker er du på tidspunktet?",
+                "acc_unknown": "Veit ikke",
+                "acc_pm1": "±1 minutt",
+                "acc_pm5": "±5 minutt",
+                "acc_pm15": "±15 minutt",
+                "acc_pm30": "±30 minutt",
+                "acc_gt30": "mer enn 30 minutts usikkerhet",
+                "step2_title": "Steg 2: Hvor var du da du så meteoren?",
+                "step2_desc": "Plasser en markør på kartet som viser nøyaktig hvor du stod. Du kan zoome og panorere.",
+                "use_my_location_btn": "Bruk posisjonen min",
+                "use_my_location_loading": "Henter posisjon…",
+                "use_my_location_not_supported": "Nettleseren støtter ikke posisjonering.",
+                "use_my_location_denied": "Du må tillate posisjonering i nettleseren.",
+                "use_my_location_failed": "Klarte ikke å hente posisjonen.",
+                "latitude_label": "Breddegrad",
+                "longitude_label": "Lengdegrad",
+                "step3_title": "Steg 3: Vis meteorens bane over himmelen",
+                "step3_desc": "Plasser et start- og sluttpunkt for meteoren. Du kan zoome og panorere. Kontroller retningene i kartet over. På en mobiltelefon kan det hjelpe å vende den 90°.",
+                "start_point_label": "Startpunkt",
+                "end_point_label": "Sluttpunkt",
+                "direction_label": "Retning",
+                "altitude_label": "Høgde",
+                "compass_n": "N",
+                "compass_e": "Ø",
+                "compass_s": "S",
+                "compass_w": "V",
+                "sky_start_label": "Start",
+                "sky_end_label": "Slutt",
+                "step4_title": "Steg 4: Andre opplysninger",
+                "color_label": "Dominerende farge:",
+                "color_unknown": "Usikker",
+                "color_white": "hvit",
+                "color_green": "grønn",
+                "color_blue": "blå",
+                "color_yellow": "gul",
+                "color_orange": "oransje",
+                "color_red": "rød",
+                "color_other": "annen",
+                "brightness_label": "Største lysstyrke:",
+                "bright_unknown": "Usikker",
+                "bright_stars": "som de klareste stjernene",
+                "bright_brighter": "litt sterkere enn stjernene",
+                "bright_muchbrighter": "mye sterkere enn stjernene men terrenget lyste ikke opp",
+                "bright_lit": "terrenget lyste opp",
+                "bright_daylight": "nesten som daglys",
+                "bright_fulldaylight": "fullt daglys",
+                "duration_label": "Hvor lenge var meteoren synlig:",
+                "dur_unknown": "Usikker",
+                "dur_lt2": "under 2 sekund",
+                "dur_2_4": "2 - 4 sekund",
+                "dur_4_8": "4 - 8 sekund",
+                "dur_8_16": "8 - 16 sekund",
+                "dur_gt16": "mer enn 16 sekund",
+                "other_label": "Annet",
+                "other_afterglow": "etterglød",
+                "other_smoke": "røykspor",
+                "other_fragmentation": "oppsplitting",
+                "other_explosion": "eksplosjon",
+                "other_sound": "lyd/drønn",
+                "sound_delay_label": "Hvor lang tid gikk det fra du så meteoren til du hørte noe?",
+                "delay_unknown": "Usikker",
+                "delay_lt30s": "mindre enn 30 sekund",
+                "delay_30s_1m": "30 sekund til ett minutt",
+                "delay_1m_1.5m": "ett minutt til halvannet minutt",
+                "delay_1.5m_2m": "halvannet minutt til to minutt",
+                "delay_gt2m": "mer enn to minutt",
+                "more_info_label": "Fortell gjerne mer om observasjonen:",
+                "step5_title": "Steg 5: Kontaktinformasjon (frivillig)",
+                "name_label": "Navn:",
+                "phone_label": "Telefonnummer:",
+                "email_label": "E-post:",
+                "invalid_phone": "Vennligst oppgi et gyldig telefonnummer (kun tall, +, og mellomrom).",
+                "invalid_email": "Vennligst oppgi en gyldig e-postadresse.",
+                "step6_title": "Steg 6: Last opp bilder eller videoer",
+                "file_upload_info": "Velg éi eller flere filer. Maks 10 filer, 50 MB totalt.",
+                "file_limit_error": "Du kan maksimalt laste opp 10 filer.",
+                "file_size_error": "Total filstørrelse overstiger 50 MB. Vennligst fjern en fil for å fortsette.",
+                "remove_file_label": "Fjern",
+                "submit_btn": "Send rapport",
+                "checklist_title": "Sjekkliste",
+                "checklist_intro": "Følgende sjekkliste kan være nyttig for å vurdere om du har sett ei ildkule (kraftig meteor). Er ikke disse tingene oppfylt, har du antakelig sett noe annet (fyrverkeri, nødbluss, kinesisk lykt, satellitt, fly, ordinært stjerneskudd, osv).",
+                "checklist1": "<i>Beveger seg raskt over himmelen, langt raskere enn et fly.</i>",
+                "checklist2": "<i>Beveger seg i rett linje, svinger ikke, snur ikke.</i>",
+                "checklist3": "<i>Lyser kraftigere enn noen stjerne eller planet på himmelen.</i>",
+                "checklist4": "<i>Er ikke synlig foran terreng/trær/tett skydekke.</i>",
+                "checklist5": "<i>Er synlig i mindre enn et halvminutt, oftest 1 - 10 sekund.</i>",
+                "checklist_other_intro": "Andre observasjoner kan være av interesse, også om du ikke så noen ildkule direkte:",
+                "checklist_other1": "<i>Plutselig opplysning av terrenget (så skygger kommer til syne om det er klarvær).</i>",
+                "checklist_other2": "<i>Lysende stripe eller flekk på himmelen som gradvis blir svakere.</i>",
+                "checklist_other3": "<i>Drønn eller smell som ikke kan tilskrives torden eller menneskelig aktivitet.</i>",
+                "checklist_flystripe_caption": "Dette er IKKE en meteor, men en kondensstripe fra et fly i solnedgang.",
+                "checklist_note": "Merk: Mens torden følger få sekund etter et lyn, vil det vanligvis gå minst et minutt før et drønn kan høres etter ei ildkule.",
+                "footer": "Norsk meteornettverk",
+                "loading": "Laster...",
+                "sending_report": "Sender rapport...",
+                "time_error_future": "Tidspunktet kan ikke være i framtida.",
+                "time_display_prefix": "Observasjonstid:",
+                "time_display_conjunction": "kl.",
+                "month_names": ["januar","februar","mars","april","mai","juni","juli","august","september","oktober","november","desember"],
+                "celestial_Sun": "Sola",
+                "celestial_Moon": "Månen",
+                "celestial_Venus": "Venus",
+                "celestial_Mars": "Mars",
+                "celestial_Jupiter": "Jupiter",
+                "celestial_Saturn": "Saturn",
+                "form_error_incomplete": "Vennligst fullfør steg 1, 2 og 3 før du sender inn rapporten.",
+                "submission_failed_alert": "Beklager, det skjedde en feil under innsending. Vennligst sjekk nettverkstilkoplinga og prøv igjen."
+            },
+            "en_GB": {
+                "page_title": "Report a Meteor",
+                "nmn": "Norwegian Meteor Network",
+                "main_title": "Report a Meteor",
+                "main_subtitle": "Follow the steps below to provide an accurate report.",
+                "step0_title": "Step 0: Change language",
+                "step0_desc": "Change language:",
+                "step_nav_prev": "Previous",
+                "step_nav_next": "Next",
+                "step1_title": "Step 1: Time of observation (local time)",
+                "date_label": "Date",
+                "date_placeholder": "dd/mm/yyyy",
+                "today_button": "Today",
+                "yesterday_button": "Yesterday",
+                "time_label": "Time",
+                "hour_option": "Hour",
+                "minute_option": "Minute",
+                "second_option": "Sec",
+                "time_picker_title": "Select time",
+                "ok_button": "OK",
+                "cancel_button": "Cancel",
+                "time_accuracy_label": "How sure are you about the time?",
+                "acc_unknown": "Unsure",
+                "acc_pm1": "±1 minute",
+                "acc_pm5": "±5 minutes",
+                "acc_pm15": "±15 minutes",
+                "acc_pm30": "±30 minutes",
+                "acc_gt30": "more than 30 minutes of uncertainty",
+                "step2_title": "Step 2: Where were you when you saw the meteor?",
+                "step2_desc": "Place a marker on the map showing exactly where you were standing. You can zoom and pan.",
+                "use_my_location_btn": "Use my location",
+                "use_my_location_loading": "Getting location…",
+                "use_my_location_not_supported": "Your browser doesn’t support location services.",
+                "use_my_location_denied": "Please allow location access in your browser.",
+                "use_my_location_failed": "Couldn’t get your location.",
+                "latitude_label": "Latitude",
+                "longitude_label": "Longitude",
+                "step3_title": "Step 3: Show the meteor's path across the sky",
+                "step3_desc": "Place a start and end point for the meteor. You can zoom and pan. Check the directions in the compass above. On a mobile phone, turning it 90° might help.",
+                "start_point_label": "Start Point",
+                "end_point_label": "End Point",
+                "direction_label": "Direction",
+                "altitude_label": "Altitude",
+                "compass_n": "N",
+                "compass_e": "E",
+                "compass_s": "S",
+                "compass_w": "W",
+                "sky_start_label": "Start",
+                "sky_end_label": "End",
+                "step4_title": "Step 4: Other information",
+                "color_label": "Dominant color:",
+                "color_unknown": "Unsure",
+                "color_white": "white",
+                "color_green": "green",
+                "color_blue": "blue",
+                "color_yellow": "yellow",
+                "color_orange": "orange",
+                "color_red": "red",
+                "color_other": "other",
+                "brightness_label": "Peak brightness:",
+                "bright_unknown": "Unsure",
+                "bright_stars": "like the brightest stars",
+                "bright_brighter": "slightly brighter than the stars",
+                "bright_muchbrighter": "much brighter than stars, but dud bit light up the landscape",
+                "bright_lit": "the landscape was lit up",
+                "bright_daylight": "almost like daylight",
+                "bright_fulldaylight": "full daylight",
+                "duration_label": "How long was the meteor visible:",
+                "dur_unknown": "Unsure",
+                "dur_lt2": "less than 2 seconds",
+                "dur_2_4": "2 - 4 seconds",
+                "dur_4_8": "4 - 8 seconds",
+                "dur_8_16": "8 - 16 seconds",
+                "dur_gt16": "more than 16 seconds",
+                "other_label": "Other phenomena",
+                "other_afterglow": "afterglow",
+                "other_smoke": "smoke trail",
+                "other_fragmentation": "fragmentation",
+                "other_explosion": "explosion",
+                "other_sound": "sound/boom",
+                "sound_delay_label": "How long after seeing the meteor did you hear something?",
+                "delay_unknown": "Unsure",
+                "delay_lt30s": "less than 30 seconds",
+                "delay_30s_1m": "30 seconds to one minute",
+                "delay_1m_1.5m": "one to one and a half minutes",
+                "delay_1.5m_2m": "one and a half to two minutes",
+                "delay_gt2m": "more than two minutes",
+                "more_info_label": "Please provide more details about the observation:",
+                "step5_title": "Step 5: Contact information (optional)",
+                "name_label": "Name:",
+                "phone_label": "Phone number:",
+                "email_label": "E-mail:",
+                "invalid_phone": "Please provide a valid phone number (only numbers, +, and spaces).",
+                "invalid_email": "Please provide a valid e-mail address.",
+                "step6_title": "Step 6: Upload images or videos",
+                "file_upload_info": "Select one or more files. Max 10 files, 50 MB total.",
+                "file_limit_error": "You can upload a maximum of 10 files.",
+                "file_size_error": "Total file size exceeds 50 MB. Please remove a file to continue.",
+                "remove_file_label": "Remove",
+                "submit_btn": "Submit Report",
+                "checklist_title": "Checklist",
+                "checklist_intro": "The following checklist can be useful to determine if you have seen a fireball (a bright meteor). If these conditions are not met, you have likely seen something else (fireworks, flare, sky lantern, satellite, aircraft, ordinary shooting star, etc.).",
+                "checklist1": "<i>Moves quickly across the sky, much faster than an aircraft.</i>",
+                "checklist2": "<i>Moves in a straight line, does not turn or reverse.</i>",
+                "checklist3": "<i>Shines brighter than any star or planet in the sky.</i>",
+                "checklist4": "<i>Is not visible in front of terrain/trees/dense cloud cover.</i>",
+                "checklist5": "<i>Is visible for less than half a minute, usually 1 - 10 seconds.</i>",
+                "checklist_other_intro": "Other observations may be of interest, even if you did not see a fireball directly:",
+                "checklist_other1": "<i>Sudden illumination of the landscape (so that shadows appear if the sky is clear).</i>",
+                "checklist_other2": "<i>A glowing streak or patch in the sky that gradually fades.</i>",
+                "checklist_other3": "<i>A boom or bang that cannot be attributed to thunder or human activity.</i>",
+                "checklist_flystripe_caption": "This is NOT a meteor, but a plane contrail at sunset.",
+                "checklist_note": "Note: While thunder follows a few seconds after lightning, it will usually take at least a minute before a boom can be heard after a fireball.",
+                "footer": "Norwegian Meteor Network",
+                "loading": "Loading...",
+                "sending_report": "Sending report...",
+                "time_error_future": "The time cannot be in the future.",
+                "time_display_prefix": "Observation time:",
+                "time_display_conjunction": "at",
+                "month_names": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+                "celestial_Sun": "Sun",
+                "celestial_Moon": "Moon",
+                "celestial_Venus": "Venus",
+                "celestial_Mars": "Mars",
+                "celestial_Jupiter": "Jupiter",
+                "celestial_Saturn": "Saturn",
+                "form_error_incomplete": "Please complete steps 1, 2, and 3 before submitting the report.",
+                "submission_failed_alert": "Sorry, an error occurred during submission. Please check your network connection and try again."
+            },
+            "de_DE": {
+                "page_title": "Meteor melden",
+                "nmn": "Norwegisches Meteoren-Netzwerk",
+                "main_title": "Einen Meteor melden",
+                "main_subtitle": "Folgen Sie den unteren Schritten, um eine genaue Meldung zu erstellen.",
+                "step0_title": "Schritt 0: Sprache ändern",
+                "step0_desc": "Sprache ändern:",
+                "step_nav_prev": "Zurück",
+                "step_nav_next": "Weiter",
+                "step1_title": "Schritt 1: Zeitpunkt der Beobachtung (Ortszeit)",
+                "date_label": "Datum",
+                "date_placeholder": "tt.mm.jjjj",
+                "today_button": "Heute",
+                "yesterday_button": "Gestern",
+                "time_label": "Uhrzeit",
+                "hour_option": "Stunde",
+                "minute_option": "Minute",
+                "second_option": "Sek",
+                "time_picker_title": "Uhrzeit wählen",
+                "ok_button": "OK",
+                "cancel_button": "Abbrechen",
+                "time_accuracy_label": "Wie sicher sind Sie sich bei der Zeit?",
+                "acc_unknown": "Unsicher",
+                "acc_pm1": "±1 Minute",
+                "acc_pm5": "±5 Minuten",
+                "acc_pm15": "±15 Minuten",
+                "acc_pm30": "±30 Minuten",
+                "acc_gt30": "mehr als 30 Minuten Unsicherheit",
+                "step2_title": "Schritt 2: Wo waren Sie, als Sie den Meteor sahen?",
+                "step2_desc": "Setzen Sie eine Markierung auf die Karte, die genau zeigt, wo Sie standen. Sie können zoomen und schwenken.",
+                "use_my_location_btn": "Meinen Standort verwenden",
+                "use_my_location_loading": "Standort wird ermittelt…",
+                "use_my_location_not_supported": "Ihr Browser unterstützt keine Standortbestimmung.",
+                "use_my_location_denied": "Bitte erlauben Sie den Standortzugriff im Browser.",
+                "use_my_location_failed": "Der Standort konnte nicht ermittelt werden.",
+                "latitude_label": "Breitengrad",
+                "longitude_label": "Längengrad",
+                "step3_title": "Schritt 3: Zeigen Sie die Bahn des Meteors am Himmel",
+                "step3_desc": "Setzen Sie einen Start- und Endpunkt für den Meteor. Sie können zoomen und schwenken. Überprüfen Sie die Himmelsrichtungen im Kompass oben. Auf einem Mobiltelefon kann es helfen, es um 90° zu drehen.",
+                "start_point_label": "Startpunkt",
+                "end_point_label": "Endpunkt",
+                "direction_label": "Richtung",
+                "altitude_label": "Höhe",
+                "compass_n": "N",
+                "compass_e": "O",
+                "compass_s": "S",
+                "compass_w": "W",
+                "sky_start_label": "Start",
+                "sky_end_label": "Ende",
+                "step4_title": "Schritt 4: Weitere Informationen",
+                "color_label": "Dominante Farbe:",
+                "color_unknown": "Unsicher",
+                "color_white": "weiß",
+                "color_green": "grün",
+                "color_blue": "blau",
+                "color_yellow": "gelb",
+                "color_orange": "orange",
+                "color_red": "rot",
+                "color_other": "andere",
+                "brightness_label": "Maximale Helligkeit:",
+                "bright_unknown": "Unsicher",
+                "bright_stars": "wie die hellsten Sterne",
+                "bright_brighter": "etwas heller als die Sterne",
+                "bright_muchbrighter": "viel heller als Sterne, hat aber die Landschaft nicht erhellt",
+                "bright_lit": "die Landschaft wurde erhellt",
+                "bright_daylight": "fast wie Tageslicht",
+                "bright_fulldaylight": "volles Tageslicht",
+                "duration_label": "Sichtbarkeitsdauer des Meteors:",
+                "dur_unknown": "Unsicher",
+                "dur_lt2": "weniger als 2 Sekunden",
+                "dur_2_4": "2 - 4 Sekunden",
+                "dur_4_8": "4 - 8 Sekunden",
+                "dur_8_16": "8 - 16 Sekunden",
+                "dur_gt16": "mehr als 16 Sekunden",
+                "other_label": "Weitere Phänomene",
+                "other_afterglow": "Nachglühen",
+                "other_smoke": "Rauchspur",
+                "other_fragmentation": "Fragmentierung",
+                "other_explosion": "Explosion",
+                "other_sound": "Geräusch/Knall",
+                "sound_delay_label": "Wie lange, nachdem Sie den Meteor gesehen haben, haben Sie etwas gehört?",
+                "delay_unknown": "Unsicher",
+                "delay_lt30s": "weniger als 30 Sekunden",
+                "delay_30s_1m": "30 Sekunden bis eine Minute",
+                "delay_1m_1.5m": "eine bis anderthalb Minuten",
+                "delay_1.5m_2m": "anderthalb bis zwei Minuten",
+                "delay_gt2m": "mehr als zwei Minuten",
+                "more_info_label": "Bitte geben Sie weitere Details zur Beobachtung an:",
+                "step5_title": "Schritt 5: Kontaktinformationen (optional)",
+                "name_label": "Name:",
+                "phone_label": "Telefonnummer:",
+                "email_label": "E-Mail:",
+                "invalid_phone": "Bitte geben Sie eine gültige Telefonnummer an (nur Zahlen, +, und Leerzeichen).",
+                "invalid_email": "Bitte geben Sie eine gültige E-Mail-Adresse an.",
+                "step6_title": "Schritt 6: Bilder oder Videos hochladen",
+                "file_upload_info": "Wählen Sie eine oder mehrere Dateien aus. Max. 10 Dateien, 50 MB insgesamt.",
+                "file_limit_error": "Sie können maximal 10 Dateien hochladen.",
+                "file_size_error": "Die Gesamtdateigröße überschreitet 50 MB. Bitte entfernen Sie eine Datei, um fortzufahren.",
+                "remove_file_label": "Entfernen",
+                "submit_btn": "Bericht senden",
+                "checklist_title": "Checkliste",
+                "checklist_intro": "Die folgende Checkliste kann nützlich sein, um festzustellen, ob Sie einen Feuerball (einen hellen Meteor) gesehen haben. Wenn diese Bedingungen nicht erfüllt sind, haben Sie höchstwahrscheinlich etwas anderes gesehen (Feuerwerk, Leuchtsignal, Himmelslaterne, Satellit, Flugzeug, gewöhnliche Sternschnuppe usw.).",
+                "checklist1": "<i>Bewegt sich schnell über den Himmel, viel schneller als ein Flugzeug.</i>",
+                "checklist2": "<i>Bewegt sich in einer geraden Linie, dreht nicht und kehrt nicht um.</i>",
+                "checklist3": "<i>Leuchtet heller als jeder Stern oder Planet am Himmel.</i>",
+                "checklist4": "<i>Ist nicht vor Gelände/Bäumen/dichter Wolkendecke sichtbar.</i>",
+                "checklist5": "<i>Ist für weniger als eine halbe Minute sichtbar, normalerweise 1 - 10 Sekunden.</i>",
+                "checklist_other_intro": "Andere Beobachtungen können von Interesse sein, auch wenn Sie keinen Feuerball direkt gesehen haben:",
+                "checklist_other1": "<i>Plötzliche Erleuchtung der Landschaft (sodass bei klarem Himmel Schatten erscheinen).</i>",
+                "checklist_other2": "<i>Ein leuchtender Streifen oder Fleck am Himmel, der allmählich verblasst.</i>",
+                "checklist_other3": "<i>Ein Knall, der nicht auf Donner oder menschliche Aktivitäten zurückzuführen ist.</i>",
+                "checklist_flystripe_caption": "Das ist KEIN Meteor, sondern ein Kondensstreifen eines Flugzeugs bei Sonnenuntergang.",
+                "checklist_note": "Hinweis: Während Donner wenige Sekunden nach einem Blitz folgt, dauert es normalerweise mindestens eine Minute, bis nach einem Feuerball ein Knall zu hören ist.",
+                "footer": "Norwegisches Meteoren-Netzwerk",
+                "loading": "Lädt...",
+                "sending_report": "Bericht wird gesendet...",
+                "time_error_future": "Die Zeit kann nicht in der Zukunft liegen.",
+                "time_display_prefix": "Beobachtungszeit:",
+                "time_display_conjunction": "um",
+                "month_names": ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"],
+                "celestial_Sun": "Sonne",
+                "celestial_Moon": "Mond",
+                "celestial_Venus": "Venus",
+                "celestial_Mars": "Mars",
+                "celestial_Jupiter": "Jupiter",
+                "celestial_Saturn": "Saturn",
+                "form_error_incomplete": "Bitte füllen Sie die Schritte 1, 2 und 3 aus, bevor Sie den Bericht absenden.",
+                "submission_failed_alert": "Leider ist beim Senden ein Fehler aufgetreten. Bitte überprüfen Sie Ihre Netzwerkverbindung und versuchen Sie es erneut."
+            },
+            "cs_CZ": {
+                "page_title": "Nahlásit meteor",
+                "nmn": "Norská meteorická síť",
+                "main_title": "Nahlásit meteor",
+                "main_subtitle": "Postupujte podle níže uvedených kroků a poskytněte přesnou zprávu.",
+                "step0_title": "Krok 0: Změnit jazyk",
+                "step0_desc": "Změnit jazyk:",
+                "step_nav_prev": "Předchozí",
+                "step_nav_next": "Další",
+                "step1_title": "Krok 1: Čas pozorování (místní čas)",
+                "date_label": "Datum",
+                "date_placeholder": "dd.mm.rrrr",
+                "today_button": "Dnes",
+                "yesterday_button": "Včera",
+                "time_label": "Čas",
+                "hour_option": "Hodina",
+                "minute_option": "Minuta",
+                "second_option": "Sek",
+                "time_picker_title": "Vybrat čas",
+                "ok_button": "OK",
+                "cancel_button": "Zrušit",
+                "time_accuracy_label": "Jak jste si jisti časem?",
+                "acc_unknown": "Nevím",
+                "acc_pm1": "±1 minuta",
+                "acc_pm5": "±5 minut",
+                "acc_pm15": "±15 minut",
+                "acc_pm30": "±30 minut",
+                "acc_gt30": "více než 30 minut nejistoty",
+                "step2_title": "Krok 2: Kde jste byli, když jste viděli meteor?",
+                "step2_desc": "Umístěte na mapu značku, která přesně ukazuje, kde jste stáli. Můžete přibližovat a posouvat.",
+                "use_my_location_btn": "Použít moji polohu",
+                "use_my_location_loading": "Zjišťuji polohu…",
+                "use_my_location_not_supported": "Váš prohlížeč nepodporuje zjišťování polohy.",
+                "use_my_location_denied": "V prohlížeči musíte povolit přístup k poloze.",
+                "use_my_location_failed": "Nepodařilo se zjistit polohu.",
+                "latitude_label": "Zeměpisná šířka",
+                "longitude_label": "Zeměpisná délka",
+                "step3_title": "Krok 3: Ukažte dráhu meteoru po obloze",
+                "step3_desc": "Umístěte počáteční a koncový bod meteoru. Můžete přibližovat a posouvat. Zkontrolujte směry v kompasu výše. Na mobilním telefonu může pomoci otočit jej o 90°.",
+                "start_point_label": "Počáteční bod",
+                "end_point_label": "Koncový bod",
+                "direction_label": "Směr",
+                "altitude_label": "Výška",
+                "compass_n": "S",
+                "compass_e": "V",
+                "compass_s": "J",
+                "compass_w": "Z",
+                "sky_start_label": "Start",
+                "sky_end_label": "Konec",
+                "step4_title": "Krok 4: Další informace",
+                "color_label": "Dominantní barva:",
+                "color_unknown": "Nejistá",
+                "color_white": "bílá",
+                "color_green": "zelená",
+                "color_blue": "modrá",
+                "color_yellow": "žlutá",
+                "color_orange": "oranžová",
+                "color_red": "červená",
+                "color_other": "jiná",
+                "brightness_label": "Maximální jas:",
+                "bright_unknown": "Nevím",
+                "bright_stars": "jako nejjasnější hvězdy",
+                "bright_brighter": "o něco jasnější než hvězdy",
+                "bright_muchbrighter": "mnohem jasnější než hvězdy, ale krajinu neosvětlil",
+                "bright_lit": "krajina byla osvětlena",
+                "bright_daylight": "téměř jako denní světlo",
+                "bright_fulldaylight": "plné denní světlo",
+                "duration_label": "Doba viditelnosti meteoru:",
+                "dur_unknown": "Nejistá",
+                "dur_lt2": "méně než 2 sekundy",
+                "dur_2_4": "2 - 4 sekundy",
+                "dur_4_8": "4 - 8 sekund",
+                "dur_8_16": "8 - 16 sekund",
+                "dur_gt16": "více než 16 sekund",
+                "other_label": "Další jevy",
+                "other_afterglow": "dosvit",
+                "other_smoke": "kouřová stopa",
+                "other_fragmentation": "fragmentace",
+                "other_explosion": "exploze",
+                "other_sound": "zvuk/rána",
+                "sound_delay_label": "Jaká byla prodleva mezi spatřením meteoru a zvukem?",
+                "delay_unknown": "Nejistá",
+                "delay_lt30s": "méně než 30 sekund",
+                "delay_30s_1m": "30 sekund až jedna minuta",
+                "delay_1m_1.5m": "jedna až jedna a půl minuty",
+                "delay_1.5m_2m": "jedna a půl až dvě minuty",
+                "delay_gt2m": "více než dvě minuty",
+                "more_info_label": "Uveďte prosím další podrobnosti o pozorování:",
+                "step5_title": "Krok 5: Kontaktní údaje (nepovinné)",
+                "name_label": "Jméno:",
+                "phone_label": "Telefonní číslo:",
+                "email_label": "E-mail:",
+                "invalid_phone": "Zadejte platné telefonní číslo (pouze čísla, +, a mezery).",
+                "invalid_email": "Zadejte platnou e-mailovou adresu.",
+                "step6_title": "Krok 6: Nahrajte obrázky nebo videa",
+                "file_upload_info": "Vyberte jeden nebo více souborů. Max. 10 souborů, celkem 50 MB.",
+                "file_limit_error": "Můžete nahrát maximálně 10 souborů.",
+                "file_size_error": "Celková velikost souboru přesahuje 50 MB. Chcete-li pokračovat, odeberte soubor.",
+                "remove_file_label": "Odebrat",
+                "submit_btn": "Odeslat hlášení",
+                "checklist_title": "Kontrolní seznam",
+                "checklist_intro": "Následující kontrolní seznam může být užitečný k určení, zda jste viděli bolid (jasný meteor). Pokud tyto podmínky nejsou splněny, s největší pravděpodobností jste viděli něco jiného (ohňostroj, světlice, lampion, satelit, letadlo, běžná padající hvězda atd.).",
+                "checklist1": "<i>Pohybuje se rychle po obloze, mnohem rychleji než letadlo.</i>",
+                "checklist2": "<i>Pohybuje se v přímé linii, nezatáčí ani nemění směr.</i>",
+                "checklist3": "<i>Září jasněji než kterákoli hvězda nebo planeta na obloze.</i>",
+                "checklist4": "<i>Není viditelný před terénem/stromy/hustou oblačností.</i>",
+                "checklist5": "<i>Je viditelný méně než půl minuty, obvykle 1 - 10 sekund.</i>",
+                "checklist_other_intro": "Další pozorování mohou být zajímavá, i když jste bolid přímo neviděli:",
+                "checklist_other1": "<i>Náhlé osvětlení krajiny (takže se objeví stíny, pokud je jasno).</i>",
+                "checklist_other2": "<i>Zářící pruh nebo skvrna na obloze, která postupně slábne.</i>",
+                "checklist_other3": "<i>Rána nebo třesk, který nelze připsat hromu nebo lidské činnosti.</i>",
+                "checklist_flystripe_caption": "Tohle NENÍ meteor, ale kondenzační stopa letadla při západu slunce.",
+                "checklist_note": "Poznámka: Zatímco hrom následuje několik sekund po blesku, obvykle trvá nejméně minutu, než je po bolidu slyšet rána.",
+                "footer": "Norská meteorická síť",
+                "loading": "Načítání...",
+                "sending_report": "Odesílání hlášení...",
+                "time_error_future": "Čas nemůže být v budoucnosti.",
+                "time_display_prefix": "Čas pozorování:",
+                "time_display_conjunction": "v",
+                "month_names": ["leden", "únor", "březen", "duben", "květen", "červen", "červenec", "srpen", "září", "říjen", "listopad", "prosinec"],
+                "celestial_Sun": "Slunce",
+                "celestial_Moon": "Měsíc",
+                "celestial_Venus": "Venuše",
+                "celestial_Mars": "Mars",
+                "celestial_Jupiter": "Jupiter",
+                "celestial_Saturn": "Saturn",
+                "form_error_incomplete": "Před odesláním hlášení prosím dokončete kroky 1, 2 a 3.",
+                "submission_failed_alert": "Při odesílání došlo k chybě. Zkontrolujte prosím připojení k síti a zkuste to znovu."
+            },
+            "fi_FI": {
+                "page_title": "Ilmoita meteorihavainto",
+                "nmn": "Norjan meteoriverkosto",
+                "main_title": "Ilmoita meteorihavainto",
+                "main_subtitle": "Täytä alla olevat vaiheet antaaksesi tarkan ilmoituksen.",
+                "step0_title": "Vaihe 0: Vaihda kieli",
+                "step0_desc": "Vaihda kieli:",
+                "step_nav_prev": "Edellinen",
+                "step_nav_next": "Seuraava",
+                "step1_title": "Vaihe 1: Havaintoaika (Norjan aikaa)",
+                "date_label": "Päivämäärä",
+                "date_placeholder": "pp.kk.vvvv",
+                "today_button": "Tänään",
+                "yesterday_button": "Eilen",
+                "time_label": "Aika",
+                "hour_option": "Tunti",
+                "minute_option": "Minuutti",
+                "second_option": "Sek",
+                "time_picker_title": "Valitse aika",
+                "ok_button": "OK",
+                "cancel_button": "Peruuta",
+                "time_accuracy_label": "Kuinka varma olet ajankohdasta?",
+                "acc_unknown": "Epävarma",
+                "acc_pm1": "±1 minuutti",
+                "acc_pm5": "±5 minuuttia",
+                "acc_pm15": "±15 minuuttia",
+                "acc_pm30": "±30 minuuttia",
+                "acc_gt30": "yli 30 minuutin epävarmuus",
+                "step2_title": "Vaihe 2: Missä olit, kun näit meteorin?",
+                "step2_desc": "Aseta kartalle merkki, joka osoittaa tarkan sijaintisi. Voit zoomata ja panoroida karttaa.",
+                "use_my_location_btn": "Käytä sijaintiani",
+                "use_my_location_loading": "Haetaan sijaintia…",
+                "use_my_location_not_supported": "Selaimesi ei tue sijainnin määritystä.",
+                "use_my_location_denied": "Salli sijainnin käyttö selaimen asetuksista.",
+                "use_my_location_failed": "Sijaintia ei saatu haettua.",
+                "latitude_label": "Leveyspiiri",
+                "longitude_label": "Pituuspiiri",
+                "step3_title": "Vaihe 3: Näytä meteorin lentorata taivaalla",
+                "step3_desc": "Aseta meteorille alku- ja loppupiste. Voit zoomata ja panoroida. Tarkista suunnat yllä olevasta kompassista. Kännykällä voi auttaa laitteen kääntäminen 90 astetta.",
+                "start_point_label": "Alkupiste",
+                "end_point_label": "Loppupiste",
+                "direction_label": "Suunta",
+                "altitude_label": "Korkeus",
+                "compass_n": "P",
+                "compass_e": "I",
+                "compass_s": "E",
+                "compass_w": "L",
+                "sky_start_label": "Alku",
+                "sky_end_label": "Loppu",
+                "step4_title": "Vaihe 4: Muita tietoja",
+                "color_label": "Hallitseva väri:",
+                "color_unknown": "Epävarma",
+                "color_white": "valkoinen",
+                "color_green": "vihreä",
+                "color_blue": "sininen",
+                "color_yellow": "keltainen",
+                "color_orange": "oranssi",
+                "color_red": "punainen",
+                "color_other": "muu",
+                "brightness_label": "Suurin kirkkaus:",
+                "bright_unknown": "Epävarma",
+                "bright_stars": "kuin kirkkaimmat tähdet",
+                "bright_brighter": "hieman tähtiä kirkkaampi",
+                "bright_muchbrighter": "paljon tähtiä kirkkaampi, mutta ei valaissut maisemaa",
+                "bright_lit": "maisema valaistui",
+                "bright_daylight": "melkein kuin päivänvalo",
+                "bright_fulldaylight": "täysi päivänvalo",
+                "duration_label": "Kuinka kauan meteori oli näkyvissä:",
+                "dur_unknown": "Epävarma",
+                "dur_lt2": "alle 2 sekuntia",
+                "dur_2_4": "2–4 sekuntia",
+                "dur_4_8": "4–8 sekuntia",
+                "dur_8_16": "8–16 sekuntia",
+                "dur_gt16": "yli 16 sekuntia",
+                "other_label": "Muita ilmiöitä",
+                "other_afterglow": "jälkihohto",
+                "other_smoke": "savuvana",
+                "other_fragmentation": "hajoaminen",
+                "other_explosion": "räjähdys",
+                "other_sound": "ääni/pamaus",
+                "sound_delay_label": "Kuinka kauan meteorin näkemisen jälkeen kuulit äänen?",
+                "delay_unknown": "Epävarma",
+                "delay_lt30s": "alle 30 sekuntia",
+                "delay_30s_1m": "30 sekunnista minuuttiin",
+                "delay_1m_1.5m": "minuutista puoleentoista",
+                "delay_1.5m_2m": "puolestatoista kahteen minuuttiin",
+                "delay_gt2m": "yli kaksi minuuttia",
+                "more_info_label": "Kerro halutessasi lisää havainnostasi:",
+                "step5_title": "Vaihe 5: Yhteystiedot (vapaaehtoinen)",
+                "name_label": "Nimi:",
+                "phone_label": "Puhelinnumero:",
+                "email_label": "Sähköposti:",
+                "invalid_phone": "Anna kelvollinen puhelinnumero (vain numerot, + ja välilyönnit).",
+                "invalid_email": "Anna kelvollinen sähköpostiosoite.",
+                "step6_title": "Vaihe 6: Lataa kuvia tai videoita",
+                "file_upload_info": "Valitse yksi tai useampi tiedosto. Enintään 10 tiedostoa, yhteensä 50 MB.",
+                "file_limit_error": "Voit ladata enintään 10 tiedostoa.",
+                "file_size_error": "Tiedostojen kokonaiskoko ylittää 50 MB. Poista jokin tiedosto jatkaaksesi.",
+                "remove_file_label": "Poista",
+                "submit_btn": "Lähetä ilmoitus",
+                "checklist_title": "Tarkistuslista",
+                "checklist_intro": "Seuraava tarkistuslista voi auttaa arvioimaan, näitkö tulipallon (kirkkaan meteorin). Jos nämä ehdot eivät täyty, olet todennäköisesti nähnyt jotain muuta (ilotulite, hätäraketti, taivaslyhty, satelliitti, lentokone, tavallinen tähdenlento jne.).",
+                "checklist1": "<i>Liikkuu nopeasti taivaan poikki, paljon lentokonetta nopeammin.</i>",
+                "checklist2": "<i>Liikkuu suorassa linjassa, ei käänny eikä vaihda suuntaa.</i>",
+                "checklist3": "<i>Loistaa kirkkaammin kuin mikään tähti tai planeetta taivaalla.</i>",
+                "checklist4": "<i>Ei näy maaston/puiden/tiheän pilvipeitteen edessä.</i>",
+                "checklist5": "<i>Näkyy alle puoli minuuttia, useimmiten 1–10 sekuntia.</i>",
+                "checklist_other_intro": "Myös muut havainnot voivat olla kiinnostavia, vaikka et olisi nähnyt tulipalloa suoraan:",
+                "checklist_other1": "<i>Maiseman äkillinen valaistuminen (niin että varjot tulevat näkyviin, jos sää on selkeä).</i>",
+                "checklist_other2": "<i>Loistava juova tai läiskä taivaalla, joka vähitellen himmenee.</i>",
+                "checklist_other3": "<i>Pamaus tai jyrähdys, jota ei voi selittää ukkosella tai ihmisen toiminnalla.</i>",
+                "checklist_flystripe_caption": "Tämä EI ole meteori, vaan lentokoneen tiivistymisvana auringonlaskussa.",
+                "checklist_note": "Huom: Kun taas ukkosenjyrähdys seuraa salamaa muutaman sekunnin kuluttua, tulipallon jälkeen kuuluvaan pamaukseen menee yleensä vähintään minuutti.",
+                "footer": "Norjan meteoriverkosto",
+                "loading": "Ladataan...",
+                "sending_report": "Lähetetään ilmoitusta...",
+                "time_error_future": "Aika ei voi olla tulevaisuudessa.",
+                "time_display_prefix": "Havaintoaika:",
+                "time_display_conjunction": "klo",
+                "month_names": ["tammikuuta", "helmikuuta", "maaliskuuta", "huhtikuuta", "toukokuuta", "kesäkuuta", "heinäkuuta", "elokuuta", "syyskuuta", "lokakuuta", "marraskuuta", "joulukuuta"],
+                "celestial_Sun": "Aurinko",
+                "celestial_Moon": "Kuu",
+                "celestial_Venus": "Venus",
+                "celestial_Mars": "Mars",
+                "celestial_Jupiter": "Jupiter",
+                "celestial_Saturn": "Saturnus",
+                "form_error_incomplete": "Täytä vaiheet 1, 2 ja 3 ennen ilmoituksen lähettämistä.",
+                "submission_failed_alert": "Pahoittelut, lähetyksessä tapahtui virhe. Tarkista verkkoyhteytesi ja yritä uudelleen."
+            }
+        };
+
+        let currentLang = 'nb_NO';
+        let currentTranslation = translations[currentLang];
+        const DEFAULT_LANG = 'nb_NO';
+
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
+        function getLanguage() {
+            const supportedLangs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI'];
+            const urlParams = new URLSearchParams(window.location.search);
+            const langParam = urlParams.get('lang');
+
+            if (langParam && supportedLangs.includes(langParam)) return langParam;
+            const cookieLang = getCookie('lang');
+            if (cookieLang && supportedLangs.includes(cookieLang)) return cookieLang;
+            
+            const browserLangs = navigator.languages || [navigator.language];
+            for (const browserLang of browserLangs) {
+                const browserLangCode = browserLang.replace('-', '_');
+                if (supportedLangs.includes(browserLangCode)) return browserLangCode;
+                const shortCode = browserLangCode.substring(0, 2);
+                const matchedLang = supportedLangs.find(l => l.startsWith(shortCode));
+                if (matchedLang) return matchedLang;
+            }
+            
+            return DEFAULT_LANG;
+        }
+
+        function t(key) {
+            return currentTranslation[key] || translations[DEFAULT_LANG][key] || key;
+        }
+
+        function translatePage(langCode) {
+            if (!translations[langCode]) langCode = DEFAULT_LANG;
+            currentLang = langCode;
+            currentTranslation = translations[langCode];
+            
+            document.documentElement.lang = currentLang.substring(0, 2);
+            document.cookie = `lang=${currentLang};path=/;max-age=31536000`;
+
+            document.querySelectorAll('[data-translate]').forEach(el => {
+                const key = el.dataset.translate;
+                if(t(key)) el.innerHTML = t(key);
+            });
+            
+            // Translate placeholders and other attributes
+            document.getElementById('sighting_date_display').placeholder = t('date_placeholder');
+
+            document.querySelectorAll('#step-0 .language-switcher a[data-lang]').forEach(a => {
+                a.style.display = (a.dataset.lang === currentLang) ? 'none' : '';
+            });
+            
+            // Re-render dynamic elements
+            if (skyStartMarker) skyStartMarker.querySelector('.sky-label').textContent = t('sky_start_label');
+            if (skyEndMarker) skyEndMarker.querySelector('.sky-label').textContent = t('sky_end_label');
+            
+            checkTimeStep(); // Update time display with new month names
+            redrawSkyView(); // Redraw sky with new celestial names
+        }
+
+        // --- END TRANSLATION LOGIC ---
+
         const step2 = document.getElementById('step-2');
         const step3 = document.getElementById('step-3');
         const dateDisplayInput = document.getElementById('sighting_date_display');
         const datePickerNative = document.getElementById('sighting_date_picker_native');
+        const dateTodayBtn = document.getElementById('date-today-btn');
+        const dateYesterdayBtn = document.getElementById('date-yesterday-btn');
         const dateHiddenInput = document.getElementById('sighting_date');
+        const timeReadout = document.getElementById('time-24h-readout');
+        const timeNativeGroup = document.getElementById('time-native-group');
+        const timeDesktopGroup = document.getElementById('time-desktop-group');
+        const timeNativeInput = document.getElementById('sighting_time_native');
+        const timeDesktopDisplay = document.getElementById('sighting_time_desktop_display');
+        const timeDesktopOpenBtn = document.getElementById('time-desktop-open-btn');
+        const timePickerModalEl = document.getElementById('timePickerModal');
+        const timePickerOkBtn = document.getElementById('timePickerOkBtn');
+        const desktopHour = document.getElementById('desktop_hour');
+        const desktopMinute = document.getElementById('desktop_minute');
+        const desktopSecond = document.getElementById('desktop_second');
         const hourSelect = document.getElementById('sighting_hour');
         const minuteSelect = document.getElementById('sighting_minute');
         const secondSelect = document.getElementById('sighting_second');
@@ -650,9 +1553,43 @@
         const timeDisplay = document.getElementById('time-display');
         const latInput = document.getElementById('obs_lat');
         const lonInput = document.getElementById('obs_lon');
+        const useMyLocationBtn = document.getElementById('use-my-location-btn');
+        const useMyLocationStatus = document.getElementById('use-my-location-status');
+        const step1TimezoneEl = document.getElementById('step1-timezone');
         const panorama = document.getElementById('sky-panorama');
         const gridCanvas = document.getElementById('sky-grid-canvas');
         const gridCtx = gridCanvas.getContext('2d');
+
+        function getTimeZoneForObserver(lat, lon) {
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+            if (typeof tzlookup !== 'function') return null;
+            try {
+                return tzlookup(lat, lon);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function getUtcDateFromInputs(dateIso, timeHms, lat, lon) {
+            if (!dateIso || !timeHms) return null;
+            const DateTime = (window.luxon && window.luxon.DateTime) ? window.luxon.DateTime : null;
+            if (!DateTime) return null;
+
+            const [y, m, d] = String(dateIso).split('-').map((v) => parseInt(v, 10));
+            const [hh, mm, ss] = String(timeHms).split(':').map((v) => parseInt(v, 10));
+            if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d) || !Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+
+            const zone = getTimeZoneForObserver(lat, lon) || 'local';
+            const dt = DateTime.fromObject({ year: y, month: m, day: d, hour: hh, minute: mm, second: Number.isFinite(ss) ? ss : 0 }, { zone });
+            if (!dt.isValid) return null;
+            return dt.toUTC().toJSDate();
+        }
+
+        function updateStep1TimezoneDisplay(lat, lon) {
+            if (!step1TimezoneEl) return;
+            const zone = getTimeZoneForObserver(lat, lon);
+            step1TimezoneEl.textContent = zone ? `(${zone})` : '';
+        }
 
         // Az/Alt inputs
         const startAzInput = document.getElementById('start_az');
@@ -711,12 +1648,167 @@
         
         secondSelect.value = '00'; // Set default seconds to 00
 
+        function setDateIso(isoDate) {
+            if (!isoDate) return;
+            datePickerNative.value = isoDate;
+            dateHiddenInput.value = isoDate;
+            const parts = isoDate.split('-');
+            if (currentLang === 'en_GB') {
+                dateDisplayInput.value = `${parts[2]}/${parts[1]}/${parts[0]}`;
+            } else {
+                dateDisplayInput.value = `${parts[2]}.${parts[1]}.${parts[0]}`;
+            }
+            if (dateDisplayInput) dateDisplayInput.classList.remove('is-invalid');
+            checkTimeStep();
+        }
+
+        function parseDateDisplayToIso(str) {
+            const s = String(str || '').trim();
+            if (!s) return null;
+
+            const isEn = currentLang === 'en_GB';
+            const m = isEn
+                ? s.match(/^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/)
+                : s.match(/^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$/);
+            if (!m) return null;
+
+            const day = parseInt(m[1], 10);
+            const month = parseInt(m[2], 10);
+            const year = parseInt(m[3], 10);
+            if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(year)) return null;
+            if (year < 1900 || year > 2100) return null;
+            if (month < 1 || month > 12) return null;
+            if (day < 1 || day > 31) return null;
+
+            const dt = new Date(year, month - 1, day);
+            if (dt.getFullYear() !== year || (dt.getMonth() + 1) !== month || dt.getDate() !== day) return null;
+
+            const pad2 = (n) => String(n).padStart(2, '0');
+            return `${year}-${pad2(month)}-${pad2(day)}`;
+        }
+
+        function handleTypedDateCommit() {
+            if (!dateDisplayInput) return;
+            const iso = parseDateDisplayToIso(dateDisplayInput.value);
+            if (!iso) {
+                dateHiddenInput.value = '';
+                datePickerNative.value = '';
+                dateDisplayInput.classList.add('is-invalid');
+                checkTimeStep();
+                return;
+            }
+            setDateIso(iso);
+        }
+
+        if (dateDisplayInput) {
+            dateDisplayInput.addEventListener('change', handleTypedDateCommit);
+            dateDisplayInput.addEventListener('blur', handleTypedDateCommit);
+            dateDisplayInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleTypedDateCommit();
+                }
+            });
+        }
+
         datePickerNative.addEventListener('change', (e) => {
             if (e.target.value) {
-                dateHiddenInput.value = e.target.value;
-                const parts = e.target.value.split('-');
-                dateDisplayInput.value = `${parts[2]}/${parts[1]}/${parts[0]}`;
+                setDateIso(e.target.value);
+            }
+        });
+
+        dateTodayBtn.addEventListener('click', () => {
+            const now = new Date();
+            const pad = (n) => n.toString().padStart(2, '0');
+            const todayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+            setDateIso(todayIso);
+        });
+
+        dateYesterdayBtn.addEventListener('click', () => {
+            const now = new Date();
+            now.setDate(now.getDate() - 1);
+            const pad = (n) => n.toString().padStart(2, '0');
+            const yesterdayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+            setDateIso(yesterdayIso);
+        });
+
+        function setTimeFromParts(h, m, s) {
+            hourSelect.value = String(h).padStart(2, '0');
+            minuteSelect.value = String(m).padStart(2, '0');
+            secondSelect.value = String(s).padStart(2, '0');
+            checkTimeStep();
+        }
+
+        function updateTimeReadout() {
+            if (!timeReadout) return;
+            if (!hourSelect.value || !minuteSelect.value) {
+                timeReadout.textContent = '';
+                if (timeDesktopDisplay) timeDesktopDisplay.value = '';
+                return;
+            }
+            const s = (secondSelect.value || '00').toString().padStart(2, '0');
+            const val = `${hourSelect.value}:${minuteSelect.value}:${s}`;
+            timeReadout.textContent = val;
+            if (timeDesktopDisplay) timeDesktopDisplay.value = val;
+        }
+
+        function setTimeInputMode() {
+            const useNative = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+            timeNativeGroup.style.display = useNative ? '' : 'none';
+            timeDesktopGroup.style.display = useNative ? 'none' : '';
+            timeNativeInput.required = useNative;
+            timeDesktopDisplay.required = !useNative;
+            updateTimeReadout();
+        }
+
+        setTimeInputMode();
+        window.addEventListener('resize', setTimeInputMode);
+
+        const timePickerModal = timePickerModalEl ? new bootstrap.Modal(timePickerModalEl) : null;
+        const pad2 = (n) => String(n).padStart(2, '0');
+
+        if (desktopHour && desktopMinute && desktopSecond) {
+            for (let i = 0; i < 24; i++) desktopHour.add(new Option(pad2(i), pad2(i)));
+            for (let i = 0; i < 60; i++) desktopMinute.add(new Option(pad2(i), pad2(i)));
+            for (let i = 0; i < 60; i++) desktopSecond.add(new Option(pad2(i), pad2(i)));
+        }
+
+        function openDesktopTimePicker() {
+            if (!timePickerModal) return;
+            desktopHour.value = hourSelect.value || '00';
+            desktopMinute.value = minuteSelect.value || '00';
+            desktopSecond.value = (secondSelect.value || '00').toString().padStart(2, '0');
+            timePickerModal.show();
+        }
+
+        if (timeDesktopDisplay) timeDesktopDisplay.addEventListener('click', openDesktopTimePicker);
+        if (timeDesktopOpenBtn) timeDesktopOpenBtn.addEventListener('click', openDesktopTimePicker);
+        if (timePickerOkBtn) timePickerOkBtn.addEventListener('click', () => {
+            setTimeFromParts(desktopHour.value, desktopMinute.value, desktopSecond.value);
+            updateTimeReadout();
+            if (timePickerModal) timePickerModal.hide();
+        });
+
+        timeNativeInput.addEventListener('change', (e) => {
+            const value = String(e.target.value || '').trim();
+            if (!value) {
+                hourSelect.value = '';
+                minuteSelect.value = '';
+                secondSelect.value = '';
                 checkTimeStep();
+                updateTimeReadout();
+                return;
+            }
+            const parts = value.split(':');
+            if (parts.length >= 2) {
+                const h = parts[0].padStart(2, '0');
+                const m = parts[1].padStart(2, '0');
+                const s = (parts[2] || '00').padStart(2, '0');
+                if (parts.length < 3) {
+                    e.target.value = `${h}:${m}:${s}`;
+                }
+                setTimeFromParts(h, m, s);
+                updateTimeReadout();
             }
         });
         hourSelect.addEventListener('change', checkTimeStep);
@@ -726,45 +1818,71 @@
         function checkTimeStep() {
             const timeErrorDiv = document.getElementById('time-error');
             timeErrorDiv.textContent = '';
-            dateDisplayInput.classList.remove('is-invalid');
+            if (dateHiddenInput.value) dateDisplayInput.classList.remove('is-invalid');
             hourSelect.classList.remove('is-invalid');
             minuteSelect.classList.remove('is-invalid');
 
             if (hourSelect.value && minuteSelect.value && dateHiddenInput.value) {
                 const seconds = secondSelect.value || '00';
                 timeHiddenInput.value = `${hourSelect.value}:${minuteSelect.value}:${seconds}`;
-                const selectedDate = new Date(`${dateHiddenInput.value}T${timeHiddenInput.value}`);
+                const latStr = String(latInput.value).trim().replace(/,/g, '.');
+                const lonStr = String(lonInput.value).trim().replace(/,/g, '.');
+                const latVal = parseFloat(latStr);
+                const lonVal = parseFloat(lonStr);
+                const selectedDate = getUtcDateFromInputs(dateHiddenInput.value, timeHiddenInput.value, latVal, lonVal);
                 const now = new Date();
 
-                if (selectedDate > now) {
-                    timeErrorDiv.textContent = 'Tidspunktet kan ikke være i framtida.';
+                if (!selectedDate || selectedDate > now) {
+                    timeErrorDiv.textContent = t('time_error_future');
                     dateDisplayInput.classList.add('is-invalid');
                     hourSelect.classList.add('is-invalid');
                     minuteSelect.classList.add('is-invalid');
                     step2.classList.add('step-disabled');
                     step3.classList.add('step-disabled');
+                    updateStepNavButtons();
                     timeDisplay.innerHTML = "";
+                    updateTimeReadout();
                     return; 
                 }
                 
                 step2.classList.remove('step-disabled');
+                updateStepNavButtons();
                 updateTimeDisplay(selectedDate);
                 if (observerMarker) redrawSkyView();
+                updateTimeReadout();
 
             } else {
                 timeHiddenInput.value = "";
                 step2.classList.add('step-disabled');
                 step3.classList.add('step-disabled');
+                updateStepNavButtons();
                 timeDisplay.innerHTML = "";
+                updateTimeReadout();
             }
         }
 
         function updateTimeDisplay(localDate) {
+            const latStr = String(latInput.value).trim().replace(/,/g, '.');
+            const lonStr = String(lonInput.value).trim().replace(/,/g, '.');
+            const latVal = parseFloat(latStr);
+            const lonVal = parseFloat(lonStr);
+            const zone = getTimeZoneForObserver(latVal, lonVal);
+            if (!zone) {
+                timeDisplay.innerHTML = "";
+                return;
+            }
             const pad = (n) => n.toString().padStart(2,'0');
-            const monthNames = ["januar","februar","mars","april","mai","juni","juli","august","september","oktober","november","desember"];
-            const utcDateString = `${localDate.getUTCDate()}. ${monthNames[localDate.getUTCMonth()]} ${localDate.getUTCFullYear()}`;
+            const monthNames = t('month_names');
+            const day = localDate.getUTCDate();
+            let utcDateString;
+            if (currentLang === 'cs_CZ' || currentLang === 'de_DE' || currentLang === 'nb_NO') {
+                utcDateString = `${day}. ${monthNames[localDate.getUTCMonth()]} ${localDate.getUTCFullYear()}`;
+            } else { // en_GB
+                 utcDateString = `${monthNames[localDate.getUTCMonth()]} ${day}, ${localDate.getUTCFullYear()}`;
+            }
+
             const utcTimeString = `${pad(localDate.getUTCHours())}:${pad(localDate.getUTCMinutes())}:${pad(localDate.getUTCSeconds())} UTC`;
-            timeDisplay.innerHTML = `Observasjonstid: ${utcDateString} kl. ${utcTimeString}`;
+            timeDisplay.innerHTML = `${t('time_display_prefix')} ${utcDateString} ${t('time_display_conjunction')} ${utcTimeString}`;
         }
 
         const map = L.map('map').setView([62, 9], 5);
@@ -774,6 +1892,144 @@
         }).addTo(map);
         
         map.on('click', e => updateObserverPosition(e.latlng));
+
+        function scrollToStep(stepIndex) {
+            const el = document.getElementById(`step-${stepIndex}`);
+            if (!el) return;
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        function scrollToSubmit() {
+            const el = document.getElementById('submit-btn');
+            if (!el) return;
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function isStepEnabled(stepIndex) {
+            const el = document.getElementById(`step-${stepIndex}`);
+            if (!el) return false;
+            return !el.classList.contains('step-disabled');
+        }
+
+        function findAdjacentEnabledStep(fromStep, direction) {
+            const delta = direction === 'prev' ? -1 : 1;
+            let i = fromStep + delta;
+            while (i >= 0 && i <= 6) {
+                const el = document.getElementById(`step-${i}`);
+                if (!el) return null;
+                if (!el.classList.contains('step-disabled')) return i;
+                i += delta;
+            }
+            return null;
+        }
+
+        function updateStepNavButtons() {
+            document.querySelectorAll('button[data-step-nav][data-step]').forEach((btn) => {
+                const current = parseInt(btn.getAttribute('data-step') || '', 10);
+                if (!Number.isFinite(current)) return;
+                const dir = btn.getAttribute('data-step-nav');
+
+                if (dir === 'next') {
+                    const step3Enabled = document.getElementById('step-3') && !document.getElementById('step-3').classList.contains('step-disabled');
+                    const showNext =
+                        (current === 1 && document.getElementById('step-2') && !document.getElementById('step-2').classList.contains('step-disabled')) ||
+                        (current === 2 && document.getElementById('step-3') && !document.getElementById('step-3').classList.contains('step-disabled')) ||
+                        (current >= 3 && current <= 5 && step3Enabled);
+                    btn.style.display = showNext ? '' : 'none';
+                    btn.disabled = !showNext;
+                    return;
+                }
+
+                const target = findAdjacentEnabledStep(current, dir);
+                btn.style.display = target === null ? 'none' : '';
+                btn.disabled = (target === null);
+            });
+
+            const submitBtn = document.getElementById('submit-btn');
+            const step2El = document.getElementById('step-2');
+            const step3El = document.getElementById('step-3');
+            if (submitBtn && step2El && step3El) {
+                const canSubmit = !step2El.classList.contains('step-disabled') && !step3El.classList.contains('step-disabled');
+                submitBtn.disabled = !canSubmit;
+            }
+        }
+
+        document.querySelectorAll('button[data-step-nav][data-step]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const current = parseInt(btn.getAttribute('data-step') || '', 10);
+                if (!Number.isFinite(current)) return;
+                const dir = btn.getAttribute('data-step-nav');
+                if (dir === 'next') {
+                    if (current === 6) {
+                        scrollToSubmit();
+                    } else {
+                        scrollToStep(current + 1);
+                    }
+                    return;
+                }
+                const target = findAdjacentEnabledStep(current, dir);
+                if (target === null) return;
+                scrollToStep(target);
+            });
+        });
+
+        updateStepNavButtons();
+
+        if (useMyLocationBtn) {
+            useMyLocationBtn.addEventListener('click', () => {
+                if (!useMyLocationStatus) return;
+                useMyLocationStatus.classList.remove('text-danger');
+                useMyLocationStatus.textContent = '';
+
+                if (!navigator.geolocation) {
+                    useMyLocationStatus.classList.add('text-danger');
+                    useMyLocationStatus.textContent = t('use_my_location_not_supported');
+                    return;
+                }
+
+                useMyLocationBtn.disabled = true;
+                useMyLocationBtn.textContent = t('use_my_location_loading');
+
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        const lat = pos.coords.latitude;
+                        const lon = pos.coords.longitude;
+                        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+                            updateObserverPosition(L.latLng(lat, lon));
+                            map.setView([lat, lon], Math.max(map.getZoom(), 10));
+                        }
+                        useMyLocationBtn.disabled = false;
+                        useMyLocationBtn.textContent = t('use_my_location_btn');
+                        useMyLocationStatus.textContent = '';
+                    },
+                    (err) => {
+                        useMyLocationStatus.classList.add('text-danger');
+                        if (err && err.code === 1) {
+                            useMyLocationStatus.textContent = t('use_my_location_denied');
+                        } else {
+                            useMyLocationStatus.textContent = t('use_my_location_failed');
+                        }
+                        useMyLocationBtn.disabled = false;
+                        useMyLocationBtn.textContent = t('use_my_location_btn');
+                    },
+                    { enableHighAccuracy: false, maximumAge: 10 * 60 * 1000, timeout: 10000 }
+                );
+            });
+        }
+
+        let overpassCooldownUntilMs = 0;
+        let overpassAbortController = null;
+        let lastLandmarkErrorLogMs = 0;
+        let overpassBackoffMs = 0;
+        let lastLandmarkFetchAtMs = 0;
+        let lastLandmarkFetchCoords = null;
+        const overpassEndpoints = [
+            'https://overpass-api.de/api/interpreter',
+            'https://overpass.kumi.systems/api/interpreter',
+            'https://overpass.nchc.org.tw/api/interpreter',
+            'https://overpass.openstreetmap.ru/api/interpreter'
+        ];
+        let overpassEndpointIndex = 0;
 
         function updateObserverPosition(coords) {
             latInput.value = coords.lat.toFixed(5); 
@@ -785,11 +2041,37 @@
                 observerMarker.setLatLng(coords);
             }
             step3.classList.remove('step-disabled');
+            updateStepNavButtons();
+
+            const canReuseLandmarks =
+                lastLandmarkFetchCoords &&
+                Array.isArray(currentLandmarks) &&
+                currentLandmarks.length > 0 &&
+                currentLandmarks[0].lat !== undefined &&
+                calculateDistance(lastLandmarkFetchCoords.lat, lastLandmarkFetchCoords.lng, coords.lat, coords.lng) < 5 &&
+                (Date.now() - lastLandmarkFetchAtMs) < 30 * 60 * 1000;
+
+            if (canReuseLandmarks) {
+                currentLandmarks = currentLandmarks.map(lm => ({
+                    ...lm,
+                    az: calculateBearing(coords.lat, coords.lng, lm.lat, lm.lon),
+                    dist: calculateDistance(coords.lat, coords.lng, lm.lat, lm.lon)
+                }));
+                redrawSkyView();
+            } else {
+                currentLandmarks = [];
+                redrawSkyView();
+            }
+
+            updateStep1TimezoneDisplay(coords.lat, coords.lng);
+            if (dateHiddenInput.value && timeHiddenInput.value) {
+                checkTimeStep();
+            }
 
             clearTimeout(landmarkFetchTimer);
             landmarkFetchTimer = setTimeout(() => {
                 fetchAndDisplayLandmarks(coords);
-            }, 500);
+            }, 4000);
 
             if (startDirectionLine && startPoint.azimuth !== undefined) {
                 startDirectionLine.setLatLngs([coords, getDestinationPoint(coords, startPoint.azimuth, 200)]);
@@ -804,9 +2086,15 @@
         function redrawSkyView() {
             if (!observerMarker || !dateHiddenInput.value || !timeHiddenInput.value) return;
 
-            const date = new Date(`${dateHiddenInput.value}T${timeHiddenInput.value}`);
-            if (isNaN(date.getTime())) return;
-            const observer = new Astronomy.Observer(parseFloat(latInput.value), parseFloat(lonInput.value), 0);
+            const latStr = String(latInput.value).trim().replace(/,/g, '.');
+            const lonStr = String(lonInput.value).trim().replace(/,/g, '.');
+            const latVal = parseFloat(latStr);
+            const lonVal = parseFloat(lonStr);
+            if (!Number.isFinite(latVal) || !Number.isFinite(lonVal)) return;
+
+            const date = getUtcDateFromInputs(dateHiddenInput.value, timeHiddenInput.value, latVal, lonVal);
+            if (!date || isNaN(date.getTime())) return;
+            const observer = new Astronomy.Observer(latVal, lonVal, 0);
             
             let sunAltitude = -90;
             try {
@@ -852,6 +2140,64 @@
             const x = ((deltaAz + hFov / 2) / hFov) * panorama.offsetWidth;
             const y = (((centerAlt + vFov / 2) - altitude) / vFov) * panorama.offsetHeight;
             return { x, y };
+        }
+
+        function fitSkyViewToPath() {
+            if (!panorama) return;
+
+            const points = [];
+            if (startPoint && startPoint.azimuth !== undefined && startPoint.altitude !== undefined) {
+                points.push({ az: startPoint.azimuth, alt: startPoint.altitude });
+            }
+            if (endPoint && endPoint.azimuth !== undefined && endPoint.altitude !== undefined) {
+                points.push({ az: endPoint.azimuth, alt: endPoint.altitude });
+            }
+            if (points.length === 0) return;
+
+            const maxAlt = 90;
+            const minAlt = -10;
+
+            const azs = points.map(p => ((p.az % 360) + 360) % 360);
+            const alts = points.map(p => p.alt);
+
+            const altMin = Math.max(minAlt, Math.min(...alts));
+            const altMax = Math.min(maxAlt, Math.max(...alts));
+
+            let center;
+            let spanAz;
+            if (azs.length === 1) {
+                center = azs[0];
+                spanAz = 0;
+            } else {
+                const a1 = azs[0];
+                const a2 = azs[1];
+                const diff = ((a2 - a1 + 540) % 360) - 180;
+                spanAz = Math.abs(diff);
+                center = (a1 + diff / 2 + 360) % 360;
+            }
+
+            const altCenter = (altMin + altMax) / 2;
+            const altSpan = Math.max(0, altMax - altMin);
+
+            const width = panorama.offsetWidth || 0;
+            const height = panorama.offsetHeight || 0;
+            const marginPx = 40;
+            const azMarginDeg = width > 0 ? (360 / skyZoom) * (marginPx / width) : 8;
+            const altMarginDeg = height > 0 ? (90 / skyZoom) * (marginPx / height) : 5;
+
+            const padAz = Math.max(8, spanAz * 0.25, azMarginDeg);
+            const padAlt = Math.max(5, altSpan * 0.25, altMarginDeg);
+
+            const neededHfov = Math.min(360, Math.max(25, spanAz + padAz * 2));
+            const neededVfov = Math.min(90, Math.max(18, altSpan + padAlt * 2));
+
+            const zoomFromH = 360 / neededHfov;
+            const zoomFromV = 90 / neededVfov;
+            const targetZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(zoomFromH, zoomFromV)));
+
+            centerAz = center;
+            centerAlt = Math.max(-5, Math.min(85, altCenter));
+            skyZoom = targetZoom;
         }
 
         function getPointFromEvent(e) {
@@ -909,7 +2255,7 @@
 
             const azStep = skyZoom < 3 ? 30 : (skyZoom < 8 ? 10 : 5);
             const altStep = skyZoom < 4 ? 10 : 5;
-            const cardinalPoints = {0: 'N', 90: 'Ø', 180: 'S', 270: 'V'};
+            const cardinalPoints = {0: t('compass_n'), 90: t('compass_e'), 180: t('compass_s'), 270: t('compass_w')};
 
             for (let az = 0; az < 360; az += azStep) {
                 const { x } = getScreenCoordsFromAzAlt(az, 0);
@@ -1069,13 +2415,11 @@
                     else mag = Astronomy.Illumination(name, date).mag;
                     
                     if (mag <= finalVisibilityMagLimit) {
-                        let displayName = name;
+                        let displayName = t(`celestial_${name}`) || name;
                         let icon = null;
                         if (name === 'Moon') {
-                            displayName = 'Månen';
                             icon = getMoonIcon(Astronomy.MoonPhase(date));
                         } else if (name === 'Sun') {
-                            displayName = 'Sola';
                             icon = '☀️';
                         }
                         renderCelestialObject(displayName, hor, icon, mag, mag <= finalLabelMagLimit, sunOpacityFactor);
@@ -1180,7 +2524,7 @@
                     skyStartMarker = document.createElement("div");
                     skyStartMarker.className = "sky-marker";
                     skyStartMarker.dataset.point = "start";
-                    skyStartMarker.innerHTML = '<div class="sky-marker-visual"></div><div class="sky-label">Start</div>';
+                    skyStartMarker.innerHTML = `<div class="sky-marker-visual"></div><div class="sky-label">${t('sky_start_label')}</div>`;
                     panorama.appendChild(skyStartMarker);
                     skyStartMarker.addEventListener("mousedown", e => { draggedMarker = "start"; document.body.classList.add('no-select'); e.stopPropagation(); });
                 }
@@ -1197,7 +2541,7 @@
                     skyEndMarker = document.createElement("div");
                     skyEndMarker.className = "sky-marker";
                     skyEndMarker.dataset.point = "end";
-                    skyEndMarker.innerHTML = '<div class="sky-marker-visual"></div><div class="sky-label">Slutt</div>';
+                    skyEndMarker.innerHTML = `<div class="sky-marker-visual"></div><div class="sky-label">${t('sky_end_label')}</div>`;
                     panorama.appendChild(skyEndMarker);
                     skyEndMarker.addEventListener("mousedown", e => { draggedMarker = "end"; document.body.classList.add('no-select'); e.stopPropagation(); });
                 }
@@ -1285,19 +2629,71 @@
         }
 
         async function fetchAndDisplayLandmarks(coords) {
-            const query = `[out:json][timeout:25];(node(around:20000,${coords.lat},${coords.lng})["natural"="peak"];node(around:20000,${coords.lat},${coords.lng})["place"~"city|town|village"];);out body;>;out skel qt;`;
-            const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+            const nowMs = Date.now();
+            if (nowMs < overpassCooldownUntilMs) {
+                return;
+            }
+
+            if (lastLandmarkFetchCoords) {
+                const kmMoved = calculateDistance(lastLandmarkFetchCoords.lat, lastLandmarkFetchCoords.lng, coords.lat, coords.lng);
+                if (kmMoved < 5 && (nowMs - lastLandmarkFetchAtMs) < 30 * 60 * 1000) {
+                    return;
+                }
+            }
+
+            if ((nowMs - lastLandmarkFetchAtMs) < 60 * 1000) {
+                return;
+            }
+
+            const query = `[out:json][timeout:25];(node(around:10000,${coords.lat},${coords.lng})["natural"="peak"]["name"];node(around:10000,${coords.lat},${coords.lng})["place"~"city|town|village"]["name"];);out body;`;
+            const endpoint = overpassEndpoints[overpassEndpointIndex % overpassEndpoints.length];
+            overpassEndpointIndex = (overpassEndpointIndex + 1) % overpassEndpoints.length;
+            const url = `${endpoint}?data=${encodeURIComponent(query)}`;
             try {
-                const response = await fetch(url);
+                if (overpassAbortController) {
+                    overpassAbortController.abort();
+                }
+                overpassAbortController = new AbortController();
+
+                lastLandmarkFetchAtMs = nowMs;
+                const response = await fetch(url, { signal: overpassAbortController.signal });
+                if (!response.ok) {
+                    if (response.status === 429) {
+                        overpassBackoffMs = Math.max(overpassBackoffMs, 15 * 60 * 1000);
+                        overpassCooldownUntilMs = Date.now() + overpassBackoffMs;
+                    } else if (response.status >= 500) {
+                        overpassBackoffMs = Math.min(Math.max(overpassBackoffMs * 2, 2 * 60 * 1000), 30 * 60 * 1000);
+                        overpassCooldownUntilMs = Date.now() + overpassBackoffMs;
+                    }
+                    throw new Error(`Overpass HTTP ${response.status}`);
+                }
+                const contentType = response.headers.get('content-type') || '';
+                if (!contentType.toLowerCase().includes('application/json')) {
+                    overpassBackoffMs = Math.min(Math.max(overpassBackoffMs * 2, 2 * 60 * 1000), 30 * 60 * 1000);
+                    overpassCooldownUntilMs = Date.now() + overpassBackoffMs;
+                    throw new Error('Overpass returned non-JSON response');
+                }
                 const data = await response.json();
                 currentLandmarks = data.elements.filter(e => e.tags && e.tags.name).map(e => ({
                     name: e.tags.name,
+                    lat: e.lat,
+                    lon: e.lon,
                     az: calculateBearing(coords.lat, coords.lng, e.lat, e.lon),
                     dist: calculateDistance(coords.lat, coords.lng, e.lat, e.lon)
                 }));
+
+                lastLandmarkFetchCoords = { lat: coords.lat, lng: coords.lng };
+                overpassBackoffMs = 0;
                 redrawSkyView();
             } catch (error) {
-                console.error("Error fetching landmarks:", error);
+                if (error && error.name === 'AbortError') {
+                    return;
+                }
+                const nowErrMs = Date.now();
+                if (nowErrMs - lastLandmarkErrorLogMs > 120000) {
+                    console.warn("Error fetching landmarks:", error);
+                    lastLandmarkErrorLogMs = nowErrMs;
+                }
                 currentLandmarks = [];
                 redrawSkyView();
             }
@@ -1550,10 +2946,13 @@
 
         // --- Input Field Handlers ---
         function updateFromLatLonInputs() {
+            latInput.value = String(latInput.value).trim().replace(/,/g, '.');
+            lonInput.value = String(lonInput.value).trim().replace(/,/g, '.');
             const lat = parseFloat(latInput.value);
             const lon = parseFloat(lonInput.value);
             if (!isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
                 updateObserverPosition(L.latLng(lat, lon));
+                updateStep1TimezoneDisplay(lat, lon);
             }
         }
         
@@ -1617,7 +3016,7 @@
                 fileItem.className = 'list-group-item d-flex justify-content-between align-items-center';
                 fileItem.innerHTML = `
                     <span>${file.name} (${formatBytes(file.size)})</span>
-                    <button type="button" class="btn-close" aria-label="Fjern" data-index="${index}"></button>
+                    <button type="button" class="btn-close" aria-label="${t('remove_file_label')}" data-index="${index}"></button>
                 `;
                 fileListContainer.appendChild(fileItem);
             });
@@ -1663,7 +3062,7 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
     formErrorDiv.style.display = 'none';
 
     if (!timeHiddenInput.value || !latInput.value || !lonInput.value || !startAzInput.value || !endAzInput.value) {
-        formErrorDiv.textContent = 'Vennligst fullfør steg 1, 2 og 3 før du sender inn rapporten.';
+        formErrorDiv.textContent = t('form_error_incomplete');
         formErrorDiv.style.display = 'block';
         if (!timeHiddenInput.value) document.getElementById('step-1').scrollIntoView({ behavior: 'smooth', block: 'start' });
         else if (!latInput.value) document.getElementById('step-2').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1683,27 +3082,98 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
     document.getElementById('submission-overlay').style.display = 'flex';
 
     try {
+        const normalizeCoordinateInput = (value) => {
+            if (value === null || value === undefined) return '';
+            return String(value).trim().replace(/,/g, '.');
+        };
+
+        latInput.value = normalizeCoordinateInput(latInput.value);
+        lonInput.value = normalizeCoordinateInput(lonInput.value);
+
+        const obsLat = parseFloat(latInput.value);
+        const obsLng = parseFloat(lonInput.value);
+
+        if (!Number.isFinite(obsLat) || !Number.isFinite(obsLng) || obsLat < -90 || obsLat > 90 || obsLng < -180 || obsLng > 180) {
+            const formError = document.getElementById('form-error');
+            if (formError) {
+                formError.style.display = 'block';
+                formError.textContent = t('form_incomplete_error');
+            }
+            document.getElementById('submission-overlay').style.display = 'none';
+            return;
+        }
+
         const formData = new FormData(form);
+        
+        // Add current language to form data
+        formData.append('lang', currentLang);
 
         uploadedFiles.forEach(file => formData.append('file_uploads[]', file));
 
-        const skyCanvas = await html2canvas(document.getElementById('sky-panorama'), { useCORS: true });
+        const prevCenterAz = centerAz;
+        const prevCenterAlt = centerAlt;
+        const prevSkyZoom = skyZoom;
+
+        const SKY_CAPTURE_WIDTH_PX = 1600;
+        const SKY_CAPTURE_HEIGHT_PX = 640;
+
+        const hiddenSkyContainer = document.getElementById('hidden-sky-container');
+        const prevSkyParent = panorama.parentNode;
+        const prevSkyNextSibling = panorama.nextSibling;
+
+        const prevPanoramaWidth = panorama.style.width;
+        const prevPanoramaHeight = panorama.style.height;
+        const prevGridCanvasWidth = gridCanvas.width;
+        const prevGridCanvasHeight = gridCanvas.height;
+
+        hiddenSkyContainer.appendChild(panorama);
+        panorama.style.width = `${SKY_CAPTURE_WIDTH_PX}px`;
+        panorama.style.height = `${SKY_CAPTURE_HEIGHT_PX}px`;
+        gridCanvas.width = SKY_CAPTURE_WIDTH_PX;
+        gridCanvas.height = SKY_CAPTURE_HEIGHT_PX;
+        updatePipSize();
+
+        fitSkyViewToPath();
+        redrawSkyView();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        const skyCanvas = await html2canvas(panorama, { useCORS: true, logging: false, backgroundColor: '#ffffff', scale: 2 });
+
+        panorama.style.width = prevPanoramaWidth;
+        panorama.style.height = prevPanoramaHeight;
+        gridCanvas.width = prevGridCanvasWidth;
+        gridCanvas.height = prevGridCanvasHeight;
+
+        if (prevSkyNextSibling) prevSkyParent.insertBefore(panorama, prevSkyNextSibling);
+        else prevSkyParent.appendChild(panorama);
+
+        centerAz = prevCenterAz;
+        centerAlt = prevCenterAlt;
+        skyZoom = prevSkyZoom;
+        resizeSkyView();
         formData.append('sky_view_image', skyCanvas.toDataURL('image/png'));
         
         const hiddenMapContainer = document.getElementById('hidden-map-container');
-        const obsLat = parseFloat(latInput.value);
-        const obsLng = parseFloat(lonInput.value);
         const observerLatLng = L.latLng(obsLat, obsLng);
 
-        const hiddenMap = L.map('hidden-map-container', { zoomControl: false }).setView(observerLatLng, 10);
+        const REPORT_MAP_SIZE_PX = 1200;
+        const REPORT_MAP_HALF_SIZE_M = 25000;
+
+        hiddenMapContainer.style.width = `${REPORT_MAP_SIZE_PX}px`;
+        hiddenMapContainer.style.height = `${REPORT_MAP_SIZE_PX}px`;
+
+        const hiddenMap = L.map('hidden-map-container', { zoomControl: false, attributionControl: false }).setView(observerLatLng, 10);
         const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(hiddenMap);
 
         const earthRadius = 6371e3;
         const latRad = obsLat * Math.PI / 180;
-        const distance = 25000;
-        const lonDelta = (distance / (earthRadius * Math.cos(latRad))) * (180 / Math.PI);
-        const bounds = L.latLngBounds(L.latLng(obsLat, obsLng - lonDelta), L.latLng(obsLat, obsLng + lonDelta));
-        hiddenMap.fitBounds(bounds);
+        const latDelta = (REPORT_MAP_HALF_SIZE_M / earthRadius) * (180 / Math.PI);
+        const lonDelta = (REPORT_MAP_HALF_SIZE_M / (earthRadius * Math.cos(latRad))) * (180 / Math.PI);
+        const bounds = L.latLngBounds(
+            L.latLng(obsLat - latDelta, obsLng - lonDelta),
+            L.latLng(obsLat + latDelta, obsLng + lonDelta)
+        );
+        hiddenMap.fitBounds(bounds, { padding: [0, 0] });
+        hiddenMap.invalidateSize();
 
         const mapCanvas = await new Promise((resolve, reject) => {
             tileLayer.on('load', () => {
@@ -1715,7 +3185,7 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
                         if (overlayPane) overlayPane.style.visibility = 'hidden';
                         if (markerPane) markerPane.style.visibility = 'hidden';
 
-                        const baseMapCanvas = await html2canvas(hiddenMapContainer, { useCORS: true, logging: false });
+                        const baseMapCanvas = await html2canvas(hiddenMapContainer, { useCORS: true, logging: false, backgroundColor: '#ffffff', scale: 2 });
 
                         // Restore visibility
                         if (overlayPane) overlayPane.style.visibility = 'visible';
@@ -1723,42 +3193,46 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
 
                         // Step 2: Create a new canvas to compose the final image
                         const finalCanvas = document.createElement('canvas');
-                        finalCanvas.width = 800;
-                        finalCanvas.height = 600;
+                        finalCanvas.width = baseMapCanvas.width;
+                        finalCanvas.height = baseMapCanvas.height;
                         const ctx = finalCanvas.getContext('2d');
                         ctx.drawImage(baseMapCanvas, 0, 0);
 
                         // Step 3: Draw the overlays manually using Leaflet's coordinate conversion
-                        const markerPoint = hiddenMap.latLngToContainerPoint(observerLatLng);
+                        const scaleFactor = baseMapCanvas.width / REPORT_MAP_SIZE_PX;
+                        const markerPointRaw = hiddenMap.latLngToContainerPoint(observerLatLng);
+                        const markerPoint = { x: markerPointRaw.x * scaleFactor, y: markerPointRaw.y * scaleFactor };
 
                         // Draw Start Line
                         if (startPoint.azimuth !== undefined) {
                             const dest = getDestinationPoint(observerLatLng, startPoint.azimuth, 200);
-                            const destPoint = hiddenMap.latLngToContainerPoint(dest);
+                            const destPointRaw = hiddenMap.latLngToContainerPoint(dest);
+                            const destPoint = { x: destPointRaw.x * scaleFactor, y: destPointRaw.y * scaleFactor };
                             ctx.beginPath();
                             ctx.moveTo(markerPoint.x, markerPoint.y);
                             ctx.lineTo(destPoint.x, destPoint.y);
                             ctx.strokeStyle = '#28a745'; // Green
-                            ctx.lineWidth = 3;
+                            ctx.lineWidth = 3 * scaleFactor;
                             ctx.stroke();
                         }
                         // Draw End Line
                         if (endPoint.azimuth !== undefined) {
                             const dest = getDestinationPoint(observerLatLng, endPoint.azimuth, 200);
-                            const destPoint = hiddenMap.latLngToContainerPoint(dest);
+                            const destPointRaw = hiddenMap.latLngToContainerPoint(dest);
+                            const destPoint = { x: destPointRaw.x * scaleFactor, y: destPointRaw.y * scaleFactor };
                             ctx.beginPath();
                             ctx.moveTo(markerPoint.x, markerPoint.y);
                             ctx.lineTo(destPoint.x, destPoint.y);
                             ctx.strokeStyle = '#dc3545'; // Red
-                            ctx.lineWidth = 3;
+                            ctx.lineWidth = 3 * scaleFactor;
                             ctx.stroke();
                         }
                         // Draw Marker on top of lines
                         ctx.fillStyle = '#3388ff';
                         ctx.strokeStyle = '#ffffff';
-                        ctx.lineWidth = 2;
+                        ctx.lineWidth = 2 * scaleFactor;
                         ctx.beginPath();
-                        ctx.arc(markerPoint.x, markerPoint.y, 8, 0, 2 * Math.PI);
+                        ctx.arc(markerPoint.x, markerPoint.y, 8 * scaleFactor, 0, 2 * Math.PI);
                         ctx.fill();
                         ctx.stroke();
 
@@ -1772,16 +3246,17 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
         hiddenMap.remove();
         formData.append('generated_map_image', mapCanvas.toDataURL('image/png'));
 
-        // Create a Date object from the local time input values.
-        const localObservationDate = new Date(`${dateHiddenInput.value}T${timeHiddenInput.value}`);
+        const obsLatForTz = parseFloat(latInput.value);
+        const obsLngForTz = parseFloat(lonInput.value);
+        const utcDateObj = getUtcDateFromInputs(dateHiddenInput.value, timeHiddenInput.value, obsLatForTz, obsLngForTz);
+        if (!utcDateObj) throw new Error('Invalid time conversion');
 
-        // Extract the UTC components.
-        const utcYear = localObservationDate.getUTCFullYear();
-        const utcMonth = String(localObservationDate.getUTCMonth() + 1).padStart(2, '0'); // Month is 0-indexed
-        const utcDay = String(localObservationDate.getUTCDate()).padStart(2, '0');
-        const utcHours = String(localObservationDate.getUTCHours()).padStart(2, '0');
-        const utcMinutes = String(localObservationDate.getUTCMinutes()).padStart(2, '0');
-        const utcSeconds = String(localObservationDate.getUTCSeconds()).padStart(2, '0');
+        const utcYear = utcDateObj.getUTCFullYear();
+        const utcMonth = String(utcDateObj.getUTCMonth() + 1).padStart(2, '0'); // Month is 0-indexed
+        const utcDay = String(utcDateObj.getUTCDate()).padStart(2, '0');
+        const utcHours = String(utcDateObj.getUTCHours()).padStart(2, '0');
+        const utcMinutes = String(utcDateObj.getUTCMinutes()).padStart(2, '0');
+        const utcSeconds = String(utcDateObj.getUTCSeconds()).padStart(2, '0');
 
         // Format the UTC date and time strings.
         const utcDateString = `${utcYear}-${utcMonth}-${utcDay}`;
@@ -1799,11 +3274,16 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
     } catch (error) {
         console.error('Submission failed:', error);
         document.getElementById('submission-overlay').style.display = 'none';
-        alert('Beklager, det skjedde en feil under innsending. Vennligst sjekk nettverkstilkoplinga og prøv igjen.');
+        alert(t('submission_failed_alert'));
     }
-		    });
+});
 
-        setTimeout(resizeSkyView, 10);
+        document.addEventListener('DOMContentLoaded', () => {
+            const lang = getLanguage();
+            translatePage(lang);
+            setTimeout(resizeSkyView, 10);
+        });
     </script>
   </body>
 </html>
+

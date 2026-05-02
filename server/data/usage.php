@@ -23,33 +23,17 @@ function read_ndjson($path) {
 }
 
 // --- Server-side GeoIP lookup with persistent cache ---
-// Resolves up to 10 unknown IPs per page load; results cached indefinitely.
+// Returns cached data immediately. Spawns a background process to resolve
+// any unknown IPs so the page never blocks on network calls.
 function resolve_geoip($ips, $cache_file) {
     $cache = read_json($cache_file);
-    $changed = false;
-    $resolved = 0;
-    foreach ($ips as $ip) {
-        if (isset($cache[$ip])) continue;
-        if ($resolved >= 10) break; // rate-limit: max 10 new lookups per page load
-        $url = "http://ip-api.com/json/{$ip}?fields=country,countryCode,status";
-        $ctx = stream_context_create(['http' => ['timeout' => 2]]);
-        $json = @file_get_contents($url, false, $ctx);
-        if ($json) {
-            $d = json_decode($json, true);
-            if (isset($d['status']) && $d['status'] === 'success') {
-                $cache[$ip] = ['country' => $d['country'], 'cc' => $d['countryCode']];
-            } else {
-                $cache[$ip] = ['country' => '', 'cc' => ''];
-            }
-        } else {
-            $cache[$ip] = ['country' => '', 'cc' => ''];
-        }
-        $changed = true;
-        $resolved++;
-        usleep(220000); // 220ms between requests
-    }
-    if ($changed) {
-        @file_put_contents($cache_file, json_encode($cache, JSON_PRETTY_PRINT));
+    $unknown = array_filter($ips, fn($ip) => !isset($cache[$ip]));
+    if ($unknown) {
+        // Write unknown IPs to a temp file and resolve in the background
+        $tmp = $cache_file . '.pending';
+        @file_put_contents($tmp, implode("\n", $unknown));
+        $script = __DIR__ . '/geoip_resolve.php';
+        @shell_exec("php {$script} " . escapeshellarg($cache_file) . " " . escapeshellarg($tmp) . " > /dev/null 2>&1 &");
     }
     return $cache;
 }

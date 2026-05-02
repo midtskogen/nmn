@@ -184,5 +184,9 @@
     "usage_col_count": "Antall",
     "usage_geoip_note": "Landoppslag via ip-api.com (serversiden, hurtigbuffer). Topp 50 IP-er etter strømmingstid. Uopplyste IP-er lastes ved neste oppdatering.",
     "usage_actions_title": "API-handlinger (siste 7 dager)",
-    "usage_no_ip_data": "Ingen IP-data ennå."
+    "usage_no_ip_data": "Ingen IP-data ennå.",
+    "usage_range_1m": "Siste måned",
+    "usage_range_6m": "Siste 6 måneder",
+    "usage_range_1y": "Siste år",
+    "usage_range_3y": "Siste 3 år"
 }

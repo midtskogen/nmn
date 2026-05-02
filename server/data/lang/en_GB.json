@@ -183,5 +183,9 @@
     "usage_col_count": "Count",
     "usage_geoip_note": "Country lookup via ip-api.com (server-side, cached). Top 50 IPs by streaming time shown. Unresolved IPs load on next refresh.",
     "usage_actions_title": "API actions (last 7 days)",
-    "usage_no_ip_data": "No IP data yet."
+    "usage_no_ip_data": "No IP data yet.",
+    "usage_range_1m": "Past month",
+    "usage_range_6m": "Past 6 months",
+    "usage_range_1y": "Past year",
+    "usage_range_3y": "Past 3 years"
 }

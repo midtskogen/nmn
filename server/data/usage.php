@@ -96,9 +96,27 @@ function resolve_geoip($ips, $cache_file) {
     return $cache;
 }
 
+// --- Time range filter ---
+$range_options = ['1m' => 30, '6m' => 183, '1y' => 365, '3y' => 1095];
+$range = 'cookie';
+if (isset($_GET['range']) && isset($range_options[$_GET['range']])) {
+    $range = $_GET['range'];
+    setcookie('usage_range', $range, time() + 86400 * 365, '/');
+} elseif (isset($_COOKIE['usage_range']) && isset($range_options[$_COOKIE['usage_range']])) {
+    $range = $_COOKIE['usage_range'];
+} else {
+    $range = '6m';
+}
+$cutoff_date = date('Y-m-d', strtotime('-' . $range_options[$range] . ' days'));
+
 $stream_data = read_json($stream_file);
 $quota_data  = read_json($quota_file);
 $access_data = read_ndjson($access_file);
+
+// Apply date cutoff
+foreach (array_keys($stream_data) as $d) { if ($d < $cutoff_date) unset($stream_data[$d]); }
+foreach (array_keys($quota_data)  as $d) { if ($d < $cutoff_date) unset($quota_data[$d]); }
+$access_data = array_filter($access_data, fn($r) => ($r['date'] ?? '') >= $cutoff_date);
 
 // --- Aggregate stream data ---
 // Result: $stream_by_day[date][ip][station] = {lowres, hires}
@@ -291,7 +309,12 @@ function fmt_bytes($bytes) {
     <h1 class="mb-0" style="font-size:1.5rem"><?= t('usage_title', $lang) ?></h1>
     <div class="text-muted" style="font-size:.85rem"><?= $lang['usage_subtitle'] ?? 'Norsk Meteornettverk' ?></div>
   </div>
-  <div class="ms-auto text-muted" style="font-size:.8rem"><?= t('usage_generated', $lang) ?> <?= htmlspecialchars(date('Y-m-d H:i:s T')) ?></div>
+  <div class="ms-auto d-flex align-items-center gap-2 flex-wrap">
+    <?php foreach (['1m'=>'usage_range_1m','6m'=>'usage_range_6m','1y'=>'usage_range_1y','3y'=>'usage_range_3y'] as $r => $key): ?>
+      <a href="?range=<?= $r ?>" class="btn btn-sm <?= $range===$r ? 'btn-primary' : 'btn-outline-secondary' ?>" style="font-size:.8rem"><?= t($key,$lang) ?></a>
+    <?php endforeach; ?>
+    <span class="text-muted" style="font-size:.78rem"><?= t('usage_generated', $lang) ?> <?= htmlspecialchars(date('Y-m-d H:i:s T')) ?></span>
+  </div>
 </div>
 
 <!-- Summary cards -->

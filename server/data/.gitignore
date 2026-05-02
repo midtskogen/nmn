@@ -1,3 +1,6 @@
+# Server infrastructure — must not be in repo (security boundary)
+.htaccess
+
 # Runtime / generated — do not track
 __pycache__/
 *.pyc

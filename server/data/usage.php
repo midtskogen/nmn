@@ -145,6 +145,20 @@ foreach ($stream_by_day as $date => $ips) {
 arsort($ip_totals);
 $top_ips = array_slice($ip_totals, 0, 50, true);
 
+// --- Per-IP download bytes (all-time) ---
+$ip_bytes = [];
+foreach ($quota_by_day as $date => $ips) {
+    foreach ($ips as $ip => $stations) {
+        foreach ($stations as $bytes) {
+            $ip_bytes[$ip] = ($ip_bytes[$ip] ?? 0) + $bytes;
+        }
+    }
+}
+// Merge any IPs that only appear in quota (not streaming) into top_ips
+foreach ($ip_bytes as $ip => $bytes) {
+    if (!isset($top_ips[$ip])) $top_ips[$ip] = 0;
+}
+
 // Resolve countries server-side (cached)
 $geoip = resolve_geoip(array_keys($top_ips), $geoip_cache);
 
@@ -349,7 +363,7 @@ $total_ips          = count($all_ips);
   <div class="card p-3">
     <table class="table table-sm table-hover mb-0" id="ip-table">
       <thead><tr>
-        <th>IP Address</th><th class="country-cell">Country</th><th>Streaming time</th><th>Stations used</th>
+        <th>IP Address</th><th class="country-cell">Country</th><th>Streaming time</th><th>Downloaded</th><th>Stations used</th>
       </tr></thead>
       <tbody>
       <?php foreach ($top_ips as $ip => $total_s):
@@ -366,6 +380,7 @@ $total_ips          = count($all_ips);
         <td><?= htmlspecialchars($ip) ?></td>
         <td class="country-cell"><?= $flag ? $flag . ' ' : '' ?><?= htmlspecialchars($country ?: ($geoip[$ip] ?? null ? '?' : '…')) ?></td>
         <td><?= fmt_duration($total_s) ?></td>
+        <td><?= isset($ip_bytes[$ip]) ? fmt_bytes($ip_bytes[$ip]) : '—' ?></td>
         <td><?php
           $stations_for_ip = [];
           foreach ($stream_by_day as $date => $ips) {

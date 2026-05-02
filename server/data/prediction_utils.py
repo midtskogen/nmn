@@ -21,10 +21,11 @@ except ImportError as e:
 # Establishes base paths for all necessary directories and configuration files.
 def _find_base_dir():
     candidate = os.path.dirname(os.path.abspath(__file__))
-    if os.path.exists(os.path.join(candidate, 'stations.json')):
+    if os.path.isdir(os.path.join(candidate, 'download')):
         return candidate
-    for d in ['/var/www/html/data', os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data')]:
-        if os.path.exists(os.path.join(d, 'stations.json')):
+    for d in [os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data'),
+              '/var/www/html/data', '/data/httpd/norskmeteornettverk.no/data']:
+        if os.path.isdir(os.path.join(d, 'download')):
             return d
     return candidate
 BASE_DIR = _find_base_dir()

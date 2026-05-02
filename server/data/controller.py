@@ -14,17 +14,16 @@ from PIL import Image
 
 # --- Configuration (Defined first to avoid circular dependency issues) ---
 def _find_base_dir():
-    """Return the directory containing the live data files (stations.json etc).
-    When this script is invoked via its real path (e.g. as a subprocess spawned
-    by a symlink-invoked parent), __file__ resolves to nmn/server/data/ which
-    lacks stations.json. We walk candidate symlinks to find the right directory.
+    """Return the directory containing the live runtime data (download/, locks/ etc).
+    When this script is invoked via its real path (nmn/server/data/), __file__
+    resolves there but the runtime dirs (download/, locks/) only exist in data/.
     """
     candidate = os.path.dirname(os.path.abspath(__file__))
-    if os.path.exists(os.path.join(candidate, 'stations.json')):
+    if os.path.isdir(os.path.join(candidate, 'download')):
         return candidate
-    real = os.path.realpath(__file__)
-    for d in ['/var/www/html/data', os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data')]:
-        if os.path.exists(os.path.join(d, 'stations.json')):
+    for d in [os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data'),
+              '/var/www/html/data', '/data/httpd/norskmeteornettverk.no/data']:
+        if os.path.isdir(os.path.join(d, 'download')):
             return d
     return candidate
 BASE_DIR = _find_base_dir()

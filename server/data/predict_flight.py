@@ -15,25 +15,6 @@ import csv
 
 # --- Try to import third-party libraries ---
 # This script requires the 'requests' library to make API calls.
-
-from pathlib import Path
-
-# Ensure local project modules are importable even when this script is executed via symlink
-_SCRIPT_PATH = Path(__file__).resolve()
-_PROJECT_DIR = None
-for _cand in (_SCRIPT_PATH.parent, *_SCRIPT_PATH.parents):
-    if (_cand / 'bin').is_dir() and (_cand / 'server').is_dir():
-        _PROJECT_DIR = _cand
-        break
-if _PROJECT_DIR is not None:
-    _BIN_DIR = _PROJECT_DIR / 'bin'
-    _SRC_DIR = _PROJECT_DIR / 'src'
-    for _p in (_BIN_DIR, _SRC_DIR, _PROJECT_DIR):
-        if _p.exists():
-            _ps = str(_p)
-            if _ps not in sys.path:
-                sys.path.insert(0, _ps)
-
 try:
     import requests
     from requests.auth import HTTPBasicAuth
@@ -480,7 +461,15 @@ def fetch_and_process_track(args):
                 opacity = 0.5 - (0.5 * clamped_dist / DETAILED_VICINITY_KM)
 
                 for cam_num in range(1, 8):
-                    pto_data = get_pto_data_from_json(CAMERAS_FILE, f"{station_id.replace('ams', '')}:{cam_num}") if PTO_MAPPER_AVAILABLE else None
+                    pto_data = None
+                    if PTO_MAPPER_AVAILABLE:
+                        try:
+                            pto_data = get_pto_data_from_json(CAMERAS_FILE, f"{station_id.replace('ams', '')}:{cam_num}")
+                        except Exception as e:
+                            logging.warning(
+                                f"Worker {os.getpid()}: Missing/invalid calibration for {station_id}/cam{cam_num} ({e}). "
+                                "Falling back to uncalibrated visibility check."
+                            )
                     is_in_view, _ = is_sky_coord_in_view(pto_data, az_deg, alt_deg)
                     if is_in_view:
                         all_visible_points.append({"time": p_time, "lat": p_lat, "lon": p_lon, "az": az_deg, "alt": alt_deg, "station_id": station_id, "camera": cam_num, "station_code": station_info['station']['code'], "opacity": opacity})
@@ -663,7 +652,7 @@ def find_all_crossings(task_id):
  
     except Exception as e:
         logging.exception(f"An unhandled error occurred for task {task_id}")
-        update_status(status_file, "error", {"message": "error_internal"})
+        update_status(status_file, "error", {"message": "error_internal", "task_id": task_id, "debug": "logs/find_aircraft.log"})
 
 def main():
     """Parses command-line arguments and initiates the aircraft finding process."""

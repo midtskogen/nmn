@@ -37,7 +37,7 @@ function get_user_ip() {
  * @return string The determined and validated language code.
  */
 function get_language($default_lang) {
-    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ'];
+    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI'];
 
     // Priority 1: Check for an existing language cookie.
     if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
@@ -66,6 +66,7 @@ function get_language($default_lang) {
         'NO' => 'nb_NO', // Norway
         'SE' => 'nb_NO', // Sweden
         'DK' => 'nb_NO', // Denmark
+        'FI' => 'fi_FI', // Finland
         
         // English-speaking countries
         'GB' => 'en_GB', // United Kingdom
@@ -89,7 +90,15 @@ function get_language($default_lang) {
     // Use a free GeoIP API to get the country code.
     // Note: In a production environment, you might consider a more robust service or a local database (like MaxMind GeoLite2).
     // The '@' suppresses errors if the API call fails.
-    $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 1,
+        ],
+        'https' => [
+            'timeout' => 1,
+        ],
+    ]);
+    $geo_data_json = @file_get_contents("https://ip-api.com/json/{$user_ip}?fields=countryCode,status", false, $ctx);
     if ($geo_data_json) {
         $geo_data = json_decode($geo_data_json);
         if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
@@ -105,6 +114,121 @@ $action = $_GET['action'] ?? 'get_page';
 
 // --- Router ---
 switch ($action) {
+    case 'tile':
+        $key = getenv('MAPTILER_KEY') ?: '';
+        if ($key === '') {
+            http_response_code(500);
+            echo 'Missing MAPTILER_KEY';
+            break;
+        }
+
+        $tile_cache_dir = rtrim(sys_get_temp_dir(), '/') . '/nmn_tile_cache';
+        if (!is_dir($tile_cache_dir)) {
+            @mkdir($tile_cache_dir, 0775, true);
+        }
+
+        $type = $_GET['type'] ?? '';
+        $z = $_GET['z'] ?? null;
+        $x = $_GET['x'] ?? null;
+        $y = $_GET['y'] ?? null;
+
+        if (!in_array($type, ['satellite', 'backdrop', 'hybrid'], true) || !ctype_digit((string)$z) || !ctype_digit((string)$x) || !ctype_digit((string)$y)) {
+            http_response_code(400);
+            echo 'Invalid tile request';
+            break;
+        }
+
+        $z = (int)$z;
+        $x = (int)$x;
+        $y = (int)$y;
+
+        if ($z < 0 || $z > 12 || $x < 0 || $y < 0) {
+            http_response_code(400);
+            echo 'Invalid tile coordinates';
+            break;
+        }
+
+        if ($type === 'satellite') {
+            $upstream = "https://api.maptiler.com/maps/satellite/{$z}/{$x}/{$y}.jpg?key=" . rawurlencode($key);
+            $contentType = 'image/jpeg';
+        } elseif ($type === 'hybrid') {
+            $upstream = "https://api.maptiler.com/maps/hybrid/{$z}/{$x}/{$y}.png?key=" . rawurlencode($key);
+            $contentType = 'image/png';
+        } else {
+            $upstream = "https://api.maptiler.com/maps/backdrop/{$z}/{$x}/{$y}@2x.png?key=" . rawurlencode($key);
+            $contentType = 'image/png';
+        }
+
+        $cache_ttl = 86400;
+        $cache_key = hash('sha256', $type . '|' . $z . '|' . $x . '|' . $y);
+        $cache_file = $tile_cache_dir . '/' . $cache_key;
+        $etag = '"' . $cache_key . '"';
+        header('ETag: ' . $etag);
+
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag && file_exists($cache_file)) {
+            http_response_code(304);
+            break;
+        }
+
+        if (file_exists($cache_file) && (time() - filemtime($cache_file)) < $cache_ttl) {
+            header('Content-Type: ' . $contentType);
+            header('Cache-Control: public, max-age=86400');
+            readfile($cache_file);
+            break;
+        }
+
+        $ctx = stream_context_create([
+            'http' => [
+                'timeout' => 5,
+                'header' => "User-Agent: norskmeteornettverk.no\r\nReferer: https://norskmeteornettverk.no/\r\n",
+            ],
+            'https' => [
+                'timeout' => 5,
+                'header' => "User-Agent: norskmeteornettverk.no\r\nReferer: https://norskmeteornettverk.no/\r\n",
+            ],
+        ]);
+
+        $data = false;
+        $httpCode = null;
+        $curlErr = null;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($upstream);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+            curl_setopt($ch, CURLOPT_USERAGENT, 'norskmeteornettverk.no');
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Referer: https://norskmeteornettverk.no/']);
+            $data = curl_exec($ch);
+            $curlErr = curl_error($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($data === false || $httpCode < 200 || $httpCode >= 300) {
+                $data = false;
+            }
+        }
+
+        if ($data === false) {
+            $data = @file_get_contents($upstream, false, $ctx);
+        }
+        if ($data === false) {
+            http_response_code(502);
+            echo 'Tile fetch failed';
+            break;
+        }
+
+        header('Content-Type: ' . $contentType);
+        header('Cache-Control: public, max-age=86400');
+
+        if (is_dir($tile_cache_dir) && is_writable($tile_cache_dir)) {
+            $tmp = $cache_file . '.' . uniqid('tmp_', true);
+            @file_put_contents($tmp, $data, LOCK_EX);
+            @rename($tmp, $cache_file);
+        }
+        echo $data;
+        break;
+
     case 'get_page':
         $lang_code = get_language($DEFAULT_LANG);
         $lang_file = $LANG_DIR . '/' . $lang_code . '.json';
@@ -141,6 +265,17 @@ switch ($action) {
     case 'get_meteor_data':
         header('Content-Type: application/json');
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action);
+        echo shell_exec($command);
+        break;
+
+    case 'get_station_stats':
+        header('Content-Type: application/json');
+        $station_id = isset($_GET['station_id']) ? preg_replace('/[^a-zA-Z0-9_]/', '', $_GET['station_id']) : '';
+        $start_date = isset($_GET['start_date']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['start_date']) ? $_GET['start_date'] : '';
+        $end_date = isset($_GET['end_date']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['end_date']) ? $_GET['end_date'] : '';
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($station_id);
+        if ($start_date !== '') $command .= ' ' . escapeshellarg($start_date);
+        if ($start_date !== '' && $end_date !== '') $command .= ' ' . escapeshellarg($end_date);
         echo shell_exec($command);
         break;
 
@@ -210,7 +345,7 @@ switch ($action) {
             . escapeshellarg($resolution) . ' '
             . escapeshellarg($hevc_supported) . ' '
             . escapeshellarg($user_ip) . ' > /dev/null 2>&1 &';
-        
+
         shell_exec($command);
         echo json_encode(['success' => true, 'stream_task_id' => $task_id]);
         break;
@@ -242,6 +377,26 @@ switch ($action) {
         }
 
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' fetch_grid '
+            . escapeshellarg($stream_task_id) . ' '
+            . escapeshellarg($station_id) . ' '
+            . escapeshellarg($cam_num);
+        
+        echo shell_exec($command);
+        break;
+
+    case 'fetch_annotation':
+        header('Content-Type: application/json');
+        $stream_task_id = $_GET['stream_task_id'] ?? null;
+        $station_id = $_GET['station_id'] ?? null;
+        $cam_num = $_GET['cam_num'] ?? null;
+
+        if (!$stream_task_id || !$station_id || !$cam_num || !preg_match('/^stream_[a-zA-Z0-9_.-]+$/', $stream_task_id) || !preg_match('/^ams\d+$/', $station_id) || !ctype_digit($cam_num)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid or missing parameters']);
+            exit;
+        }
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' fetch_annotation '
             . escapeshellarg($stream_task_id) . ' '
             . escapeshellarg($station_id) . ' '
             . escapeshellarg($cam_num);

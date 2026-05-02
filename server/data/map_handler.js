@@ -5,14 +5,19 @@ import { calculateBearing, destinationPoint } from './calculations.js';
 let map;
 let cloudLayer = null, auroraLayer = null, terminatorLayer = null;
 let lightningLayer = null, selectedLightningMarker = null, meteorLayer = null;
+let meteorCountLayer = null;
 let stationMarkers = {}, groundTrackLayers = {}, bearingLineLayer = null;
 let passData = {}, aircraftData = {}, lightningData = [], meteorData = [];
+let meteorCounts = null;
 
 // --- Icon Definitions ---
 const iconOptions = { iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] };
 export const blueIcon = new L.Icon({ iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 export const redIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 export const yellowIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+export const greyIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-grey.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+// Add the new Dark Blue Icon
+export const darkBlueIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' }); 
 const createLightningIcon = (color, size) => L.divIcon({ className: `lightning-icon lightning-icon-${color} icon-size-${size}`, html: '⚡', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
 /**
@@ -144,17 +149,23 @@ export function initMap(mapId, onMoveEnd, onZoomEnd, t) {
     const defaultMapView = [[64.7, 13.0], 5];
     map = L.map(mapId, { maxZoom: 12, minZoom: 3 }).setView(...defaultMapView);
     
-    L.tileLayer(`https://api.maptiler.com/maps/satellite/{z}/{x}/{y}.jpg?key=2gLVEsGCx9JWRMUG7191`, {
+    L.tileLayer(`index.php?action=tile&type=satellite&z={z}&x={x}&y={y}`, {
         attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">&copy; MapTiler</a> <a href="https://www.openstreetmap.org/copyright" target="_blank">&copy; OpenStreetMap contributors</a>',
         className: 'map-tiler-satellite'
     }).addTo(map);
     
-    map.createPane('labels').style.zIndex = 650;
+    map.createPane('labels').style.zIndex = 350;
     map.getPane('labels').style.pointerEvents = 'none';
+    map.createPane('dataOverlays').style.zIndex = 550;
+    map.getPane('dataOverlays').style.pointerEvents = 'none';
+    map.createPane('stationCounts').style.zIndex = 625;
+    map.getPane('stationCounts').style.pointerEvents = 'none';
     map.createPane('meteorTooltipPane').style.zIndex = 651;
 
-    new L.TileLayer.WhiteToTransparent(`https://api.maptiler.com/maps/backdrop/{z}/{x}/{y}@2x.png?key=2gLVEsGCx9JWRMUG7191`, {
-        attribution: '', tileSize: 512, zoomOffset: -1
+    L.tileLayer(`index.php?action=tile&type=hybrid&z={z}&x={x}&y={y}`, {
+        attribution: '',
+        pane: 'labels',
+        opacity: 1
     }).addTo(map);
     
     L.Control.ResetView = L.Control.extend({
@@ -173,16 +184,68 @@ export function setPassData(data) { passData = data; }
 export function setAircraftData(data) { aircraftData = data; }
 export function setLightningData(data) { lightningData = data; }
 export function setMeteorData(data) { meteorData = data; }
+export function setMeteorCounts(data) { meteorCounts = data; }
+
+function updateMeteorStationCountBadges() {
+    if (meteorCountLayer) {
+        map.removeLayer(meteorCountLayer);
+        meteorCountLayer = null;
+    }
+    const countsByStation = (meteorCounts && typeof meteorCounts === 'object') ? meteorCounts : null;
+    const derivedCountsByStation = {};
+    if (!countsByStation) {
+        if (!Array.isArray(meteorData) || meteorData.length === 0) return;
+        meteorData.forEach(meteor => {
+            (meteor.station_ids || []).forEach(stationId => {
+                if (!stationId) return;
+                derivedCountsByStation[stationId] = derivedCountsByStation[stationId] || { total: 0, multi: 0 };
+                derivedCountsByStation[stationId].total += 1;
+                if ((meteor.station_ids || []).length > 1) derivedCountsByStation[stationId].multi += 1;
+            });
+        });
+    }
+
+    meteorCountLayer = L.layerGroup();
+    Object.entries(countsByStation || derivedCountsByStation).forEach(([stationId, counts]) => {
+        const stationMarker = stationMarkers[stationId];
+        if (!stationMarker) return;
+
+        let total = null;
+        let multi = null;
+        if (typeof counts === 'number') {
+            total = counts;
+        } else if (counts && typeof counts === 'object') {
+            total = counts.total;
+            multi = counts.multi;
+        }
+        if (!Number.isFinite(total) || total <= 0) return;
+
+        const badgeText = (Number.isFinite(multi) && multi >= 0) ? `${multi}/${total}` : String(total);
+
+        const latLng = stationMarker.getLatLng();
+        const badgeIcon = L.divIcon({
+            className: 'station-count-icon',
+            html: `<div class="station-count-badge">${badgeText}</div>`,
+            iconSize: [36, 24],
+            iconAnchor: [18, 44]
+        });
+
+        L.marker(latLng, { icon: badgeIcon, interactive: false, keyboard: false, pane: 'stationCounts' })
+            .addTo(meteorCountLayer);
+    });
+    meteorCountLayer.addTo(map);
+}
 
 // --- Marker Management ---
-export function addStationMarker(stationId, station, onClick) {
-    const marker = L.marker([station.astronomy.latitude, station.astronomy.longitude], { icon: blueIcon }).addTo(map);
+export function addStationMarker(stationId, station, onClick, initialIcon = blueIcon) {
+    const marker = L.marker([station.astronomy.latitude, station.astronomy.longitude], { icon: initialIcon }).addTo(map);
     marker.stationId = stationId;
-    marker.bindTooltip(`<b>${station.station.code}</b><br>${station.station.name}`).on('click', onClick);
+    marker.bindTooltip(`<b>${station.station.code} ${station.station.name} ${stationId}</b>`).on('click', onClick);
     stationMarkers[stationId] = marker;
     return marker;
 }
-export function updateStationMarkerIcon(stationId, icon) { if (stationMarkers[stationId]) stationMarkers[stationId].setIcon(icon); }
+export function updateStationMarkerIcon(stationId, icon) { if (stationMarkers[stationId]) stationMarkers[stationId].setIcon(icon);
+}
 export function getStationMarkers() { return stationMarkers; }
 
 // --- Layer & Drawing Functions ---
@@ -399,6 +462,7 @@ export function displayMeteors(onMeteorClick, onMeteorMouseover, onMeteorMouseou
         meteorShape.addTo(meteorLayer);
     });
     meteorLayer.addTo(map);
+    updateMeteorStationCountBadges();
 }
 
 export function toggleMeteorLayer(isChecked, onMeteorClick, onMeteorMouseover, onMeteorMouseout) {
@@ -408,20 +472,25 @@ export function toggleMeteorLayer(isChecked, onMeteorClick, onMeteorMouseover, o
         if (meteorLayer && map.hasLayer(meteorLayer)) {
             map.removeLayer(meteorLayer);
         }
+        if (meteorCountLayer && map.hasLayer(meteorCountLayer)) {
+            map.removeLayer(meteorCountLayer);
+        }
     }
 }
+
+export function getMeteorData() { return meteorData; }
 
 export function getMap() { return map; }
 
 function getTerminatorLayer() { 
-    if (!terminatorLayer) terminatorLayer = new L.GridLayer.Terminator();
+    if (!terminatorLayer) terminatorLayer = new L.GridLayer.Terminator({ pane: 'dataOverlays' });
     return terminatorLayer;
 }
 
 function getCloudLayer(date) { 
     if (cloudLayer && cloudLayer.wmsParams.time === date) return cloudLayer;
     if (cloudLayer) map.removeLayer(cloudLayer);
-    cloudLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_CorrectedReflectance_TrueColor', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}` });
+    cloudLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_CorrectedReflectance_TrueColor', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}`, pane: 'dataOverlays' });
     cloudLayer.setOpacity(0.5);
     return cloudLayer;
 }
@@ -429,7 +498,7 @@ function getCloudLayer(date) {
 function getAuroraLayer(date) { 
     if (auroraLayer && auroraLayer.wmsParams.time === date) return auroraLayer;
     if (auroraLayer) map.removeLayer(auroraLayer);
-    auroraLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}` });
+    auroraLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}`, pane: 'dataOverlays' });
     auroraLayer.setOpacity(0.5);
     return auroraLayer;
 }

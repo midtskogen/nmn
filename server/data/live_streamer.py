@@ -8,6 +8,9 @@ import time
 import shutil
 import signal
 import socket
+import re
+import shlex
+import threading
 from datetime import datetime, timezone
 
 # Import from our new shared utility library
@@ -16,32 +19,14 @@ from shared_utils import atomic_json_rw, update_status, uniqid
 
 # --- Configuration (specific to streaming) ---
 # Establishes base paths for all necessary directories and configuration files.
-
-import sys
-from pathlib import Path
-
-# Ensure local project modules are importable even when this script is executed via symlink
-_SCRIPT_PATH = Path(__file__).resolve()
-_PROJECT_DIR = None
-for _cand in (_SCRIPT_PATH.parent, *_SCRIPT_PATH.parents):
-    if (_cand / 'bin').is_dir() and (_cand / 'server').is_dir():
-        _PROJECT_DIR = _cand
-        break
-if _PROJECT_DIR is not None:
-    _BIN_DIR = _PROJECT_DIR / 'bin'
-    _SRC_DIR = _PROJECT_DIR / 'src'
-    for _p in (_BIN_DIR, _SRC_DIR, _PROJECT_DIR):
-        if _p.exists():
-            _ps = str(_p)
-            if _ps not in sys.path:
-                sys.path.insert(0, _ps)
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCK_DIR = os.path.join(BASE_DIR, 'locks')
 DOWNLOAD_DIR = os.path.join(BASE_DIR, 'download')
 STREAM_DIR = os.path.join(BASE_DIR, 'streams')
 STATIONS_FILE = os.path.join(BASE_DIR, 'stations.json')
 STREAM_TIME_TRACKER_FILE = os.path.join(BASE_DIR, 'stream_time_tracker.json')
+
+GRID_CACHE_DIR = DOWNLOAD_DIR
 
 # Defines the total daily streaming time allowed per user IP, per station.
 # Stations with the 'quota' flag have more restrictive limits.
@@ -70,18 +55,41 @@ def fetch_grid_file(stream_task_id, station_id, camera_num):
         return {"success": False, "error": "Stream task not found."}
 
     try:
+        os.makedirs(GRID_CACHE_DIR, exist_ok=True)
+
+        cached_filename = f"grid_{station_id}_cam{camera_num}.png"
+        cached_filepath = os.path.join(GRID_CACHE_DIR, cached_filename)
+        if os.path.exists(cached_filepath) and os.path.getsize(cached_filepath) > 0:
+            try:
+                age_seconds = time.time() - os.path.getmtime(cached_filepath)
+            except OSError:
+                age_seconds = 10**9
+
+            if age_seconds < 86400:
+                logging.info(f"{log_prefix} Using cached grid: {cached_filepath}")
+                return {"success": True, "grid_url": f"download/{cached_filename}"}
+            logging.info(f"{log_prefix} Cached grid is stale ({age_seconds:.0f}s). Refetching.")
+
         # Securely copies the grid.png file from the remote station.
-        local_filename = f"grid_{station_id}_cam{camera_num}_{uniqid()}.png"
-        local_filepath = os.path.join(DOWNLOAD_DIR, local_filename)
-        command = ["scp", "-B", "-o", "ConnectTimeout=10", f"{station_id}:/meteor/cam{camera_num}/grid.png", local_filepath]
+        tmp_filename = f"grid_{station_id}_cam{camera_num}_{uniqid()}.png"
+        tmp_filepath = os.path.join(DOWNLOAD_DIR, tmp_filename)
+        command = ["scp", "-B", "-o", "ConnectTimeout=10", f"{station_id}:/meteor/cam{camera_num}/grid.png", tmp_filepath]
         subprocess.run(command, check=True, timeout=40, capture_output=True)
-        logging.info(f"{log_prefix} Fetched grid to {local_filepath}")
+        logging.info(f"{log_prefix} Fetched grid to {tmp_filepath}")
+
+        try:
+            os.replace(tmp_filepath, cached_filepath)
+        except OSError:
+            # If atomic replace fails, keep the tmp file and serve it.
+            cached_filepath = tmp_filepath
+            cached_filename = os.path.basename(cached_filepath)
 
         # Updates the stream's status file with the path to the downloaded grid.
         with atomic_json_rw(status_file, stream_task_id) as data:
-            data['grid_local_path'] = local_filepath
+            data['grid_local_path'] = cached_filepath
+            data['grid_cached'] = (cached_filepath == os.path.join(GRID_CACHE_DIR, f"grid_{station_id}_cam{camera_num}.png"))
         
-        return {"success": True, "grid_url": f"download/{local_filename}"}
+        return {"success": True, "grid_url": f"download/{cached_filename}"}
 
     except subprocess.TimeoutExpired:
         logging.error(f"{log_prefix} SCP timed out.")
@@ -89,6 +97,98 @@ def fetch_grid_file(stream_task_id, station_id, camera_num):
     except subprocess.CalledProcessError as e:
         logging.error(f"{log_prefix} SCP failed. Stderr: {e.stderr.decode()}")
         return {"success": False, "error": "error_grid_not_found"}
+    except Exception as e:
+        logging.error(f"{log_prefix} Unexpected error: {e}", exc_info=True)
+        return {"success": False, "error": "error_internal"}
+
+
+DRAWGRID_SCRIPT = os.path.join(os.path.dirname(BASE_DIR), 'bin', 'drawgrid.py')
+PTO_CACHE_DIR = DOWNLOAD_DIR
+
+
+def fetch_annotation_file(stream_task_id, station_id, camera_num):
+    """
+    Generates a star annotation overlay for the live stream.
+    Uses the cached grid PNG as a base and draws star positions on top using drawgrid.py.
+    Requires the lens.pto calibration file from the remote station.
+    """
+    log_prefix = f"AnnotationFetch for {stream_task_id} -"
+    logging.info(f"{log_prefix} Request for {station_id} cam {camera_num}.")
+
+    status_file = os.path.join(LOCK_DIR, f"{stream_task_id}.json")
+    for _ in range(50):
+        if os.path.exists(status_file):
+            break
+        time.sleep(0.2)
+    else:
+        logging.error(f"{log_prefix} Status file not found after waiting.")
+        return {"success": False, "error": "Stream task not found."}
+
+    try:
+        os.makedirs(PTO_CACHE_DIR, exist_ok=True)
+
+        # 1. Fetch lens.pto from the remote station (cache for 24h)
+        pto_filename = f"lens_{station_id}_cam{camera_num}.pto"
+        pto_filepath = os.path.join(PTO_CACHE_DIR, pto_filename)
+        pto_fresh = False
+        if os.path.exists(pto_filepath) and os.path.getsize(pto_filepath) > 0:
+            try:
+                age_seconds = time.time() - os.path.getmtime(pto_filepath)
+            except OSError:
+                age_seconds = 10**9
+            if age_seconds < 86400:
+                pto_fresh = True
+                logging.info(f"{log_prefix} Using cached lens.pto: {pto_filepath}")
+
+        if not pto_fresh:
+            tmp_pto = os.path.join(DOWNLOAD_DIR, f"lens_{station_id}_cam{camera_num}_{uniqid()}.pto")
+            command = ["scp", "-B", "-o", "ConnectTimeout=10",
+                       f"{station_id}:/meteor/cam{camera_num}/lens.pto", tmp_pto]
+            subprocess.run(command, check=True, timeout=40, capture_output=True)
+            logging.info(f"{log_prefix} Fetched lens.pto to {tmp_pto}")
+            try:
+                os.replace(tmp_pto, pto_filepath)
+            except OSError:
+                pto_filepath = tmp_pto
+
+        # 2. Get station latitude/longitude from stations.json
+        with open(STATIONS_FILE, 'r') as f:
+            stations_data = json.load(f)
+        station = stations_data.get(station_id, {})
+        lat = station.get('astronomy', {}).get('latitude')
+        lon = station.get('astronomy', {}).get('longitude')
+        if lat is None or lon is None:
+            logging.error(f"{log_prefix} Station {station_id} missing lat/lon.")
+            return {"success": False, "error": "error_station_not_found"}
+
+        # 3. Run drawgrid.py with --annotations-only for star-only transparent overlay
+        # Add 15s to compensate for video delay (~8s) and refresh interval
+        timestamp = int(time.time()) + 15
+        annotation_filename = f"annotation_{station_id}_cam{camera_num}.png"
+        annotation_filepath = os.path.join(DOWNLOAD_DIR, annotation_filename)
+
+        cmd = [
+            "python3", DRAWGRID_SCRIPT,
+            "--annotations-only",
+            "-Y", str(lat), "-X", str(lon),
+            "-d", str(timestamp),
+            pto_filepath, annotation_filepath
+        ]
+        logging.info(f"{log_prefix} Running drawgrid: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            logging.error(f"{log_prefix} drawgrid failed: {result.stderr}")
+            return {"success": False, "error": "error_annotation_generation_failed"}
+
+        logging.info(f"{log_prefix} Annotation generated: {annotation_filepath}")
+        return {"success": True, "annotation_url": f"download/{annotation_filename}?t={timestamp}"}
+
+    except subprocess.TimeoutExpired:
+        logging.error(f"{log_prefix} Operation timed out.")
+        return {"success": False, "error": "error_grid_fetch_timeout"}
+    except subprocess.CalledProcessError as e:
+        logging.error(f"{log_prefix} SCP failed. Stderr: {e.stderr.decode()}")
+        return {"success": False, "error": "error_annotation_pto_not_found"}
     except Exception as e:
         logging.error(f"{log_prefix} Unexpected error: {e}", exc_info=True)
         return {"success": False, "error": "error_internal"}
@@ -166,9 +266,10 @@ def stop_stream_relay(task_id):
         except OSError:
             logging.info(f"{pid_name} (PID: {pid}) for task {task_id} was already gone.")
             
-    # Deletes the temporary grid file.
+    # Deletes the temporary grid file (but never delete the cached grid).
     if grid_path := data.get("grid_local_path"):
-        if os.path.exists(grid_path):
+        is_cached = bool(data.get("grid_cached"))
+        if (not is_cached) and os.path.exists(grid_path):
             try:
                 os.remove(grid_path)
                 logging.info(f"Removed grid file: {grid_path}")
@@ -233,78 +334,203 @@ def _start_ssh_tunnel(station_id, camera_num):
     
     logging.info(f"{log_prefix} Attempting to establish tunnel on port {local_port} with command: {' '.join(ssh_command)}")
     process = subprocess.Popen(ssh_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    time.sleep(4) # Wait briefly to see if the process exits immediately.
-    # If the SSH process has already terminated, the tunnel failed.
-    if process.poll() is not None:
-        stderr_output = process.stderr.read().decode('utf-8', errors='ignore').strip()
-        error_message = f"error_ssh_tunnel_failed_with_msg|error={stderr_output}" if stderr_output else "error_ssh_process_terminated"
-        logging.error(f"{log_prefix} FAILED. {error_message}")
-        raise RuntimeError(error_message)
+    # Avoid a fixed sleep here; instead, quickly detect failure or readiness.
+    start = time.time()
+    while True:
+        if process.poll() is not None:
+            stderr_output = process.stderr.read().decode('utf-8', errors='ignore').strip()
+            error_message = f"error_ssh_tunnel_failed_with_msg|error={stderr_output}" if stderr_output else "error_ssh_process_terminated"
+            logging.error(f"{log_prefix} FAILED. {error_message}")
+            raise RuntimeError(error_message)
+        try:
+            with socket.create_connection(("127.0.0.1", local_port), timeout=0.3):
+                break
+        except OSError:
+            if (time.time() - start) > 4:
+                raise RuntimeError(f"error_ssh_tunnel_timeout|port={local_port}")
+            time.sleep(0.1)
 
-    logging.info(f"{log_prefix} Tunnel appears stable (PID: {process.pid}) on port {local_port}.")
+    logging.info(f"{log_prefix} Tunnel is ready (PID: {process.pid}) on port {local_port}.")
     return process, local_port
 
 
 def _start_ffmpeg_relay(local_port, resolution, stream_dir, hevc_supported, log_prefix):
     """
-    Starts an ffmpeg process that connects to the local end of the SSH tunnel,
-    and re-streams the video into an HLS (HTTP Live Streaming) format.
+    Starts an ffmpeg process. Uses robust probing to default to transcoding if codec detection fails.
     """
-    stream_index = '1' if resolution == 'lowres' else '0' # Camera provides different stream indexes for hi/low res.
+    stream_index = '1' if resolution == 'lowres' else '0' 
     rtsp_url = f"rtsp://127.0.0.1:{local_port}/user=admin&password=&channel=1&stream={stream_index}.sdp"
     playlist_path = os.path.join(stream_dir, 'playlist.m3u8')
 
-    # Verifies that the local port is open, confirming the SSH tunnel is active.
     try:
-        with socket.create_connection(("127.0.0.1", local_port), timeout=2):
+        with socket.create_connection(("127.0.0.1", local_port), timeout=3):
             logging.info(f"{log_prefix} Port {local_port} is open. SSH tunnel is confirmed active.")
     except (socket.timeout, ConnectionRefusedError) as e:
         raise RuntimeError(f"error_local_tunnel_inactive|port={local_port}")
 
-    # Probes the video stream to detect its codec (HEVC or H.264).
+    # --- Codec Detection (time-bounded) ---
+    codec_name = None
     try:
-        ffprobe_cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", "-rtsp_transport", "tcp", rtsp_url]
-        probe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=20, check=True)
-        codec_name = probe_result.stdout.strip()
-        logging.info(f"{log_prefix} Detected video codec: {codec_name}")
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-        logging.error(f"{log_prefix} ffprobe failed to determine codec, defaulting to copy. Error: {e.stderr if hasattr(e, 'stderr') else e}")
-        codec_name = 'h264'
+        ffprobe_cmd = [
+            "ffprobe", "-v", "error",
+            "-analyzeduration", "0", "-probesize", "32768",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-rtsp_transport", "tcp",
+            rtsp_url
+        ]
+        probe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=2, check=True)
+        detected = probe_result.stdout.strip().lower()
+        if detected:
+            codec_name = 'hevc' if detected == 'h265' else detected
+            logging.info(f"{log_prefix} Detected video codec: {codec_name}")
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        logging.warning(f"{log_prefix} Probe failed quickly; defaulting to HEVC for safety.")
+            
+    if not codec_name:
+        logging.warning(f"{log_prefix} Probing failed. Defaulting to HEVC->Transcode for safety.")
+        codec_name = 'hevc'
 
+    should_copy = (codec_name == 'h264') or (codec_name == 'hevc' and hevc_supported)
+    output_codec = codec_name if should_copy else 'h264'
+    transcoding = not should_copy
   
     video_opts = ["-c:v"]
-    # If the source is HEVC but the user's browser doesn't support it, transcode to H.264.
-    if codec_name.lower() == 'hevc' and not hevc_supported:
-        logging.info(f"{log_prefix} Transcoding HEVC to H.264 for browser compatibility.")
-        video_opts.extend(["libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)"])
-    else:
-        # Otherwise, copy the video stream without re-encoding to save CPU.
-        logging.info(f"{log_prefix} Codec is '{codec_name}'. Using copy.")
+    if should_copy:
+        logging.info(f"{log_prefix} Copying stream (codec: {codec_name})")
         video_opts.append("copy")
+    else:
+        logging.info(f"{log_prefix} Transcoding stream to H.264")
+        video_opts.extend(["libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)"])
         
-    # The ffmpeg command to create the HLS stream (playlist.m3u8 and .ts segment files).
-    ffmpeg_command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", rtsp_url, *video_opts, "-an", "-f", "hls", "-hls_time", "1", "-hls_list_size", "2", "-hls_flags", "delete_segments", playlist_path]
+    ffmpeg_command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-analyzeduration", "0",
+        "-probesize", "32768",
+        "-rtsp_transport", "tcp",
+        "-i", rtsp_url,
+        *video_opts,
+        "-an",
+        "-f", "hls",
+        "-hls_time", "1",
+        "-hls_list_size", "2",
+        "-hls_flags", "delete_segments",
+        playlist_path
+    ]
     
     logging.info(f"{log_prefix} Starting ffmpeg with command: {' '.join(ffmpeg_command)}")
-    process = subprocess.Popen(ffmpeg_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    # Waits for ffmpeg to create the HLS playlist file, confirming it's working.
-    for _ in range(30):
-        if process.poll() is not None: raise RuntimeError("FFmpeg process failed to start or connect.")
-        if os.path.exists(playlist_path) and os.path.getsize(playlist_path) > 0: return process, playlist_path
-        time.sleep(1)
+    process = subprocess.Popen(ffmpeg_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return process, playlist_path, codec_name, output_codec, transcoding
+
+
+def _wait_for_playlist(process, playlist_path, log_prefix, timeout_seconds=10):
+    """Waits for ffmpeg to create a non-empty playlist file."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if process.poll() is not None:
+            err_out = process.stderr.read().decode('utf-8', errors='ignore')
+            raise RuntimeError(f"FFmpeg process died immediately. Error: {err_out}")
+        if os.path.exists(playlist_path) and os.path.getsize(playlist_path) > 0:
+            return
+        time.sleep(0.1)
     raise RuntimeError("FFmpeg is running but failed to create a valid playlist file.")
+
+
+def _onvif_request_keyframe_via_station(station_id, camera_num, log_prefix, status_file=None, resolution=None):
+    """Best-effort ONVIF request for an IDR/keyframe.
+
+    This runs *from the station* (which has access to the camera LAN) by executing
+    curl over SSH. Many embedded ONVIF stacks expose gSOAP on port 8899.
+
+    If anything fails, it logs and returns without raising.
+    """
+    cam_ip = f"192.168.76.7{camera_num}"
+    media_service = f"http://{cam_ip}:8899/onvif/Media"
+
+    # NOTE: We intentionally do not write ONVIF diagnostics into the stream status file.
+    # The frontend only needs readiness states; detailed ONVIF payloads were temporary debug.
+
+    # Important: ssh executes the *remote* command via a shell string. If we pass an argv list
+    # with arguments containing spaces (like the Content-Type header), they will be split.
+    # Build a single shell-escaped command string instead.
+    def _ssh_curl(url, soap_xml, timeout_s=2):
+        # Build a single remote shell command string (ssh runs through a remote shell).
+        remote_cmd = [
+            "curl",
+            "-sS",
+            "--max-time", str(timeout_s),
+            "-w", "\\nHTTP_CODE:%{http_code}\\n",
+            "-X", "POST",
+            url,
+            "-H", "Content-Type: application/soap+xml; charset=utf-8",
+            "--data-binary", "@-",
+        ]
+        cmd = ["ssh", station_id, " ".join(shlex.quote(x) for x in remote_cmd)]
+        return subprocess.run(cmd, input=soap_xml.encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_s + 1)
+
+    def _set_sync(token):
+        sync_xml = (
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\">"
+            "<s:Body>"
+            "<trt:SetSynchronizationPoint xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\">"
+            f"<trt:ProfileToken>{token}</trt:ProfileToken>"
+            "</trt:SetSynchronizationPoint>"
+            "</s:Body>"
+            "</s:Envelope>"
+        )
+        t1 = time.time()
+        res2 = _ssh_curl(media_service, sync_xml)
+        dt2 = time.time() - t1
+        out2 = (res2.stdout or "")
+        err2 = (res2.stderr or "")
+        body2 = out2 + "\n" + err2
+        http_m2 = re.search(r"HTTP_CODE:(\d{3})", body2)
+        http_code2 = int(http_m2.group(1)) if http_m2 else None
+        soap_fault2 = ("<SOAP-ENV:Fault" in body2) or ("<SOAP-ENV:Fault" in out2) or ("<SOAP-ENV:Fault" in err2)
+        return {
+            "ok": bool(res2.returncode == 0) and not soap_fault2,
+            "returncode": res2.returncode,
+            "http_code": http_code2,
+            "soap_fault": bool(soap_fault2),
+            "seconds": round(dt2, 3),
+            "profile_token": token,
+        }
+
+    # Request keyframes for the known encoder tokens.
+    # On these modules, tokens are typically stable (000=hires, 001=lowres).
+    try:
+        results = []
+        for tok in ("000", "001"):
+            results.append(_set_sync(tok))
+        ok_count = sum(1 for r in results if r.get('ok'))
+        logging.info(f"{log_prefix} ONVIF: requested keyframe for {len(results)} tokens on {cam_ip} (ok={ok_count}).")
+    except Exception as e:
+        logging.info(f"{log_prefix} ONVIF: SetSynchronizationPoint failed: {e}")
+        return None
+
+    return None
 
 
 def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hevc_supported=False):
     """
     Main function to orchestrate the entire live stream setup process.
-    This function is intended to be long-running and will manage the stream's lifecycle.
+    Supports dynamic switching to H.264 transcoding without dropping the SSH tunnel.
     """
     stream_start_time = time.time()
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     log_prefix = f"StreamRelay {task_id} -"
     logging.info(f"{log_prefix} Request for {station_id}/{camera_num}/{resolution}. HEVC support: {hevc_supported}")
+
+    timings = {
+        "t0": stream_start_time,
+        "ssh_tunnel_seconds": None,
+        "ffmpeg_to_playlist_seconds": None,
+        "setup_seconds": None,
+    }
     
     _cleanup_stale_stream_locks(log_prefix)
 
@@ -325,26 +551,138 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
     try:
         update_status(status_file, "establishing_tunnel", {"message": "status_contacting_station"})
    
+        t_ssh0 = time.time()
         ssh_process, local_port = _start_ssh_tunnel(station_id, camera_num)
+        timings["ssh_tunnel_seconds"] = round(time.time() - t_ssh0, 3)
 
         update_status(status_file, "connecting_camera", {"message": "status_connecting_camera"})
-        ffmpeg_process, _ = _start_ffmpeg_relay(local_port, resolution, stream_dir, hevc_supported, log_prefix)
+
+        # Start ffmpeg first, then request keyframe (avoids race: we are ready to receive).
+        t_ff0 = time.time()
+        ffmpeg_process, playlist_path, input_codec, output_codec, transcoding = _start_ffmpeg_relay(local_port, resolution, stream_dir, hevc_supported, log_prefix)
+
+        # Wait for playlist in parallel so we can see whether ONVIF actually changes time-to-playlist.
+        playlist_ready = {"ts": None, "error": None}
+        def _playlist_waiter():
+            try:
+                _wait_for_playlist(ffmpeg_process, playlist_path, log_prefix, timeout_seconds=10)
+                playlist_ready["ts"] = time.time()
+            except Exception as e:
+                playlist_ready["error"] = e
+
+        waiter_thread = threading.Thread(target=_playlist_waiter, daemon=True)
+        waiter_thread.start()
+
+        # ONVIF keyframe request is done asynchronously so it cannot delay readiness.
+        def _onvif_worker():
+            try:
+                # Cross-process rate-limit to avoid spamming the camera on rapid restarts.
+                # (Each stream start is a separate Python process.)
+                rate_file = os.path.join(LOCK_DIR, f"onvif_rate_{station_id}_{camera_num}.json")
+                now = time.time()
+                try:
+                    with atomic_json_rw(rate_file) as r:
+                        last = float(r.get('last_ts') or 0.0)
+                        if (now - last) < 2.0:
+                            return
+                        r['last_ts'] = now
+                except Exception:
+                    pass
+
+                _onvif_request_keyframe_via_station(
+                    station_id,
+                    camera_num,
+                    log_prefix,
+                    status_file=status_file,
+                    resolution=resolution,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_onvif_worker, daemon=True).start()
+
+        # Ensure playlist is ready (or error) before marking ready.
+        waiter_thread.join(timeout=12)
+        if playlist_ready["error"]:
+            raise playlist_ready["error"]
+        if not playlist_ready["ts"]:
+            raise RuntimeError("Playlist waiter did not finish in time.")
+
+        timings["ffmpeg_to_playlist_seconds"] = round(playlist_ready["ts"] - t_ff0, 3)
         
         timeout_seconds = _get_timeout_for_station(station_id, resolution, stations_data)
         update_data = {
             "message": "status_stream_ready", "pids": {"ssh_pid": ssh_process.pid, "ffmpeg_pid": ffmpeg_process.pid},
             "stream_dir": stream_dir, "station_id": station_id, "timeout_seconds": timeout_seconds, "resolution": resolution
         }
+        timings["setup_seconds"] = round(time.time() - stream_start_time, 3)
+        update_data["input_codec"] = input_codec
+        update_data["output_codec"] = output_codec
+        update_data["transcoding"] = bool(transcoding)
         update_status(status_file, "ready", update_data)
+
+        logging.info(
+            f"{log_prefix} Timing: ssh={timings['ssh_tunnel_seconds']}s, ffmpeg->playlist={timings['ffmpeg_to_playlist_seconds']}s, "
+            f"setup={timings['setup_seconds']}s"
+        )
         
         # This loop keeps the script alive, monitoring the stream processes until the timeout is reached
         # or a process dies or is stopped externally.
         end_time = time.time() + timeout_seconds
         while time.time() < end_time:
-            if not os.path.exists(status_file) or ssh_process.poll() is not None or ffmpeg_process.poll() is not None:
-                logging.warning(f"A stream process for task {task_id} terminated or was stopped.")
+            # 1. Check for Hot-Swap Command
+            should_switch = False
+            try:
+                with atomic_json_rw(status_file) as s_data:
+                    if s_data.get('command') == 'switch_to_h264':
+                        logging.info(f"{log_prefix} Hot-swap requested. Restarting FFmpeg...")
+                        del s_data['command']
+                        should_switch = True
+            except Exception: pass
+
+            if should_switch:
+                # Terminate old FFmpeg politely, then forcefully
+                if ffmpeg_process and ffmpeg_process.poll() is None:
+                    try:
+                        os.kill(ffmpeg_process.pid, signal.SIGTERM)
+                        for _ in range(20): # Wait 2s
+                            if ffmpeg_process.poll() is not None: break
+                            time.sleep(0.1)
+                        if ffmpeg_process.poll() is None:
+                            os.kill(ffmpeg_process.pid, signal.SIGKILL)
+                            ffmpeg_process.wait(timeout=1)
+                    except (OSError, subprocess.TimeoutExpired): pass
+                
+                time.sleep(1) # Cooldown
+                
+                # Cleanup playlist
+                plist = os.path.join(stream_dir, 'playlist.m3u8')
+                if os.path.exists(plist): 
+                    try: os.remove(plist)
+                    except OSError: pass
+
+                # Restart
+                try:
+                    ffmpeg_process, _, input_codec, output_codec, transcoding = _start_ffmpeg_relay(local_port, resolution, stream_dir, False, log_prefix)
+                    with atomic_json_rw(status_file) as s_data:
+                        s_data['pids']['ffmpeg_pid'] = ffmpeg_process.pid
+                        s_data['input_codec'] = input_codec
+                        s_data['output_codec'] = output_codec
+                        s_data['transcoding'] = bool(transcoding)
+                except Exception as e:
+                    logging.error(f"{log_prefix} Failed to restart FFmpeg: {e}")
+                    break
+
+            if not os.path.exists(status_file):
+                logging.warning(f"Status file gone for {task_id}. Stopping.")
                 break
-            time.sleep(2)
+            if ssh_process.poll() is not None:
+                logging.warning(f"SSH process terminated for {task_id}.")
+                break
+            if ffmpeg_process.poll() is not None and not should_switch:
+                logging.warning(f"FFmpeg process terminated for {task_id}.")
+                break
+            time.sleep(0.5)
 
     except Exception as e:
  

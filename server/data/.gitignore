@@ -1,0 +1,4 @@
+# Runtime / generated — do not track
+__pycache__/
+*.pyc
+*.pyo

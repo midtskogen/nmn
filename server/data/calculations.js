@@ -15,15 +15,15 @@ export function getSunTimes(date, lat, lon, altitude = -6) {
     const dayOfYear = (Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - Date.UTC(date.getUTCFullYear(), 0, 0)) / 864e5;
     
     // An approximation of the solar declination angle in radians.
-    const solarDeclination = TO_DEG * (0.006918 - 0.399912 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
+    const solarDeclination = (0.006918 - 0.399912 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
         + 0.070257 * Math.sin(2 * Math.PI * (dayOfYear - 1) / 365.24)
         - 0.006758 * Math.cos(4 * Math.PI * (dayOfYear - 1) / 365.24)
         + 0.000907 * Math.sin(4 * Math.PI * (dayOfYear - 1) / 365.24)
         - 0.002697 * Math.cos(6 * Math.PI * (dayOfYear - 1) / 365.24)
-        + 0.00148 * Math.sin(6 * Math.PI * (dayOfYear - 1) / 365.24)) * TO_RAD;
+        + 0.00148 * Math.sin(6 * Math.PI * (dayOfYear - 1) / 365.24));
         
     // Core of the sunrise/sunset formula to calculate the hour angle.
-    const hourAngleArg = (Math.sin(altitude * TO_RAD) - Math.sin(lat * TO_RAD) * Math.sin(solarDeclination * TO_RAD)) / (Math.cos(lat * TO_RAD) * Math.cos(solarDeclination * TO_RAD));
+    const hourAngleArg = (Math.sin(altitude * TO_RAD) - Math.sin(lat * TO_RAD) * Math.sin(solarDeclination)) / (Math.cos(lat * TO_RAD) * Math.cos(solarDeclination));
 
     // Check for polar day (sun never sets) or polar night (sun never rises).
     if (hourAngleArg > 1) return { rise: null, set: null, type: 'polar_day' };

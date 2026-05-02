@@ -4,10 +4,8 @@ import * as chartHandler from './chart_handler.js';
 import * as api from './api.js';
 import { getSunTimes } from './calculations.js';
 import { createEl, isHevcSupported } from './utils.js';
-
 // --- Application State and I18n ---
 let LANG = {};
-
 /**
  * Translates a key into the current language, with placeholder support.
  * @param {string} key - The translation key from the language file.
@@ -15,7 +13,8 @@ let LANG = {};
  * @returns {string} The translated and formatted string.
  */
 function t(key, replacements = {}) {
-    let str = LANG[key] || key;
+    let str = LANG[key] ||
+key;
     for (const placeholder in replacements) {
         str = str.replace(`{${placeholder}}`, replacements[placeholder]);
     }
@@ -49,14 +48,19 @@ document.addEventListener('DOMContentLoaded', main);
 function initializeApp() {
     // --- Application State ---
     let selectedStations = new Set();
-    let stationsData = {}, cameraFovs = {};
-    let passData = {}, aircraftData = {}, lightningData = [];
+    let stationsData = null;
+    let cameraFovs = null;
+    let lightningData = null;
+    let meteorCountsByStation = null;
+    let passData = {}, aircraftData = {};
     let currentTaskId = null;
     let statusInterval = null;
     let isFirstCameraClickSincePassChange = true;
     let activeStationForSelection = null;
     let currentHighlightedPassId = null;
     let currentHighlightedCrossingId = null;
+    let stationStatsStart = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+    let stationStatsEnd = new Date().toISOString().slice(0, 10);
 
     // --- DOM Element Cache ---
     const dom = {
@@ -69,6 +73,7 @@ function initializeApp() {
         progressContainer: document.getElementById('progress-container'),
         progressBarInner: document.getElementById('progress-bar-inner'),
         progressText: document.getElementById('progress-text'),
+   
         stationList: document.getElementById('station-list'),
         stationListPlaceholder: document.querySelector('#station-list-container p'),
         dateInput: document.getElementById('date'),
@@ -79,40 +84,41 @@ function initializeApp() {
         intervalSelect: document.getElementById('interval'),
         liveStreamControls: null
     };
-
     // --- Initialization ---
     
     // Dynamically create the placeholder for live stream controls and inject it into the DOM.
     const cameraFieldset = document.querySelector('fieldset.form-group legend').parentElement;
     dom.liveStreamControls = createEl('div', { id: 'live-stream-controls', style: 'display: none;' });
     cameraFieldset.insertAdjacentElement('afterend', dom.liveStreamControls);
-    
     // Initialize all the major modules, passing the translation function.
     uiManager.initUIManager(dom, resetAll, t);
     chartHandler.initChart(t);
     mapHandler.initMap('map', handleMapMoveEnd, handleMapZoomEnd, t);
-
     // Set up all event listeners for user interaction.
     initEventListeners();
-    
     // Fetch all the initial data needed to render the application.
     api.fetchInitialData()
         .then(data => {
             stationsData = data.stations;
             cameraFovs = data.fovs;
             lightningData = data.lightning;
+            meteorCountsByStation = data.meteorCounts || null;
 
             mapHandler.setMeteorData(data.meteors);
+            mapHandler.setMeteorCounts(data.meteorCounts);
             mapHandler.setLightningData(data.lightning);
 
             Object.entries(stationsData).forEach(([stationId, station]) => {
+         
                 station.station.id = stationId;
-                mapHandler.addStationMarker(stationId, station, handleStationClick);
+                const baseIcon = getBaseIconForStation(stationId);
+                mapHandler.addStationMarker(stationId, station, handleStationClick, baseIcon);
             });
 
             if (data.kpData && !data.kpData.error) {
                 const formattedKpData = formatKpData(data.kpData);
                 const chartCtx = document.getElementById('aurora-chart').getContext('2d');
+       
                 chartHandler.plotAuroraChart(chartCtx, formattedKpData, handleChartBarClick);
             }
 
@@ -126,13 +132,30 @@ function initializeApp() {
         });
     uiManager.setUIState('ready');
 
+    const stationHasRecentMeteors = (stationId) => {
+        if (!meteorCountsByStation) return true;
+        const counts = meteorCountsByStation[stationId];
+        if (typeof counts === 'number') return counts > 0;
+        if (counts && typeof counts === 'object') return (counts.total || 0) > 0;
+        return false;
+    };
+
+    const getBaseIconForStation = (stationId) => {
+        const stationHasInfrasound = stationsData?.[stationId]?.station?.infrasound_id;
+        const hasMeteors = stationHasRecentMeteors(stationId);
+        if (!hasMeteors) return mapHandler.greyIcon;
+        return stationHasInfrasound ? mapHandler.darkBlueIcon : mapHandler.blueIcon;
+    };
+
     // --- Event Handlers & Callbacks ---
 
     function handleStationClick(e) {
         const clickedId = e.target.stationId;
+        const baseIcon = getBaseIconForStation(clickedId);
+
         if (selectedStations.has(clickedId)) {
             selectedStations.delete(clickedId);
-            mapHandler.updateStationMarkerIcon(clickedId, mapHandler.blueIcon);
+            mapHandler.updateStationMarkerIcon(clickedId, baseIcon); // Use appropriate base icon
         } else {
             selectedStations.add(clickedId);
             mapHandler.updateStationMarkerIcon(clickedId, mapHandler.redIcon);
@@ -145,6 +168,56 @@ function initializeApp() {
 
         uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
         handleMapMoveEnd();
+        if (selectedStations.size === 1 && selectedStations.has(clickedId)) {
+            stationStatsStart = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+            stationStatsEnd = new Date().toISOString().slice(0, 10);
+        }
+        refreshStationStats();
+    }
+
+    function refreshStationStats() {
+        if (selectedStations.size === 1) {
+            const stationId = selectedStations.values().next().value;
+            const stationCode = stationsData?.[stationId]?.station?.code || stationId;
+            uiManager.showStationStatsLoading(stationCode);
+            api.fetchStationStats(stationId, stationStatsStart, stationStatsEnd).then(data => {
+                if (selectedStations.size !== 1 || !selectedStations.has(stationId)) return;
+                const codeToId = {};
+                Object.entries(stationsData).forEach(([id, s]) => { codeToId[s.station.code] = id; });
+                uiManager.displayStationStats(data, {
+                    onDateRangeChange: (s, e) => { stationStatsStart = s; stationStatsEnd = e; refreshStationStats(); },
+                    onEventClick: (timestamp) => {
+                        const d = new Date(timestamp);
+                        dom.dateInput.value = d.toISOString().slice(0, 10);
+                        dom.hourSelect.value = d.getUTCHours();
+                        dom.minuteSelect.value = d.getUTCMinutes();
+                        dom.lengthSelect.value = 1;
+                        dom.intervalSelect.value = 1;
+                        dom.dateInput.dispatchEvent(new Event('change'));
+                    },
+                    onEventHover: (stationCodes) => {
+                        const markers = mapHandler.getStationMarkers();
+                        stationCodes.forEach(code => {
+                            const sid = codeToId[code];
+                            if (sid && markers[sid]) markers[sid].setIcon(mapHandler.yellowIcon);
+                        });
+                    },
+                    onEventLeave: (stationCodes) => {
+                        const markers = mapHandler.getStationMarkers();
+                        stationCodes.forEach(code => {
+                            const sid = codeToId[code];
+                            if (sid && markers[sid]) {
+                                markers[sid].setIcon(selectedStations.has(sid) ? mapHandler.redIcon : getBaseIconForStation(sid));
+                            }
+                        });
+                    }
+                }, stationStatsStart, stationStatsEnd, mapHandler.getMap());
+            }).catch(err => {
+                console.error('Failed to fetch station stats:', err);
+            });
+        } else {
+            uiManager.hideStationStats();
+        }
     }
 
     function handleMapMoveEnd() {
@@ -169,23 +242,22 @@ function initializeApp() {
         mapHandler.highlightTrack(id, type, isSatView, isAircraftView);
         if (document.getElementById('meteor-toggle').checked) {
 	    mapHandler.displayMeteors(handleMeteorClick, handleMeteorMouseover, handleMeteorMouseout);
-	}
+        }
 
 	// Redraw bearing lines if a pass/crossing and station are selected
 	if (id && activeStationForSelection) {
-	    const dataSource = isSatView ? passData.passes : aircraftData.crossings;
+	    const dataSource = isSatView ?
+passData.passes : aircraftData.crossings;
 	    const idKey = isSatView ? 'pass_id' : 'crossing_id';
 	    const item = dataSource?.find(p => p[idKey] === id);
-	    
-	    if (item) {
+            if (item) {
 		const checkedCameras = [...document.querySelectorAll('input[name="cameras"]:checked')].map(cb => parseInt(cb.value, 10));
 		const selectedCameraViews = item.camera_views.filter(cv =>
 		    cv.station_id === activeStationForSelection && checkedCameras.includes(cv.camera)
 		);
-		
-		if (selectedCameraViews.length > 0) {
+                if (selectedCameraViews.length > 0) {
 		    mapHandler.drawBearingLines(item, selectedCameraViews, stationsData);
-		}
+                }
 	    }
         }
     }
@@ -246,7 +318,8 @@ function initializeApp() {
         }
 
         Object.keys(mapHandler.getStationMarkers()).forEach(stationId => {
-            mapHandler.updateStationMarkerIcon(stationId, selectedStations.has(stationId) ? mapHandler.redIcon : mapHandler.blueIcon);
+            const baseIcon = getBaseIconForStation(stationId);
+            mapHandler.updateStationMarkerIcon(stationId, selectedStations.has(stationId) ? mapHandler.redIcon : baseIcon);
         });
         uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
         uiManager.updateFormFromSelection(dom, selectedStations, pass.pass_id || pass.crossing_id, pass, mapHandler, stationsData);
@@ -266,7 +339,10 @@ function initializeApp() {
         if (nearestStation) {
             selectedStations.clear();
             selectedStations.add(nearestStation.station.id);
-            Object.values(mapHandler.getStationMarkers()).forEach(m => m.setIcon(selectedStations.has(m.stationId) ? mapHandler.redIcon : mapHandler.blueIcon));
+            Object.values(mapHandler.getStationMarkers()).forEach(m => {
+                const baseIcon = getBaseIconForStation(m.stationId);
+                m.setIcon(selectedStations.has(m.stationId) ? mapHandler.redIcon : baseIcon);
+            });
             uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
             const inViewCams = uiManager.getCamerasInView(nearestStation, strike, cameraFovs);
             document.querySelectorAll('input[name="cameras"]').forEach(cb => cb.checked = inViewCams.includes(cb.value));
@@ -283,7 +359,10 @@ function initializeApp() {
         dom.dateInput.dispatchEvent(new Event('change'));
         selectedStations.clear();
         (meteor.station_ids || []).forEach(id => selectedStations.add(id));
-        Object.entries(mapHandler.getStationMarkers()).forEach(([id, marker]) => marker.setIcon(selectedStations.has(id) ? mapHandler.redIcon : mapHandler.blueIcon));
+        Object.entries(mapHandler.getStationMarkers()).forEach(([id, marker]) => {
+            const baseIcon = getBaseIconForStation(id);
+            marker.setIcon(selectedStations.has(id) ? mapHandler.redIcon : baseIcon);
+        });
         uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
     }
 
@@ -297,16 +376,36 @@ function initializeApp() {
     function handleMeteorMouseout(meteor) {
         (meteor.station_ids || []).forEach(id => {
             const marker = mapHandler.getStationMarkers()[id];
-            if (marker) marker.setIcon(selectedStations.has(id) ? mapHandler.redIcon : mapHandler.blueIcon);
+            if (marker) {
+                const baseIcon = getBaseIconForStation(id);
+                marker.setIcon(selectedStations.has(id) ? mapHandler.redIcon : baseIcon);
+            }
         });
     }
 
     // --- Utility & Business Logic Functions ---
 
-    async function startLiveStream(stationId, cameraNum, resolution) {
+    async function startLiveStream(stationId, cameraNum, resolution, forceTranscode = false) {
         try {
-            const streamTaskId = await api.startStream(stationId, cameraNum, resolution, isHevcSupported());
-            uiManager.showVideoModal(stationId, cameraNum, resolution, streamTaskId);
+            // If forcing transcode, pass false. Otherwise use browser detection.
+            const hevcSupport = forceTranscode ? false : isHevcSupported();
+            
+            const streamTaskId = await api.startStream(stationId, cameraNum, resolution, hevcSupport);
+            
+            // Define what to do if the stream fails to play
+            const onRetry = () => {
+                if (!forceTranscode) {
+                    console.warn("Stream playback failed. Retrying with forced H.264 transcoding...");
+                    // Recursive call with forced transcoding enabled
+                    startLiveStream(stationId, cameraNum, resolution, true);
+                } else {
+                    console.error("Stream failed even with forced transcoding.");
+                    alert(t('error_stream_failed'));
+                }
+            };
+
+            // Pass the retry callback to the UI manager
+            uiManager.showVideoModal(stationId, cameraNum, resolution, streamTaskId, onRetry);
         } catch (error) {
             alert(t('error_stream_start', { error: error.message }));
         }
@@ -315,24 +414,49 @@ function initializeApp() {
     function formatKpData(kpData) {
         const chartData = [];
         let lastDateLabel = '';
-        kpData.slice(1).slice(-56).forEach(row => {
-            const [timestamp, kpValueStr] = row;
+        if (!Array.isArray(kpData)) return chartData;
+
+        // NOAA has historically served this as an array-of-arrays with a header row,
+        // but it may also be served as an array of objects.
+        let rows = kpData;
+        if (rows.length > 0 && Array.isArray(rows[0]) && typeof rows[0][0] === 'string') {
+            const firstCell = String(rows[0][0]).toLowerCase();
+            if (firstCell.includes('time') || firstCell.includes('timestamp')) {
+                rows = rows.slice(1);
+            }
+        }
+
+        rows.slice(-56).forEach(row => {
+            let timestamp;
+            let kpValueStr;
+
+            if (Array.isArray(row)) {
+                [timestamp, kpValueStr] = row;
+            } else if (row && typeof row === 'object') {
+                timestamp = row.time_tag ?? row.timestamp ?? row.time ?? row.date;
+                kpValueStr = row.Kp ?? row.kp_index ?? row.kp ?? row.value;
+            }
+
             const kpValue = parseFloat(kpValueStr);
             if (timestamp && !isNaN(kpValue)) {
-                const dateObj = new Date(timestamp.replace(' ', 'T') + 'Z');
+                const ts = String(timestamp).replace(' ', 'T');
+                const dateObj = new Date(ts.endsWith('Z') ? ts : (ts + 'Z'));
+                if (isNaN(dateObj.getTime())) return;
                 const currentDateLabel = dateObj.toISOString().slice(0, 10);
-       
+   
                 const timeLabel = `${String(dateObj.getUTCHours()).padStart(2, '0')}:${String(dateObj.getUTCMinutes()).padStart(2, '0')}`;
                 chartData.push({ label: (currentDateLabel !== lastDateLabel) ? currentDateLabel : timeLabel, value: kpValue, timestamp: dateObj.toISOString() });
                 lastDateLabel = currentDateLabel;
          
             }
+       
         });
         return chartData;
     }
 
     function startPassDownload(passId, type) {
-        const dataSource = type === 'satellite' ? passData.passes : aircraftData.crossings;
+        const dataSource = type === 'satellite' ?
+passData.passes : aircraftData.crossings;
         const idKey = type === 'satellite' ? 'pass_id' : 'crossing_id';
         const item = dataSource.find(p => p[idKey] === passId);
         if (!item) {
@@ -344,10 +468,12 @@ function initializeApp() {
         const isHighRes = document.getElementById('high-resolution-switch').checked;
         const isLongInt = document.getElementById('long-integration-switch').checked;
         const fileType = primaryType === 'video'
-            ? (isHighRes ? 'hires' : 'lowres')
+            ?
+(isHighRes ? 'hires' : 'lowres')
             : (isHighRes ? (isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres'));
         const payload = {
-            [type === 'satellite' ? 'pass_data' : 'crossing_data']: item,
+            [type === 'satellite' ?
+'pass_data' : 'crossing_data']: item,
             file_type: fileType,
             hevc_supported: isHevcSupported()
         };
@@ -373,6 +499,7 @@ function initializeApp() {
                     api.cleanupTask(currentTaskId);
                 }
      
+       
                 currentTaskId = null;
             },
             onError: (data) => {
@@ -380,6 +507,7 @@ function initializeApp() {
                 uiManager.setUIState('ready');
                 if (currentTaskId) api.cleanupTask(currentTaskId);
        
+  
                 currentTaskId = null;
             }
         });
@@ -393,7 +521,9 @@ function initializeApp() {
     function resetAll() {
         uiManager.setDefaultFormValues();
         selectedStations.clear();
-        Object.values(mapHandler.getStationMarkers()).forEach(marker => marker.setIcon(mapHandler.blueIcon));
+        Object.values(mapHandler.getStationMarkers()).forEach(marker => {
+            marker.setIcon(getBaseIconForStation(marker.stationId));
+        });
         uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
 
         ['cloud', 'aurora', 'terminator', 'satellite', 'aircraft', 'lightning', 'meteor'].forEach(type => {
@@ -426,12 +556,139 @@ function initializeApp() {
                 document.cookie = `lang=${e.target.dataset.lang};path=/;max-age=31536000`;
                 location.reload();
             }
+      
         });
 
-        const timeChangeHandler = () => mapHandler.updateTimeDependentLayers(dom.dateInput.value, dom.hourSelect.value, dom.minuteSelect.value);
+        const prevDayBtn = document.getElementById('date-prev-btn');
+        const nextDayBtn = document.getElementById('date-next-btn');
+        const updateNextDayDisabled = () => {
+            if (!nextDayBtn) return;
+            const todayStr = new Date().toISOString().slice(0, 10);
+            nextDayBtn.disabled = !dom.dateInput.value || dom.dateInput.value >= todayStr;
+        };
+        const getSelectedUtcDateTime = () => {
+            if (!dom.dateInput.value) return null;
+            const h = parseInt(dom.hourSelect.value, 10);
+            const m = parseInt(dom.minuteSelect.value, 10);
+            if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+            const dt = new Date(`${dom.dateInput.value}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00Z`);
+            if (isNaN(dt.getTime())) return null;
+            return dt;
+        };
+        const setSelectedUtcDateTime = (dt) => {
+            if (!dt || isNaN(dt.getTime())) return;
+            const dateStr = dt.toISOString().slice(0, 10);
+            dom.dateInput.value = dateStr;
+            if (dom.dateDisplayInput) dom.dateDisplayInput.value = dateStr;
+            dom.hourSelect.value = dt.getUTCHours();
+            dom.minuteSelect.value = dt.getUTCMinutes();
+        };
+        const clampToNowUtc = () => {
+            if (!dom.dateInput.value) return;
+            const dt = getSelectedUtcDateTime();
+            if (!dt) return;
+            const now = new Date();
+            if (dt.getTime() <= now.getTime()) return;
+            const nowUtc = new Date(now.getTime());
+            nowUtc.setUTCSeconds(0, 0);
+            setSelectedUtcDateTime(nowUtc);
+        };
+        const stepSelectedUtcDateTime = ({ deltaDays = 0, deltaHours = 0, deltaMinutes = 0 } = {}) => {
+            const current = getSelectedUtcDateTime();
+            if (!current) return;
+            const dt = new Date(current.getTime());
+            if (deltaDays) dt.setUTCDate(dt.getUTCDate() + deltaDays);
+            if (deltaHours) dt.setUTCHours(dt.getUTCHours() + deltaHours);
+            if (deltaMinutes) dt.setUTCMinutes(dt.getUTCMinutes() + deltaMinutes);
+            setSelectedUtcDateTime(dt);
+            clampToNowUtc();
+        };
+        const timeChangeHandler = () => {
+            clampToNowUtc();
+            mapHandler.updateTimeDependentLayers(dom.dateInput.value, dom.hourSelect.value, dom.minuteSelect.value);
+        };
         dom.dateInput.addEventListener('change', timeChangeHandler);
         dom.hourSelect.addEventListener('change', timeChangeHandler);
         dom.minuteSelect.addEventListener('change', timeChangeHandler);
+        const stepSelect = (selectEl, delta) => {
+            if (!selectEl) return;
+            const options = [...selectEl.options].filter(o => !o.disabled && o.value !== '');
+            if (options.length === 0) return;
+            const idx = options.findIndex(o => o.value === selectEl.value);
+            const nextIdx = Math.max(0, Math.min(options.length - 1, idx + delta));
+            selectEl.value = (idx === -1) ? options[0].value : options[nextIdx].value;
+        };
+        const refreshTimeUiState = () => {
+            clampToNowUtc();
+            updateNextDayDisabled();
+            if (nextDayBtn) nextDayBtn.disabled = !dom.dateInput.value || dom.dateInput.value >= new Date().toISOString().slice(0, 10);
+
+            const hourPrevBtn = document.getElementById('hour-prev-btn');
+            const hourNextBtn = document.getElementById('hour-next-btn');
+            const minutePrevBtn = document.getElementById('minute-prev-btn');
+            const minuteNextBtn = document.getElementById('minute-next-btn');
+            const isToday = dom.dateInput.value === new Date().toISOString().slice(0, 10);
+            if (hourNextBtn || minuteNextBtn) {
+                const h = parseInt(dom.hourSelect.value, 10);
+                const mi = parseInt(dom.minuteSelect.value, 10);
+                const now = new Date();
+                const nowH = now.getUTCHours();
+                const nowM = now.getUTCMinutes();
+                const atNowOrFuture = isToday && Number.isFinite(h) && Number.isFinite(mi) && (h > nowH || (h === nowH && mi >= nowM));
+                if (hourNextBtn) hourNextBtn.disabled = atNowOrFuture;
+                if (minuteNextBtn) minuteNextBtn.disabled = atNowOrFuture;
+                if (hourPrevBtn) hourPrevBtn.disabled = !Number.isFinite(h);
+                if (minutePrevBtn) minutePrevBtn.disabled = !Number.isFinite(mi);
+            }
+
+            const lengthPrevBtn = document.getElementById('length-prev-btn');
+            const lengthNextBtn = document.getElementById('length-next-btn');
+            const intervalPrevBtn = document.getElementById('interval-prev-btn');
+            const intervalNextBtn = document.getElementById('interval-next-btn');
+            const clampButtonsToOptions = (selectEl, prevBtn, nextBtn) => {
+                if (!selectEl) return;
+                const options = [...selectEl.options].filter(o => !o.disabled && o.value !== '');
+                if (options.length === 0) return;
+                const idx = options.findIndex(o => o.value === selectEl.value);
+                if (prevBtn) prevBtn.disabled = idx <= 0;
+                if (nextBtn) nextBtn.disabled = idx === -1 || idx >= options.length - 1;
+            };
+            clampButtonsToOptions(dom.lengthSelect, lengthPrevBtn, lengthNextBtn);
+            clampButtonsToOptions(dom.intervalSelect, intervalPrevBtn, intervalNextBtn);
+        };
+        const stepDateUTC = (deltaDays) => {
+            if (!dom.dateInput.value) return;
+            const [y, m, d] = dom.dateInput.value.split('-').map(n => parseInt(n, 10));
+            if (!y || !m || !d) return;
+            const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+            if (isNaN(dt.getTime())) return;
+            dt.setUTCDate(dt.getUTCDate() + deltaDays);
+            const todayStr = new Date().toISOString().slice(0, 10);
+            const nextStr = dt.toISOString().slice(0, 10);
+            dom.dateInput.value = (nextStr > todayStr) ? todayStr : nextStr;
+            dom.dateInput.dispatchEvent(new Event('change'));
+        };
+        if (prevDayBtn) prevDayBtn.addEventListener('click', () => stepDateUTC(-1));
+        if (nextDayBtn) nextDayBtn.addEventListener('click', () => stepDateUTC(1));
+
+        const hourPrevBtn = document.getElementById('hour-prev-btn');
+        const hourNextBtn = document.getElementById('hour-next-btn');
+        const minutePrevBtn = document.getElementById('minute-prev-btn');
+        const minuteNextBtn = document.getElementById('minute-next-btn');
+        const lengthPrevBtn = document.getElementById('length-prev-btn');
+        const lengthNextBtn = document.getElementById('length-next-btn');
+        const intervalPrevBtn = document.getElementById('interval-prev-btn');
+        const intervalNextBtn = document.getElementById('interval-next-btn');
+
+        if (hourPrevBtn) hourPrevBtn.addEventListener('click', () => { stepSelectedUtcDateTime({ deltaHours: -1 }); dom.hourSelect.dispatchEvent(new Event('change')); });
+        if (hourNextBtn) hourNextBtn.addEventListener('click', () => { stepSelectedUtcDateTime({ deltaHours: 1 }); dom.hourSelect.dispatchEvent(new Event('change')); });
+        if (minutePrevBtn) minutePrevBtn.addEventListener('click', () => { stepSelectedUtcDateTime({ deltaMinutes: -1 }); dom.minuteSelect.dispatchEvent(new Event('change')); });
+        if (minuteNextBtn) minuteNextBtn.addEventListener('click', () => { stepSelectedUtcDateTime({ deltaMinutes: 1 }); dom.minuteSelect.dispatchEvent(new Event('change')); });
+
+        if (lengthPrevBtn) lengthPrevBtn.addEventListener('click', () => { stepSelect(dom.lengthSelect, -1); dom.lengthSelect.dispatchEvent(new Event('change')); });
+        if (lengthNextBtn) lengthNextBtn.addEventListener('click', () => { stepSelect(dom.lengthSelect, 1); dom.lengthSelect.dispatchEvent(new Event('change')); });
+        if (intervalPrevBtn) intervalPrevBtn.addEventListener('click', () => { stepSelect(dom.intervalSelect, -1); dom.intervalSelect.dispatchEvent(new Event('change')); });
+        if (intervalNextBtn) intervalNextBtn.addEventListener('click', () => { stepSelect(dom.intervalSelect, 1); dom.intervalSelect.dispatchEvent(new Event('change')); });
 
         document.getElementById('last-night-btn').addEventListener('click', () => {
             if (selectedStations.size === 0) return;
@@ -450,11 +707,13 @@ function initializeApp() {
             }
             
     
+    
             let startTime = yesterdayTimes.type === 'polar_night'
                 ? new Date(Date.UTC(yesterday.getUTCFullYear(), yesterday.getUTCMonth(), yesterday.getUTCDate(), 12, 0, 0))
                 : yesterdayTimes.set;
             let endTime = todayTimes.type === 'polar_night'
-                ? new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 12, 0, 0))
+                ?
+new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 12, 0, 0))
                 : todayTimes.rise;
             if (!startTime || !endTime) {
                 dom.formError.textContent = t('error_last_night_suntimes');
@@ -476,11 +735,17 @@ function initializeApp() {
             dom.hourSelect.value = now.getUTCHours();
             dom.minuteSelect.value = now.getUTCMinutes();
             dom.lengthSelect.value = 1;
+          
             dom.intervalSelect.value = 1;
             dom.dateInput.dispatchEvent(new Event('change'));
         });
         dom.dateDisplayInput.addEventListener('click', () => { try { dom.dateInput.showPicker(); } catch (e) { dom.dateInput.click(); } });
-        dom.dateInput.addEventListener('change', () => { if (dom.dateInput.value) dom.dateDisplayInput.value = dom.dateInput.value; });
+        dom.dateInput.addEventListener('change', () => { if (dom.dateInput.value) dom.dateDisplayInput.value = dom.dateInput.value; refreshTimeUiState(); });
+        dom.hourSelect.addEventListener('change', refreshTimeUiState);
+        dom.minuteSelect.addEventListener('change', refreshTimeUiState);
+        dom.lengthSelect.addEventListener('change', refreshTimeUiState);
+        dom.intervalSelect.addEventListener('change', refreshTimeUiState);
+        refreshTimeUiState();
         document.querySelector('input[name="primary_file_type"][value="video"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'none'; });
         document.querySelector('input[name="primary_file_type"][value="image"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'flex'; });
         
@@ -496,30 +761,46 @@ function initializeApp() {
         });
         document.getElementById('terminator-toggle').addEventListener('change', (e) => mapHandler.toggleLayer('terminator', e.target.checked, dom.dateInput.value, dom.hourSelect.value, dom.minuteSelect.value));
         document.getElementById('lightning-toggle').addEventListener('change', (e) => uiManager.togglePanelAndLayer('lightning', e.target.checked, mapHandler));
-        document.getElementById('meteor-toggle').addEventListener('change', (e) => mapHandler.toggleMeteorLayer(e.target.checked, handleMeteorClick, handleMeteorMouseover, handleMeteorMouseout));
+        document.getElementById('meteor-toggle').addEventListener('change', (e) => {
+            mapHandler.toggleMeteorLayer(e.target.checked, handleMeteorClick, handleMeteorMouseover, handleMeteorMouseout);
+            if (e.target.checked) {
+                uiManager.showPanel('meteor');
+                uiManager.displayMeteorList(mapHandler.getMeteorData(), { onMeteorClick: handleMeteorClick });
+            } else {
+                uiManager.hidePanel('meteor');
+            }
+        });
         document.getElementById('lightning-24h-toggle').addEventListener('change', () => {
             const is24h = document.getElementById('lightning-24h-toggle').checked;
             uiManager.displayLightningStrikes(lightningData, stationsData, cameraFovs, is24h, handleLightningSelect);
             mapHandler.displayLightningStrikes(is24h, handleLightningSelect);
         });
-        
         document.getElementById('satellite-toggle').addEventListener('change', (e) => {
             if (e.target.checked) {
                 document.getElementById('aircraft-toggle').checked = false;
                 uiManager.showPanel('satellite');
                 uiManager.hidePanel('aircraft');
                
-                mapHandler.highlightTrack(null, 'aircraft', false, false);
+                mapHandler.highlightTrack(null, 'aircraft', 
+false, false);
                 api.fetchAllPasses({
                     onProgress: (data) => uiManager.updateTaskProgress('satellite', data),
                     onComplete: (data) => {
     
                         passData = data.data;
+      
                         mapHandler.setPassData(data.data);
                         uiManager.displayAllPasses(data.data, { onHeaderClick: handlePassHeaderClick, onDownloadClick: (id) => startPassDownload(id, 'satellite'), onEventClick: (pass, event) => handleEventClick(pass, 'satellite', event) });
                         handleMapZoomEnd();
+                  
                     },
-                    onError: (data) => uiManager.showPanelError('satellite', data.message)
+                    onError: (data) => {
+                        const baseMsg = data && data.message ? t(data.message) : t('error_internal');
+                        const details = [];
+                        if (data && data.task_id) details.push(`task=${data.task_id}`);
+                        if (data && data.debug) details.push(data.debug);
+                        uiManager.showPanelError('satellite', details.length ? `${baseMsg} (${details.join(', ')})` : baseMsg);
+                    }
                 });
             } else {
                 uiManager.hidePanel('satellite');
@@ -533,23 +814,31 @@ function initializeApp() {
                 uiManager.hidePanel('satellite');
                 mapHandler.highlightTrack(null, 'satellite', false, false);
           
+    
                 api.fetchAllAircraftCrossings({
                     onProgress: (data) => uiManager.updateTaskProgress('aircraft', data),
                     onComplete: (data) => {
                       
+                   
                         aircraftData = data.data;
                         mapHandler.setAircraftData(data.data);
                         uiManager.displayAllAircraft(data.data, { onHeaderClick: handlePassHeaderClick, onDownloadClick: (id) => startPassDownload(id, 'aircraft'), onEventClick: (pass, event) => handleEventClick(pass, 'aircraft', event) });
                         handleMapZoomEnd();
+     
                     },
-                    onError: (data) => uiManager.showPanelError('aircraft', data.message)
+                    onError: (data) => {
+                        const baseMsg = data && data.message ? t(data.message) : t('error_internal');
+                        const details = [];
+                        if (data && data.task_id) details.push(`task=${data.task_id}`);
+                        if (data && data.debug) details.push(data.debug);
+                        uiManager.showPanelError('aircraft', details.length ? `${baseMsg} (${details.join(', ')})` : baseMsg);
+                    }
                 });
             } else {
                 uiManager.hidePanel('aircraft');
                 mapHandler.highlightTrack(null, 'aircraft', false, false);
             }
         });
-        
         dom.downloadForm.addEventListener('submit', (event) => {
             event.preventDefault();
 
@@ -558,6 +847,7 @@ function initializeApp() {
                 dom.formError.textContent = t('error_no_station_selected');
           
                 return;
+        
             }
             if (selectedCameras.length === 0) {
                 dom.formError.textContent = t('error_no_camera_selected');
@@ -567,11 +857,13 @@ function initializeApp() {
 
    
             const primaryType = document.querySelector('input[name="primary_file_type"]:checked').value;
+  
             const isHighRes = document.getElementById('high-resolution-switch').checked;
             const isLongInt = document.getElementById('long-integration-switch').checked;
             const fileType = primaryType === 'video'
                 ? (isHighRes ? 'hires' : 'lowres')
-                : (isHighRes ? (isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres'));
+                : (isHighRes ?
+(isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres'));
             const payload = {
                 stations: [...selectedStations],
                 date: dom.dateInput.value,
@@ -579,12 +871,12 @@ function initializeApp() {
                 minute: dom.minuteSelect.value,
                 length: dom.lengthSelect.value,
    
+         
                 interval: dom.intervalSelect.value,
                 cameras: selectedCameras,
                 file_type: fileType,
                 hevc_supported: isHevcSupported()
             };
-            
             if (currentHighlightedPassId && passData.passes) {
                 const pass = passData.passes.find(p => p.pass_id === currentHighlightedPassId);
                 if (pass) {
@@ -609,7 +901,8 @@ function initializeApp() {
             dom.resultsLog.prepend(createEl('p', { innerHTML: `<strong>${t('download_cancelled')}</strong>`, className: 'error-msg' }));
             currentTaskId = null;
             dom.progressContainer.style.display = 'none';
-            
+       
+      
             uiManager.setUIState('cooldown');
         });
     }

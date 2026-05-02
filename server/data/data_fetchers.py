@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import json
 import logging
 import time
 import math
 import base64
+import statistics
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -14,26 +16,6 @@ from datetime import datetime, timedelta, timezone
 # This attempts to import the necessary functions for camera calibration transformations.
 # The PTO_MAPPER_AVAILABLE flag is used by other modules to conditionally enable features
 # that rely on this functionality.
-
-import sys
-from pathlib import Path
-
-# Ensure local project modules are importable even when this script is executed via symlink
-_SCRIPT_PATH = Path(__file__).resolve()
-_PROJECT_DIR = None
-for _cand in (_SCRIPT_PATH.parent, *_SCRIPT_PATH.parents):
-    if (_cand / 'bin').is_dir() and (_cand / 'server').is_dir():
-        _PROJECT_DIR = _cand
-        break
-if _PROJECT_DIR is not None:
-    _BIN_DIR = _PROJECT_DIR / 'bin'
-    _SRC_DIR = _PROJECT_DIR / 'src'
-    for _p in (_BIN_DIR, _SRC_DIR, _PROJECT_DIR):
-        if _p.exists():
-            _ps = str(_p)
-            if _ps not in sys.path:
-                sys.path.insert(0, _ps)
-
 try:
     from pto_mapper import get_pto_data_from_json, map_image_to_pano
     PTO_MAPPER_AVAILABLE = True
@@ -92,10 +74,11 @@ def get_meteor_data():
     """
     logging.info("Starting meteor data scan...")
     meteors = []
+    counts_by_station = {}
     # Aborts if the necessary data directories or files are missing.
     if not os.path.exists(METEOR_DIR) or not os.path.exists(STATIONS_FILE):
         logging.warning(f"Meteor directory ({METEOR_DIR}) or stations file ({STATIONS_FILE}) not found. Aborting scan.")
-        return []
+        return {"tracks": [], "counts": {}}
     
     with open(STATIONS_FILE, 'r') as f:
         stations_data = json.load(f)
@@ -117,6 +100,15 @@ def get_meteor_data():
         for time_dir in os.listdir(full_date_path):
             event_path = os.path.join(full_date_path, time_dir)
             if not os.path.isdir(event_path): continue
+
+            observing_station_ids = [name_to_id.get(d) for d in os.listdir(event_path)
+                                     if os.path.isdir(os.path.join(event_path, d)) and name_to_id.get(d)]
+            observing_station_ids = list(set(observing_station_ids))
+            for sid in observing_station_ids:
+                if not sid:
+                    continue
+                counts_by_station.setdefault(sid, {'total': 0, 'multi': 0})
+                counts_by_station[sid]['total'] += 1
             
             meteor_trajectory = None
             # Finds the trajectory result file (.res) within the event directory.
@@ -149,13 +141,17 @@ def get_meteor_data():
             
             if not meteor_trajectory: continue
 
-            # Determines which stations participated in this observation based on subdirectories.
-            observing_station_ids = [name_to_id.get(d) for d in os.listdir(event_path) if os.path.isdir(os.path.join(event_path, d)) and name_to_id.get(d)]
-            meteor_trajectory['station_ids'] = list(set(observing_station_ids))
+            meteor_trajectory['station_ids'] = observing_station_ids
+            if len(observing_station_ids) > 1:
+                for sid in observing_station_ids:
+                    if not sid:
+                        continue
+                    counts_by_station.setdefault(sid, {'total': 0, 'multi': 0})
+                    counts_by_station[sid]['multi'] += 1
             meteors.append(meteor_trajectory)
 
     logging.info(f"Meteor scan finished. Found {len(meteors)} tracks.")
-    return meteors
+    return {"tracks": meteors, "counts": counts_by_station}
 
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -318,6 +314,256 @@ def get_lightning_data(end_date_str):
             
     logging.info(f"Processed {len(all_raw_strikes_parts)} raw strikes into {len(final_strikes)} unique, filtered events.")
     return final_strikes
+
+_RE_DIRECTION = re.compile(r'Direction:</td><td>\s*([\d.]+)')
+_RE_SPEED = re.compile(r'Entry speed:</td><td>\s*([\d.]+)')
+_RE_SHOWER = re.compile(r'Meteor Shower:</td><td[^>]*>\s*(\S[^<]*\S)\s*</td>')
+_RE_START_H = re.compile(r'Start height:</td><td>\s*(-?[\d.]+)')
+_RE_END_H = re.compile(r'End height:</td><td>\s*(-?[\d.]+)')
+_RE_START_POS = re.compile(r'Start position:</td><td>\s*([\d.]+)([NS])\s+([\d.]+)([EW])')
+_RE_END_POS = re.compile(r'End position:</td><td>\s*([\d.]+)([NS])\s+([\d.]+)([EW])')
+
+def _parse_latlon(match):
+    try:
+        lat = float(match.group(1)) * (-1 if match.group(2) == 'S' else 1)
+        lon = float(match.group(3)) * (-1 if match.group(4) == 'W' else 1)
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            return None, None
+        return lat, lon
+    except (ValueError, IndexError):
+        return None, None
+
+def _parse_trajectory_details(event_path):
+    """Parses trajectory details from en_tables.html if present."""
+    tables_file = os.path.join(event_path, 'en_tables.html')
+    if not os.path.isfile(tables_file):
+        return {}
+    try:
+        with open(tables_file, 'r', encoding='utf-8', errors='ignore') as f:
+            html = f.read()
+    except (OSError, IOError):
+        return {}
+    result = {}
+    try:
+        m = _RE_DIRECTION.search(html)
+        if m:
+            val = float(m.group(1))
+            if 0 <= val <= 360:
+                result['direction'] = val
+        m = _RE_SPEED.search(html)
+        if m:
+            val = float(m.group(1))
+            if 0 <= val < 100:  # reasonable speed range km/s
+                result['speed'] = val
+        m = _RE_SHOWER.search(html)
+        if m:
+            shower = m.group(1).strip()
+            if shower:
+                result['shower'] = shower
+        m = _RE_START_H.search(html)
+        if m:
+            val = float(m.group(1))
+            if 0 <= val <= 150:  # reasonable altitude range km
+                result['start_alt'] = val
+        m = _RE_END_H.search(html)
+        if m:
+            val = float(m.group(1))
+            if 0 <= val <= 150:
+                result['end_alt'] = val
+        m = _RE_START_POS.search(html)
+        if m:
+            lat, lon = _parse_latlon(m)
+            if lat is not None:
+                result['start_lat'] = lat
+                result['start_lon'] = lon
+        m = _RE_END_POS.search(html)
+        if m:
+            lat, lon = _parse_latlon(m)
+            if lat is not None:
+                result['end_lat'] = lat
+                result['end_lon'] = lon
+    except (ValueError, TypeError, IndexError):
+        # Return partial results if parsing fails mid-way
+        pass
+    return result
+
+
+def get_station_stats(station_id, start_date=None, end_date=None):
+    """
+    Returns observation statistics for a single station over a date range.
+    Accepts start_date and end_date as YYYY-MM-DD strings.
+    If omitted, defaults to the last 7 days.
+    station_id can be 'all' for network-wide totals (no per-event list).
+    """
+    if not os.path.exists(METEOR_DIR) or not os.path.exists(STATIONS_FILE):
+        return {"error": "Data directories not found."}
+
+    try:
+        with open(STATIONS_FILE, 'r') as f:
+            stations_data = json.load(f)
+    except (json.JSONDecodeError, IOError, OSError) as e:
+        return {"error": f"Failed to load stations data: {e}"}
+
+    is_all = (station_id == 'all')
+    if not is_all and station_id not in stations_data:
+        return {"error": f"Unknown station: {station_id}"}
+
+    try:
+        station_name = None if is_all else stations_data[station_id]['station']['name']
+        station_code = 'all' if is_all else stations_data[station_id]['station']['code']
+        name_to_id = {s['station']['name']: sid for sid, s in stations_data.items() if 'station' in s and 'name' in s['station']}
+        id_to_code = {sid: s['station']['code'] for sid, s in stations_data.items() if 'station' in s and 'code' in s['station']}
+    except (KeyError, TypeError):
+        return {"error": "Corrupted station data format."}
+
+    today = datetime.now(timezone.utc).date()
+    try:
+        d_end = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else today
+        d_start = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else (d_end - timedelta(days=6))
+    except ValueError:
+        return {"error": "Invalid date format. Use YYYY-MM-DD."}
+
+    if d_start > d_end:
+        d_start, d_end = d_end, d_start
+    span = (d_end - d_start).days + 1
+    if span > 730:
+        return {"error": "stats_range_too_large"}
+
+    parse_trajectory = True
+    total = 0
+    multi = 0
+    shower_count = 0
+    sporadic_count = 0
+    speeds = []
+    start_alts = []
+    end_alts = []
+    events = []
+
+    current = d_start
+    while current <= d_end:
+        date_dir = current.strftime('%Y%m%d')
+        full_date_path = os.path.join(METEOR_DIR, date_dir)
+        current += timedelta(days=1)
+
+        if not os.path.isdir(full_date_path):
+            continue
+
+        try:
+            time_entries = os.listdir(full_date_path)
+        except (OSError, IOError):
+            continue
+        for time_dir in time_entries:
+            event_path = os.path.join(full_date_path, time_dir)
+            if not os.path.isdir(event_path):
+                continue
+
+            if not is_all:
+                if not os.path.isdir(os.path.join(event_path, station_name)):
+                    continue
+
+            total += 1
+
+            try:
+                event_contents = os.listdir(event_path)
+            except (OSError, IOError):
+                event_contents = []
+            observing_ids = [
+                name_to_id[d] for d in event_contents
+                if os.path.isdir(os.path.join(event_path, d))
+                and name_to_id.get(d)
+            ]
+            observing_ids = list(set(observing_ids))
+            num_stations = len(observing_ids)
+            is_multi = num_stations > 1
+            if is_multi:
+                multi += 1
+
+            try:
+                traj = _parse_trajectory_details(event_path) if parse_trajectory else {}
+            except Exception:
+                traj = {}
+            shower = traj.get('shower')
+            if shower:
+                if shower.lower() == 'sporadic':
+                    sporadic_count += 1
+                else:
+                    shower_count += 1
+            if 'speed' in traj:
+                speeds.append(traj['speed'])
+            if 'start_alt' in traj and traj['start_alt'] > 0:
+                start_alts.append(traj['start_alt'])
+            if 'end_alt' in traj and traj['end_alt'] > 0:
+                end_alts.append(traj['end_alt'])
+
+            if not is_all:
+                other_ids = [sid for sid in observing_ids if sid != station_id]
+                try:
+                    has_trajectory = any(
+                        fn.startswith('obs') and fn.endswith('.res')
+                        for fn in event_contents
+                    )
+
+                    timestamp_str = (
+                        f"{date_dir[0:4]}-{date_dir[4:6]}-{date_dir[6:8]}"
+                        f"T{time_dir[0:2]}:{time_dir[2:4]}:{time_dir[4:6]}Z"
+                    )
+
+                    evt = {
+                        'timestamp': timestamp_str,
+                        'date_dir': date_dir,
+                        'time_dir': time_dir,
+                        'num_stations': num_stations,
+                        'other_stations': [id_to_code.get(sid, sid) for sid in other_ids],
+                        'has_trajectory': has_trajectory,
+                    }
+                    if shower:
+                        evt['shower'] = shower
+                    if 'speed' in traj:
+                        evt['speed'] = traj['speed']
+                    if 'direction' in traj:
+                        evt['direction'] = traj['direction']
+                    if 'start_alt' in traj:
+                        evt['start_alt'] = traj['start_alt']
+                    if 'end_alt' in traj:
+                        evt['end_alt'] = traj['end_alt']
+                    if 'start_lat' in traj:
+                        evt['start_lat'] = traj['start_lat']
+                        evt['start_lon'] = traj['start_lon']
+                    if 'end_lat' in traj:
+                        evt['end_lat'] = traj['end_lat']
+                        evt['end_lon'] = traj['end_lon']
+                    events.append(evt)
+                except (KeyError, TypeError, ValueError):
+                    # Skip malformed event data but continue processing others
+                    continue
+
+    events.sort(key=lambda e: e['timestamp'], reverse=True)
+
+    traj_summary = {}
+    if parse_trajectory and speeds:
+        traj_summary['avg_speed'] = round(sum(speeds) / len(speeds), 1)
+        traj_summary['median_speed'] = round(statistics.median(speeds), 1)
+    if parse_trajectory and start_alts:
+        traj_summary['avg_start_alt'] = round(sum(start_alts) / len(start_alts), 1)
+        traj_summary['median_start_alt'] = round(statistics.median(start_alts), 1)
+    if parse_trajectory and end_alts:
+        traj_summary['avg_end_alt'] = round(sum(end_alts) / len(end_alts), 1)
+        traj_summary['median_end_alt'] = round(statistics.median(end_alts), 1)
+
+    return {
+        'station_id': station_id,
+        'station_code': station_code,
+        'start_date': d_start.strftime('%Y-%m-%d'),
+        'end_date': d_end.strftime('%Y-%m-%d'),
+        'total': total,
+        'multi': multi,
+        'shower_count': shower_count,
+        'sporadic_count': sporadic_count,
+        'has_trajectory_details': parse_trajectory,
+        **traj_summary,
+        'events': events,
+    }
+
 
 def get_camera_fovs():
     """

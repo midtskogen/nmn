@@ -1,5 +1,5 @@
 import { createEl, isHevcSupported } from './utils.js';
-import { getSunTimes, calculateBearing } from './calculations.js';
+import { getSunTimes, calculateBearing, destinationPoint } from './calculations.js';
 import * as api from './api.js';
 import { airlineCodes } from './airline_codes.js';
 // --- Module-scoped variables ---
@@ -9,12 +9,51 @@ let hls = null;
 // Holds the HLS.js instance for playing HLS video streams.
 let streamCountdownInterval = null;
 // Interval ID for the stream timeout countdown.
+let bitrateUpdateInterval = null;
+// Interval ID for updating bitrate in the status line.
 let activeStreamTaskId = null;
 // The task ID of the currently active stream.
 let stopStreamTimeout = null;
 // Timeout ID to automatically close the modal.
 let streamStatusPoller = null; // Interval ID for polling the stream's status.
 let onFullscreenChange = null; // Holds the fullscreen change event handler.
+
+let meteorReportExistenceCache = new Map();
+let meteorListRenderToken = 0;
+
+let urlCheckInFlight = 0;
+const urlCheckQueue = [];
+const URL_CHECK_CONCURRENCY = 4;
+
+function processUrlCheckQueue() {
+    while (urlCheckInFlight < URL_CHECK_CONCURRENCY && urlCheckQueue.length > 0) {
+        const { run } = urlCheckQueue.shift();
+        urlCheckInFlight++;
+        run().finally(() => { urlCheckInFlight--; processUrlCheckQueue(); });
+    }
+}
+
+async function checkUrlExists(url) {
+    if (meteorReportExistenceCache.has(url)) return meteorReportExistenceCache.get(url);
+
+    let resolve;
+    const promise = new Promise(r => { resolve = r; });
+    meteorReportExistenceCache.set(url, promise);
+
+    urlCheckQueue.push({ run: async () => {
+        try {
+            let res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+            if (res.status === 405 || res.status === 501) {
+                res = await fetch(url, { method: 'GET', cache: 'no-store' });
+            }
+            resolve(res.ok);
+        } catch (e) {
+            resolve(false);
+        }
+    }});
+    processUrlCheckQueue();
+    return promise;
+}
 // --- Private Helper Functions ---
 
 /**
@@ -130,7 +169,12 @@ export function updateSelectedStationsUI(selectedStations, stationsData, onStrea
     } else {
         dom.stationListPlaceholder.style.display = 'none';
         dom.stationList.style.display = 'flex';
-        dom.stationList.innerHTML = [...selectedStations].map(stationId => `<li>${stationsData[stationId].station.code}</li>`).join('');
+        dom.stationList.replaceChildren(
+            ...[...selectedStations].map(stationId => {
+                const code = stationsData?.[stationId]?.station?.code ?? String(stationId);
+                return createEl('li', { textContent: code });
+            })
+        );
     }
     updateLastNightButtonState(selectedStations, stationsData);
     updateLiveStreamUI(selectedStations, stationsData, onStreamLinkClick);
@@ -167,19 +211,53 @@ function updateLastNightButtonState(selectedStations, stationsData) {
 function updateLiveStreamUI(selectedStations, stationsData, onStreamLinkClick) {
     if (!dom.liveStreamControls) return;
     dom.liveStreamControls.innerHTML = '';
+
     if (selectedStations.size === 1) {
         const stationId = selectedStations.values().next().value;
-        const stationCode = stationsData[stationId]?.station?.code || 'station';
+        const stationData = stationsData[stationId]; 
+        const stationCode = stationData?.station?.code || 'station';
+        
         const title = createEl('legend', { textContent: t('live_stream_title', { station_code: stationCode }) });
+        
+        // --- Video Controls ---
         const sdContainer = createEl('div', { className: 'live-stream-res-group' });
         const hdContainer = createEl('div', { className: 'live-stream-res-group' });
+
         for (let i = 1; i <= 7; i++) {
             const sdLink = createEl('span', { className: 'live-stream-link', textContent: `SD${i}`, onclick: () => onStreamLinkClick(stationId, i, 'lowres') });
             sdContainer.appendChild(sdLink);
             const hdLink = createEl('span', { className: 'live-stream-link', textContent: `HD${i}`, onclick: () => onStreamLinkClick(stationId, i, 'hires') });
             hdContainer.appendChild(hdLink);
         }
+        
         dom.liveStreamControls.append(title, sdContainer, hdContainer);
+
+        // --- Infrasound / Geophone Controls (New Window/Tab) ---
+        const infrasoundId = stationData?.station?.infrasound_id;
+        
+        if (infrasoundId) {
+            const sensorContainer = createEl('div', { className: 'live-stream-res-group', style: 'margin-top: 5px;' });
+            
+            // Infrasound Button - Opens in a new tab/window
+            const infraLink = createEl('a', { // Use 'a' for better accessibility/link behavior
+                href: `https://dataview.raspberryshake.org/#/AM/${infrasoundId}/00/HDF`,
+                target: '_blank', // Opens in a new tab
+                className: 'live-stream-link', 
+                textContent: t('live_infrasound')
+            });
+
+            // Geophone Button - Opens in a new tab/window
+            const geoLink = createEl('a', { // Use 'a' for better accessibility/link behavior
+                href: `https://dataview.raspberryshake.org/#/AM/${infrasoundId}/00/EHZ`,
+                target: '_blank', // Opens in a new tab
+                className: 'live-stream-link', 
+                textContent: t('live_geophone')
+            });
+
+            sensorContainer.append(infraLink, geoLink);
+            dom.liveStreamControls.appendChild(sensorContainer);
+        }
+
         dom.liveStreamControls.style.display = 'block';
     } else {
         dom.liveStreamControls.style.display = 'none';
@@ -194,18 +272,17 @@ function updateLiveStreamUI(selectedStations, stationsData, onStreamLinkClick) {
 export function displayAllPasses(passData, { onHeaderClick, onDownloadClick, onEventClick }) {
     const satelliteList = document.getElementById('satellite-list');
     if (!passData.passes || passData.passes.length === 0) {
-        satelliteList.innerHTML = `<p style="color: #6c757d; margin: 0;">${t('no_visible_passes')}</p>`;
+        satelliteList.replaceChildren(createEl('p', { style: 'color: #6c757d; margin: 0;', textContent: t('no_visible_passes') }));
         return;
     }
-    satelliteList.innerHTML = '';
+    satelliteList.replaceChildren();
     passData.passes.forEach((pass, index) => {
         const passDiv = createEl('div', { className: `satellite-group ${index % 2 === 0 ? 'pass-even' : 'pass-odd'}` });
         const earliestTime = new Date(pass.earliest_camera_utc);
         const formattedTimestamp = earliestTime.toISOString().slice(0, 19).replace('T', ' ');
-        const headerHTML = t('pass_header', { satellite: pass.satellite, timestamp: formattedTimestamp }) +
-                     
-            ` <span class="magnitude">${t('pass_magnitude', { magnitude: pass.magnitude.toFixed(1) })}</span>`;
-        const header = createEl('h6', { innerHTML: headerHTML, dataset: { passId: pass.pass_id }});
+        const header = createEl('h6', { dataset: { passId: pass.pass_id }});
+        header.appendChild(document.createTextNode(t('pass_header', { satellite: pass.satellite, timestamp: formattedTimestamp }) + ' '));
+        header.appendChild(createEl('span', { className: 'magnitude', textContent: t('pass_magnitude', { magnitude: pass.magnitude.toFixed(1) }) }));
         header.addEventListener('click', () => onHeaderClick(pass.pass_id, 'satellite'));
 
         const downloadAllBtn = createEl('button', { textContent: t('download_all_button'), className: 'download-all-btn' });
@@ -237,10 +314,10 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
         ? t('aircraft_panel_title_dynamic', { hours: aircraftData.time_window_hours })
         : t('aircraft_panel_title');
     if (!aircraftData.crossings || aircraftData.crossings.length === 0) {
-        aircraftList.innerHTML = `<p style="color: #6c757d; margin: 0;">${t('no_visible_aircraft')}</p>`;
+        aircraftList.replaceChildren(createEl('p', { style: 'color: #6c757d; margin: 0;', textContent: t('no_visible_aircraft') }));
         return;
     }
-    aircraftList.innerHTML = '';
+    aircraftList.replaceChildren();
     aircraftData.crossings.forEach((crossing, index) => {
         const crossingDiv = createEl('div', { className: `satellite-group ${index % 2 === 0 ? 'pass-even' : 'pass-odd'}` });
         const earliestTime = new Date(crossing.earliest_camera_utc);
@@ -261,8 +338,7 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
            }
         }
 
-        const headerHTML = t('aircraft_header', { callsign: flightIdentifier, origin: (origin || '?'), destination: (destination || '?'), timestamp: formattedTimestamp });
-        const header = createEl('h6', { innerHTML: headerHTML, dataset: { crossingId: crossing.crossing_id }});
+        const header = createEl('h6', { dataset: { crossingId: crossing.crossing_id }, textContent: t('aircraft_header', { callsign: flightIdentifier, origin: (origin || '?'), destination: (destination || '?'), timestamp: formattedTimestamp }) });
         header.addEventListener('click', () => onHeaderClick(crossing.crossing_id, 'aircraft'));
 
         const downloadAllBtn = createEl('button', { textContent: t('download_all_button'), className: 'download-all-btn' });
@@ -301,11 +377,11 @@ export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hF
     }
 
     if (!filteredStrikes || filteredStrikes.length === 0) {
-        lightningList.innerHTML = `<p style="color: #6c757d; margin: 0;">${t('no_lightning_strikes')}</p>`;
+        lightningList.replaceChildren(createEl('p', { style: 'color: #6c757d; margin: 0;', textContent: t('no_lightning_strikes') }));
         return;
     }
 
-    lightningList.innerHTML = '';
+    lightningList.replaceChildren();
     const ul = createEl('ul', { className: 'lightning-list' });
     filteredStrikes.sort((a, b) => new Date(b.time) - new Date(a.time)).forEach((strike, index) => {
         strike.id = `lightning-${index}`;
@@ -333,13 +409,49 @@ export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hF
                 stationText = t('lightning_list_item_station_info_no_cam', params);
             }
         }
-        const li = createEl('li', { id: strike.id, innerHTML: `<span class="strike-type-indicator ${strike.type}">⚡</span> ${timestamp} ${stationText}` });
+        const li = createEl('li', { id: strike.id });
+        li.appendChild(createEl('span', { className: `strike-type-indicator ${strike.type}`, textContent: '⚡' }));
+        li.appendChild(document.createTextNode(` ${timestamp} ${stationText}`));
         li.onclick = () => onStrikeClick(strike, true);
         ul.appendChild(li);
     });
     lightningList.appendChild(ul);
 }
 
+
+/**
+ * Creates and displays a modal window containing an Iframe for external data (Infrasound/Geophone).
+ * @param {string} url - The URL to load.
+ * @param {string} title - The title for the modal.
+ */
+function showIframeModal(url, title) {
+    const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
+    const modalContent = createEl('div', { id: 'video-modal-content' });
+    
+    // Create a container for the iframe
+    const iframeContainer = createEl('div', { 
+        id: 'video-container', 
+        style: 'aspect-ratio: 16/9; background: #fff;' 
+    });
+
+    const iframe = createEl('iframe', { 
+        src: url, 
+        style: 'width: 100%; height: 100%; border: none;',
+        allowfullscreen: true
+    });
+
+    const statusEl = createEl('p', { id: 'video-status', textContent: title });
+    const closeButton = createEl('button', { 
+        id: 'video-close-button', 
+        textContent: t('modal_close_button'), 
+        onclick: () => document.getElementById('video-modal-backdrop')?.remove() 
+    });
+
+    iframeContainer.appendChild(iframe);
+    modalContent.append(statusEl, iframeContainer, closeButton);
+    modalBackdrop.appendChild(modalContent);
+    document.body.appendChild(modalBackdrop);
+}
 
 /**
  * Renders the results of a completed download task in the results panel.
@@ -464,7 +576,7 @@ export function displayResults(resultData, dom, hevcSupported) {
  * @param {string} resolution
  * @param {string} streamTaskId
  */
-export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
+export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, onRetry) {
     if (activeStreamTaskId) {
         hideVideoModal();
     }
@@ -475,140 +587,376 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
     const videoContainer = createEl('div', { id: 'video-container', style: { aspectRatio: resolution === 'lowres' ? '800 / 448' : '1920 / 1080' } });
     const videoEl = createEl('video', { id: 'live-video', muted: true, autoplay: true, playsinline: true });
     const gridOverlay = createEl('img', { id: 'grid-overlay-image' });
+    const annotationOverlay = createEl('img', { id: 'annotation-overlay-image' });
     const statusEl = createEl('p', { id: 'video-status', textContent: t('modal_starting_stream') });
     const controlsContainer = createEl('div', { className: 'video-controls-container' });
     const gridToggleContainer = createEl('div', { id: 'grid-toggle-container', style: 'display: none;' });
     const gridCheckbox = createEl('input', { type: 'checkbox', id: 'grid-overlay-toggle' });
     const gridLabel = createEl('label', { textContent: t('modal_grid_toggle'), htmlFor: 'grid-overlay-toggle' });
     gridToggleContainer.append(gridCheckbox, gridLabel);
+    const annotationToggleContainer = createEl('div', { id: 'annotation-toggle-container', style: 'display: none;' });
+    const annotationCheckbox = createEl('input', { type: 'checkbox', id: 'annotation-overlay-toggle' });
+    const annotationLabel = createEl('label', { textContent: t('modal_annotation_toggle'), htmlFor: 'annotation-overlay-toggle' });
+    annotationToggleContainer.append(annotationCheckbox, annotationLabel);
     const fullscreenButton = createEl('button', { id: 'fullscreen-btn', textContent: t('modal_fullscreen_button') });
-    controlsContainer.append(gridToggleContainer, fullscreenButton);
+    controlsContainer.append(gridToggleContainer, annotationToggleContainer, fullscreenButton);
     const closeButton = createEl('button', { id: 'video-close-button', textContent: t('modal_close_button'), onclick: hideVideoModal });
 
-    videoContainer.append(videoEl, gridOverlay);
+    let baseStatusText = t('modal_starting_stream');
+    let countdownSuffix = '';
+    let bitrateText = '';
+
+    const renderStatusLine = () => {
+        if (!statusEl) return;
+        const parts = [baseStatusText];
+        if (bitrateText) parts.push(bitrateText);
+        if (countdownSuffix) parts.push(countdownSuffix);
+        statusEl.textContent = parts.join(' | ');
+    };
+
+    const setBaseStatusText = (text) => {
+        baseStatusText = text;
+        renderStatusLine();
+    };
+
+    const setBitrateText = (text) => {
+        bitrateText = text;
+        renderStatusLine();
+    };
+
+    videoContainer.append(videoEl, gridOverlay, annotationOverlay);
     modalContent.append(statusEl, videoContainer, controlsContainer, closeButton);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
-    videoEl.addEventListener('loadedmetadata', () => {
-        if (videoEl.videoHeight > 0) videoContainer.style.aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
-    });
-    gridCheckbox.addEventListener('change', () => { gridOverlay.style.opacity = gridCheckbox.checked ? '0.3' : '0'; });
-    // Pan and Zoom logic
-    let scale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
-    const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
-    const updateTransform = () => {
-        const transformValue = `translate(${panX}px, ${panY}px) scale(${scale})`;
-        videoEl.style.transform = transformValue;
-        gridOverlay.style.transform = transformValue;
-    };
-    videoEl.style.transformOrigin = '0 0';
-    gridOverlay.style.transformOrigin = '0 0';
-    const onWheel = e => {
-        if (document.fullscreenElement) return;
-        e.preventDefault();
-        const rect = videoContainer.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-        const scaleAmount = e.deltaY > 0 ? 0.9 : 1.1;
-        const newScale = clamp(scale * scaleAmount, 1, 8);
-        const newPanX = mouseX - (mouseX - panX) * (newScale / scale);
-        const newPanY = mouseY - (mouseY - panY) * (newScale / scale);
-        scale = newScale;
-        if (scale <= 1.01) {
-            panX = 0;
-            panY = 0;
-        } else {
-            const minPanX = -(videoContainer.clientWidth * (scale - 1));
-            const minPanY = -(videoContainer.clientHeight * (scale - 1));
-            panX = clamp(newPanX, minPanX, 0);
-            panY = clamp(newPanY, minPanY, 0);
+    
+    // --- Overlay Sizing to Match Video Display Area ---
+    const updateOverlaySizing = () => {
+        if (!videoEl.videoWidth || !videoEl.videoHeight) return;
+        
+        const containerRect = videoContainer.getBoundingClientRect();
+        const videoAspect = videoEl.videoWidth / videoEl.videoHeight;
+        const containerAspect = containerRect.width / containerRect.height;
+        
+        let displayWidth = containerRect.width;
+        let displayHeight = containerRect.height;
+        let offsetX = 0;
+        let offsetY = 0;
+        
+        // Calculate actual video display area (letterboxed)
+        if (videoAspect > containerAspect) {
+            // Video is wider than container - black bars on top/bottom
+            displayHeight = containerRect.width / videoAspect;
+            offsetY = (containerRect.height - displayHeight) / 2;
+        } else if (videoAspect < containerAspect) {
+            // Video is taller than container - black bars on sides
+            displayWidth = containerRect.height * videoAspect;
+            offsetX = (containerRect.width - displayWidth) / 2;
         }
-        updateTransform();
-        if (videoEl.paused) videoEl.play().catch(() => {});
+        
+        // Apply to overlays
+        const overlays = [gridOverlay, annotationOverlay];
+        overlays.forEach(overlay => {
+            overlay.style.width = `${displayWidth}px`;
+            overlay.style.height = `${displayHeight}px`;
+            overlay.style.left = `${offsetX}px`;
+            overlay.style.top = `${offsetY}px`;
+            // Set transform-origin to negative of offset so zoom happens from container's (0,0)
+            // This makes overlays zoom from the same point as the video
+            overlay.style.transformOrigin = `${-offsetX}px ${-offsetY}px`;
+        });
     };
-    const onMouseMove = e => {
-        if (!isPanning) return;
-        const newPanX = startPanX + (e.clientX - panOriginX);
-        const newPanY = startPanY + (e.clientY - panOriginY);
-        const minPanX = -(videoContainer.clientWidth * (scale - 1));
-        const minPanY = -(videoContainer.clientHeight * (scale - 1));
-        panX = clamp(newPanX, minPanX, 0);
-        panY = clamp(newPanY, minPanY, 0);
-        updateTransform();
+    
+    videoEl.addEventListener('loadedmetadata', () => {
+        if (videoEl.videoHeight > 0) {
+            videoContainer.style.aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
+            updateOverlaySizing();
+        }
+    });
+    window.addEventListener('resize', updateOverlaySizing);
+    
+    gridCheckbox.addEventListener('change', () => { gridOverlay.style.opacity = gridCheckbox.checked ? '0.3' : '0'; });
+    annotationCheckbox.addEventListener('change', () => { annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.4' : '0'; });
+    
+    // --- Pan/Zoom Logic (kept condensed) ---
+    let scale=1, panX=0, panY=0, isPanning=false, startPanX=0, startPanY=0, panOriginX=0, panOriginY=0;
+    const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+    const updateTransform = () => { 
+        const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+        videoEl.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
-    const onMouseUp = () => {
-        isPanning = false;
-        videoContainer.style.cursor = 'grab';
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
-    };
-
-    const onMouseDown = e => {
-        if (e.button !== 0 || document.fullscreenElement) return;
-        e.preventDefault();
-        isPanning = true;
-        videoContainer.style.cursor = 'grabbing';
-        panOriginX = e.clientX;
-        panOriginY = e.clientY;
-        startPanX = panX;
-        startPanY = panY;
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-    };
-
-    let cursorIdleTimer = null;
-    const handleIdleCursor = () => {
-        if (!videoContainer || !document.fullscreenElement) return;
-        videoContainer.style.cursor = 'default';
-        clearTimeout(cursorIdleTimer);
-        cursorIdleTimer = setTimeout(() => { videoContainer.style.cursor = 'none'; }, 2000);
-    };
-    onFullscreenChange = () => {
-        const isFullscreen = !!document.fullscreenElement;
-        fullscreenButton.textContent = isFullscreen ? t('modal_exit_fullscreen_button') : t('modal_fullscreen_button');
-        if (isFullscreen) {
-            scale = 1;
-            panX = 0; panY = 0;
-            updateTransform();
-            videoContainer.addEventListener('mousemove', handleIdleCursor);
+    videoEl.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = '0 0';
+    const onWheel = e => { e.preventDefault(); const rect=videoContainer.getBoundingClientRect(); const mouseX=e.clientX-rect.left; const mouseY=e.clientY-rect.top; const newScale=clamp(scale*(e.deltaY>0?0.9:1.1),1,8); const newPanX=mouseX-(mouseX-panX)*(newScale/scale); const newPanY=mouseY-(mouseY-panY)*(newScale/scale); scale=newScale; if(scale<=1.01){panX=0;panY=0;}else{panX=clamp(newPanX,-(videoContainer.clientWidth*(scale-1)),0); panY=clamp(newPanY,-(videoContainer.clientHeight*(scale-1)),0);} updateTransform(); };
+    const onMouseMove = e => { if(!isPanning)return; panX=clamp(startPanX+(e.clientX-panOriginX),-(videoContainer.clientWidth*(scale-1)),0); panY=clamp(startPanY+(e.clientY-panOriginY),-(videoContainer.clientHeight*(scale-1)),0); updateTransform(); };
+    const onMouseUp = () => { isPanning=false; videoContainer.style.cursor='grab'; window.removeEventListener('mousemove',onMouseMove); window.removeEventListener('mouseup',onMouseUp); };
+    const onMouseDown = e => { if(e.button!==0)return; e.preventDefault(); isPanning=true; videoContainer.style.cursor='grabbing'; panOriginX=e.clientX; panOriginY=e.clientY; startPanX=panX; startPanY=panY; window.addEventListener('mousemove',onMouseMove); window.addEventListener('mouseup',onMouseUp); };
+    let cursorIdleTimer=null; const handleIdleCursor=()=>{if(!videoContainer||!document.fullscreenElement)return; videoContainer.style.cursor='default'; clearTimeout(cursorIdleTimer); cursorIdleTimer=setTimeout(()=>{videoContainer.style.cursor='none';},2000);};
+    onFullscreenChange = () => { 
+        const isFullscreen=!!document.fullscreenElement; 
+        fullscreenButton.textContent=isFullscreen?t('modal_exit_fullscreen_button'):t('modal_fullscreen_button'); 
+        if(isFullscreen){
+            // Delay reset to allow fullscreen styles to apply first
+            setTimeout(() => {
+                scale=1;panX=0;panY=0;updateTransform();
+                updateOverlaySizing();
+            }, 100);
+            videoContainer.addEventListener('mousemove',handleIdleCursor);
             handleIdleCursor();
         } else {
-            videoContainer.removeEventListener('mousemove', handleIdleCursor);
+            videoContainer.removeEventListener('mousemove',handleIdleCursor);
             clearTimeout(cursorIdleTimer);
-            videoContainer.style.cursor = 'grab';
+            videoContainer.style.cursor='grab';
+            // Reset transforms when exiting fullscreen
+            scale=1;panX=0;panY=0;updateTransform();
+            setTimeout(updateOverlaySizing, 100);
+        } 
+    };
+    fullscreenButton.addEventListener('click', () => { if (!document.fullscreenElement) videoContainer.requestFullscreen().catch(err => alert(t('modal_fullscreen_error', { error: err.message }))); else document.exitFullscreen(); });
+    videoContainer.addEventListener('wheel', onWheel); videoContainer.addEventListener('mousedown', onMouseDown); document.addEventListener('fullscreenchange', onFullscreenChange);
+
+    // --- Error Handler Wrapper ---
+    const triggerRetry = async (reason) => {
+        console.warn(`Video playback error (${reason}). Attempting hot-swap to H.264...`);
+        
+        // Only act if this is still the active stream
+        if (activeStreamTaskId === streamTaskId) {
+            // 1. Notify user
+            if (statusEl) statusEl.textContent = t('modal_status_optimizing') || "Optimizing stream compatibility...";
+            
+            // 2. Tell backend to switch modes (reusing the tunnel)
+            try {
+                await api.requestTranscode(streamTaskId);
+            } catch (e) {
+                console.error("Failed to request transcode:", e);
+                // Fallback to full restart if the hot-swap API fails
+                if (onRetry) { hideVideoModal(); onRetry(); }
+                return;
+            }
+
+            // 3. Wait a moment for backend FFmpeg to restart (1.5s is usually enough)
+            setTimeout(() => {
+                console.log("Reloading HLS source...");
+                const playlistUrl = `streams/${data.station_id}_${cameraNum}_${data.resolution}/playlist.m3u8`;
+                
+                if (hls) {
+                    hls.stopLoad();
+                    // hls.recoverMediaError() might not be enough if codec changed completely
+                    hls.loadSource(playlistUrl);
+                    hls.startLoad();
+                    hls.attachMedia(videoEl);
+                } else if (videoEl) {
+                    // For native players (Safari), force a reload
+                    const currentSrc = videoEl.src;
+                    videoEl.src = ''; 
+                    videoEl.src = currentSrc; 
+                    videoEl.play().catch(e => console.error("Retry play failed:", e));
+                }
+            }, 1500);
         }
     };
-
-    fullscreenButton.addEventListener('click', () => {
-        if (!document.fullscreenElement) {
-            videoContainer.requestFullscreen().catch(err => alert(t('modal_fullscreen_error', { error: err.message })));
-        } else {
-            document.exitFullscreen();
-        }
-    });
-    videoContainer.addEventListener('wheel', onWheel);
-    videoContainer.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('fullscreenchange', onFullscreenChange);
 
     streamStatusPoller = api.pollStreamStatus(streamTaskId, {
         onStatusUpdate: (data) => {
             if (statusEl) statusEl.textContent = translateMessage(data.message) || t('modal_status_updating');
         },
         onReady: (data) => {
-            if (statusEl) statusEl.textContent = translateMessage(data.message) || t('modal_status_ready');
+            setBaseStatusText(t('modal_waiting_for_video'));
             const playlistUrl = `streams/${data.station_id}_${cameraNum}_${data.resolution}/playlist.m3u8`;
 
-          
+            const formatCodec = (c) => {
+                const s = String(c || '').toLowerCase();
+                if (!s) return '';
+                if (s === 'h264' || s === 'avc') return 'H.264';
+                if (s === 'hevc' || s === 'h265') return 'HEVC';
+                return String(c).toUpperCase();
+            };
+
+            const codecIndicator = (() => {
+                if (!data) return '';
+                const inCodec = formatCodec(data.input_codec);
+                const outCodec = formatCodec(data.output_codec);
+                if (data.transcoding) {
+                    if (!inCodec || !outCodec) return '';
+                    return `${inCodec} -> ${outCodec}`;
+                }
+                // Not transcoding: show the active codec only.
+                return outCodec || inCodec;
+            })();
+
+            let firstFrameSeen = false;
+            const markFirstFrameSeen = () => {
+                if (firstFrameSeen) return;
+                firstFrameSeen = true;
+                const liveLabel = t('modal_stream_live');
+                setBaseStatusText(codecIndicator ? `${liveLabel} | ${codecIndicator}` : liveLabel);
+            };
+
+            const waitForFirstFrame = () => {
+                if (!videoEl || firstFrameSeen) return;
+                if (typeof videoEl.requestVideoFrameCallback === 'function') {
+                    try {
+                        videoEl.requestVideoFrameCallback(() => markFirstFrameSeen());
+                        return;
+                    } catch (e) {
+                        // fall through to event-based detection
+                    }
+                }
+
+                const onTimeUpdate = () => {
+                    // When playback has advanced, we have a decoded frame.
+                    if (videoEl.currentTime > 0) {
+                        videoEl.removeEventListener('timeupdate', onTimeUpdate);
+                        markFirstFrameSeen();
+                    }
+                };
+                videoEl.addEventListener('timeupdate', onTimeUpdate);
+            };
+
+            // If playback stalls (often due to waiting for a keyframe), keep the user informed.
+            videoEl.addEventListener('waiting', () => {
+                if (!firstFrameSeen) setBaseStatusText(t('modal_waiting_for_video'));
+            }, { once: true });
+
             if (Hls.isSupported()) {
                 hls = new Hls({ maxBufferLength: 2, maxMaxBufferLength: 4, highBufferWatchdogPeriod: 2 });
+
+                let fragBitrateEwmaBps = null;
+                const ewmaAlpha = 0.2;
+                const fragSizeCache = new Map();
+                let lastHeadAtMs = 0;
+                const updateBitrateDisplay = () => {
+                    const levelIndex = hls?.currentLevel;
+                    const levels = hls?.levels;
+                    const level = (typeof levelIndex === 'number' && levelIndex >= 0)
+                        ? levels?.[levelIndex]
+                        : (Array.isArray(levels) && levels.length > 0 ? levels[0] : null);
+                    const targetBps = level?.bitrate;
+
+                    const parts = [];
+                    if (typeof targetBps === 'number' && isFinite(targetBps) && targetBps > 0) {
+                        parts.push(`${Math.round(targetBps / 1000)} kbps`);
+                    }
+                    if (typeof fragBitrateEwmaBps === 'number' && isFinite(fragBitrateEwmaBps) && fragBitrateEwmaBps > 0) {
+                        parts.push(`${Math.round(fragBitrateEwmaBps / 1000)} kbps`);
+                    }
+
+                    setBitrateText(parts.join(' / '));
+                };
+
+                const updateFromFrag = async (frag, stats) => {
+                    try {
+                        if (!frag) return;
+                        const dur = frag.duration
+                            ?? frag._duration
+                            ?? ((typeof frag.endPTS === 'number' && typeof frag.startPTS === 'number') ? (frag.endPTS - frag.startPTS) : null);
+                        if (!dur || dur <= 0) return;
+
+                        let bytes = stats?.loaded ?? stats?.total;
+                        if (!bytes || !isFinite(bytes) || bytes <= 0) {
+                            const fragUrl = frag.url
+                                ?? frag._url
+                                ?? ((frag.baseurl && frag.relurl) ? (frag.baseurl + frag.relurl) : null);
+                            if (!fragUrl) return;
+
+                            if (fragSizeCache.has(fragUrl)) {
+                                bytes = fragSizeCache.get(fragUrl);
+                            } else {
+                                const now = Date.now();
+                                // Avoid spamming HEAD requests: max ~1 per second.
+                                if (now - lastHeadAtMs < 1000) return;
+                                lastHeadAtMs = now;
+
+                                // Try HEAD first.
+                                let resp = await fetch(fragUrl, { method: 'HEAD', cache: 'no-store' });
+                                let len = resp.headers.get('content-length');
+                                let parsed = len ? parseInt(len, 10) : NaN;
+
+                                // Some servers omit Content-Length on HEAD; try a 1-byte range GET.
+                                if (!isFinite(parsed) || parsed <= 0) {
+                                    resp = await fetch(fragUrl, { method: 'GET', headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+                                    const contentRange = resp.headers.get('content-range');
+                                    // Format: bytes 0-0/12345
+                                    if (contentRange && contentRange.includes('/')) {
+                                        const totalStr = contentRange.split('/').pop();
+                                        parsed = totalStr ? parseInt(totalStr, 10) : NaN;
+                                    } else {
+                                        len = resp.headers.get('content-length');
+                                        parsed = len ? parseInt(len, 10) : NaN;
+                                    }
+                                }
+
+                                if (!isFinite(parsed) || parsed <= 0) return;
+                                bytes = parsed;
+                                fragSizeCache.set(fragUrl, bytes);
+                            }
+                        }
+
+                        const bps = (bytes * 8) / dur;
+                        fragBitrateEwmaBps = (fragBitrateEwmaBps == null) ? bps : (ewmaAlpha * bps + (1 - ewmaAlpha) * fragBitrateEwmaBps);
+                        updateBitrateDisplay();
+                    } catch (e) {
+                        // ignore
+                    }
+                };
+
+                // Show a placeholder quickly so the user knows bitrate is being determined.
+                setBitrateText('bitrate …');
+                
+                // Catch Fatal HLS Errors (Codec mismatch often triggers MEDIA_ERROR or BUFFER_APPEND_ERROR)
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal) {
+                        console.error("HLS Fatal Error:", data);
+                        triggerRetry(data.type);
+                    }
+                });
+
+                // Show configured/selected stream bitrate (level bitrate), and estimate actual stream bitrate
+                // from fragment payload size and fragment duration.
+                hls.on(Hls.Events.LEVEL_SWITCHED, updateBitrateDisplay);
+                hls.on(Hls.Events.LEVEL_LOADED, updateBitrateDisplay);
+                hls.on(Hls.Events.MANIFEST_PARSED, updateBitrateDisplay);
+                hls.on(Hls.Events.FRAG_LOADED, (event, fragData) => {
+                    updateFromFrag(fragData?.frag, fragData?.stats);
+                });
+
+                // Fallback: if FRAG_LOADED doesn't provide usable stats, still update based on the currently playing fragment.
+                hls.on(Hls.Events.FRAG_CHANGED, (event, fragData) => {
+                    updateFromFrag(fragData?.frag, fragData?.stats);
+                });
+
+                // Periodic fallback: some Hls.js builds/configs don't populate stats on events.
+                // Try to sample the current fragment from internal controllers.
+                if (bitrateUpdateInterval) clearInterval(bitrateUpdateInterval);
+                bitrateUpdateInterval = setInterval(() => {
+                    try {
+                        const currentFrag = hls?.streamController?.fragCurrent;
+                        if (currentFrag) updateFromFrag(currentFrag, null);
+                    } catch (e) {
+                        // ignore
+                    }
+                }, 2000);
+
                 hls.loadSource(playlistUrl);
                 hls.attachMedia(videoEl);
-                hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play());
-         
-               } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-   
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    // Catch AbortError specifically from the play promise
+                    videoEl.play().catch(e => {
+                        console.error("Play Promise Error:", e);
+                        triggerRetry(e.name);
+                    });
+
+                    waitForFirstFrame();
+                });
+            } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+                // Native Safari/iOS support
                 videoEl.src = playlistUrl;
-                videoEl.addEventListener('canplay', () => videoEl.play());
+                videoEl.addEventListener('error', (e) => {
+                    console.error("Native Video Error:", videoEl.error);
+                    triggerRetry("NativeVideoError");
+                });
+                videoEl.addEventListener('canplay', () => {
+                    videoEl.play().catch(e => triggerRetry(e.name));
+                    waitForFirstFrame();
+                });
             }
 
             const timeoutSeconds = data.timeout_seconds || 300;
@@ -618,9 +966,8 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
                 timeLeft--;
                 const minutes = Math.floor(timeLeft / 60);
                 const seconds = timeLeft % 60;
-                const currentText = (statusEl.textContent || '').split(' | ')[0];
-               
-                statusEl.textContent = `${currentText} | ${t('modal_stream_stops_in', { minutes: minutes, seconds: String(seconds).padStart(2, '0') })}`;
+                countdownSuffix = t('modal_stream_stops_in', { minutes: minutes, seconds: String(seconds).padStart(2, '0') });
+                renderStatusLine();
                 if (timeLeft <= 0) clearInterval(streamCountdownInterval);
             }, 1000);
         },
@@ -635,10 +982,25 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId) {
             if (gridData.success && gridData.grid_url) {
                 gridOverlay.src = gridData.grid_url;
                 gridToggleContainer.style.display = 'flex';
+                annotationToggleContainer.style.display = 'flex';
             }
         })
-       
         .catch(err => console.error("Could not fetch grid overlay:", err));
+
+    const refreshAnnotation = () => {
+        api.fetchAnnotation(streamTaskId, stationId, cameraNum)
+            .then(annData => {
+                if (annData.success && annData.annotation_url) {
+                    annotationOverlay.src = annData.annotation_url;
+                }
+            })
+            .catch(err => console.error("Could not fetch annotation overlay:", err));
+    };
+    refreshAnnotation();
+    const annotationRefreshInterval = setInterval(refreshAnnotation, 15000);
+    // Store interval so hideVideoModal can clear it
+    if (!window._annotationRefreshInterval) window._annotationRefreshInterval = null;
+    window._annotationRefreshInterval = annotationRefreshInterval;
 }
 
 /**
@@ -648,6 +1010,9 @@ function hideVideoModal() {
     if (streamCountdownInterval) clearInterval(streamCountdownInterval);
     if (streamStatusPoller) clearInterval(streamStatusPoller);
     if (stopStreamTimeout) clearTimeout(stopStreamTimeout);
+    if (bitrateUpdateInterval) clearInterval(bitrateUpdateInterval);
+    bitrateUpdateInterval = null;
+    if (window._annotationRefreshInterval) { clearInterval(window._annotationRefreshInterval); window._annotationRefreshInterval = null; }
     if (hls) {
         hls.stopLoad();
         hls.destroy();
@@ -821,12 +1186,73 @@ export function hidePanel(panelType) {
     document.getElementById(`${panelType}-panel-container`).style.display = 'none';
 }
 
+export function displayMeteorList(meteors, { onMeteorClick }) {
+    const meteorList = document.getElementById('meteor-list');
+    if (!meteorList) return;
+
+    meteorListRenderToken += 1;
+    const renderToken = meteorListRenderToken;
+
+    if (!Array.isArray(meteors) || meteors.length === 0) {
+        meteorList.replaceChildren(createEl('p', { style: 'color: #6c757d; margin: 0;', textContent: t('no_meteors_found') }));
+        return;
+    }
+
+    meteorList.replaceChildren();
+    const ul = createEl('ul', { className: 'meteor-list' });
+
+    [...meteors]
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 200)
+        .forEach((meteor) => {
+            const ts = meteor && meteor.timestamp ? String(meteor.timestamp) : '';
+            const label = ts ? ts.replace('T', ' ').replace('Z', ' UTC') : t('unknown_time');
+            const stationCount = Array.isArray(meteor.station_ids) ? meteor.station_ids.length : 0;
+            const li = createEl('li', { className: 'meteor-list-item' });
+            const btn = createEl('button', {
+                type: 'button',
+                className: 'meteor-list-btn',
+                textContent: stationCount > 0 ? `${label} (${stationCount})` : label
+            });
+            btn.addEventListener('click', () => onMeteorClick(meteor));
+
+            let reportLink = null;
+            const match = ts.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/);
+            if (match) {
+                const ymd = `${match[1]}${match[2]}${match[3]}`;
+                const hms = `${match[4]}${match[5]}${match[6]}`;
+                const url = `https://norskmeteornettverk.no/meteor/${ymd}/${hms}/`;
+
+                const maybeLink = createEl('span', { className: 'meteor-report-link-placeholder' });
+                checkUrlExists(url).then(exists => {
+                    if (!exists) return;
+                    if (meteorListRenderToken !== renderToken) return;
+                    if (!maybeLink.isConnected) return;
+                    const a = createEl('a', { href: url, target: '_blank', rel: 'noopener', className: 'meteor-report-link', textContent: t('meteor_report_link') });
+                    maybeLink.replaceChildren(a);
+                });
+                reportLink = maybeLink;
+            }
+
+            if (reportLink) {
+                const row = createEl('div', { className: 'meteor-list-row' });
+                row.append(btn, reportLink);
+                li.appendChild(row);
+            } else {
+                li.appendChild(btn);
+            }
+            ul.appendChild(li);
+        });
+
+    meteorList.appendChild(ul);
+}
+
 /** Displays an error message inside a panel's list area.
  */
 export function showPanelError(panelType, message) {
     const listEl = document.getElementById(`${panelType}-list`);
     if (listEl) {
-        listEl.innerHTML = `<p class="error-msg">${message}</p>`;
+        listEl.replaceChildren(createEl('p', { className: 'error-msg', textContent: message }));
     }
 }
 
@@ -869,4 +1295,226 @@ export function translateMessage(message) {
         });
     }
     return t(key, replacements);
+}
+
+let stationStatsRenderToken = 0;
+
+/**
+ * Renders station observation statistics in the dedicated panel.
+ * @param {object} data - The stats data returned by get_station_stats.
+ * @param {object} callbacks - Object containing { onDateRangeChange, onEventClick }.
+ * @param {string} startDate - Currently active start date (YYYY-MM-DD).
+ * @param {string} endDate - Currently active end date (YYYY-MM-DD).
+ * @param {object} [leafletMap] - Optional Leaflet map instance for drawing paths on hover.
+ */
+export function displayStationStats(data, { onDateRangeChange, onEventClick, onEventHover, onEventLeave }, startDate, endDate, leafletMap) {
+    const container = document.getElementById('station-stats-panel-container');
+    const panel = document.getElementById('station-stats-panel');
+    if (!container || !panel) return;
+
+    stationStatsRenderToken += 1;
+    const renderToken = stationStatsRenderToken;
+
+    container.style.display = 'block';
+
+    const titleEl = panel.querySelector('h2');
+    if (titleEl) titleEl.textContent = t('stats_panel_title', { station_code: data.station_code || '' });
+
+    const listEl = document.getElementById('station-stats-list');
+    if (!listEl) return;
+    listEl.replaceChildren();
+
+    const periodBar = createEl('div', { className: 'stats-period-bar' });
+    const todayStr = new Date().toISOString().slice(0, 10);
+    [7, 30, 90].forEach(d => {
+        const presetEnd = todayStr;
+        const presetStart = new Date(Date.now() - (d - 1) * 86400000).toISOString().slice(0, 10);
+        const isActive = (startDate === presetStart && endDate === presetEnd);
+        const btn = createEl('button', {
+            type: 'button',
+            className: `stats-period-btn${isActive ? ' active' : ''}`,
+            textContent: t('stats_period_days', { days: d })
+        });
+        btn.addEventListener('click', () => onDateRangeChange(presetStart, presetEnd));
+        periodBar.appendChild(btn);
+    });
+    const stepDate = (hiddenInput, displayInput, delta) => {
+        if (!hiddenInput.value) return;
+        const [y, m, d] = hiddenInput.value.split('-').map(Number);
+        if (!y || !m || !d) return;
+        const next = new Date(Date.UTC(y, m - 1, d + delta));
+        const iso = next.toISOString().slice(0, 10);
+        hiddenInput.value = iso;
+        displayInput.value = iso;
+    };
+    const fromLabel = createEl('span', { className: 'stats-date-label', textContent: t('stats_from') });
+    const fromHidden = createEl('input', { type: 'date', style: 'position:absolute;opacity:0;pointer-events:none;width:0;height:0;', value: startDate || '' });
+    const fromDisplay = createEl('input', { type: 'text', className: 'stats-date-input', value: startDate || '', placeholder: 'YYYY-MM-DD', readOnly: true });
+    fromDisplay.addEventListener('click', () => { try { fromHidden.showPicker(); } catch (e) { fromHidden.click(); } });
+    fromHidden.addEventListener('change', () => { fromDisplay.value = fromHidden.value; });
+    const fromPrev = createEl('button', { type: 'button', className: 'date-nav-btn', textContent: '\u2039' });
+    const fromNext = createEl('button', { type: 'button', className: 'date-nav-btn', textContent: '\u203A' });
+    fromPrev.addEventListener('click', () => stepDate(fromHidden, fromDisplay, -1));
+    fromNext.addEventListener('click', () => stepDate(fromHidden, fromDisplay, 1));
+    const toLabel = createEl('span', { className: 'stats-date-label', textContent: t('stats_to') });
+    const toHidden = createEl('input', { type: 'date', style: 'position:absolute;opacity:0;pointer-events:none;width:0;height:0;', value: endDate || '' });
+    const toDisplay = createEl('input', { type: 'text', className: 'stats-date-input', value: endDate || '', placeholder: 'YYYY-MM-DD', readOnly: true });
+    toDisplay.addEventListener('click', () => { try { toHidden.showPicker(); } catch (e) { toHidden.click(); } });
+    toHidden.addEventListener('change', () => { toDisplay.value = toHidden.value; });
+    const toPrev = createEl('button', { type: 'button', className: 'date-nav-btn', textContent: '\u2039' });
+    const toNext = createEl('button', { type: 'button', className: 'date-nav-btn', textContent: '\u203A' });
+    toPrev.addEventListener('click', () => stepDate(toHidden, toDisplay, -1));
+    toNext.addEventListener('click', () => stepDate(toHidden, toDisplay, 1));
+    const goBtn = createEl('button', { type: 'button', className: 'stats-date-go-btn', textContent: t('stats_go') });
+    goBtn.addEventListener('click', () => {
+        if (fromHidden.value && toHidden.value) onDateRangeChange(fromHidden.value, toHidden.value);
+    });
+    periodBar.append(fromLabel, fromPrev, fromHidden, fromDisplay, fromNext, toLabel, toPrev, toHidden, toDisplay, toNext, goBtn);
+    listEl.appendChild(periodBar);
+
+    if (data.error) {
+        const errMsg = t(data.error) !== data.error ? t(data.error) : data.error;
+        listEl.appendChild(createEl('p', { className: 'error-msg', textContent: errMsg }));
+        return;
+    }
+
+    const summary = createEl('div', { className: 'stats-summary' });
+    summary.appendChild(createEl('span', { className: 'stats-total', textContent: t('stats_total_observations', { count: data.total }) }));
+    summary.appendChild(createEl('span', { className: 'stats-multi', textContent: t('stats_multi_station', { count: data.multi }) }));
+    summary.appendChild(createEl('span', { className: 'stats-single', textContent: t('stats_single_station', { count: data.total - data.multi }) }));
+    if (data.has_trajectory_details) {
+        const orbitTotal = data.shower_count + data.sporadic_count;
+        if (orbitTotal > 0) {
+            summary.appendChild(createEl('span', { className: 'stats-orbit', textContent: t('stats_orbit_count', { count: orbitTotal }) }));
+            summary.appendChild(createEl('span', { className: 'stats-shower', textContent: t('stats_shower_count', { count: data.shower_count }) }));
+            summary.appendChild(createEl('span', { className: 'stats-sporadic', textContent: t('stats_sporadic_count', { count: data.sporadic_count }) }));
+        }
+        if (data.avg_speed != null) {
+            summary.appendChild(createEl('span', { className: 'stats-speed', textContent: t('stats_avg_speed', { speed: data.avg_speed }) }));
+        }
+        if (data.median_speed != null) {
+            summary.appendChild(createEl('span', { className: 'stats-speed', textContent: t('stats_median_speed', { speed: data.median_speed }) }));
+        }
+        if (data.avg_start_alt != null) {
+            summary.appendChild(createEl('span', { className: 'stats-alt', textContent: t('stats_start_alt_summary', { avg: data.avg_start_alt, median: data.median_start_alt }) }));
+        }
+        if (data.avg_end_alt != null) {
+            summary.appendChild(createEl('span', { className: 'stats-alt', textContent: t('stats_end_alt_summary', { avg: data.avg_end_alt, median: data.median_end_alt }) }));
+        }
+    }
+    listEl.appendChild(summary);
+
+    if (!data.events || data.events.length === 0) {
+        listEl.appendChild(createEl('p', { style: 'color: #6c757d; margin: 8px 0 0;', textContent: t('stats_no_events') }));
+        return;
+    }
+
+    const ul = createEl('ul', { className: 'stats-event-list' });
+    data.events.forEach(event => {
+        const li = createEl('li', { className: `stats-event-item${event.num_stations > 1 ? ' multi' : ''}` });
+
+        const ts = event.timestamp || '';
+        const label = ts ? ts.replace('T', ' ').replace('Z', ' UTC') : t('unknown_time');
+
+        const btn = createEl('button', {
+            type: 'button',
+            className: 'stats-event-btn',
+        });
+        const timeSpan = createEl('span', { className: 'stats-event-time', textContent: label });
+        const countBadge = createEl('span', {
+            className: `stats-station-badge${event.num_stations > 1 ? ' multi' : ''}`,
+            textContent: event.num_stations > 1 ? `${event.num_stations} ${t('stats_stations_short')}` : `1 ${t('stats_station_short')}`
+        });
+        btn.append(timeSpan, countBadge);
+        btn.addEventListener('click', () => {
+            if (onEventClick) onEventClick(event.timestamp);
+        });
+
+        const row = createEl('div', { className: 'stats-event-row' });
+        row.appendChild(btn);
+
+        const match = ts.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/);
+        if (match) {
+            const ymd = `${match[1]}${match[2]}${match[3]}`;
+            const hms = `${match[4]}${match[5]}${match[6]}`;
+            const url = `https://norskmeteornettverk.no/meteor/${ymd}/${hms}/`;
+            row.appendChild(createEl('a', { href: url, target: '_blank', rel: 'noopener', className: 'meteor-report-link', textContent: t('meteor_report_link') }));
+        }
+
+        li.appendChild(row);
+
+        const detailParts = [];
+        if (event.other_stations && event.other_stations.length > 0) {
+            detailParts.push(`${t('stats_also_seen_at')}: ${event.other_stations.join(', ')}`);
+        }
+        if (event.shower) {
+            const showerLabel = event.shower.toLowerCase() === 'sporadic' ? t('stats_sporadic') : event.shower;
+            detailParts.push(`${t('stats_shower_label')}: ${showerLabel}`);
+        }
+        if (event.speed != null) {
+            detailParts.push(`${t('stats_speed_label')}: ${event.speed} km/s`);
+        }
+        if (event.direction != null) {
+            detailParts.push(`${t('stats_direction_label')}: ${event.direction}°`);
+        }
+        if (event.start_alt != null) {
+            detailParts.push(`${t('stats_alt_label')}: ${event.start_alt} → ${event.end_alt} km`);
+        }
+        if (detailParts.length > 0) {
+            li.appendChild(createEl('div', { className: 'stats-event-detail', textContent: detailParts.join('  ·  ') }));
+        }
+        const allStationCodes = [data.station_code, ...(event.other_stations || [])];
+        if (event.num_stations > 1 && onEventHover) {
+            li.addEventListener('mouseenter', () => onEventHover(allStationCodes));
+            li.addEventListener('mouseleave', () => onEventLeave(allStationCodes));
+        }
+        if (event.start_lat != null && event.end_lat != null && leafletMap) {
+            li.addEventListener('mouseenter', () => {
+                if (window._statsPathLayer) { window._statsPathLayer.remove(); window._statsPathLayer = null; }
+                const zoom = leafletMap.getZoom();
+                const metersPerPixel = 40075016.686 * Math.abs(Math.cos(leafletMap.getCenter().lat * Math.PI / 180)) / Math.pow(2, zoom + 8);
+                const h1 = event.start_alt != null ? event.start_alt : 80;
+                const h2 = event.end_alt != null ? event.end_alt : 40;
+                const getW = (h, isEnd) => (1 + (1 - (Math.min(100, Math.max(0, h)) / 100)) * 4 + (isEnd ? 3 : 0)) * metersPerPixel;
+                const w1 = getW(h1, false), w2 = getW(h2, true);
+                const bearing = calculateBearing(event.start_lat, event.start_lon, event.end_lat, event.end_lon);
+                const perp1 = (bearing + 90) % 360, perp2 = (bearing - 90 + 360) % 360;
+                const p1L = destinationPoint(event.start_lat, event.start_lon, w1 / 2, perp2);
+                const p1R = destinationPoint(event.start_lat, event.start_lon, w1 / 2, perp1);
+                const p2L = destinationPoint(event.end_lat, event.end_lon, w2 / 2, perp2);
+                const p2R = destinationPoint(event.end_lat, event.end_lon, w2 / 2, perp1);
+                const poly = L.polygon([p1L, p1R, p2R, p2L], { color: '#ff9900', fillColor: '#ff9900', weight: 0, fillOpacity: 0.7 });
+                const endCap = L.circle([event.end_lat, event.end_lon], { radius: w2 / 2, color: '#ff9900', fillColor: '#ff9900', weight: 0, fillOpacity: 0.7 });
+                window._statsPathLayer = L.featureGroup([poly, endCap]).addTo(leafletMap);
+            });
+            li.addEventListener('mouseleave', () => {
+                if (window._statsPathLayer) { window._statsPathLayer.remove(); window._statsPathLayer = null; }
+            });
+        }
+        ul.appendChild(li);
+    });
+    listEl.appendChild(ul);
+}
+
+/**
+ * Hides the station statistics panel.
+ */
+export function hideStationStats() {
+    const container = document.getElementById('station-stats-panel-container');
+    if (container) container.style.display = 'none';
+}
+
+/**
+ * Shows a loading state in the station stats panel.
+ * @param {string} stationCode - The station code to display in the title.
+ */
+export function showStationStatsLoading(stationCode) {
+    const container = document.getElementById('station-stats-panel-container');
+    const panel = document.getElementById('station-stats-panel');
+    if (!container || !panel) return;
+    container.style.display = 'block';
+    const titleEl = panel.querySelector('h2');
+    if (titleEl) titleEl.textContent = t('stats_panel_title', { station_code: stationCode });
+    const listEl = document.getElementById('station-stats-list');
+    if (listEl) listEl.replaceChildren(createEl('p', { style: 'color: #6c757d; margin: 0;', textContent: t('stats_loading') }));
 }

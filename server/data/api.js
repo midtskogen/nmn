@@ -21,7 +21,11 @@ export async function fetchInitialData() {
             fetch(`${API_BASE}get_kp_data`).then(r => r.json()),
             fetch(`${API_BASE}get_lightning_data`).then(r => r.json())
         ]);
-        return { stations, fovs, meteors, kpData, lightning };
+
+        const meteorTracks = Array.isArray(meteors) ? meteors : (meteors && Array.isArray(meteors.tracks) ? meteors.tracks : []);
+        const meteorCounts = (!Array.isArray(meteors) && meteors && typeof meteors.counts === 'object') ? meteors.counts : null;
+
+        return { stations, fovs, meteors: meteorTracks, meteorCounts, kpData, lightning };
     } catch (error) {
         console.error("Error during initial data load:", error);
         throw new Error("Could not load initial application data.");
@@ -76,6 +80,21 @@ function pollTaskStatus(taskId, statusAction, { onProgress, onComplete, onError 
         }
     }, 2000); // Poll every 2 seconds.
     return intervalId;
+}
+
+/**
+ * Fetches observation statistics for a single station over a date range.
+ * @param {string} stationId - The station ID (e.g., 'ams176'), or 'all' for network totals.
+ * @param {string} startDate - Start date as YYYY-MM-DD.
+ * @param {string} endDate - End date as YYYY-MM-DD.
+ * @returns {Promise<object>} A promise that resolves to the station statistics object.
+ */
+export async function fetchStationStats(stationId, startDate, endDate) {
+    let url = `${API_BASE}get_station_stats&station_id=${encodeURIComponent(stationId)}`;
+    if (startDate) url += `&start_date=${encodeURIComponent(startDate)}`;
+    if (endDate) url += `&end_date=${encodeURIComponent(endDate)}`;
+    const response = await fetch(url);
+    return response.json();
 }
 
 // --- Specific Task Functions ---
@@ -180,6 +199,19 @@ export async function fetchStreamGrid(streamTaskId, stationId, camNum) {
 }
 
 /**
+ * Fetches a star annotation overlay for the live stream.
+ * @param {string} streamTaskId - The ID of the active stream task.
+ * @param {string} stationId - The ID of the station.
+ * @param {number} camNum - The camera number.
+ * @returns {Promise<object>} A promise that resolves to the JSON response containing the annotation URL.
+ */
+export async function fetchAnnotation(streamTaskId, stationId, camNum) {
+    const url = `${API_BASE}fetch_annotation&stream_task_id=${streamTaskId}&station_id=${stationId}&cam_num=${camNum}`;
+    const response = await fetch(url);
+    return response.json();
+}
+
+/**
  * Polls the status of a live stream task, handling its specific lifecycle states
  * like establishing a tunnel, connecting to the camera, and becoming ready.
  * @param {string} taskId - The ID of the stream task to poll.
@@ -207,7 +239,7 @@ export function pollStreamStatus(taskId, { onStatusUpdate, onReady, onError }) {
             clearInterval(intervalId);
             if (onError) onError({ message: error.message });
         }
-    }, 2000); // Poll every 2 seconds.
+    }, 500); // Poll frequently to reduce perceived startup latency.
     return intervalId;
 }
 
@@ -228,4 +260,14 @@ export function stopStream(taskId) {
         // Fallback to fetch with `keepalive` for older browsers.
         fetch(`${API_BASE}stop_stream`, { method: 'POST', body: payload, keepalive: true });
     }
+}
+
+/**
+ * signals the backend to switch the existing stream to H.264 transcoding
+ * without tearing down the connection.
+ * @param {string} taskId - The active stream task ID.
+ */
+export async function requestTranscode(taskId) {
+    const response = await fetch(`${API_BASE}request_transcode&task_id=${taskId}`);
+    return response.json();
 }

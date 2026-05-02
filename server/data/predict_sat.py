@@ -12,25 +12,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # --- Try to import third-party libraries ---
 # This script requires the 'skyfield' library for orbital mechanics calculations
 # and 'numpy' for efficient vector and matrix operations.
-
-from pathlib import Path
-
-# Ensure local project modules are importable even when this script is executed via symlink
-_SCRIPT_PATH = Path(__file__).resolve()
-_PROJECT_DIR = None
-for _cand in (_SCRIPT_PATH.parent, *_SCRIPT_PATH.parents):
-    if (_cand / 'bin').is_dir() and (_cand / 'server').is_dir():
-        _PROJECT_DIR = _cand
-        break
-if _PROJECT_DIR is not None:
-    _BIN_DIR = _PROJECT_DIR / 'bin'
-    _SRC_DIR = _PROJECT_DIR / 'src'
-    for _p in (_BIN_DIR, _SRC_DIR, _PROJECT_DIR):
-        if _p.exists():
-            _ps = str(_p)
-            if _ps not in sys.path:
-                sys.path.insert(0, _ps)
-
 try:
     from skyfield.api import load, EarthSatellite, wgs84
     import numpy as np
@@ -64,11 +45,11 @@ PASS_CACHE_FILE = os.path.join(CACHE_DIR, 'pass_cache.json')
 LOG_FILE = os.path.join(LOG_DIR, 'predict_sat.log')
 
 # --- Script settings ---
-MAX_LOG_LINES = 10000
+MAX_LOG_LINES = 20000
 TLE_UPDATE_INTERVAL_HOURS = 4 # How often to fetch fresh TLE data.
 PASS_CACHE_LIFETIME_MINUTES = 235 # How long to use cached pass predictions. Set just under TLE interval.
 SEARCH_DAYS = 7 # How many days into the past to search for passes.
-MAX_VISIBLE_MAGNITUDE = 5.0 # The faintest satellite magnitude to consider. Lower is brighter.
+MAX_VISIBLE_MAGNITUDE = 6.0 # The faintest satellite magnitude to consider. Lower is brighter.
 MAXIMUM_SUN_ALT = -9 # The maximum sun altitude for a pass to be considered "dark enough".
 # (-6 is civil twilight)
 
@@ -167,57 +148,88 @@ def process_station(args):
     for a single ground station over the defined search period.
     """
     station_id, station_info, tle_data = args
+    # Add a log message here to know which station the worker is handling
+    logging.info(f"Worker {os.getpid()}: Processing station {station_id} ({station_info.get('station', {}).get('code', 'N/A')})")
     ts, eph = worker_ts, worker_eph
 
     sun, earth = eph['sun'], eph['earth']
     station_passes = []
-    location = wgs84.latlon(station_info['astronomy']['latitude'], station_info['astronomy']['longitude'], elevation_m=station_info['astronomy']['elevation'])
-    
-    # Define the time window for the search.
-    utc_now = datetime.now(timezone.utc)
-    end_dt = utc_now.replace(minute=0, second=0, microsecond=0)
-    start_dt = (end_dt - timedelta(days=SEARCH_DAYS)).replace(hour=12, minute=0, second=0, microsecond=0)
+    location = wgs84.latlon(station_info['astronomy']['latitude'], station_info['astronomy']['longitude'], elevation_m=station_info['astronomy']['elevation']) # 
 
-    end_time = ts.utc(end_dt)
-    start_time = ts.utc(start_dt)
+    # Define the time window for the search.
+    utc_now = datetime.now(timezone.utc) # 
+    end_dt = utc_now.replace(minute=0, second=0, microsecond=0) # 
+    start_dt = (end_dt - timedelta(days=SEARCH_DAYS)).replace(hour=12, minute=0, second=0, microsecond=0) # 
+
+    end_time = ts.utc(end_dt) # 
+    start_time = ts.utc(start_dt) # 
 
     for name, data in tle_data.items():
-        if not all(k in data for k in ['line1', 'line2', 'inclination']): continue
-        satellite = EarthSatellite(data['line1'], data['line2'], name, ts)
-        # A satellite can't be seen from a latitude higher than its inclination. This is a quick filter.
-        if abs(np.deg2rad(station_info['astronomy']['latitude'])) > data['inclination']: continue
+        # Log which satellite is being checked
+        logging.debug(f"Worker {os.getpid()}: Checking satellite {name} for station {station_id}") # <-- ADD DEBUG LOG
+
+        if not all(k in data for k in ['line1', 'line2', 'inclination']): continue # 
+        satellite = EarthSatellite(data['line1'], data['line2'], name, ts) # 
+        # A satellite can't be seen from a latitude higher than its inclination.
+        # This is a quick filter.
+        if abs(np.deg2rad(station_info['astronomy']['latitude'])) > data['inclination']: # 
+            # Log if filtered by inclination
+            logging.debug(f"Worker {os.getpid()}: Satellite {name} filtered out for {station_id} by inclination ({np.rad2deg(data['inclination']):.1f} deg vs station lat {station_info['astronomy']['latitude']:.1f} deg)") # <-- ADD DEBUG LOG
+            continue # 
 
         # Use skyfield's `find_events` to find when the satellite rises, culminates, and sets.
-        times, events = satellite.find_events(location, start_time, end_time, altitude_degrees=20.0)
+        try: # Add try/except around find_events
+            times, events = satellite.find_events(location, start_time, end_time, altitude_degrees=20.0) # 
+            # Log the number of events found
+            logging.debug(f"Worker {os.getpid()}: Found {len(events)} rise/cul/set events for {name} at {station_id}") # <-- ADD DEBUG LOG
+        except Exception as e:
+            logging.error(f"Worker {os.getpid()}: Error during find_events for {name} at {station_id}: {e}") # <-- ADD ERROR LOG
+            continue # Skip this satellite if find_events fails
 
-        for i, event_type in enumerate(events):
+        for i, event_type in enumerate(events): # 
             # A pass is a sequence of rise (0), culmination (1), and set (2).
-            if event_type == 0 and i + 2 < len(events) and np.all(events[i+1:i+3] == [1, 2]):
-                rise_time, culminate_time, set_time = times[i : i+3]
+            if event_type == 0 and i + 2 < len(events) and np.all(events[i+1:i+3] == [1, 2]): # 
+                rise_time, culminate_time, set_time = times[i : i+3] # 
+
+                # Log the potential pass time
+                logging.debug(f"Worker {os.getpid()}: Potential pass for {name} at {station_id}, culmination: {culminate_time.utc_iso()}") # <-- ADD DEBUG LOG
 
                 # --- Visibility Checks ---
                 # 1. The satellite must be illuminated by the sun.
-                if not satellite.at(culminate_time).is_sunlit(eph): continue
+                is_sunlit = satellite.at(culminate_time).is_sunlit(eph) # 
+                if not is_sunlit: # 
+                    logging.debug(f"Worker {os.getpid()}: Pass {name} rejected: Satellite not sunlit at culmination.") # <-- ADD DEBUG LOG
+                    continue # 
                 # 2. The observer on the ground must be in darkness.
-                if (earth + location).at(culminate_time).observe(sun).apparent().altaz()[0].degrees > MAXIMUM_SUN_ALT: continue
-                
+                observer_alt = (earth + location).at(culminate_time).observe(sun).apparent().altaz()[0].degrees # 
+                if observer_alt > MAXIMUM_SUN_ALT: # 
+                    logging.debug(f"Worker {os.getpid()}: Pass {name} rejected: Observer sun altitude {observer_alt:.1f} > {MAXIMUM_SUN_ALT:.1f}") # <-- ADD DEBUG LOG
+                    continue # 
+
                 # 3. Estimate the satellite's apparent magnitude (brightness).
-                abs_mag = SATELLITE_MAGNITUDES.get(name, 99.0)
-                topocentric_culminate = (satellite - location).at(culminate_time)
-                r_km = topocentric_culminate.distance().km
+                abs_mag = SATELLITE_MAGNITUDES.get(name, 99.0) # 
+                topocentric_culminate = (satellite - location).at(culminate_time) # 
+                r_km = topocentric_culminate.distance().km # 
                 # The following calculates the phase angle to adjust brightness.
-                sat_pos_au = satellite.at(culminate_time).position.au
-                obs_pos_au = (earth + location).at(culminate_time).position.au
-                sun_pos_au = sun.at(culminate_time).position.au
-                vec_obs_sat, vec_sun_sat = sat_pos_au - obs_pos_au, sat_pos_au - sun_pos_au
-                dot_product = np.dot(vec_obs_sat, vec_sun_sat)
-                mag_obs_sat, mag_sun_sat = np.linalg.norm(vec_obs_sat), np.linalg.norm(vec_sun_sat)
-                phi = np.arccos(dot_product / (mag_obs_sat * mag_sun_sat))
-                phase_factor = (np.sin(phi) + (np.pi - phi) * np.cos(phi)) / np.pi
-                est_mag = abs_mag + 5 * np.log10(r_km / 1000.0)
-                if phase_factor > 0: est_mag += -2.5 * np.log10(phase_factor)
- 
-                if est_mag >= MAX_VISIBLE_MAGNITUDE: continue
+                sat_pos_au = satellite.at(culminate_time).position.au # 
+                obs_pos_au = (earth + location).at(culminate_time).position.au # 
+                sun_pos_au = sun.at(culminate_time).position.au # 
+                vec_obs_sat, vec_sun_sat = sat_pos_au - obs_pos_au, sat_pos_au - sun_pos_au # 
+                dot_product = np.dot(vec_obs_sat, vec_sun_sat) # 
+                mag_obs_sat, mag_sun_sat = np.linalg.norm(vec_obs_sat), np.linalg.norm(vec_sun_sat) # 
+                phi = np.arccos(np.clip(dot_product / (mag_obs_sat * mag_sun_sat), -1.0, 1.0)) # Add clip for safety # 
+                phase_factor = (np.sin(phi) + (np.pi - phi) * np.cos(phi)) / np.pi # 
+                est_mag = abs_mag + 5 * np.log10(r_km / 1000.0) # 
+                if phase_factor > 1e-6: # Avoid log10(0)
+                   est_mag += -2.5 * np.log10(phase_factor) # 
+
+                if est_mag >= MAX_VISIBLE_MAGNITUDE: # 
+                    logging.debug(f"Worker {os.getpid()}: Pass {name} rejected: Estimated magnitude {est_mag:.1f} >= {MAX_VISIBLE_MAGNITUDE:.1f}") # <-- ADD DEBUG LOG
+                    continue # 
+
+                # If all checks pass, calculate the detailed track for the pass.
+                # Log that a pass passed filters
+                logging.info(f"Worker {os.getpid()}: Pass found for {name} at {station_id}, culmination: {culminate_time.utc_iso()}, Mag: {est_mag:.1f}, Sun Alt: {observer_alt:.1f}")
 
                 # If all checks pass, calculate the detailed track for the pass.
                 pass_duration_seconds = (set_time - rise_time) * 86400.0
@@ -429,7 +441,7 @@ def find_all_passes(task_id):
         update_status(status_file, "complete", {"data": result_data})
     except Exception as e:
         logging.exception(f"An unhandled error occurred during pass prediction for task {task_id}")
-        update_status(status_file, "error", {"message": "error_internal"})
+        update_status(status_file, "error", {"message": "error_internal", "task_id": task_id, "debug": "logs/predict_sat.log"})
 
 def main():
     """Parses command-line arguments to run in either on-demand or cron mode."""
@@ -457,7 +469,7 @@ Example cron job to run every 4 hours:
     is_quiet = args.quiet or args.cron
     if not is_quiet:
         logging.basicConfig(
-            level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
+            level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[logging.FileHandler(LOG_FILE)]
         )
         logging.info("--- Script execution started ---")
@@ -474,7 +486,7 @@ Example cron job to run every 4 hours:
             find_all_passes(args.task_id)
         except Exception as e:
             logging.exception("A fatal error occurred at the top level of the script!")
-            update_status(status_file, "error", {"message": "error_internal"})
+            update_status(status_file, "error", {"message": "error_internal", "task_id": args.task_id, "debug": "logs/predict_sat.log"})
     else:
         parser.print_help()
         sys.exit(1)

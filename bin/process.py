@@ -342,21 +342,21 @@ def run_video_processing(
     station_name = station_config.get('station', 'name')
     base_name = f"{station_name}-{videostart_ts.strftime('%Y%m%d%H%M%S')}"
 
-    command = [Settings.MAKEVIDEOS_SCRIPT, base_name]
+    command = [sys.executable, str(Settings.MAKEVIDEOS_SCRIPT), base_name]
     if credit:
-        command.insert(1, "--credit")
-        command.insert(2, credit)
-        command.insert(3, "--creditpos")
-        command.insert(4, creditpos)
-        command.insert(5, "--creditsize")
-        command.insert(6, str(creditsize))
-        command.insert(7, "--creditfont")
-        command.insert(8, creditfont)
+        command.insert(2, "--credit")
+        command.insert(3, credit)
+        command.insert(4, "--creditpos")
+        command.insert(5, creditpos)
+        command.insert(6, "--creditsize")
+        command.insert(7, str(creditsize))
+        command.insert(8, "--creditfont")
+        command.insert(9, creditfont)
     elif logos:
         # Preserve ordering and pairing: each --logopos applies to the --logo before it.
         # Here we support a simple pairing where the Nth --logopos corresponds to the Nth --logo.
         # If fewer positions are provided, makevideos.py will auto-place remaining logos clockwise.
-        insert_at = 1
+        insert_at = 2
         positions = list(logopos or [])
         for i, lf in enumerate(list(logos)):
             command.insert(insert_at, "--logo")
@@ -367,7 +367,7 @@ def run_video_processing(
                 command.insert(insert_at + 1, str(positions[i]))
                 insert_at += 2
     elif nologos:
-        command.insert(1, "--nologos")
+        command.insert(2, "--nologos")
     proc = run_command(command, cwd=event_dir)
 
     stdout_value = (proc.stdout or '').strip()
@@ -416,7 +416,7 @@ def run_classification(event_config, event_dir: Path):
     if event_config.has_option('summary', 'meteor_probability'):
         return
 
-    proc = run_command([Settings.METEOR_TEST_SCRIPT, fireball_jpg], cwd=event_dir)
+    proc = run_command([sys.executable, str(Settings.METEOR_TEST_SCRIPT), str(fireball_jpg)], cwd=event_dir)
 
     stdout_value = proc.stdout.strip()
     probability = None

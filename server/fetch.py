@@ -25,7 +25,6 @@ import io
 import json
 import logging
 import math
-import multiprocessing
 import os
 import re
 import shutil
@@ -245,16 +244,23 @@ def load_translations(lang_code: str) -> dict:
 def setup_logging(log_file_path: Path):
     """Configures logging to file and console."""
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s:%(levelname)s:%(name)s:%(message)s',
-        filename=log_file_path,
-        filemode='a'
-    )
+    root_logger = logging.getLogger()
+    # Remove any existing handlers to avoid duplicates when called multiple times.
+    for h in list(root_logger.handlers):
+        try:
+            h.close()
+        except Exception:
+            pass
+        root_logger.removeHandler(h)
+    root_logger.setLevel(logging.INFO)
+    file_handler = logging.FileHandler(log_file_path, mode='a')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s:%(message)s'))
+    root_logger.addHandler(file_handler)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
-    logging.getLogger().addHandler(console_handler)
+    root_logger.addHandler(console_handler)
 
 
 def restore_terminal_state():
@@ -1051,8 +1057,9 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
         if max_jobs < 1:
             max_jobs = 1
 
+        _JOB_TIMEOUT_SECONDS = 1800  # 30 minutes per process.py job
         pending = list(event_files)
-        running = []
+        running = []  # (proc, log_file, start_time)
         if pending:
             logging.info(f"Running station processing jobs with up to {max_jobs} parallel processes...")
 
@@ -1070,16 +1077,32 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         stdout=log_file,
                         stderr=log_file,
                     )
-                    running.append((proc, log_file))
+                    running.append((proc, log_file, time.monotonic()))
                     time.sleep(1)
                 except Exception as e:
                     logging.error(f"Failed to spawn process.py for {event_file}: {e}")
 
             still_running = []
-            for proc, log_file in running:
+            for proc, log_file, start_time in running:
                 rc = proc.poll()
                 if rc is None:
-                    still_running.append((proc, log_file))
+                    elapsed = time.monotonic() - start_time
+                    if elapsed > _JOB_TIMEOUT_SECONDS:
+                        logging.error(f"process.py job (pid {proc.pid}) timed out after {elapsed:.0f}s. Terminating.")
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=10)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                        try:
+                            log_file.close()
+                        except Exception:
+                            pass
+                    else:
+                        still_running.append((proc, log_file, start_time))
                     continue
 
                 try:
@@ -1792,7 +1815,7 @@ def main():
 
     station = re.sub(r'\W', '', args.arg1)
     port = re.sub(r'\D', '', args.port)
-    remote_cleaned = re.sub(r'[^a-zA-Z0-9_/]', '', args.remote_dir)
+    remote_cleaned = re.sub(r'[^a-zA-Z0-9_/\-]', '', args.remote_dir)
     
     try:
         dir_parts = [p for p in remote_cleaned.split('/') if p]
@@ -1869,20 +1892,7 @@ def main():
         else:
             logging.info("Lock acquired. Starting process_event().")
 
-        # Run process_event with a 30-minute timeout to prevent indefinite hangs
-        def _run_process_event():
-            process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
-
-        proc = multiprocessing.Process(target=_run_process_event)
-        proc.start()
-        proc.join(timeout=1800)  # 30 minutes
-        if proc.is_alive():
-            logging.error("process_event() timed out after 30 minutes. Terminating...")
-            proc.terminate()
-            proc.join(timeout=10)
-            if proc.is_alive():
-                proc.kill()
-            sys.exit("Processing timeout.")
+        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

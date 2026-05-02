@@ -161,7 +161,7 @@ def generate_reports(config: configparser.ConfigParser, video_output: list, even
     """Generates metrack, centroid, light data files and a brightness plot."""
     original_arc = config.getfloat('trail', 'arc')
     original_duration = config.getfloat('trail', 'duration')
-    start_az, start_alt = float(video_output[-5]), float(video_output[-4])
+    start_az, start_alt = float(video_output[-4]), float(video_output[-3])
     end_az, end_alt = float(video_output[-2]), float(video_output[-1])
     recalibrated_arc = haversine_arc(start_az, start_alt, end_az, end_alt)
     duration = original_duration * (recalibrated_arc / original_arc) if original_arc > 0 else 0
@@ -245,7 +245,7 @@ def update_event_file(config: configparser.ConfigParser, video_output: list, eve
     """Adds a [summary] section to the event file with key results."""
     original_duration = config.getfloat('trail', 'duration')
     original_arc = config.getfloat('trail', 'arc')
-    start_az, start_alt = float(video_output[-5]), float(video_output[-4])
+    start_az, start_alt = float(video_output[-4]), float(video_output[-3])
     end_az, end_alt = float(video_output[-2]), float(video_output[-1])
     recalibrated_arc = haversine_arc(start_az, start_alt, end_az, end_alt)
     duration = original_duration * (recalibrated_arc / original_arc) if original_arc > 0 else 0

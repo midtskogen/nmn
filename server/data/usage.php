@@ -388,7 +388,9 @@ $total_ips          = count($all_ips);
                   foreach (array_keys($ips[$ip]) as $st) $stations_for_ip[$st] = true;
               }
           }
-          foreach (array_keys($stations_for_ip) as $st) echo '<span class="badge-station me-1">'.htmlspecialchars($st).'</span>';
+          $sorted_stations = array_keys($stations_for_ip);
+          sort($sorted_stations);
+          foreach ($sorted_stations as $st) echo '<span class="badge-station me-1">'.htmlspecialchars($st).'</span>';
         ?></td>
       </tr>
       <?php endforeach; ?>

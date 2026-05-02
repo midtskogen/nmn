@@ -158,6 +158,14 @@ foreach ($access_data as $entry) {
 }
 arsort($access_summary);
 
+function utf8_codepoint($cp) {
+    // Encode a Unicode codepoint as a UTF-8 byte string (supports full 4-byte range)
+    if ($cp <= 0x7F)     return chr($cp);
+    if ($cp <= 0x7FF)    return chr(0xC0|($cp>>6))   . chr(0x80|($cp&0x3F));
+    if ($cp <= 0xFFFF)   return chr(0xE0|($cp>>12))  . chr(0x80|(($cp>>6)&0x3F))  . chr(0x80|($cp&0x3F));
+    return               chr(0xF0|($cp>>18))  . chr(0x80|(($cp>>12)&0x3F)) . chr(0x80|(($cp>>6)&0x3F)) . chr(0x80|($cp&0x3F));
+}
+
 function fmt_duration($seconds) {
     $s = (int)$seconds;
     if ($s < 60) return $s . 's';
@@ -346,11 +354,12 @@ $total_ips          = count($all_ips);
       <tbody>
       <?php foreach ($top_ips as $ip => $total_s):
           $country = $geoip[$ip]['country'] ?? '';
-          $cc      = $geoip[$ip]['cc'] ?? '';
+          $cc      = strtoupper($geoip[$ip]['cc'] ?? '');
           $flag = '';
-          if (strlen($cc) === 2) {
-              $flag = mb_convert_encoding('&#' . (0x1F1E0 - 65 + ord($cc[0])) . ';', 'UTF-8', 'HTML-ENTITIES')
-                    . mb_convert_encoding('&#' . (0x1F1E0 - 65 + ord($cc[1])) . ';', 'UTF-8', 'HTML-ENTITIES');
+          if (strlen($cc) === 2 && ctype_alpha($cc)) {
+              // Regional indicator symbols start at U+1F1E6 ('A') — encode as 4-byte UTF-8
+              $flag = utf8_codepoint(0x1F1E6 + ord($cc[0]) - 65)
+                    . utf8_codepoint(0x1F1E6 + ord($cc[1]) - 65);
           }
       ?>
       <tr>

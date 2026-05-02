@@ -256,11 +256,13 @@ function utf8_codepoint($cp) {
     return               chr(0xF0|($cp>>18))  . chr(0x80|(($cp>>12)&0x3F)) . chr(0x80|(($cp>>6)&0x3F)) . chr(0x80|($cp&0x3F));
 }
 
-function fmt_duration($seconds) {
+function fmt_duration($seconds, $lang_code = 'nb_NO') {
     $s = (int)$seconds;
+    $u_h = $lang_code === 'nb_NO' ? 't' : 'h';
+    $u_m = $lang_code === 'nb_NO' ? 'min' : 'm';
     if ($s < 60) return $s . 's';
-    if ($s < 3600) return sprintf('%dm %ds', intdiv($s,60), $s%60);
-    return sprintf('%dh %dm', intdiv($s,3600), intdiv($s%3600,60));
+    if ($s < 3600) return sprintf('%d%s %ds', intdiv($s,60), $u_m, $s%60);
+    return sprintf('%d%s %d%s', intdiv($s,3600), $u_h, intdiv($s%3600,60), $u_m);
 }
 
 function fmt_bytes($bytes) {
@@ -334,7 +336,7 @@ $total_ips          = count($all_ips);
     <div class="stat-label"><?= t('usage_unique_ips', $lang) ?></div>
   </div></div>
   <div class="col-6 col-md-3"><div class="card p-3 text-center">
-    <div class="stat-num"><?= fmt_duration($total_stream_s_all) ?></div>
+    <div class="stat-num"><?= fmt_duration($total_stream_s_all, $lang_code) ?></div>
     <div class="stat-label"><?= t('usage_total_stream', $lang) ?></div>
   </div></div>
   <div class="col-6 col-md-3"><div class="card p-3 text-center">
@@ -374,7 +376,7 @@ $total_ips          = count($all_ips);
       <tr>
         <td><?= htmlspecialchars($date) ?></td>
         <td><?= $row['unique_ips'] ?></td>
-        <td><?= fmt_duration($row['stream_s']) ?></td>
+        <td><?= fmt_duration($row['stream_s'], $lang_code) ?></td>
         <td><?= fmt_bytes($row['bytes']) ?></td>
         <td><div class="bar-wrap"><div class="bar-fill" style="width:<?= $pct ?>%"></div></div></td>
       </tr>
@@ -399,7 +401,7 @@ $total_ips          = count($all_ips);
       ?>
       <tr>
         <td><span class="badge-station"><?= htmlspecialchars($station) ?></span></td>
-        <td><?= fmt_duration($totals['stream_s'] ?? 0) ?></td>
+        <td><?= fmt_duration($totals['stream_s'] ?? 0, $lang_code) ?></td>
         <td><?= fmt_bytes($totals['bytes'] ?? 0) ?></td>
         <td><div class="bar-wrap"><div class="bar-fill" style="width:<?= $pct ?>%"></div></div></td>
       </tr>
@@ -463,7 +465,7 @@ $total_ips          = count($all_ips);
       <tr>
         <td><?= htmlspecialchars($ip) ?></td>
         <td class="country-cell"><?= $flag ? $flag . ' ' : '' ?><?= htmlspecialchars($country ?: ($geoip[$ip] ?? null ? '?' : '…')) ?></td>
-        <td><?= fmt_duration($total_s) ?></td>
+        <td><?= fmt_duration($total_s, $lang_code) ?></td>
         <td><?= isset($ip_bytes[$ip]) ? fmt_bytes($ip_bytes[$ip]) : '—' ?></td>
         <td><?php
           $stations_for_ip = [];

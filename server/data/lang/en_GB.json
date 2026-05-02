@@ -187,5 +187,8 @@
     "usage_range_1m": "Past month",
     "usage_range_6m": "Past 6 months",
     "usage_range_1y": "Past year",
-    "usage_range_3y": "Past 3 years"
+    "usage_range_3y": "Past 3 years",
+    "usage_chart_streaming": "Streaming (min)",
+    "usage_chart_downloaded": "Downloaded (MB)",
+    "usage_chart_minutes": "minutes"
 }

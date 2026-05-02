@@ -18,7 +18,7 @@
     "date_label": "Dato (UTC):",
     "last_night_button": "Siste natt",
     "now_button": "Nå",
-    "now_button_title": "Sett tida til to minutter sia",
+    "now_button_title": "Sett tida til to minutt sia",
     "last_night_button_title": "Velg siste natt for den først valgte stasjonen",
     "hour_label": "Time (0-23 UTC):",
     "minute_label": "Minutt (0-59):",
@@ -188,5 +188,8 @@
     "usage_range_1m": "Siste måned",
     "usage_range_6m": "Siste 6 måneder",
     "usage_range_1y": "Siste år",
-    "usage_range_3y": "Siste 3 år"
+    "usage_range_3y": "Siste 3 år",
+    "usage_chart_streaming": "Strømmingstid (min)",
+    "usage_chart_downloaded": "Nedlasta (MB)",
+    "usage_chart_minutes": "minutt"
 }

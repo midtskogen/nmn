@@ -549,14 +549,14 @@ new Chart(document.getElementById('chartStream'), {
   data: {
     labels: dailyDates,
     datasets: [{
-      label: 'Streaming (min)',
+      label: <?= json_encode($lang['usage_chart_streaming'] ?? 'Streaming (min)') ?>,
       data: dailyStream,
       backgroundColor: 'rgba(31,111,235,0.7)',
       borderColor: '#1f6feb',
       borderWidth: 1,
       yAxisID: 'y',
     }, {
-      label: 'Downloaded (MB)',
+      label: <?= json_encode($lang['usage_chart_downloaded'] ?? 'Downloaded (MB)') ?>,
       data: dailyBytes,
       type: 'line',
       backgroundColor: 'rgba(63,185,80,0.15)',
@@ -573,7 +573,7 @@ new Chart(document.getElementById('chartStream'), {
     plugins: { legend: { labels: { color: '#8b949e' } } },
     scales: {
       x: { ticks: { maxTicksLimit: 20, maxRotation: 45 } },
-      y:  { title: { display: true, text: 'minutes' }, position: 'left' },
+      y:  { title: { display: true, text: <?= json_encode($lang['usage_chart_minutes'] ?? 'minutes') ?> }, position: 'left' },
       y2: { title: { display: true, text: 'MB' }, position: 'right', grid: { drawOnChartArea: false } },
     }
   }
@@ -597,7 +597,7 @@ new Chart(document.getElementById('chartStations'), {
     plugins: { legend: { labels: { color: '#8b949e' } } },
     scales: {
       x: { stacked: true, ticks: { maxTicksLimit: 20, maxRotation: 45 } },
-      y: { stacked: true, title: { display: true, text: 'minutes' } },
+      y: { stacked: true, title: { display: true, text: <?= json_encode($lang['usage_chart_minutes'] ?? 'minutes') ?> } },
     }
   }
 });

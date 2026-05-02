@@ -116,6 +116,22 @@ function get_language($default_lang) {
 
 $action = $_GET['action'] ?? 'get_page';
 
+// --- Access logging ---
+// Append a compact entry to access_log.json for the usage stats page.
+// Skip tile requests (too frequent) and internal polling actions.
+$_skip_log = ['tile', 'check_status', 'get_stream_status'];
+if (!in_array($action, $_skip_log)) {
+    $_log_file = $BASE_DIR . '/access_log.json';
+    $_log_entry = json_encode([
+        'ts'     => date('Y-m-d H:i:s'),
+        'date'   => date('Y-m-d'),
+        'ip'     => get_user_ip(),
+        'action' => $action,
+        'station'=> $_GET['station_id'] ?? ($_GET['station'] ?? null),
+    ]) . "\n";
+    @file_put_contents($_log_file, $_log_entry, FILE_APPEND | LOCK_EX);
+}
+
 // --- Router ---
 switch ($action) {
     case 'tile':

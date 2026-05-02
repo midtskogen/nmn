@@ -18,6 +18,47 @@ $lang_file = $BASE_DIR . '/lang/' . $lang_code . '.json';
 $lang = file_exists($lang_file) ? (json_decode(file_get_contents($lang_file), true) ?: []) : [];
 function t($key, $lang) { return htmlspecialchars($lang[$key] ?? $key); }
 
+// Norwegian country name translations (English → Norsk)
+$COUNTRY_NO = [
+    'Afghanistan' => 'Afghanistan', 'Albania' => 'Albania', 'Algeria' => 'Algerie',
+    'Andorra' => 'Andorra', 'Angola' => 'Angola', 'Argentina' => 'Argentina',
+    'Armenia' => 'Armenia', 'Australia' => 'Australia', 'Austria' => 'Østerrike',
+    'Azerbaijan' => 'Aserbajdsjan', 'Bahrain' => 'Bahrain', 'Bangladesh' => 'Bangladesh',
+    'Belarus' => 'Hviterussland', 'Belgium' => 'Belgia', 'Bolivia' => 'Bolivia',
+    'Bosnia and Herzegovina' => 'Bosnia-Hercegovina', 'Brazil' => 'Brasil',
+    'Bulgaria' => 'Bulgaria', 'Canada' => 'Canada', 'Chile' => 'Chile',
+    'China' => 'Kina', 'Colombia' => 'Colombia', 'Croatia' => 'Kroatia',
+    'Cyprus' => 'Kypros', 'Czech Republic' => 'Tsjekkia', 'Czechia' => 'Tsjekkia',
+    'Denmark' => 'Danmark', 'Ecuador' => 'Ecuador', 'Egypt' => 'Egypt',
+    'Estonia' => 'Estland', 'Ethiopia' => 'Etiopia', 'Finland' => 'Finland',
+    'France' => 'Frankrike', 'Georgia' => 'Georgia', 'Germany' => 'Tyskland',
+    'Ghana' => 'Ghana', 'Greece' => 'Hellas', 'Hungary' => 'Ungarn',
+    'Iceland' => 'Island', 'India' => 'India', 'Indonesia' => 'Indonesia',
+    'Iran' => 'Iran', 'Iraq' => 'Irak', 'Ireland' => 'Irland',
+    'Israel' => 'Israel', 'Italy' => 'Italia', 'Japan' => 'Japan',
+    'Jordan' => 'Jordan', 'Kazakhstan' => 'Kasakhstan', 'Kenya' => 'Kenya',
+    'Kosovo' => 'Kosovo', 'Kuwait' => 'Kuwait', 'Latvia' => 'Latvia',
+    'Lebanon' => 'Libanon', 'Libya' => 'Libya', 'Liechtenstein' => 'Liechtenstein',
+    'Lithuania' => 'Litauen', 'Luxembourg' => 'Luxemburg', 'Malaysia' => 'Malaysia',
+    'Malta' => 'Malta', 'Mexico' => 'Mexico', 'Moldova' => 'Moldova',
+    'Monaco' => 'Monaco', 'Montenegro' => 'Montenegro', 'Morocco' => 'Marokko',
+    'Netherlands' => 'Nederland', 'New Zealand' => 'New Zealand',
+    'Nigeria' => 'Nigeria', 'North Macedonia' => 'Nord-Makedonia',
+    'Norway' => 'Norge', 'Pakistan' => 'Pakistan', 'Palestine' => 'Palestina',
+    'Peru' => 'Peru', 'Philippines' => 'Filippinene', 'Poland' => 'Polen',
+    'Portugal' => 'Portugal', 'Qatar' => 'Qatar', 'Romania' => 'Romania',
+    'Russia' => 'Russland', 'Saudi Arabia' => 'Saudi-Arabia',
+    'Serbia' => 'Serbia', 'Singapore' => 'Singapore', 'Slovakia' => 'Slovakia',
+    'Slovenia' => 'Slovenia', 'South Africa' => 'Sør-Afrika',
+    'South Korea' => 'Sør-Korea', 'Spain' => 'Spania', 'Sweden' => 'Sverige',
+    'Switzerland' => 'Sveits', 'Syria' => 'Syria', 'Taiwan' => 'Taiwan',
+    'Thailand' => 'Thailand', 'Tunisia' => 'Tunisia', 'Turkey' => 'Tyrkia',
+    'Ukraine' => 'Ukraina', 'United Arab Emirates' => 'De forente arabiske emirater',
+    'United Kingdom' => 'Storbritannia', 'United States' => 'USA',
+    'Uruguay' => 'Uruguay', 'Uzbekistan' => 'Usbekistan',
+    'Venezuela' => 'Venezuela', 'Vietnam' => 'Vietnam', 'Yemen' => 'Jemen',
+];
+
 $stream_file  = $BASE_DIR . '/stream_time_tracker.json';
 $quota_file   = $BASE_DIR . '/quota_tracker.json';
 $access_file  = $BASE_DIR . '/access_log.json';
@@ -368,9 +409,9 @@ $total_ips          = count($all_ips);
   // Build country totals for the chart (server-side)
   $country_totals_php = [];
   foreach ($top_ips as $ip => $secs) {
-      $country = $geoip[$ip]['country'] ?? '';
-      $cc      = $geoip[$ip]['cc'] ?? '';
-      $label   = $country ?: $ip;
+      $country_en = $geoip[$ip]['country'] ?? '';
+      $country_disp = ($lang_code === 'nb_NO' && isset($COUNTRY_NO[$country_en])) ? $COUNTRY_NO[$country_en] : $country_en;
+      $label   = $country_disp ?: $ip;
       $country_totals_php[$label] = ($country_totals_php[$label] ?? 0) + $secs;
   }
   arsort($country_totals_php);
@@ -386,7 +427,8 @@ $total_ips          = count($all_ips);
       </tr></thead>
       <tbody>
       <?php foreach ($top_ips as $ip => $total_s):
-          $country = $geoip[$ip]['country'] ?? '';
+          $country_en = $geoip[$ip]['country'] ?? '';
+          $country = ($lang_code === 'nb_NO' && isset($COUNTRY_NO[$country_en])) ? $COUNTRY_NO[$country_en] : $country_en;
           $cc      = strtoupper($geoip[$ip]['cc'] ?? '');
           $flag = '';
           if (strlen($cc) === 2 && ctype_alpha($cc)) {

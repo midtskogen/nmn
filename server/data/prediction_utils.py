@@ -19,16 +19,7 @@ except ImportError as e:
 
 # --- Configuration Constants ---
 # Establishes base paths for all necessary directories and configuration files.
-def _find_base_dir():
-    candidate = os.path.dirname(os.path.abspath(__file__))
-    if os.path.isdir(os.path.join(candidate, 'download')):
-        return candidate
-    for d in [os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data'),
-              '/var/www/html/data', '/data/httpd/norskmeteornettverk.no/data']:
-        if os.path.isdir(os.path.join(d, 'download')):
-            return d
-    return candidate
-BASE_DIR = _find_base_dir()
+BASE_DIR = os.environ.get('NMN_DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 LOCK_DIR = os.path.join(BASE_DIR, 'locks')
 CACHE_DIR = os.path.join(BASE_DIR, 'cache')

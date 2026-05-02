@@ -1,15 +1,19 @@
 <?php
 // --- Configuration ---
+// Use the directory of the script as accessed (following symlinks),
+// not __DIR__ which resolves to the real path of the source file.
+$BASE_DIR = dirname($_SERVER['SCRIPT_FILENAME']);
 $MAX_CONCURRENT_REQUESTS = 8;
-$LOCK_DIR = __DIR__ . '/locks';
-$PYTHON_SCRIPT = __DIR__ . '/controller.py';
-$SATELLITE_SCRIPT = __DIR__ . '/predict_sat.py';
-$AIRCRAFT_SCRIPT = __DIR__ . '/predict_flight.py';
+$LOCK_DIR = $BASE_DIR . '/locks';
+$PYTHON_SCRIPT = $BASE_DIR . '/controller.py';
+$SATELLITE_SCRIPT = $BASE_DIR . '/predict_sat.py';
+$AIRCRAFT_SCRIPT = $BASE_DIR . '/predict_flight.py';
 $PYTHON_EXECUTABLE = '/usr/bin/python3';
-$LANG_DIR = __DIR__ . '/lang';
+$LANG_DIR = $BASE_DIR . '/lang';
 $DEFAULT_LANG = 'nb_NO';
 
 // --- Setup ---
+putenv('NMN_DATA_DIR=' . $BASE_DIR);
 if (!is_dir($LOCK_DIR)) { mkdir($LOCK_DIR, 0775, true); }
 
 /**

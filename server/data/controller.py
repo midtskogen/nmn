@@ -13,20 +13,9 @@ from datetime import datetime, timedelta, timezone
 from PIL import Image
 
 # --- Configuration (Defined first to avoid circular dependency issues) ---
-def _find_base_dir():
-    """Return the directory containing the live runtime data (download/, locks/ etc).
-    When this script is invoked via its real path (nmn/server/data/), __file__
-    resolves there but the runtime dirs (download/, locks/) only exist in data/.
-    """
-    candidate = os.path.dirname(os.path.abspath(__file__))
-    if os.path.isdir(os.path.join(candidate, 'download')):
-        return candidate
-    for d in [os.path.join(os.path.dirname(os.path.dirname(candidate)), 'data'),
-              '/var/www/html/data', '/data/httpd/norskmeteornettverk.no/data']:
-        if os.path.isdir(os.path.join(d, 'download')):
-            return d
-    return candidate
-BASE_DIR = _find_base_dir()
+# NMN_DATA_DIR is set by index.php (the entry point) so all subprocesses
+# inherit the correct runtime data directory regardless of __file__ resolution.
+BASE_DIR = os.environ.get('NMN_DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
 STATIONS_FILE = os.path.join(BASE_DIR, 'stations.json')
 DOWNLOAD_DIR = os.path.join(BASE_DIR, 'download')
 LOG_DIR = os.path.join(BASE_DIR, 'logs')

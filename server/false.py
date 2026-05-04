@@ -295,7 +295,8 @@ def process_directory(source: Path, destination: Path, dir_arg: str, dry_run: bo
             cmd = [sys.executable, FETCH_SCRIPT, str(time_level_dir.resolve())]
             print(f"    Target cleanup directory still contains subdirectories. Running: {' '.join(cmd)}")
             # Run the command. check=True will raise an error if the script fails.
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            # Timeout: fetch.py does up to 5 rsync retries with 60s delays, so cap at 10 min.
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
 
     # --- Error Handling for Final Cleanup ---
     except FileNotFoundError as e:
@@ -308,6 +309,10 @@ def process_directory(source: Path, destination: Path, dir_arg: str, dry_run: bo
             print(f"  The fetch script itself is missing from the expected location: '{FETCH_SCRIPT}'.", file=sys.stderr)
         else:
             print(f"  Details: {e}", file=sys.stderr)
+    except subprocess.TimeoutExpired as e:
+        print(f"  ❌ Error: '{FETCH_SCRIPT}' timed out after {e.timeout}s and was killed.", file=sys.stderr)
+        if e.stdout: print(f"  --- STDOUT ---\n{e.stdout}", file=sys.stderr)
+        if e.stderr: print(f"  --- STDERR ---\n{e.stderr}", file=sys.stderr)
     except subprocess.CalledProcessError as e:
         # This error is raised if the FETCH_SCRIPT returns a non-zero exit code.
         print(f"  ❌ Error: The script '{FETCH_SCRIPT}' failed.", file=sys.stderr)

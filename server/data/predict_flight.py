@@ -177,6 +177,67 @@ def update_and_get_flight_database(task_id, access_token):
     logging.info(f"Task {task_id}: Flight database updated. Total flights in window: {len(pruned_db)}.")
     return list(pruned_db.values()), fetch_start_ts
 
+def get_geo_altitude_offset(task_id, icao24, time_within_flight, access_token):
+    """
+    Fetches the geometric altitude from OpenSky state vectors API and calculates
+    the offset from barometric altitude. This is more accurate than pressure-based correction.
+
+    Returns the average (geo_altitude - baro_altitude) offset in meters, or None if unavailable.
+    """
+    # Round time to nearest 10 seconds for caching (state vectors are ~5s apart)
+    rounded_time = (time_within_flight // 10) * 10
+    cache_file = os.path.join(TRACK_CACHE_DIR, f"{icao24}-{rounded_time}-geo-offset.json")
+
+    if os.path.exists(cache_file):
+        if (time.time() - os.path.getmtime(cache_file)) < (TRACK_CACHE_HOURS * 3600):
+            with open(cache_file, 'r') as f:
+                cached = json.load(f)
+                return cached.get('offset')
+
+    url = f"https://opensky-network.org/api/states/all?time={rounded_time}&icao24={icao24}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        data = response.json()
+
+        states = data.get('states', [])
+        if not states:
+            return None
+
+        # Calculate offset from the state vector
+        # State vector format: [icao24, callsign, origin_country, time_position, last_contact,
+        #                       longitude, latitude, baro_altitude, on_ground, velocity,
+        #                       true_track, vertical_rate, sensors, geo_altitude, squawk, spi,
+        #                       position_source, category]
+        offsets = []
+        for state in states:
+            if len(state) > 13:
+                baro = state[7]  # baro_altitude
+                geo = state[13]  # geo_altitude
+                if baro is not None and geo is not None and not state[8]:  # not on ground
+                    offsets.append(geo - baro)
+
+        if offsets:
+            avg_offset = sum(offsets) / len(offsets)
+            logging.info(f"Task {task_id}: Geo altitude offset for {icao24}: {avg_offset:.1f}m (from {len(offsets)} state vectors)")
+
+            # Cache the result
+            with open(cache_file, 'w') as f:
+                json.dump({'offset': avg_offset, 'samples': len(offsets), 'time': rounded_time}, f)
+
+            return avg_offset
+
+        return None
+
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Task {task_id}: Could not fetch geo altitude for {icao24}: {e}")
+        return None
+
+
 def get_flight_track(task_id, icao24, time_within_flight, access_token):
     """Fetches the full trajectory (track) for a specific flight,
     using a local cache."""
@@ -193,6 +254,14 @@ def get_flight_track(task_id, icao24, time_within_flight, access_token):
             response.raise_for_status()
             data = response.json()
 
+            # Try to get geometric altitude offset from state vectors for better accuracy
+            # This provides (geo_altitude - baro_altitude) which we can add to track baro altitudes
+            geo_offset = get_geo_altitude_offset(task_id, icao24, time_within_flight, access_token)
+            if geo_offset is not None:
+                # Store the offset in the track data for later use
+                data['geo_altitude_offset'] = geo_offset
+                logging.info(f"Task {task_id}: Will apply geo altitude offset of {geo_offset:.1f}m to track for {icao24}")
+
             # To make the cached JSON human-readable, we will append the UTC timestamp
             # as a new value at the end of each point list in the path.
             if data.get('path'):
@@ -203,11 +272,11 @@ def get_flight_track(task_id, icao24, time_within_flight, access_token):
                         point.append(utc_time_str)
                     else:
                         point.append(None)
-            
+
             # Write the augmented data to the cache file with pretty-printing (indent=4).
             with open(cache_file, 'w') as f:
                 json.dump(data, f, indent=4)
-            
+
             return data
         except requests.exceptions.RequestException as e:
             if e.response and e.response.status_code == 500 and attempt < REQUEST_RETRY_COUNT - 1:
@@ -443,11 +512,19 @@ def fetch_and_process_track(args):
         
     # --- OPTIMIZATION: Only fetch air pressure if the flight is a real candidate ---
     pressure_hpa = None
+
+    # Check if we have a geo_altitude_offset from state vectors API (more accurate than pressure correction)
+    geo_altitude_offset = track_data.get('geo_altitude_offset')
+    if geo_altitude_offset is not None:
+        logging.info(f"Worker {os.getpid()}: Using geo altitude offset from state vectors: {geo_altitude_offset:.1f}m for {flight_info['icao24']}")
+
+    # Check if we need pressure-based correction (only if no geo offset available)
     needs_correction = any(len(p) > 3 and p[3] is not None for p in track_data['path']) and \
-                       not all(len(p) > 9 and p[9] is not None for p in track_data['path'])
-    
+                       not all(len(p) > 9 and p[9] is not None for p in track_data['path']) and \
+                       geo_altitude_offset is None
+
     warned_about_fallback = False
-    
+
     if needs_correction:
         mid_point = track_data['path'][len(track_data['path']) // 2]
         p_time, p_lat, p_lon = mid_point[0], mid_point[1], mid_point[2]
@@ -468,7 +545,7 @@ def fetch_and_process_track(args):
 
     all_visible_points = []
     altitude_corrections = []
-    altitude_source_stats = {'gps_original': 0, 'gps_interpolated': 0, 'baro_corrected': 0, 'baro_uncorrected': 0}
+    altitude_source_stats = {'gps_original': 0, 'gps_interpolated': 0, 'baro_geo_corrected': 0, 'baro_corrected': 0, 'baro_uncorrected': 0}
 
     for station_id, station_info in stations_data.items():
         lat_ref, lon_ref, alt_ref = station_info['astronomy']['latitude'], station_info['astronomy']['longitude'], station_info['astronomy']['elevation']
@@ -509,6 +586,12 @@ def fetch_and_process_track(args):
                     else:
                         alt_source = 'gps_original'
                         altitude_source_stats['gps_original'] += 1
+                elif geo_altitude_offset is not None:
+                    # Using barometric altitude corrected by geo offset from state vectors API
+                    # This is more accurate than pressure-based correction
+                    p_alt_for_plot = baro_alt + geo_altitude_offset
+                    alt_source = 'baro_geo_corrected'
+                    altitude_source_stats['baro_geo_corrected'] += 1
                 else:
                     # Using barometric altitude with pressure correction
                     pressure_to_use = pressure_hpa if pressure_hpa is not None else 1013.25
@@ -624,19 +707,24 @@ def fetch_and_process_track(args):
     # Log altitude source statistics for this flight
     total_points = sum(altitude_source_stats.values())
     if total_points > 0:
-        gps_pct = (altitude_source_stats['gps_original'] + altitude_source_stats['gps_interpolated']) / total_points * 100
+        gps_based = altitude_source_stats['gps_original'] + altitude_source_stats['gps_interpolated'] + altitude_source_stats['baro_geo_corrected']
+        gps_pct = gps_based / total_points * 100
         logging.info(f"Worker {os.getpid()}: Altitude sources for {flight_info['icao24']}: "
                     f"GPS original: {altitude_source_stats['gps_original']}, "
                     f"GPS interpolated: {altitude_source_stats['gps_interpolated']}, "
-                    f"Baro corrected: {altitude_source_stats['baro_corrected']}, "
+                    f"Baro geo-corrected: {altitude_source_stats['baro_geo_corrected']}, "
+                    f"Baro pressure-corrected: {altitude_source_stats['baro_corrected']}, "
                     f"Baro uncorrected: {altitude_source_stats['baro_uncorrected']} "
                     f"({gps_pct:.1f}% GPS-based)")
 
     logging.info(f"Worker {os.getpid()}: Successfully finished processing for {flight_info['icao24']}. Found crossing.")
 
     # Determine overall altitude quality for this flight
+    # High: >80% original GPS
+    # Medium: >50% GPS-based (original, interpolated, or geo-corrected)
+    # Low: primarily pressure-corrected or uncorrected barometric
     altitude_quality = 'high' if altitude_source_stats['gps_original'] > total_points * 0.8 else \
-                      'medium' if (altitude_source_stats['gps_original'] + altitude_source_stats['gps_interpolated']) > total_points * 0.5 else \
+                      'medium' if (altitude_source_stats['gps_original'] + altitude_source_stats['gps_interpolated'] + altitude_source_stats['baro_geo_corrected']) > total_points * 0.5 else \
                       'low'
 
     return {"crossing_id": f"{flight_info['icao24']}-{flight_info['firstSeen']}",

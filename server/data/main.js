@@ -3,7 +3,7 @@ import * as mapHandler from './map_handler.js';
 import * as chartHandler from './chart_handler.js';
 import * as api from './api.js';
 import { getSunTimes } from './calculations.js';
-import { createEl, isHevcSupported } from './utils.js';
+import { createEl, isHevcSupported, showToast } from './utils.js';
 // --- Application State and I18n ---
 let LANG = {};
 /**
@@ -94,6 +94,18 @@ function initializeApp() {
     uiManager.initUIManager(dom, resetAll, t);
     chartHandler.initChart(t);
     mapHandler.initMap('map', handleMapMoveEnd, handleMapZoomEnd, t);
+
+    // Set up callback for when imagery fallback occurs (e.g., showing yesterday's clouds when today's aren't available yet)
+    mapHandler.setImageryFallbackCallback((layerType, requestedDate, effectiveDate) => {
+        const layerName = layerType === 'cloud' ? t('toggle_clouds', 'Skydekke') : t('toggle_aurora', 'Nattlys');
+        const msg = t('imagery_fallback_notice', '{layer}: Ingen data for {requested}. Viser {effective}.')
+            .replace('{layer}', layerName)
+            .replace('{requested}', requestedDate)
+            .replace('{effective}', effectiveDate);
+        // Show as a non-intrusive toast/notification
+        showToast(msg, 'info');
+    });
+
     // Set up all event listeners for user interaction.
     initEventListeners();
     // Fetch all the initial data needed to render the application.

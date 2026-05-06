@@ -191,5 +191,6 @@
     "usage_range_3y": "Siste 3 år",
     "usage_chart_streaming": "Strømmingstid (min)",
     "usage_chart_downloaded": "Nedlasta (MB)",
-    "usage_chart_minutes": "minutt"
+    "usage_chart_minutes": "minutt",
+    "imagery_fallback_notice": "{layer}: Ingen data for {requested}. Viser {effective}."
 }

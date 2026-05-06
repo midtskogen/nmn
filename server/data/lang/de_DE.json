@@ -158,6 +158,6 @@
     "stats_median_speed": "Median-Geschw.: {speed} km/s",
     "stats_start_alt_summary": "Starthöhe: Ø {avg}, Median {median} km",
     "stats_end_alt_summary": "Endhöhe: Ø {avg}, Median {median} km",
-    "stats_alt_label": "Höhe"
+    "stats_alt_label": "Höhe",
+    "imagery_fallback_notice": "{layer}: Keine Daten für {requested}. Zeige {effective}."
 }
-

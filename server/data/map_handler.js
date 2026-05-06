@@ -487,20 +487,88 @@ function getTerminatorLayer() {
     return terminatorLayer;
 }
 
-function getCloudLayer(date) { 
-    if (cloudLayer && cloudLayer.wmsParams.time === date) return cloudLayer;
+// Track the actual date being displayed for fallback purposes
+let cloudDisplayDate = null;
+let auroraDisplayDate = null;
+let onImageryFallbackCallback = null;
+
+// Maximum age of imagery to use as fallback (days)
+const MAX_IMAGERY_AGE_DAYS = 7;
+
+/**
+ * Sets a callback function to be called when imagery fallback occurs.
+ * The callback receives (layerType, requestedDate, effectiveDate).
+ */
+export function setImageryFallbackCallback(callback) {
+    onImageryFallbackCallback = callback;
+}
+
+function notifyImageryFallback(layerType, requestedDate, effectiveDate) {
+    if (onImageryFallbackCallback) {
+        onImageryFallbackCallback(layerType, requestedDate, effectiveDate);
+    }
+}
+
+/**
+ * Gets the most recent available date for NASA GIBS imagery.
+ * GIBS typically has a delay of several hours to a day for processing.
+ * Returns yesterday's date as the most recent likely-available date.
+ */
+function getMostRecentImageryDate() {
+    const now = new Date();
+    now.setUTCDate(now.getUTCDate() - 1); // Use yesterday as the most recent available
+    return now.toISOString().slice(0, 10);
+}
+
+/**
+ * Checks if a date is in the future or too recent (today) for imagery to be available.
+ */
+function isDateTooRecentForImagery(dateStr) {
+    const requested = new Date(dateStr);
+    const now = new Date();
+    // Consider today and future dates as "too recent"
+    return requested >= new Date(now.toISOString().slice(0, 10));
+}
+
+function getCloudLayer(date) {
+    // Fall back to most recent available imagery if date is too recent
+    const effectiveDate = isDateTooRecentForImagery(date) ? getMostRecentImageryDate() : date;
+    const isFallback = effectiveDate !== date;
+    cloudDisplayDate = effectiveDate;
+
+    if (cloudLayer && cloudLayer.wmsParams.time === effectiveDate) return cloudLayer;
     if (cloudLayer) map.removeLayer(cloudLayer);
-    cloudLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_CorrectedReflectance_TrueColor', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}`, pane: 'dataOverlays' });
+    cloudLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_CorrectedReflectance_TrueColor', format: 'image/png', transparent: true, time: effectiveDate, attribution: `NASA GIBS | ${effectiveDate}`, pane: 'dataOverlays' });
     cloudLayer.setOpacity(0.5);
+
+    if (isFallback) {
+        notifyImageryFallback('cloud', date, effectiveDate);
+    }
     return cloudLayer;
 }
 
-function getAuroraLayer(date) { 
-    if (auroraLayer && auroraLayer.wmsParams.time === date) return auroraLayer;
+function getAuroraLayer(date) {
+    // Fall back to most recent available imagery if date is too recent
+    const effectiveDate = isDateTooRecentForImagery(date) ? getMostRecentImageryDate() : date;
+    const isFallback = effectiveDate !== date;
+    auroraDisplayDate = effectiveDate;
+
+    if (auroraLayer && auroraLayer.wmsParams.time === effectiveDate) return auroraLayer;
     if (auroraLayer) map.removeLayer(auroraLayer);
-    auroraLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance', format: 'image/png', transparent: true, time: date, attribution: `NASA GIBS | ${date}`, pane: 'dataOverlays' });
+    auroraLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance', format: 'image/png', transparent: true, time: effectiveDate, attribution: `NASA GIBS | ${effectiveDate}`, pane: 'dataOverlays' });
     auroraLayer.setOpacity(0.5);
+
+    if (isFallback) {
+        notifyImageryFallback('aurora', date, effectiveDate);
+    }
     return auroraLayer;
+}
+
+/**
+ * Gets the actual date being displayed for cloud/aurora layers (may differ from requested due to fallback).
+ */
+export function getEffectiveImageryDate(layerType) {
+    return layerType === 'cloud' ? cloudDisplayDate : auroraDisplayDate;
 }
 
 export function toggleLayer(layerType, isChecked, date, hour, minute) {

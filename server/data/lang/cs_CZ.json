@@ -158,5 +158,6 @@
     "stats_median_speed": "Medián rychlosti: {speed} km/s",
     "stats_start_alt_summary": "Počáteční výška: prům. {avg}, medián {median} km",
     "stats_end_alt_summary": "Konečná výška: prům. {avg}, medián {median} km",
-    "stats_alt_label": "Výška"
+    "stats_alt_label": "Výška",
+    "imagery_fallback_notice": "{layer}: Žádná data pro {requested}. Zobrazuji {effective}."
 }

@@ -190,5 +190,6 @@
     "usage_range_3y": "Past 3 years",
     "usage_chart_streaming": "Streaming (min)",
     "usage_chart_downloaded": "Downloaded (MB)",
-    "usage_chart_minutes": "minutes"
+    "usage_chart_minutes": "minutes",
+    "imagery_fallback_notice": "{layer}: No data for {requested}. Showing {effective}."
 }

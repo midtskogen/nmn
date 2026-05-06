@@ -67,3 +67,46 @@ export const isHevcSupported = () => {
     // If none of the checks pass, assume no support.
     return false;
 };
+
+/**
+ * Shows a temporary toast notification message.
+ * @param {string} message - The message to display.
+ * @param {string} [type='info'] - The type of toast ('info', 'warning', 'error').
+ * @param {number} [duration=5000] - How long to show the toast in milliseconds.
+ */
+export function showToast(message, type = 'info', duration = 5000) {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    toast.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: ${type === 'error' ? '#dc3545' : type === 'warning' ? '#ffc107' : '#17a2b8'};
+        color: ${type === 'warning' ? '#000' : '#fff'};
+        padding: 12px 24px;
+        border-radius: 4px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        z-index: 10000;
+        font-family: system-ui, sans-serif;
+        font-size: 14px;
+        max-width: 80%;
+        text-align: center;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+    `;
+
+    document.body.appendChild(toast);
+
+    // Fade in
+    requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+    });
+
+    // Remove after duration
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 300);
+    }, duration);
+}

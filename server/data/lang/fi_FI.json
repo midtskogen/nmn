@@ -158,5 +158,6 @@
     "stats_median_speed": "Mediaaninopeus: {speed} km/s",
     "stats_start_alt_summary": "Alkukorkeus: ka. {avg}, mediaani {median} km",
     "stats_end_alt_summary": "Loppukorkeus: ka. {avg}, mediaani {median} km",
-    "stats_alt_label": "Korkeus"
+    "stats_alt_label": "Korkeus",
+    "imagery_fallback_notice": "{layer}: Ei dataa ajalle {requested}. Näytetään {effective}."
 }

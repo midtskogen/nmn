@@ -159,5 +159,8 @@
     "stats_start_alt_summary": "Starthöhe: Ø {avg}, Median {median} km",
     "stats_end_alt_summary": "Endhöhe: Ø {avg}, Median {median} km",
     "stats_alt_label": "Höhe",
-    "imagery_fallback_notice": "{layer}: Keine Daten für {requested}. Zeige {effective}."
+    "imagery_fallback_notice": "{layer}: Keine Daten für {requested}. Zeige {effective}.",
+    "altitude_quality_high": "Hohe Genauigkeit: GPS-Höhe",
+    "altitude_quality_medium": "Mittlere Genauigkeit: Mischung aus GPS und barometrisch",
+    "altitude_quality_low": "Niedrige Genauigkeit: Hauptsächlich barometrisch"
 }

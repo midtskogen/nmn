@@ -191,5 +191,8 @@
     "usage_chart_streaming": "Streaming (min)",
     "usage_chart_downloaded": "Downloaded (MB)",
     "usage_chart_minutes": "minutes",
-    "imagery_fallback_notice": "{layer}: No data for {requested}. Showing {effective}."
+    "imagery_fallback_notice": "{layer}: No data for {requested}. Showing {effective}.",
+    "altitude_quality_high": "High accuracy: GPS altitude",
+    "altitude_quality_medium": "Medium accuracy: Mix of GPS and barometric",
+    "altitude_quality_low": "Low accuracy: Primarily barometric altitude"
 }

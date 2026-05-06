@@ -345,8 +345,26 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
         downloadAllBtn.onclick = (e) => { e.stopPropagation(); onHeaderClick(crossing.crossing_id, 'aircraft');
         onDownloadClick(crossing.crossing_id, 'aircraft'); };
 
+        // Add altitude quality indicator if altitude quality data is available
+        const headerElements = [header, downloadAllBtn];
+        if (crossing.altitude_quality) {
+            const qualityIcons = { high: '📡', medium: '📶', low: '⚠️' };
+            const qualityTitles = {
+                high: t('altitude_quality_high', 'High accuracy: GPS altitude'),
+                medium: t('altitude_quality_medium', 'Medium accuracy: Mix of GPS and barometric'),
+                low: t('altitude_quality_low', 'Low accuracy: Primarily barometric altitude')
+            };
+            const qualityIcon = createEl('span', {
+                className: 'altitude-quality-indicator',
+                textContent: qualityIcons[crossing.altitude_quality] || '',
+                title: qualityTitles[crossing.altitude_quality] || '',
+                style: 'margin-left: 8px; cursor: help;'
+            });
+            headerElements.splice(1, 0, qualityIcon);
+        }
+
         const headerContainer = createEl('div', { className: 'satellite-group-header' });
-        headerContainer.append(header, downloadAllBtn);
+        headerContainer.append(...headerElements);
         const eventsContainer = createEl('div', { className: 'events-container' });
         crossing.camera_views.forEach(event => {
             const eventSpan = createEl('span', { className: 'event-link', textContent: `${event.station_code}-${event.camera}`, dataset: { stationId: event.station_id, camera: event.camera } });

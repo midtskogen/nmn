@@ -159,5 +159,8 @@
     "stats_start_alt_summary": "Alkukorkeus: ka. {avg}, mediaani {median} km",
     "stats_end_alt_summary": "Loppukorkeus: ka. {avg}, mediaani {median} km",
     "stats_alt_label": "Korkeus",
-    "imagery_fallback_notice": "{layer}: Ei dataa ajalle {requested}. Näytetään {effective}."
+    "imagery_fallback_notice": "{layer}: Ei dataa ajalle {requested}. Näytetään {effective}.",
+    "altitude_quality_high": "Korkea tarkkuus: GPS-korkeus",
+    "altitude_quality_medium": "Keskiverto tarkkuus: Sekoitus GPS ja barometrinen",
+    "altitude_quality_low": "Alhainen tarkkuus: Pääasiassa barometrinen korkeus"
 }

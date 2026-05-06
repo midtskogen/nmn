@@ -159,5 +159,8 @@
     "stats_start_alt_summary": "Počáteční výška: prům. {avg}, medián {median} km",
     "stats_end_alt_summary": "Konečná výška: prům. {avg}, medián {median} km",
     "stats_alt_label": "Výška",
-    "imagery_fallback_notice": "{layer}: Žádná data pro {requested}. Zobrazuji {effective}."
+    "imagery_fallback_notice": "{layer}: Žádná data pro {requested}. Zobrazuji {effective}.",
+    "altitude_quality_high": "Vysoká přesnost: GPS výška",
+    "altitude_quality_medium": "Střední přesnost: Kombinace GPS a barometrické",
+    "altitude_quality_low": "Nízká přesnost: Převážně barometrická výška"
 }

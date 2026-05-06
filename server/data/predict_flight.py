@@ -224,6 +224,70 @@ def enu_to_az_alt(e, n, u):
     alt = math.degrees(math.asin(u / math.sqrt(e**2 + n**2 + u**2)))
     return az, alt
 
+def fill_missing_geometric_altitude(path, max_gap_seconds=300):
+    """
+    Fills missing geometric altitude (index 9) by interpolating from nearby points
+    that have valid GPS altitude data. This is more accurate than using pressure-corrected
+    barometric altitude.
+
+    Args:
+        path: The flight track path (list of points)
+        max_gap_seconds: Maximum time gap to interpolate across (default 5 minutes)
+
+    Returns:
+        Modified path with interpolated geometric altitudes where possible
+    """
+    if not path or len(path) < 2:
+        return path
+
+    # First pass: identify segments with missing geometric altitude
+    result = [p.copy() for p in path]
+
+    for i in range(len(result)):
+        # Check if this point is missing geometric altitude
+        has_geo = len(result[i]) > 9 and result[i][9] is not None
+
+        if not has_geo:
+            # Look backward for the nearest point with geometric altitude
+            prev_geo_idx = None
+            for j in range(i - 1, -1, -1):
+                if len(result[j]) > 9 and result[j][9] is not None:
+                    time_diff = result[i][0] - result[j][0]
+                    if time_diff <= max_gap_seconds:
+                        prev_geo_idx = j
+                    break
+
+            # Look forward for the nearest point with geometric altitude
+            next_geo_idx = None
+            for j in range(i + 1, len(result)):
+                if len(result[j]) > 9 and result[j][9] is not None:
+                    time_diff = result[j][0] - result[i][0]
+                    if time_diff <= max_gap_seconds:
+                        next_geo_idx = j
+                    break
+
+            # If we found both previous and next points with geometric altitude, interpolate
+            if prev_geo_idx is not None and next_geo_idx is not None:
+                prev_point = result[prev_geo_idx]
+                next_point = result[next_geo_idx]
+                prev_geo = prev_point[9]
+                next_geo = next_point[9]
+
+                # Calculate interpolation fraction based on time
+                total_time = next_point[0] - prev_point[0]
+                if total_time > 0:
+                    fraction = (result[i][0] - prev_point[0]) / total_time
+                    interpolated_alt = prev_geo + fraction * (next_geo - prev_geo)
+
+                    # Ensure point has enough elements (index 10 will mark if altitude was interpolated)
+                    while len(result[i]) <= 10:
+                        result[i].append(None)
+                    result[i][9] = interpolated_alt
+                    result[i][10] = 'interpolated'  # Mark as interpolated GPS altitude
+
+    return result
+
+
 def interpolate_raw_track(path, max_interval_sec):
     """
     Fills in gaps in a raw flight track by linear interpolation, but avoids
@@ -332,7 +396,11 @@ def fetch_and_process_track(args):
         logging.warning(f"Worker {os.getpid()}: No track data found for {flight_info['icao24']}.")
         return None
 
-    interpolated_path = interpolate_raw_track(track_data['path'], 15)
+    # Fill missing geometric altitude by interpolating from nearby GPS points before processing
+    # This is more accurate than using pressure-corrected barometric altitude
+    path_with_filled_altitude = fill_missing_geometric_altitude(track_data['path'], max_gap_seconds=300)
+
+    interpolated_path = interpolate_raw_track(path_with_filled_altitude, 15)
     
     # This block filters out slow-moving segments from the flight path,
     # such as ground taxiing, to avoid processing unrealistic data.
@@ -400,7 +468,8 @@ def fetch_and_process_track(args):
 
     all_visible_points = []
     altitude_corrections = []
-    
+    altitude_source_stats = {'gps_original': 0, 'gps_interpolated': 0, 'baro_corrected': 0, 'baro_uncorrected': 0}
+
     for station_id, station_info in stations_data.items():
         lat_ref, lon_ref, alt_ref = station_info['astronomy']['latitude'], station_info['astronomy']['longitude'], station_info['astronomy']['elevation']
         lat_rad_ref, lon_rad_ref = map(math.radians, [lat_ref, lon_ref])
@@ -412,37 +481,58 @@ def fetch_and_process_track(args):
         for point in interpolated_path:
             p_time, p_lat, p_lon, baro_alt = point[0], point[1], point[2], point[3]
             geo_alt = point[9] if len(point) > 9 and point[9] is not None else None
+            geo_source = point[10] if len(point) > 10 else None  # 'interpolated' or None
             p_alt_uncorrected = geo_alt if geo_alt is not None else baro_alt
 
             if not all([p_lat, p_lon, p_alt_uncorrected]): continue
-            
+
             lat_rad_ac_u, lon_rad_ac_u = map(math.radians, [p_lat, p_lon])
             sin_lat_ac_u = math.sin(lat_rad_ac_u)
             N_ac_u = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat_ac_u**2)
             x_ac_u = (N_ac_u + p_alt_uncorrected) * math.cos(lat_rad_ac_u) * math.cos(lon_rad_ac_u)
             y_ac_u = (N_ac_u + p_alt_uncorrected) * math.cos(lat_rad_ac_u) * math.sin(lon_rad_ac_u)
             z_ac_u = (N_ac_u * (1 - WGS84_E2) + p_alt_uncorrected) * sin_lat_ac_u
-            
+
             dx_u, dy_u, dz_u = x_ac_u - x0, y_ac_u - y0, z_ac_u - z0
             e_u, n_u, u_u = -sin_lon_ref*dx_u + cos_lon_ref*dy_u, -sin_lat_ref*cos_lon_ref*dx_u - sin_lat_ref*sin_lon_ref*dy_u + cos_lat_ref*dz_u, cos_lat_ref*cos_lon_ref*dx_u + cos_lat_ref*sin_lon_ref*dy_u + sin_lat_ref*dz_u
             _, alt_deg_uncorrected = enu_to_az_alt(e_u, n_u, u_u)
-        
+
             if alt_deg_uncorrected > 10:
                 p_alt_for_plot = p_alt_uncorrected
-                if geo_alt is None:
-                    # If the API call failed, use standard pressure (1013.25 hPa).
-                    # This results in a zero correction, a safe fallback.
+                alt_source = 'unknown'
+
+                if geo_alt is not None:
+                    # Using geometric altitude (GPS)
+                    if geo_source == 'interpolated':
+                        alt_source = 'gps_interpolated'
+                        altitude_source_stats['gps_interpolated'] += 1
+                    else:
+                        alt_source = 'gps_original'
+                        altitude_source_stats['gps_original'] += 1
+                else:
+                    # Using barometric altitude with pressure correction
                     pressure_to_use = pressure_hpa if pressure_hpa is not None else 1013.25
                     if pressure_hpa is None and needs_correction and not warned_about_fallback:
                         logging.warning(f"Worker {os.getpid()}: Using standard pressure 1013.25 hPa as fallback for {flight_info['icao24']}.")
                         warned_about_fallback = True
 
-                    pressure_deviation = 1013.25 - pressure_to_use
-                    altitude_correction = pressure_deviation * 8.23
+                    # Apply barometric altitude correction using the barometric formula
+                    # h = (RT/g) * ln(P0/P) where R=287.058 J/(kg·K), T=288.15K (15°C), g=9.80665 m/s²
+                    # This gives RT/g ≈ 8430m. For standard conditions, this is more accurate than simple linear approximation.
+                    try:
+                        altitude_correction = 8430.0 * math.log(1013.25 / pressure_to_use)
+                    except (ValueError, ZeroDivisionError):
+                        # Fallback to simple linear approximation if log fails
+                        altitude_correction = (1013.25 - pressure_to_use) * 8.23
                     p_alt_for_plot = baro_alt + altitude_correction
-                    
+
                     if pressure_hpa is not None:
                         altitude_corrections.append(p_alt_for_plot - baro_alt)
+                        alt_source = 'baro_corrected'
+                        altitude_source_stats['baro_corrected'] += 1
+                    else:
+                        alt_source = 'baro_uncorrected'
+                        altitude_source_stats['baro_uncorrected'] += 1
 
                 lat_rad_ac, lon_rad_ac = map(math.radians, [p_lat, p_lon])
                 sin_lat_ac = math.sin(lat_rad_ac)
@@ -531,8 +621,34 @@ def fetch_and_process_track(args):
         logging.info(f"Worker {os.getpid()}: Finished {flight_info['icao24']}. No valid camera views constructed.")
         return None
 
+    # Log altitude source statistics for this flight
+    total_points = sum(altitude_source_stats.values())
+    if total_points > 0:
+        gps_pct = (altitude_source_stats['gps_original'] + altitude_source_stats['gps_interpolated']) / total_points * 100
+        logging.info(f"Worker {os.getpid()}: Altitude sources for {flight_info['icao24']}: "
+                    f"GPS original: {altitude_source_stats['gps_original']}, "
+                    f"GPS interpolated: {altitude_source_stats['gps_interpolated']}, "
+                    f"Baro corrected: {altitude_source_stats['baro_corrected']}, "
+                    f"Baro uncorrected: {altitude_source_stats['baro_uncorrected']} "
+                    f"({gps_pct:.1f}% GPS-based)")
+
     logging.info(f"Worker {os.getpid()}: Successfully finished processing for {flight_info['icao24']}. Found crossing.")
-    return {"crossing_id": f"{flight_info['icao24']}-{flight_info['firstSeen']}", "flight_info": {"callsign": (flight_info.get('callsign') or '????').strip(), "origin": (flight_info.get('displayOriginCode') or '????'), "destination": (flight_info.get('displayDestinationCode') or '????')}, "ground_track": ground_track, "station_sky_tracks": station_sky_tracks, "camera_views": camera_views, "earliest_camera_utc": min(cv['start_utc'] for cv in camera_views)}
+
+    # Determine overall altitude quality for this flight
+    altitude_quality = 'high' if altitude_source_stats['gps_original'] > total_points * 0.8 else \
+                      'medium' if (altitude_source_stats['gps_original'] + altitude_source_stats['gps_interpolated']) > total_points * 0.5 else \
+                      'low'
+
+    return {"crossing_id": f"{flight_info['icao24']}-{flight_info['firstSeen']}",
+            "flight_info": {"callsign": (flight_info.get('callsign') or '????').strip(),
+                           "origin": (flight_info.get('displayOriginCode') or '????'),
+                           "destination": (flight_info.get('displayDestinationCode') or '????')},
+            "ground_track": ground_track,
+            "station_sky_tracks": station_sky_tracks,
+            "camera_views": camera_views,
+            "earliest_camera_utc": min(cv['start_utc'] for cv in camera_views),
+            "altitude_stats": altitude_source_stats,
+            "altitude_quality": altitude_quality}
 
 def cleanup_old_cache(directory, max_age_hours):
     """Deletes files in a directory that are older than a specified age."""

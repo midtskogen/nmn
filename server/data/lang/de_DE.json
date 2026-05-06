@@ -162,5 +162,7 @@
     "imagery_fallback_notice": "{layer}: Keine Daten für {requested}. Zeige {effective}.",
     "altitude_quality_high": "Hohe Genauigkeit: GPS-Höhe",
     "altitude_quality_medium": "Mittlere Genauigkeit: Mischung aus GPS und barometrisch",
-    "altitude_quality_low": "Niedrige Genauigkeit: Hauptsächlich barometrisch"
+    "altitude_quality_low": "Niedrige Genauigkeit: Hauptsächlich barometrisch",
+    "status_filtering_flights_progress": "Flugverkehr filtern ({current}/{total})...",
+    "status_filtering_candidates_progress": "Kandidaten filtern ({current}/{total})..."
 }

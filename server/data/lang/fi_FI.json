@@ -162,5 +162,7 @@
     "imagery_fallback_notice": "{layer}: Ei dataa ajalle {requested}. Näytetään {effective}.",
     "altitude_quality_high": "Korkea tarkkuus: GPS-korkeus",
     "altitude_quality_medium": "Keskiverto tarkkuus: Sekoitus GPS ja barometrinen",
-    "altitude_quality_low": "Alhainen tarkkuus: Pääasiassa barometrinen korkeus"
+    "altitude_quality_low": "Alhainen tarkkuus: Pääasiassa barometrinen korkeus",
+    "status_filtering_flights_progress": "Suodatetaan lentoliikennettä ({current}/{total})...",
+    "status_filtering_candidates_progress": "Suodatetaan ehdokkaita ({current}/{total})..."
 }

@@ -704,20 +704,84 @@ def find_all_crossings(task_id):
 
         update_status(status_file, "progress", {"step": 20, "message": "status_filtering_flights"})
         station_coords = [(s['astronomy']['latitude'], s['astronomy']['longitude']) for s in stations_data.values()]
+
+        # Pre-compute station bounding boxes for quick filtering (approximate, ~50km in degrees)
+        # This avoids expensive haversine calculations for flights far from all stations
+        LAT_50KM = 0.45  # ~50km in latitude degrees
+        LON_50KM = 0.65  # ~50km in longitude degrees at mid-latitudes (varies by latitude)
+        station_bounds = []
+        for s_lat, s_lon in station_coords:
+            station_bounds.append((s_lat - LAT_50KM, s_lat + LAT_50KM, s_lon - LON_50KM, s_lon + LON_50KM))
+
+        def is_near_any_station(lat, lon):
+            """Quick bounding box check before expensive haversine calculation"""
+            for bounds in station_bounds:
+                if bounds[0] <= lat <= bounds[1] and bounds[2] <= lon <= bounds[3]:
+                    # Only do haversine for flights within bounding box
+                    s_lat, s_lon = (bounds[0] + bounds[1]) / 2, (bounds[2] + bounds[3]) / 2
+                    if haversine_distance(lat, lon, s_lat, s_lon) < SHORTLIST_VICINITY_KM:
+                        return True
+            return False
+
         flights_after_validation = []
-        for flight in flight_list:
+        total_flights = len(flight_list)
+        report_interval = max(1, total_flights // 20)  # Report progress every 5%
+
+        for i, flight in enumerate(flight_list):
+            # Report progress periodically
+            if i % report_interval == 0:
+                update_status(status_file, "progress", {"step": 20 + int((i / total_flights) * 5), "message": f"status_filtering_flights_progress|current={i},total={total_flights}"})
+
             dep_icao, arr_icao = flight.get('estDepartureAirport'), flight.get('estArrivalAirport')
-    
+
             if not dep_icao or not arr_icao or dep_icao == arr_icao: continue
             dep_airport, arr_airport = airport_db.get(dep_icao), airport_db.get(arr_icao)
             if not dep_airport or not arr_airport: continue
-            dep_code = dep_airport.get('iata') or (dep_icao if any(haversine_distance(dep_airport['lat'], dep_airport['lon'], s_lat, s_lon) < SHORTLIST_VICINITY_KM for s_lat, s_lon in station_coords) else None)
-            arr_code = arr_airport.get('iata') or (arr_icao if any(haversine_distance(arr_airport['lat'], arr_airport['lon'], s_lat, s_lon) < SHORTLIST_VICINITY_KM for s_lat, s_lon in station_coords) else None)
+
+            # Use bounding box + haversine for departure airport
+            dep_code = dep_airport.get('iata') or (dep_icao if is_near_any_station(dep_airport['lat'], dep_airport['lon']) else None)
+            if not dep_code: continue  # Skip early if dep is not near any station
+
+            # Use bounding box + haversine for arrival airport
+            arr_code = arr_airport.get('iata') or (arr_icao if is_near_any_station(arr_airport['lat'], arr_airport['lon']) else None)
+
             if dep_code and arr_code:
                 flight.update({'dep_airport_data': dep_airport, 'arr_airport_data': arr_airport, 'displayOriginCode': dep_code, 'displayDestinationCode': arr_code})
                 flights_after_validation.append(flight)
 
-        candidate_flights = [f for f in flights_after_validation if any(cross_track_distance(s_lat, s_lon, f['dep_airport_data']['lat'], f['dep_airport_data']['lon'], f['arr_airport_data']['lat'], f['arr_airport_data']['lon']) < SHORTLIST_VICINITY_KM for s_lat, s_lon in station_coords)]
+        logging.info(f"Task {task_id}: Validation complete. {len(flights_after_validation)} flights with valid airports near stations.")
+
+        # Second filter: cross-track distance with progress reporting
+        candidate_flights = []
+        total_after_validation = len(flights_after_validation)
+        report_interval = max(1, total_after_validation // 10)
+
+        for i, flight in enumerate(flights_after_validation):
+            if i % report_interval == 0:
+                update_status(status_file, "progress", {"step": 25 + int((i / total_after_validation) * 5), "message": f"status_filtering_candidates_progress|current={i},total={total_after_validation}"})
+
+            dep_lat = flight['dep_airport_data']['lat']
+            dep_lon = flight['dep_airport_data']['lon']
+            arr_lat = flight['arr_airport_data']['lat']
+            arr_lon = flight['arr_airport_data']['lon']
+
+            # Quick bounding box check before expensive cross-track calculation
+            # Create bounding box that encompasses the flight path with 50km buffer
+            min_lat = min(dep_lat, arr_lat) - LAT_50KM
+            max_lat = max(dep_lat, arr_lat) + LAT_50KM
+            min_lon = min(dep_lon, arr_lon) - LON_50KM
+            max_lon = max(dep_lon, arr_lon) + LON_50KM
+
+            path_near_station = False
+            for s_lat, s_lon in station_coords:
+                if min_lat <= s_lat <= max_lat and min_lon <= s_lon <= max_lon:
+                    if cross_track_distance(s_lat, s_lon, dep_lat, dep_lon, arr_lat, arr_lon) < SHORTLIST_VICINITY_KM:
+                        path_near_station = True
+                        break
+
+            if path_near_station:
+                candidate_flights.append(flight)
+
         logging.info(f"Task {task_id}: Filtered down to {len(candidate_flights)} candidates (full shortlist).")
         candidate_flights.sort(key=lambda f: f['lastSeen'], reverse=True)
         if len(candidate_flights) > PROCESSING_CHUNK_SIZE:
@@ -734,7 +798,7 @@ def find_all_crossings(task_id):
                 futures = []
                 for task in tasks:
                     futures.append(executor.submit(fetch_and_process_track, task))
-                    time.sleep(1) # Add a 1-second delay to stagger API requests
+                    time.sleep(0.3)  # Stagger API requests to respect rate limits (was 1s, now 0.3s for faster processing)
                 for i, future in enumerate(as_completed(futures)):
                     if result := future.result(): final_crossings.append(result)
                     update_status(status_file, "progress", {"step": 25 + int(((i + 1) / total_tasks) * 70), "message": f"status_fetching_aircraft_track|i={i + 1},total={total_tasks}"})

@@ -195,5 +195,7 @@
     "imagery_fallback_notice": "{layer}: Ingen data for {requested}. Viser {effective}.",
     "altitude_quality_high": "Høg nøyaktighet: GPS-høgde",
     "altitude_quality_medium": "Middels nøyaktighet: Blanding av GPS og barometrisk",
-    "altitude_quality_low": "Lav nøyaktighet: Hovedsaklig barometrisk høgde"
+    "altitude_quality_low": "Lav nøyaktighet: Hovedsaklig barometrisk høgde",
+    "status_filtering_flights_progress": "Filtrerer flytrafikk ({current}/{total})...",
+    "status_filtering_candidates_progress": "Filtrerer kandidater ({current}/{total})..."
 }

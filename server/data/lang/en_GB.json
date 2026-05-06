@@ -194,5 +194,7 @@
     "imagery_fallback_notice": "{layer}: No data for {requested}. Showing {effective}.",
     "altitude_quality_high": "High accuracy: GPS altitude",
     "altitude_quality_medium": "Medium accuracy: Mix of GPS and barometric",
-    "altitude_quality_low": "Low accuracy: Primarily barometric altitude"
+    "altitude_quality_low": "Low accuracy: Primarily barometric altitude",
+    "status_filtering_flights_progress": "Filtering aircraft traffic ({current}/{total})...",
+    "status_filtering_candidates_progress": "Filtering candidates ({current}/{total})..."
 }

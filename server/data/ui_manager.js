@@ -472,6 +472,361 @@ function showIframeModal(url, title) {
 }
 
 /**
+ * Creates and displays a video preview player with frame controls, filters, and screenshot capability.
+ * @param {string} videoUrl - The URL of the video to preview.
+ * @param {string} title - The title for the modal.
+ */
+export function showVideoPreview(videoUrl, title) {
+    const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
+    const modalContent = createEl('div', { id: 'video-modal-content', className: 'preview-modal' });
+
+    // Header with title and close button
+    const header = createEl('div', { className: 'preview-header' });
+    header.appendChild(createEl('h3', { textContent: title, className: 'preview-title' }));
+    const closeButton = createEl('button', {
+        className: 'preview-close-btn',
+        textContent: '×',
+        onclick: () => document.getElementById('video-modal-backdrop')?.remove()
+    });
+    header.appendChild(closeButton);
+
+    // Video container with overlay for timestamp
+    const videoWrapper = createEl('div', { className: 'preview-video-wrapper' });
+    const video = createEl('video', {
+        src: videoUrl,
+        className: 'preview-video',
+        controls: false,
+        preload: 'metadata'
+    });
+
+    // Timestamp overlay with date (2 decimal precision) - lower right
+    const timestampOverlay = createEl('div', { className: 'preview-timestamp', textContent: '' });
+
+    // Loading indicator
+    const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
+
+    videoWrapper.append(video, timestampOverlay, loadingIndicator);
+
+    // Playback controls
+    const controls = createEl('div', { className: 'preview-controls' });
+
+    // Play/Pause button
+    const playPauseBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '▶',
+        title: t('play_pause', 'Play/Pause')
+    });
+
+    // Frame step controls
+    const frameBackBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '⏮',
+        title: t('frame_back', 'Previous Frame')
+    });
+
+    const frameForwardBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '⏭',
+        title: t('frame_forward', 'Next Frame')
+    });
+
+    // Time display
+    const timeDisplay = createEl('span', { className: 'preview-time-display', textContent: '00:00 / 00:00' });
+
+    // Progress bar
+    const progressContainer = createEl('div', { className: 'preview-progress-container' });
+    const progressBar = createEl('div', { className: 'preview-progress-bar' });
+    const progressFill = createEl('div', { className: 'preview-progress-fill' });
+    progressBar.appendChild(progressFill);
+    progressContainer.appendChild(progressBar);
+
+    // Screenshot button
+    const screenshotBtn = createEl('button', {
+        className: 'preview-control-btn screenshot',
+        textContent: '📷',
+        title: t('screenshot', 'Take Screenshot')
+    });
+
+    // Download button
+    const downloadBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '⬇',
+        title: t('download_video', 'Download Video')
+    });
+
+    // Fullscreen button
+    const fullscreenBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '⛶',
+        title: t('fullscreen', 'Fullscreen')
+    });
+
+    controls.append(frameBackBtn, playPauseBtn, frameForwardBtn, timeDisplay, screenshotBtn, downloadBtn, fullscreenBtn);
+
+    // Filter controls - all on one line
+    const filterControls = createEl('div', { className: 'preview-filter-controls' });
+
+    // Brightness slider
+    const brightnessSlider = createEl('input', {
+        type: 'range',
+        min: '0.5',
+        max: '2',
+        step: '0.1',
+        value: '1',
+        className: 'preview-slider',
+        title: t('brightness', 'Brightness'),
+        id: 'brightness-slider'
+    });
+
+    // Contrast slider
+    const contrastSlider = createEl('input', {
+        type: 'range',
+        min: '0.5',
+        max: '2',
+        step: '0.1',
+        value: '1',
+        className: 'preview-slider',
+        title: t('contrast', 'Contrast'),
+        id: 'contrast-slider'
+    });
+
+    // Reset filters button
+    const resetFiltersBtn = createEl('button', {
+        className: 'preview-control-btn reset',
+        textContent: t('reset_filters', 'Reset'),
+        title: t('reset_filters', 'Reset to default')
+    });
+
+    // Timestamp toggle checkbox
+    const timestampToggleContainer = createEl('label', { className: 'preview-timestamp-toggle' });
+    const timestampCheckbox = createEl('input', {
+        type: 'checkbox',
+        checked: true
+    });
+    timestampToggleContainer.append(timestampCheckbox, ' ', t('show_timestamp', 'Show timestamp'));
+
+    // Assemble filter controls on one line
+    filterControls.append(
+        createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'brightness-slider', className: 'preview-filter-label' }),
+        brightnessSlider,
+        createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'contrast-slider', className: 'preview-filter-label' }),
+        contrastSlider,
+        resetFiltersBtn,
+        timestampToggleContainer
+    );
+
+    // Assemble modal
+    modalContent.append(header, videoWrapper, progressContainer, controls, filterControls);
+    modalBackdrop.appendChild(modalContent);
+    document.body.appendChild(modalBackdrop);
+
+    // Video event handlers
+    let isPlaying = false;
+    let frameStep = 1 / 30; // Assume 30fps, will be updated when metadata loads
+
+    // Get current date once at initialization
+    const currentDateStr = new Date().toISOString().substr(0, 10);
+
+    // Helper to format timestamp with actual video date
+    // When seconds is 0 (not started), use current date instead of epoch (1970)
+    function getFormattedTimestamp(seconds) {
+        const effectiveSeconds = seconds || 0;
+        // When video hasn't started, show current date with 00:00:00.00
+        if (effectiveSeconds === 0) {
+            return `${currentDateStr} 00:00:00.00`;
+        }
+        // For playing video, use epoch time but only take the time portion
+        const date = new Date(effectiveSeconds * 1000);
+        const timeStr = date.toISOString().substr(11, 8); // HH:MM:SS
+        const decimals = String(Math.floor((effectiveSeconds % 1) * 100)).padStart(2, '0');
+        return `${currentDateStr} ${timeStr}.${decimals}`;
+    }
+
+    // Set initial timestamp immediately before video loads
+    timestampOverlay.textContent = `${currentDateStr} 00:00:00.00`;
+
+    video.addEventListener('loadedmetadata', () => {
+        loadingIndicator.style.display = 'none';
+        // Try to detect frame rate from video or default to 30
+        frameStep = 1 / 30;
+        updateTimeDisplay();
+        // Advance one frame to get valid currentTime (avoid 1970 epoch issue)
+        video.currentTime = frameStep;
+        // Trigger timeupdate to refresh timestamp
+        const event = new Event('timeupdate');
+        video.dispatchEvent(event);
+    });
+
+    video.addEventListener('timeupdate', () => {
+        const progress = (video.currentTime / video.duration) * 100;
+        progressFill.style.width = `${progress}%`;
+        updateTimeDisplay();
+
+        // Update timestamp overlay with date and 2-decimal precision (lower right)
+        if (timestampCheckbox.checked) {
+            timestampOverlay.textContent = getFormattedTimestamp(video.currentTime);
+            timestampOverlay.style.display = 'block';
+        } else {
+            timestampOverlay.style.display = 'none';
+        }
+    });
+
+    video.addEventListener('ended', () => {
+        isPlaying = false;
+        playPauseBtn.textContent = '▶';
+    });
+
+    function updateTimeDisplay() {
+        const current = formatTime(video.currentTime);
+        const duration = formatTime(video.duration || 0);
+        timeDisplay.textContent = `${current} / ${duration}`;
+    }
+
+    function formatTime(seconds) {
+        if (!seconds || isNaN(seconds)) return '00:00';
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+
+    // Control handlers
+    playPauseBtn.addEventListener('click', () => {
+        if (isPlaying) {
+            video.pause();
+            playPauseBtn.textContent = '▶';
+        } else {
+            video.play();
+            playPauseBtn.textContent = '⏸';
+        }
+        isPlaying = !isPlaying;
+    });
+
+    frameBackBtn.addEventListener('click', () => {
+        video.pause();
+        isPlaying = false;
+        playPauseBtn.textContent = '▶';
+        video.currentTime = Math.max(0, video.currentTime - frameStep);
+    });
+
+    frameForwardBtn.addEventListener('click', () => {
+        video.pause();
+        isPlaying = false;
+        playPauseBtn.textContent = '▶';
+        video.currentTime = Math.min(video.duration, video.currentTime + frameStep);
+    });
+
+    // Progress bar click to seek
+    progressBar.addEventListener('click', (e) => {
+        const rect = progressBar.getBoundingClientRect();
+        const pos = (e.clientX - rect.left) / rect.width;
+        video.currentTime = pos * video.duration;
+    });
+
+    // Filter handlers
+    function updateFilters() {
+        const brightness = brightnessSlider.value;
+        const contrast = contrastSlider.value;
+        video.style.filter = `brightness(${brightness}) contrast(${contrast})`;
+    }
+
+    brightnessSlider.addEventListener('input', updateFilters);
+    contrastSlider.addEventListener('input', updateFilters);
+
+    // Reset filters button handler
+    resetFiltersBtn.addEventListener('click', () => {
+        brightnessSlider.value = 1;
+        contrastSlider.value = 1;
+        updateFilters();
+    });
+
+    // Timestamp toggle handler
+    timestampCheckbox.addEventListener('change', () => {
+        const event = new Event('timeupdate');
+        video.dispatchEvent(event);
+    });
+
+    // Fullscreen button handler
+    fullscreenBtn.addEventListener('click', () => {
+        if (video.requestFullscreen) {
+            video.requestFullscreen();
+        } else if (video.webkitRequestFullscreen) {
+            video.webkitRequestFullscreen();
+        } else if (video.msRequestFullscreen) {
+            video.msRequestFullscreen();
+        }
+    });
+
+    // Screenshot handler
+    screenshotBtn.addEventListener('click', () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+
+        // Apply current filters to canvas
+        ctx.filter = video.style.filter;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Add timestamp to screenshot only if enabled (lower right corner)
+        if (timestampCheckbox.checked) {
+            ctx.filter = 'none';
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            // Measure text to fit box exactly
+            ctx.font = '16px monospace';
+            const text = timestampOverlay.textContent;
+            const textWidth = ctx.measureText(text).width;
+            const padding = 10;
+            const x = canvas.width - textWidth - padding * 2 - 10;
+            const y = canvas.height - 38;
+            // Draw box in lower right, sized to fit text
+            ctx.fillRect(x, y, textWidth + padding * 2, 28);
+            ctx.fillStyle = '#fff';
+            ctx.fillText(text, x + padding, y + 20);
+        }
+
+        // Download screenshot
+        const link = document.createElement('a');
+        link.download = `screenshot_${title.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    });
+
+    // Download handler
+    downloadBtn.addEventListener('click', () => {
+        const link = document.createElement('a');
+        link.href = videoUrl;
+        link.download = title;
+        link.click();
+    });
+
+    // Keyboard shortcuts
+    modalBackdrop.addEventListener('keydown', (e) => {
+        switch(e.key) {
+            case 'ArrowLeft':
+                e.preventDefault();
+                frameBackBtn.click();
+                break;
+            case 'ArrowRight':
+                e.preventDefault();
+                frameForwardBtn.click();
+                break;
+            case ' ':
+                e.preventDefault();
+                playPauseBtn.click();
+                break;
+            case 'Escape':
+                e.preventDefault();
+                closeButton.click();
+                break;
+        }
+    });
+
+    // Focus modal for keyboard events
+    modalBackdrop.setAttribute('tabindex', '0');
+    setTimeout(() => modalBackdrop.focus(), 100);
+}
+
+/**
  * Renders the results of a completed download task in the results panel.
  * @param {object} resultData - The data object from the backend, containing files and errors.
  * @param {object} dom - The DOM element cache.
@@ -508,14 +863,27 @@ export function displayResults(resultData, dom, hevcSupported) {
                     const isVideo = file.url.endsWith('.mp4');
                     
                     if (file.thumb_url) {
-  
-                        const link = createEl('a', { href: file.url, target: '_blank', title: file.name });
                         const thumbContainer = createEl('div', { className: `thumbnail-container${isVideo ? ' video' : ''}` });
                         thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 'thumbnail-preview' }));
-  
-                        link.appendChild(thumbContainer);
-                        li.appendChild(link);
-                   
+
+                        if (isVideo) {
+                            // Video thumbnails open preview player
+                            thumbContainer.style.cursor = 'pointer';
+                            thumbContainer.addEventListener('click', () => {
+                                showVideoPreview(file.url, file.name);
+                            });
+                        } else {
+                            // Image thumbnails open in new tab
+                            const link = createEl('a', { href: file.url, target: '_blank', title: file.name });
+                            link.appendChild(thumbContainer);
+                            li.appendChild(link);
+                            thumbContainer.style.cursor = 'zoom-in';
+                        }
+
+                        // Only append directly for videos (images already appended via link)
+                        if (isVideo) {
+                            li.appendChild(thumbContainer);
+                        }
                      } else {
                         li.appendChild(createEl('a', { href: file.url, target: '_blank', textContent: file.name, title: file.name }));
                     }

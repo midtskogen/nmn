@@ -164,5 +164,17 @@
     "altitude_quality_medium": "Střední přesnost: Kombinace GPS a barometrické",
     "altitude_quality_low": "Nízká přesnost: Převážně barometrická výška",
     "status_filtering_flights_progress": "Filtrování letového provozu ({current}/{total})...",
-    "status_filtering_candidates_progress": "Filtrování kandidátů ({current}/{total})..."
+    "status_filtering_candidates_progress": "Filtrování kandidátů ({current}/{total})...",
+    "loading": "Načítání...",
+    "play_pause": "Přehrát/Pozastavit",
+    "frame_back": "Předchozí snímek",
+    "frame_forward": "Další snímek",
+    "screenshot": "Pořídit snímek obrazovky",
+    "download_video": "Stáhnout video",
+    "brightness": "Jas",
+    "contrast": "Kontrast",
+    "reset_filters": "Obnovit",
+    "show_timestamp": "Zobrazit časovou značku",
+    "fullscreen": "Celá obrazovka",
+    "show_overlay": "Zobrazit překryv"
 }

@@ -196,5 +196,17 @@
     "altitude_quality_medium": "Medium accuracy: Mix of GPS and barometric",
     "altitude_quality_low": "Low accuracy: Primarily barometric altitude",
     "status_filtering_flights_progress": "Filtering aircraft traffic ({current}/{total})...",
-    "status_filtering_candidates_progress": "Filtering candidates ({current}/{total})..."
+    "status_filtering_candidates_progress": "Filtering candidates ({current}/{total})...",
+    "loading": "Loading...",
+    "play_pause": "Play/Pause",
+    "frame_back": "Previous Frame",
+    "frame_forward": "Next Frame",
+    "screenshot": "Take Screenshot",
+    "download_video": "Download Video",
+    "brightness": "Brightness",
+    "contrast": "Contrast",
+    "reset_filters": "Reset",
+    "show_timestamp": "Show timestamp",
+    "fullscreen": "Fullscreen",
+    "show_overlay": "Show overlay"
 }

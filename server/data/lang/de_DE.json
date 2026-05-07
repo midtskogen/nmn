@@ -164,5 +164,17 @@
     "altitude_quality_medium": "Mittlere Genauigkeit: Mischung aus GPS und barometrisch",
     "altitude_quality_low": "Niedrige Genauigkeit: Hauptsächlich barometrisch",
     "status_filtering_flights_progress": "Flugverkehr filtern ({current}/{total})...",
-    "status_filtering_candidates_progress": "Kandidaten filtern ({current}/{total})..."
+    "status_filtering_candidates_progress": "Kandidaten filtern ({current}/{total})...",
+    "loading": "Laden...",
+    "play_pause": "Abspielen/Pause",
+    "frame_back": "Voriges Bild",
+    "frame_forward": "Nächstes Bild",
+    "screenshot": "Screenshot aufnehmen",
+    "download_video": "Video herunterladen",
+    "brightness": "Helligkeit",
+    "contrast": "Kontrast",
+    "reset_filters": "Zurücksetzen",
+    "show_timestamp": "Zeitstempel anzeigen",
+    "fullscreen": "Vollbild",
+    "show_overlay": "Overlay anzeigen"
 }

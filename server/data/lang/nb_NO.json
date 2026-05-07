@@ -197,5 +197,17 @@
     "altitude_quality_medium": "Middels nøyaktighet: Blanding av GPS og barometrisk",
     "altitude_quality_low": "Lav nøyaktighet: Hovedsaklig barometrisk høgde",
     "status_filtering_flights_progress": "Filtrerer flytrafikk ({current}/{total})...",
-    "status_filtering_candidates_progress": "Filtrerer kandidater ({current}/{total})..."
+    "status_filtering_candidates_progress": "Filtrerer kandidater ({current}/{total})...",
+    "loading": "Laster...",
+    "play_pause": "Spill/Pause",
+    "frame_back": "Forrige ramme",
+    "frame_forward": "Neste ramme",
+    "screenshot": "Ta skjermbilde",
+    "download_video": "Last ned video",
+    "brightness": "Lysstyrke",
+    "contrast": "Kontrast",
+    "reset_filters": "Nullstill",
+    "show_timestamp": "Vis tidsstempel",
+    "fullscreen": "Fullskjerm",
+    "show_overlay": "Vis overlay"
 }

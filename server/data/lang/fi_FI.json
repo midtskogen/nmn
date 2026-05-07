@@ -164,5 +164,17 @@
     "altitude_quality_medium": "Keskiverto tarkkuus: Sekoitus GPS ja barometrinen",
     "altitude_quality_low": "Alhainen tarkkuus: Pääasiassa barometrinen korkeus",
     "status_filtering_flights_progress": "Suodatetaan lentoliikennettä ({current}/{total})...",
-    "status_filtering_candidates_progress": "Suodatetaan ehdokkaita ({current}/{total})..."
+    "status_filtering_candidates_progress": "Suodatetaan ehdokkaita ({current}/{total})...",
+    "loading": "Ladataan...",
+    "play_pause": "Toista/Tauko",
+    "frame_back": "Edellinen kehys",
+    "frame_forward": "Seuraava kehys",
+    "screenshot": "Ota kuvakaappaus",
+    "download_video": "Lataa video",
+    "brightness": "Kirkkaus",
+    "contrast": "Kontrasti",
+    "reset_filters": "Palauta",
+    "show_timestamp": "Näytä aikaleima",
+    "fullscreen": "Koko näyttö",
+    "show_overlay": "Näytä peite"
 }

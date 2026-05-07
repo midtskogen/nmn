@@ -71,7 +71,8 @@ try:
         PTO_MAPPER_AVAILABLE
     )
     from live_streamer import (
-        start_stream_relay, stop_stream_relay, fetch_grid_file, fetch_annotation_file
+        start_stream_relay, stop_stream_relay, fetch_grid_file, fetch_annotation_file,
+        get_archive_grid_overlay, get_archive_annotation_overlay
     )
     from data_fetchers import (
         get_kp_data, get_lightning_data, get_meteor_data, get_camera_fovs, get_station_stats
@@ -711,6 +712,14 @@ def main():
     if len(sys.argv) < 2: sys.exit("Usage: controller.py <action> [args...]")
     action = sys.argv[1]
 
+    # Load stations data for archive overlay functions
+    try:
+        with open(STATIONS_FILE, 'r') as f:
+            stations_data = json.load(f)
+    except Exception as e:
+        stations_data = {}
+        logging.warning(f"Could not load stations data: {e}")
+
     # Helper function to prevent FFmpeg crashes by ensuring stream directory exists
     def handle_start_stream():
         task_id = sys.argv[2]
@@ -737,6 +746,10 @@ def main():
             "get_station_stats": lambda: print(json.dumps(get_station_stats(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None, sys.argv[4] if len(sys.argv) > 4 else None))),
             "fetch_grid": lambda: print(json.dumps(fetch_grid_file(sys.argv[2], sys.argv[3], sys.argv[4]))),
             "fetch_annotation": lambda: print(json.dumps(fetch_annotation_file(sys.argv[2], sys.argv[3], sys.argv[4]))),
+            "fetch_archive_grid": lambda: print(json.dumps(get_archive_grid_overlay(
+                sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
+            "fetch_archive_annotation": lambda: print(json.dumps(get_archive_annotation_overlay(
+                sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
             "download": lambda: main_download_coordinator(sys.argv[2], sys.argv[3], sys.argv[4]),
             "_internal_download_station": lambda: download_for_single_station(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]),
             "_internal_start_stream": handle_start_stream,

@@ -483,11 +483,7 @@ export function showVideoPreview(videoUrl, title) {
     // Header with title and close button
     const header = createEl('div', { className: 'preview-header' });
     header.appendChild(createEl('h3', { textContent: title, className: 'preview-title' }));
-    const closeButton = createEl('button', {
-        className: 'preview-close-btn',
-        textContent: '×',
-        onclick: () => document.getElementById('video-modal-backdrop')?.remove()
-    });
+    const closeButton = createEl('button', { className: 'preview-close-btn', textContent: '×' });
     header.appendChild(closeButton);
 
     // Video container with overlay for timestamp
@@ -496,8 +492,17 @@ export function showVideoPreview(videoUrl, title) {
         src: videoUrl,
         className: 'preview-video',
         controls: false,
-        preload: 'metadata'
+        preload: 'metadata',
+        autoplay: true,
+        muted: true
     });
+
+    // Grid and annotation overlays for archive videos (hidden by default via opacity, shown via toggle)
+    const gridOverlay = createEl('img', { id: 'grid-overlay-image', className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 10 } });
+    const annotationOverlay = createEl('img', { id: 'annotation-overlay-image', className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 11 } });
+    // Explicitly set opacity 0 to hide initially
+    gridOverlay.style.opacity = '0';
+    annotationOverlay.style.opacity = '0';
 
     // Timestamp overlay with date (2 decimal precision) - lower right
     const timestampOverlay = createEl('div', { className: 'preview-timestamp', textContent: '' });
@@ -505,15 +510,15 @@ export function showVideoPreview(videoUrl, title) {
     // Loading indicator
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
 
-    videoWrapper.append(video, timestampOverlay, loadingIndicator);
+    videoWrapper.append(video, gridOverlay, annotationOverlay, timestampOverlay, loadingIndicator);
 
     // Playback controls
     const controls = createEl('div', { className: 'preview-controls' });
 
-    // Play/Pause button
+    // Play/Pause button - video autoplays so start with pause symbol
     const playPauseBtn = createEl('button', {
         className: 'preview-control-btn',
-        textContent: '▶',
+        textContent: '⏸',
         title: t('play_pause', 'Play/Pause')
     });
 
@@ -529,9 +534,6 @@ export function showVideoPreview(videoUrl, title) {
         textContent: '⏭',
         title: t('frame_forward', 'Next Frame')
     });
-
-    // Time display
-    const timeDisplay = createEl('span', { className: 'preview-time-display', textContent: '00:00 / 00:00' });
 
     // Progress bar
     const progressContainer = createEl('div', { className: 'preview-progress-container' });
@@ -561,7 +563,7 @@ export function showVideoPreview(videoUrl, title) {
         title: t('fullscreen', 'Fullscreen')
     });
 
-    controls.append(frameBackBtn, playPauseBtn, frameForwardBtn, timeDisplay, screenshotBtn, downloadBtn, fullscreenBtn);
+    controls.append(frameBackBtn, playPauseBtn, frameForwardBtn, screenshotBtn, downloadBtn, fullscreenBtn);
 
     // Filter controls - all on one line
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
@@ -605,6 +607,43 @@ export function showVideoPreview(videoUrl, title) {
     });
     timestampToggleContainer.append(timestampCheckbox, ' ', t('show_timestamp', 'Show timestamp'));
 
+    // Parse station and camera from video filename (e.g., "GAU_cam1_20260429_2056_hires.mp4")
+    const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_\d{8}_\d{4}/);
+    let stationId = null, cameraNum = null, videoTimestamp = null, annotationTimestamp = null;
+    let gridToggleContainer = null, annotationToggleContainer = null;
+    let gridCheckbox = null, annotationCheckbox = null;
+
+    if (filenameMatch) {
+        stationId = filenameMatch[1];
+        cameraNum = filenameMatch[2];
+
+        // Extract timestamp from filename for overlays
+        const dateMatch = title.match(/(\d{8})_(\d{4})/);
+        if (dateMatch) {
+            const dateStr = dateMatch[1];
+            const timeStr = dateMatch[2];
+            const year = dateStr.substring(0, 4);
+            const month = dateStr.substring(4, 6);
+            const day = dateStr.substring(6, 8);
+            const hour = timeStr.substring(0, 2);
+            const minute = timeStr.substring(2, 4);
+            videoTimestamp = `${year}-${month}-${day}T${hour}:${minute}:00`;
+            // Add 30 seconds for annotation (middle of video)
+            annotationTimestamp = `${year}-${month}-${day}T${hour}:${minute}:30`;
+        }
+
+
+        // Grid overlay toggle - initially greyed out until loaded
+        gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { marginLeft: '15px', opacity: '0.5' } });
+        gridCheckbox = createEl('input', { type: 'checkbox', id: 'grid-overlay-toggle', disabled: true });
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+
+        // Annotation overlay toggle - initially greyed out until loaded
+        annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { marginLeft: '15px', opacity: '0.5' } });
+        annotationCheckbox = createEl('input', { type: 'checkbox', id: 'annotation-overlay-toggle', disabled: true });
+        annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle', 'Show Stars'));
+    }
+
     // Assemble filter controls on one line
     filterControls.append(
         createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'brightness-slider', className: 'preview-filter-label' }),
@@ -614,14 +653,66 @@ export function showVideoPreview(videoUrl, title) {
         resetFiltersBtn,
         timestampToggleContainer
     );
+    if (gridToggleContainer) filterControls.append(gridToggleContainer);
+    if (annotationToggleContainer) filterControls.append(annotationToggleContainer);
 
     // Assemble modal
     modalContent.append(header, videoWrapper, progressContainer, controls, filterControls);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
 
+    // Load grid overlay - fetch JSON metadata first, then set image src
+    if (videoTimestamp && stationId && cameraNum) {
+        const gridApiUrl = `index.php?action=fetch_archive_grid&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(videoTimestamp)}`;
+        fetch(gridApiUrl)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.grid_url) {
+                    gridOverlay.src = data.grid_url;
+                    gridToggleContainer.style.opacity = '1';
+                    gridCheckbox.disabled = false;
+                } else {
+                    gridToggleContainer.style.opacity = '0.5';
+                    gridCheckbox.disabled = true;
+                }
+            })
+            .catch(err => {
+                gridToggleContainer.style.opacity = '0.5';
+                gridCheckbox.disabled = true;
+            });
+
+        // Grid toggle handler - toggle opacity (0.6)
+        gridCheckbox.addEventListener('change', () => {
+            gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0';
+        });
+
+        // Load annotation overlay - fetch JSON metadata first, then set image src
+        const annotationApiUrl = `index.php?action=fetch_archive_annotation&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(annotationTimestamp)}`;
+        fetch(annotationApiUrl)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.annotation_url) {
+                    annotationOverlay.src = data.annotation_url;
+                    annotationToggleContainer.style.opacity = '1';
+                    annotationCheckbox.disabled = false;
+                } else {
+                    annotationToggleContainer.style.opacity = '0.5';
+                    annotationCheckbox.disabled = true;
+                }
+            })
+            .catch(err => {
+                annotationToggleContainer.style.opacity = '0.5';
+                annotationCheckbox.disabled = true;
+            });
+
+        // Annotation toggle handler - toggle opacity (0.6)
+        annotationCheckbox.addEventListener('change', () => {
+            annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.6' : '0';
+        });
+    }
+
     // Video event handlers
-    let isPlaying = false;
+    let isPlaying = true; // Video autoplays so start as playing
     let frameStep = 1 / 30; // Assume 30fps, will be updated when metadata loads
 
     // Get current date once at initialization
@@ -649,7 +740,6 @@ export function showVideoPreview(videoUrl, title) {
         loadingIndicator.style.display = 'none';
         // Try to detect frame rate from video or default to 30
         frameStep = 1 / 30;
-        updateTimeDisplay();
         // Advance one frame to get valid currentTime (avoid 1970 epoch issue)
         video.currentTime = frameStep;
         // Trigger timeupdate to refresh timestamp
@@ -660,7 +750,6 @@ export function showVideoPreview(videoUrl, title) {
     video.addEventListener('timeupdate', () => {
         const progress = (video.currentTime / video.duration) * 100;
         progressFill.style.width = `${progress}%`;
-        updateTimeDisplay();
 
         // Update timestamp overlay with date and 2-decimal precision (lower right)
         if (timestampCheckbox.checked) {
@@ -675,19 +764,6 @@ export function showVideoPreview(videoUrl, title) {
         isPlaying = false;
         playPauseBtn.textContent = '▶';
     });
-
-    function updateTimeDisplay() {
-        const current = formatTime(video.currentTime);
-        const duration = formatTime(video.duration || 0);
-        timeDisplay.textContent = `${current} / ${duration}`;
-    }
-
-    function formatTime(seconds) {
-        if (!seconds || isNaN(seconds)) return '00:00';
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-    }
 
     // Control handlers
     playPauseBtn.addEventListener('click', () => {
@@ -745,16 +821,46 @@ export function showVideoPreview(videoUrl, title) {
         video.dispatchEvent(event);
     });
 
-    // Fullscreen button handler
+    // Fullscreen button handler - use videoWrapper to include overlays
     fullscreenBtn.addEventListener('click', () => {
-        if (video.requestFullscreen) {
-            video.requestFullscreen();
-        } else if (video.webkitRequestFullscreen) {
-            video.webkitRequestFullscreen();
-        } else if (video.msRequestFullscreen) {
-            video.msRequestFullscreen();
+        if (videoWrapper.requestFullscreen) {
+            videoWrapper.requestFullscreen();
+        } else if (videoWrapper.webkitRequestFullscreen) {
+            videoWrapper.webkitRequestFullscreen();
+        } else if (videoWrapper.msRequestFullscreen) {
+            videoWrapper.msRequestFullscreen();
         }
     });
+
+    // --- Pan/Zoom Logic (same as live video) ---
+    let scale=1, panX=0, panY=0, isPanning=false, startPanX=0, startPanY=0, panOriginX=0, panOriginY=0;
+    const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+    const updateTransform = () => { 
+        const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+        video.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
+    };
+    video.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = '0 0';
+    const onWheel = e => { e.preventDefault(); const rect=videoWrapper.getBoundingClientRect(); const mouseX=e.clientX-rect.left; const mouseY=e.clientY-rect.top; const newScale=clamp(scale*(e.deltaY>0?0.9:1.1),1,8); const newPanX=mouseX-(mouseX-panX)*(newScale/scale); const newPanY=mouseY-(mouseY-panY)*(newScale/scale); scale=newScale; if(scale<=1.01){panX=0;panY=0;}else{panX=clamp(newPanX,-(videoWrapper.clientWidth*(scale-1)),0); panY=clamp(newPanY,-(videoWrapper.clientHeight*(scale-1)),0);} updateTransform(); };
+    const onMouseMove = e => { if(!isPanning)return; panX=clamp(startPanX+(e.clientX-panOriginX),-(videoWrapper.clientWidth*(scale-1)),0); panY=clamp(startPanY+(e.clientY-panOriginY),-(videoWrapper.clientHeight*(scale-1)),0); updateTransform(); };
+    const onMouseUp = () => { isPanning=false; videoWrapper.style.cursor='default'; window.removeEventListener('mousemove',onMouseMove); window.removeEventListener('mouseup',onMouseUp); };
+    const onMouseDown = e => { if(e.button!==0)return; e.preventDefault(); isPanning=true; videoWrapper.style.cursor='grabbing'; panOriginX=e.clientX; panOriginY=e.clientY; startPanX=panX; startPanY=panY; window.addEventListener('mousemove',onMouseMove); window.addEventListener('mouseup',onMouseUp); };
+    videoWrapper.addEventListener('wheel', onWheel); videoWrapper.addEventListener('mousedown', onMouseDown);
+    
+    // Sync overlay visibility when entering/exiting fullscreen
+    const onFullscreenChange = () => {
+        const isFullscreen = !!document.fullscreenElement;
+        if (isFullscreen) {
+            video.style.maxHeight = 'none';
+            video.style.height = '100%';
+        } else {
+            video.style.maxHeight = '';
+            video.style.height = '';
+            scale=1; panX=0; panY=0; updateTransform();
+        }
+        gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
+        annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
 
     // Screenshot handler
     screenshotBtn.addEventListener('click', () => {
@@ -766,6 +872,20 @@ export function showVideoPreview(videoUrl, title) {
         // Apply current filters to canvas
         ctx.filter = video.style.filter;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Draw grid overlay if enabled
+        if (gridCheckbox?.checked && gridOverlay.src) {
+            ctx.globalAlpha = 0.6;
+            ctx.drawImage(gridOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+
+        // Draw annotation overlay if enabled
+        if (annotationCheckbox?.checked && annotationOverlay.src) {
+            ctx.globalAlpha = 0.6;
+            ctx.drawImage(annotationOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
 
         // Add timestamp to screenshot only if enabled (lower right corner)
         if (timestampCheckbox.checked) {
@@ -819,6 +939,14 @@ export function showVideoPreview(videoUrl, title) {
                 closeButton.click();
                 break;
         }
+    });
+
+    // Close button handler (defined after all handlers)
+    closeButton.addEventListener('click', () => {
+        document.removeEventListener('fullscreenchange', onFullscreenChange);
+        videoWrapper.removeEventListener('wheel', onWheel);
+        videoWrapper.removeEventListener('mousedown', onMouseDown);
+        document.getElementById('video-modal-backdrop')?.remove();
     });
 
     // Focus modal for keyboard events
@@ -974,6 +1102,9 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     const videoEl = createEl('video', { id: 'live-video', muted: true, autoplay: true, playsinline: true });
     const gridOverlay = createEl('img', { id: 'grid-overlay-image' });
     const annotationOverlay = createEl('img', { id: 'annotation-overlay-image' });
+    // Explicitly set opacity 0 to hide initially
+    gridOverlay.style.opacity = '0';
+    annotationOverlay.style.opacity = '0';
     const statusEl = createEl('p', { id: 'video-status', textContent: t('modal_starting_stream') });
     const controlsContainer = createEl('div', { className: 'video-controls-container' });
     const gridToggleContainer = createEl('div', { id: 'grid-toggle-container', style: 'display: none;' });
@@ -1060,8 +1191,8 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     });
     window.addEventListener('resize', updateOverlaySizing);
     
-    gridCheckbox.addEventListener('change', () => { gridOverlay.style.opacity = gridCheckbox.checked ? '0.3' : '0'; });
-    annotationCheckbox.addEventListener('change', () => { annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.4' : '0'; });
+    gridCheckbox.addEventListener('change', () => { gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0'; });
+    annotationCheckbox.addEventListener('change', () => { annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.6' : '0'; });
     
     // --- Pan/Zoom Logic (kept condensed) ---
     let scale=1, panX=0, panY=0, isPanning=false, startPanX=0, startPanY=0, panOriginX=0, panOriginY=0;

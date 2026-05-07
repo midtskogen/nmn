@@ -424,6 +424,46 @@ switch ($action) {
         echo shell_exec($command);
         break;
 
+    case 'fetch_archive_grid':
+        header('Content-Type: application/json');
+        $station_id = $_GET['station_id'] ?? null;
+        $camera_num = $_GET['camera_num'] ?? null;
+        $timestamp = $_GET['timestamp'] ?? null;
+
+        if (!$station_id || !$camera_num || !$timestamp || !preg_match('/^[A-Z]{3}$/', $station_id) || !ctype_digit($camera_num) || !preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/', $timestamp)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid or missing parameters']);
+            exit;
+        }
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' fetch_archive_grid '
+            . escapeshellarg($station_id) . ' '
+            . escapeshellarg($camera_num) . ' '
+            . escapeshellarg($timestamp);
+
+        echo shell_exec($command);
+        break;
+
+    case 'fetch_archive_annotation':
+        header('Content-Type: application/json');
+        $station_id = $_GET['station_id'] ?? null;
+        $camera_num = $_GET['camera_num'] ?? null;
+        $timestamp = $_GET['timestamp'] ?? null;
+
+        if (!$station_id || !$camera_num || !$timestamp || !preg_match('/^[A-Z]{3}$/', $station_id) || !ctype_digit($camera_num) || !preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/', $timestamp)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid or missing parameters']);
+            exit;
+        }
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' fetch_archive_annotation '
+            . escapeshellarg($station_id) . ' '
+            . escapeshellarg($camera_num) . ' '
+            . escapeshellarg($timestamp);
+
+        echo shell_exec($command);
+        break;
+
     case 'download':
         $lock_files = glob($LOCK_DIR . '/master_task_*.lock');
         if (count($lock_files) >= $MAX_CONCURRENT_REQUESTS) {

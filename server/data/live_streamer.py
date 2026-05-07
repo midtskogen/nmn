@@ -194,6 +194,180 @@ def fetch_annotation_file(stream_task_id, station_id, camera_num):
         return {"success": False, "error": "error_internal"}
 
 
+# --- Archive Video Overlay Functions (separate from live stream) ---
+
+def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
+    """
+    Fetches or generates a grid overlay for an archive video.
+    For archive videos, we use the current grid.png (calibration doesn't change often).
+    Returns a web-accessible URL path.
+    """
+    # Map station code to station ID
+    station_id = None
+    for sid, s in stations_data.items():
+        if s.get('station', {}).get('code', '').upper() == station_code.upper():
+            station_id = sid
+            break
+
+    if not station_id:
+        logging.error(f"[ArchiveGrid] Station code {station_code} not found in stations data")
+        return {"success": False, "error": "error_station_not_found"}
+
+    log_prefix = f"[ArchiveGrid {station_id}_cam{cam_num}]"
+    logging.info(f"{log_prefix} Request for timestamp={timestamp}")
+
+    # Extract date from timestamp for caching
+    try:
+        date_str = timestamp[:10].replace('-', '')  # YYYY-MM-DD -> YYYYMMDD
+    except:
+        date_str = datetime.now().strftime('%Y%m%d')
+
+    cached_filename = f"grid_{station_id}_cam{cam_num}_{date_str}.png"
+    cached_filepath = os.path.join(DOWNLOAD_DIR, cached_filename)
+
+    # Check if already cached
+    if os.path.exists(cached_filepath) and os.path.getsize(cached_filepath) > 0:
+        logging.info(f"{log_prefix} Using cached grid: {cached_filename}")
+        return {"success": True, "grid_url": f"download/{cached_filename}"}
+
+    # Need to fetch from station
+    try:
+        hostname = station_id  # Use station_id directly as hostname
+
+        # Try to fetch dated grid file first
+        remote_dated = f"/meteor/cam{cam_num}/grid-{date_str}.png"
+        tmp_path = os.path.join(DOWNLOAD_DIR, f"grid_{station_id}_cam{cam_num}_{uniqid()}.png")
+
+        scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
+                   f"{hostname}:{remote_dated}", tmp_path]
+        logging.info(f"{log_prefix} Trying dated grid: {remote_dated}")
+        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode != 0 or not os.path.exists(tmp_path):
+            # Fall back to current grid.png
+            logging.info(f"{log_prefix} Dated grid not found, falling back to grid.png")
+            remote_current = f"/meteor/cam{cam_num}/grid.png"
+            scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
+                       f"{hostname}:{remote_current}", tmp_path]
+            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0 or not os.path.exists(tmp_path):
+                logging.error(f"{log_prefix} SCP failed: {result.stderr}")
+                return {"success": False, "error": "error_grid_not_found"}
+
+        # Move to cache location
+        try:
+            os.replace(tmp_path, cached_filepath)
+        except OSError:
+            cached_filepath = tmp_path
+            cached_filename = os.path.basename(tmp_path)
+
+        logging.info(f"{log_prefix} Grid fetched: {cached_filename}")
+        return {"success": True, "grid_url": f"download/{cached_filename}"}
+
+    except subprocess.TimeoutExpired:
+        logging.error(f"{log_prefix} SCP timeout")
+        return {"success": False, "error": "error_grid_fetch_timeout"}
+    except Exception as e:
+        logging.error(f"{log_prefix} Error: {e}")
+        return {"success": False, "error": "error_internal"}
+
+
+def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_data):
+    """
+    Generates a star annotation overlay for an archive video using drawgrid.py.
+    Uses the video's timestamp to calculate star positions.
+    Returns a web-accessible URL path.
+    """
+    # Map station code to station ID
+    station_id = None
+    for sid, s in stations_data.items():
+        if s.get('station', {}).get('code', '').upper() == station_code.upper():
+            station_id = sid
+            break
+
+    if not station_id:
+        logging.error(f"[ArchiveAnnotation] Station code {station_code} not found in stations data")
+        return {"success": False, "error": "error_station_not_found"}
+
+    log_prefix = f"[ArchiveAnnotation {station_id}_cam{cam_num}]"
+    logging.info(f"{log_prefix} Request for timestamp={timestamp}")
+
+    try:
+        # Extract timestamp for caching (include hour and minute since stars move)
+        date_str = timestamp[:10].replace('-', '')  # YYYY-MM-DD -> YYYYMMDD
+        hour_min = timestamp[11:13] + timestamp[14:16]  # HH:MM -> HHMM
+        output_filename = f"annotation_{station_id}_cam{cam_num}_{date_str}_{hour_min}_labels.png"
+        output_path = os.path.join(DOWNLOAD_DIR, output_filename)
+
+        # Check cache (valid for 1 hour since stars don't move much in that time)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            file_age = time.time() - os.path.getmtime(output_path)
+            if file_age < 3600:  # 1 hour cache
+                logging.info(f"{log_prefix} Using cached annotation (age={file_age:.0f}s)")
+                return {"success": True, "annotation_url": f"download/{output_filename}"}
+            logging.info(f"{log_prefix} Cache expired (age={file_age:.0f}s), regenerating")
+
+        # Get station lat/lon
+        station = stations_data.get(station_id, {})
+        lat = station.get('astronomy', {}).get('latitude')
+        lon = station.get('astronomy', {}).get('longitude')
+        if lat is None or lon is None:
+            logging.error(f"{log_prefix} Station missing lat/lon")
+            return {"success": False, "error": "error_station_not_found"}
+
+        # Fetch lens.pto if needed
+        pto_filename = f"lens_{station_id}_cam{cam_num}.pto"
+        pto_path = os.path.join(DOWNLOAD_DIR, pto_filename)
+
+        if not os.path.exists(pto_path) or os.path.getsize(pto_path) == 0:
+            hostname = station_id
+            remote_pto = f"/meteor/cam{cam_num}/lens.pto"
+            scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
+                       f"{hostname}:{remote_pto}", pto_path]
+            logging.info(f"{log_prefix} Fetching lens.pto")
+            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                logging.error(f"{log_prefix} Failed to fetch lens.pto: {result.stderr}")
+                return {"success": False, "error": "error_annotation_pto_not_found"}
+
+        # Parse timestamp to Unix epoch
+        try:
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00').replace('+00:00', ''))
+            epoch_time = int(dt.timestamp())
+        except:
+            epoch_time = int(time.time())
+
+        # Generate annotation with drawgrid.py
+        cmd = [
+            "python3", DRAWGRID_SCRIPT,
+            "--annotations-only",
+            "-Y", str(lat), "-X", str(lon),
+            "-d", str(epoch_time),
+            pto_path, output_path
+        ]
+        logging.info(f"{log_prefix} Running drawgrid: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            logging.error(f"{log_prefix} drawgrid failed: {result.stderr}")
+            return {"success": False, "error": "error_annotation_generation_failed"}
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logging.error(f"{log_prefix} Output file not created")
+            return {"success": False, "error": "error_annotation_generation_failed"}
+
+        logging.info(f"{log_prefix} Annotation generated: {output_filename}")
+        return {"success": True, "annotation_url": f"download/{output_filename}"}
+
+    except subprocess.TimeoutExpired:
+        logging.error(f"{log_prefix} Operation timeout")
+        return {"success": False, "error": "error_annotation_timeout"}
+    except Exception as e:
+        logging.error(f"{log_prefix} Error: {e}")
+        return {"success": False, "error": "error_internal"}
+
+
 def _get_timeout_for_station(station_id, resolution, stations_data):
     """Determines the maximum duration for a single streaming session."""
     has_quota = stations_data.get(station_id, {}).get("station", {}).get("quota", False)

@@ -1128,6 +1128,17 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     controlsContainer.append(gridToggleContainer, annotationToggleContainer, fullscreenButton);
     const closeButton = createEl('button', { id: 'video-close-button', textContent: t('modal_close_button'), onclick: hideVideoModal });
 
+    // Filter controls
+    const liveFilterControls = createEl('div', { className: 'preview-filter-controls' });
+    const liveBrightnessSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'live-brightness-slider' });
+    const liveContrastSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'live-contrast-slider' });
+    const liveResetBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters', 'Reset'), title: t('reset_filters', 'Reset to default') });
+    const liveBrightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    liveBrightnessWrapper.append(createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'live-brightness-slider', className: 'preview-filter-label' }), liveBrightnessSlider);
+    const liveContrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    liveContrastWrapper.append(createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'live-contrast-slider', className: 'preview-filter-label' }), liveContrastSlider);
+    liveFilterControls.append(liveResetBtn, liveBrightnessWrapper, liveContrastWrapper);
+
     let baseStatusText = t('modal_starting_stream');
     let countdownSuffix = '';
     let bitrateText = '';
@@ -1151,7 +1162,7 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     };
 
     videoContainer.append(videoEl, gridOverlay, annotationOverlay);
-    modalContent.append(statusEl, videoContainer, controlsContainer, closeButton);
+    modalContent.append(statusEl, videoContainer, controlsContainer, liveFilterControls, closeButton);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
     
@@ -1527,6 +1538,18 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     // Store interval so hideVideoModal can clear it
     if (!window._annotationRefreshInterval) window._annotationRefreshInterval = null;
     window._annotationRefreshInterval = annotationRefreshInterval;
+
+    // Live filter handlers
+    function updateLiveFilters() {
+        videoEl.style.filter = `brightness(${liveBrightnessSlider.value}) contrast(${liveContrastSlider.value})`;
+    }
+    liveBrightnessSlider.addEventListener('input', updateLiveFilters);
+    liveContrastSlider.addEventListener('input', updateLiveFilters);
+    liveResetBtn.addEventListener('click', () => {
+        liveBrightnessSlider.value = 1;
+        liveContrastSlider.value = 1;
+        updateLiveFilters();
+    });
 }
 
 /**

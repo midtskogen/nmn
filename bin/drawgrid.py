@@ -15,8 +15,10 @@ import configparser
 import os
 import re
 from datetime import datetime, UTC
+import time as _time
 from brightstar import brightstar
 import numpy as np
+from numba import njit
 
 import sys
 from pathlib import Path
@@ -36,6 +38,19 @@ if _PROJECT_DIR is not None:
             _ps = str(_p)
             if _ps not in sys.path:
                 sys.path.insert(0, _ps)
+
+@njit(cache=True)
+def _count_overlaps_jit(placed, bx0, by0, bx1, by1, margin):
+    """Count how many boxes in placed overlap with (bx0,by0,bx1,by1)."""
+    count = 0
+    for i in range(placed.shape[0]):
+        if not (placed[i, 0] > bx1 + margin or
+                placed[i, 2] < bx0 - margin or
+                placed[i, 1] > by1 + margin or
+                placed[i, 3] < by0 - margin):
+            count += 1
+    return count
+
 
 class Vector2D:
     """A simple 2D vector class."""
@@ -64,12 +79,29 @@ def main():
     parser.add_argument('-t', '--temperature', dest='temperature', help='observer temperature (C)', type=float)
     parser.add_argument('-P', '--pressure', dest='pressure', help='observer air pressure (hPa)', type=float)
     parser.add_argument('-c', '--config', dest='config', help='meteor config file', type=str)
-    parser.add_argument('-d', '--date', dest='timestamp', help='Unix timestamp (seconds since 1970-01-01 00:00:00UTC)', type=int)
+    def unix_timestamp(value):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return int(datetime.strptime(value, '%Y-%m-%d %H:%M:%S').replace(tzinfo=UTC).timestamp())
+        except ValueError:
+            pass
+        now = int(_time.time())
+        raise argparse.ArgumentTypeError(
+            f"invalid value: '{value}'\n"
+            f"  Expected: Unix timestamp or datetime string in format YYYY-MM-DD HH:MM:SS (UTC)\n"
+            f"  Examples: {now}  or  {datetime.fromtimestamp(now, UTC).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+    parser.add_argument('-d', '--date', dest='timestamp', help='Unix timestamp (seconds since 1970-01-01 00:00:00UTC)', type=unix_timestamp)
     parser.add_argument("--radec", help="use RA/DEC instead of az/alt", action="store_true")
     parser.add_argument("--verbose", help="more verbose labels", action="store_true")
     parser.add_argument("--refract", help="Apply atmospheric refraction correction (Az/Alt mode only).", action="store_true")
     parser.add_argument("--base-image", dest='base_image', help='Load an existing PNG and draw annotations on top (skip grid generation)', type=str)
     parser.add_argument("--annotations-only", dest='annotations_only', help='Only draw star annotations on a transparent canvas (no grid)', action="store_true")
+    parser.add_argument("--nopos", dest='nopos', help='Omit [az, alt] / [ra, dec] position from star labels', action="store_true")
 
     parser.add_argument(action='store', dest='infile', help='input .pto file')
     parser.add_argument(action='store', dest='outfile', help='output grid file (default "grid.png")', default="grid.png", nargs='?')
@@ -484,36 +516,161 @@ def main():
 
         if pos.date and pos.lat and pos.long and args.timestamp:
             stars = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects)
+
+            # Draw star circles and collect visible stars
             draw.stroke_color = wand.color.Color('white')
             draw.stroke_opacity = 1
             draw.fill_color = wand.color.Color('transparent')
+            star_r = 7  # visual radius (circle perimeter at +5,+5 gives radius ≈ 7px)
+            visible_stars = []
             for s in stars:
                 x, y = s[0] * args.xscale, s[1] * args.yscale
                 if 0 <= x < image.width and 0 <= y < image.height:
-                     draw.circle((x, y), (x + 5, y + 5))
+                    draw.circle((x, y), (x + 5, y + 5))
+                    visible_stars.append((x, y, s))
 
+            # Sort brightest first so important stars get priority label positions
+            visible_stars.sort(key=lambda t: t[2][5])
+
+            # --- Label placement with collision detection ---
             draw.translate(0, 0)
             draw.rotate(0)
-            draw.text_alignment = 'left'
-            draw.stroke_opacity = 1
-            draw.stroke_color = wand.color.Color('transparent')
-            for s in stars:
-                text_x = int(s[0] * args.xscale + 10)
-                text_y = int(s[1] * args.yscale + 6)
-                if not (0 <= text_x < image.width and 0 <= text_y < image.height):
-                    continue
+            draw.font = 'helvetica'
+            draw.font_size = 14
+            char_h = 14
+            gap = star_r + 3
 
-                draw.fill_color = wand.color.Color('white')
+            def measure_label(lbl):
+                """Return (width, ascender, descender) of label text in pixels using font metrics."""
+                m = draw.get_font_metrics(image, lbl)
+                return (int(math.ceil(m.text_width)),
+                        int(math.ceil(m.ascender)),
+                        int(math.ceil(-m.descender)))
+
+            max_leader = 80   # maximum leader line length in pixels
+            step = gap        # distance increment per level
+            n_dirs = 32       # number of evenly-spaced directions
+
+            # Pre-compute sorted angles: right-first, then by |sin| ascending (prefer horizontal)
+            _raw_angles = [2 * math.pi * i / n_dirs for i in range(n_dirs)]
+            _sorted_angles = sorted(_raw_angles, key=lambda a: (-math.cos(a), abs(math.sin(a))))
+            _cos_sin = [(math.cos(a), math.sin(a)) for a in _sorted_angles]
+
+            def label_anchor(px, py, lw, asc, desc, cos_a, sin_a):
+                """Compute label anchor (lx, ly) so the nearest box edge touches (px, py)."""
+                if abs(cos_a) < 0.2:
+                    lx = int(px - lw / 2)
+                elif cos_a > 0:
+                    lx = int(px)
+                else:
+                    lx = int(px - lw)
+
+                if abs(sin_a) < 0.2:
+                    ly = int(py + asc / 2)
+                elif sin_a > 0:
+                    ly = int(py + asc)
+                else:
+                    ly = int(py + desc)
+                return lx, ly
+
+            def label_candidates(sx, sy, lw, asc, desc):
+                """Candidate anchor positions in 32 directions at increasing distances.
+                Right-first, horizontal before diagonal within each distance level."""
+                candidates = []
+                d = gap
+                while d <= max_leader:
+                    for cos_a, sin_a in _cos_sin:
+                        px = sx + d * cos_a
+                        py = sy + d * sin_a
+                        candidates.append(label_anchor(px, py, lw, asc, desc, cos_a, sin_a))
+                    d += step
+                return candidates
+
+            def label_box(lx, ly, lw, asc, desc):
+                """Bounding box for left-aligned text with baseline at (lx, ly)."""
+                return (lx, ly - asc + 2, lx + lw, ly + desc - 2)
+
+            # Use numpy array for fast vectorized overlap detection
+            margin = 3
+            # placed_boxes_arr: shape (N, 4) columns = [x0, y0, x1, y1]
+            placed_arr = np.ascontiguousarray([
+                [sx - star_r, sy - star_r, sx + star_r, sy + star_r]
+                for sx, sy, _ in visible_stars
+            ], dtype=np.float64)
+
+            def count_overlaps(b):
+                return _count_overlaps_jit(placed_arr, b[0], b[1], b[2], b[3], margin)
+
+            # Cache for measure_label results keyed by label string
+            _measure_cache = {}
+
+            def cached_measure(lbl):
+                if lbl not in _measure_cache:
+                    _measure_cache[lbl] = measure_label(lbl)
+                return _measure_cache[lbl]
+
+            label_draws = []
+
+            for x, y, s in visible_stars:
                 if args.radec:
                     ra, dec = pos.radec_of(str(s[2]), str(s[3]))
                     if args.verbose:
-                        draw.text(text_x, text_y,
-                                  s[4] + " " + str(round(s[5], 1)) + " [" + re.sub(r'\..*', '', str(ra)) + ", " + str(round(math.degrees(float(repr(dec))), 2)) + "]")
+                        label = s[4] + " " + str(round(s[5], 1)) + " [" + re.sub(r'\..*', '', str(ra)) + ", " + str(round(math.degrees(float(repr(dec))), 2)) + "]"
+                    elif args.nopos:
+                        label = s[4]
                     else:
-                        draw.text(text_x, text_y, s[4])
+                        label = s[4]
                 else:
-                    draw.text(text_x, text_y,
-                              s[4] + " " + str(round(s[5], 1)) + " [" + str(round(s[2], 2)) + ", " + str(round(s[3], 2)) + "]")
+                    if args.nopos:
+                        label = s[4] + " " + str(round(s[5], 1))
+                    else:
+                        label = s[4] + " " + str(round(s[5], 1)) + " [" + str(round(s[2], 2)) + ", " + str(round(s[3], 2)) + "]"
+                lw, asc, desc = cached_measure(label)
+                best = None
+                best_n = float('inf')
+
+                for lx, ly in label_candidates(x, y, lw, asc, desc):
+                    b = label_box(lx, ly, lw, asc, desc)
+                    if b[0] < 0 or b[2] > image.width or b[1] < 0 or b[3] > image.height:
+                        continue
+                    n = count_overlaps(b)
+                    if n == 0:
+                        best = (lx, ly, b)
+                        break
+                    if n < best_n:
+                        best_n, best = n, (lx, ly, b)
+
+                if best is None:
+                    lx, ly = int(x + gap), int(y + asc // 2)
+                    best = (lx, ly, label_box(lx, ly, lw, asc, desc))
+
+                lx, ly, b = int(best[0]), int(best[1]), best[2]
+                placed_arr = np.vstack([placed_arr, [b[0], b[1], b[2], b[3]]])
+
+                # Leader line: from circle edge to nearest point on label bounding box
+                near_x = max(b[0], min(x, b[2]))
+                near_y = max(b[1], min(y, b[3]))
+                dx, dy = near_x - x, near_y - y
+                dist = math.sqrt(dx * dx + dy * dy) or 1
+                line_x1 = x + star_r * dx / dist
+                line_y1 = y + star_r * dy / dist
+                label_draws.append((lx, ly, label, line_x1, line_y1, near_x, near_y))
+
+            # Draw leader lines
+            draw.fill_color = wand.color.Color('none')
+            draw.stroke_color = wand.color.Color('white')
+            draw.stroke_opacity = 0.8
+            draw.stroke_width = 1
+            for lx, ly, label, lx1, ly1, lx2, ly2 in label_draws:
+                draw.line((int(lx1), int(ly1)), (int(lx2), int(ly2)))
+
+            # Draw labels
+            draw.stroke_color = wand.color.Color('transparent')
+            draw.stroke_opacity = 0
+            draw.fill_color = wand.color.Color('white')
+            draw.text_alignment = 'left'
+            for lx, ly, label, *_ in label_draws:
+                draw.text(int(lx), int(ly), label)
         
         draw(image)
 

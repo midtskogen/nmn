@@ -15,11 +15,18 @@ export const TO_DEG = 180 / Math.PI;
  */
 export const createEl = (tag, options = {}) => {
     const el = document.createElement(tag);
-    // Destructure the options to handle 'dataset' as a special case, separating it
-    // from other standard element properties.
-    const { dataset, ...otherOptions } = options;
+    // Destructure the options to handle 'dataset' and 'style' as special cases.
+    const { dataset, style, ...otherOptions } = options;
     // Assign all standard properties (like className, textContent, id, etc.) directly to the element.
     Object.assign(el, otherOptions);
+    // Handle style: support both string (cssText) and object (individual properties).
+    if (style) {
+        if (typeof style === 'string') {
+            el.style.cssText = style;
+        } else {
+            Object.assign(el.style, style);
+        }
+    }
     // If a `dataset` object was provided in the options, iterate over its keys
     // and assign them as `data-*` attributes on the element.
     if (dataset) {

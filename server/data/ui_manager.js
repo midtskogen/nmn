@@ -519,28 +519,28 @@ export function showVideoPreview(videoUrl, title) {
     const playPauseBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '⏸',
-        title: t('play_pause', 'Play/Pause')
+        title: t('modal_play_pause', 'Play/Pause')
     });
 
     // Frame step controls
     const frameBackBtn = createEl('button', {
         className: 'preview-control-btn',
-        textContent: '⏮',
-        title: t('frame_back', 'Previous Frame')
+        textContent: '◀',
+        title: t('modal_frame_back', 'Previous Frame')
     });
 
     const frameForwardBtn = createEl('button', {
         className: 'preview-control-btn',
-        textContent: '⏭',
-        title: t('frame_forward', 'Next Frame')
+        textContent: '▶',
+        title: t('modal_frame_forward', 'Next Frame')
     });
 
-    // Progress bar
-    const progressContainer = createEl('div', { className: 'preview-progress-container' });
-    const progressBar = createEl('div', { className: 'preview-progress-bar' });
-    const progressFill = createEl('div', { className: 'preview-progress-fill' });
-    progressBar.appendChild(progressFill);
-    progressContainer.appendChild(progressBar);
+    // Rewind button
+    const rewindBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '⏮',
+        title: t('modal_rewind', 'Rewind to Start')
+    });
 
     // Screenshot button
     const screenshotBtn = createEl('button', {
@@ -563,7 +563,7 @@ export function showVideoPreview(videoUrl, title) {
         title: t('fullscreen', 'Fullscreen')
     });
 
-    controls.append(frameBackBtn, playPauseBtn, frameForwardBtn, screenshotBtn, downloadBtn, fullscreenBtn);
+    controls.append(rewindBtn, frameBackBtn, playPauseBtn, frameForwardBtn, screenshotBtn, downloadBtn, fullscreenBtn);
 
     // Filter controls - all on one line
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
@@ -634,30 +634,39 @@ export function showVideoPreview(videoUrl, title) {
 
 
         // Grid overlay toggle - initially greyed out until loaded
-        gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { marginLeft: '15px', opacity: '0.5' } });
+        gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         gridCheckbox = createEl('input', { type: 'checkbox', id: 'grid-overlay-toggle', disabled: true });
         gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
 
         // Annotation overlay toggle - initially greyed out until loaded
-        annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { marginLeft: '15px', opacity: '0.5' } });
+        annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         annotationCheckbox = createEl('input', { type: 'checkbox', id: 'annotation-overlay-toggle', disabled: true });
         annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle', 'Show Stars'));
     }
 
-    // Assemble filter controls on one line
-    filterControls.append(
+    // Brightness: label above slider in a small inline column
+    const brightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    brightnessWrapper.append(
         createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'brightness-slider', className: 'preview-filter-label' }),
-        brightnessSlider,
-        createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'contrast-slider', className: 'preview-filter-label' }),
-        contrastSlider,
-        resetFiltersBtn,
-        timestampToggleContainer
+        brightnessSlider
     );
-    if (gridToggleContainer) filterControls.append(gridToggleContainer);
-    if (annotationToggleContainer) filterControls.append(annotationToggleContainer);
+
+    // Contrast: label above slider in a small inline column
+    const contrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    contrastWrapper.append(
+        createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'contrast-slider', className: 'preview-filter-label' }),
+        contrastSlider
+    );
+
+    const checkboxesWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '4px' } });
+    checkboxesWrapper.append(timestampToggleContainer);
+    if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
+    if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
+
+    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, checkboxesWrapper);
 
     // Assemble modal
-    modalContent.append(header, videoWrapper, progressContainer, controls, filterControls);
+    modalContent.append(header, videoWrapper, controls, filterControls);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
 
@@ -748,9 +757,6 @@ export function showVideoPreview(videoUrl, title) {
     });
 
     video.addEventListener('timeupdate', () => {
-        const progress = (video.currentTime / video.duration) * 100;
-        progressFill.style.width = `${progress}%`;
-
         // Update timestamp overlay with date and 2-decimal precision (lower right)
         if (timestampCheckbox.checked) {
             timestampOverlay.textContent = getFormattedTimestamp(video.currentTime);
@@ -791,11 +797,14 @@ export function showVideoPreview(videoUrl, title) {
         video.currentTime = Math.min(video.duration, video.currentTime + frameStep);
     });
 
-    // Progress bar click to seek
-    progressBar.addEventListener('click', (e) => {
-        const rect = progressBar.getBoundingClientRect();
-        const pos = (e.clientX - rect.left) / rect.width;
-        video.currentTime = pos * video.duration;
+    // Rewind button handler
+    rewindBtn.addEventListener('click', () => {
+        video.currentTime = 0;
+        if (!isPlaying) {
+            video.play();
+            isPlaying = true;
+            playPauseBtn.textContent = '⏸';
+        }
     });
 
     // Filter handlers

@@ -557,10 +557,9 @@ def main():
             step = gap        # distance increment per level
             n_dirs = 32       # number of evenly-spaced directions
 
-            # Pre-compute sorted angles: right-first, then by |sin| ascending (prefer horizontal)
+            # Pre-compute direction vectors for 32 evenly-spaced angles
             _raw_angles = [2 * math.pi * i / n_dirs for i in range(n_dirs)]
-            _sorted_angles = sorted(_raw_angles, key=lambda a: (-math.cos(a), abs(math.sin(a))))
-            _cos_sin = [(math.cos(a), math.sin(a)) for a in _sorted_angles]
+            _cos_sin = [(math.cos(a), math.sin(a)) for a in _raw_angles]
 
             def label_anchor(px, py, lw, asc, desc, cos_a, sin_a):
                 """Compute label anchor (lx, ly) so the nearest box edge touches (px, py)."""
@@ -579,13 +578,13 @@ def main():
                     ly = int(py + desc)
                 return lx, ly
 
-            def label_candidates(sx, sy, lw, asc, desc):
+            def label_candidates(sx, sy, lw, asc, desc, sorted_cs):
                 """Candidate anchor positions in 32 directions at increasing distances.
-                Right-first, horizontal before diagonal within each distance level."""
+                Direction order determined by sorted_cs (per-star preferred direction)."""
                 candidates = []
                 d = gap
                 while d <= max_leader:
-                    for cos_a, sin_a in _cos_sin:
+                    for cos_a, sin_a in sorted_cs:
                         px = sx + d * cos_a
                         py = sy + d * sin_a
                         candidates.append(label_anchor(px, py, lw, asc, desc, cos_a, sin_a))
@@ -647,9 +646,20 @@ def main():
                 best = None
                 best_n = float('inf')
 
+<<<<<<< HEAD
                 prev = prev_placements.get(s[4])
 
                 for lx, ly in label_candidates(x, y, lw, asc, desc):
+=======
+                # Deterministic preferred direction from star name hash
+                pref_angle = (hash(s[4]) % 3600) / 3600.0 * 2 * math.pi
+                pref_cos = math.cos(pref_angle)
+                pref_sin = math.sin(pref_angle)
+                sorted_cs = sorted(_cos_sin,
+                                   key=lambda cs: -(cs[0]*pref_cos + cs[1]*pref_sin))
+
+                for lx, ly in label_candidates(x, y, lw, asc, desc, sorted_cs):
+>>>>>>> 54bcc72 (Improve label stability)
                     b = label_box(lx, ly, lw, asc, desc)
                     if b[0] < 0 or b[2] > image.width or b[1] < 0 or b[3] > image.height:
                         continue
@@ -699,6 +709,7 @@ def main():
             for lx, ly, label, *_ in label_draws:
                 draw.text(int(lx), int(ly), label)
 
+<<<<<<< HEAD
             # Save current placements for next frame's stability bias
             if cur_placements:
                 try:
@@ -707,6 +718,8 @@ def main():
                 except OSError:
                     pass
 
+=======
+>>>>>>> 54bcc72 (Improve label stability)
         draw(image)
 
         image.format = 'png'

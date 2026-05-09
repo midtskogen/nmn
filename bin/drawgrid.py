@@ -12,6 +12,7 @@ import wand.image
 import wand.drawing
 import wand.color
 import configparser
+import json
 import os
 import re
 from datetime import datetime, UTC
@@ -616,6 +617,18 @@ def main():
 
             label_draws = []
 
+            # Load previous placements from sidecar file for stability bias
+            bias_radius = 15
+            prev_placements = {}
+            sidecar = args.outfile + '.labels.json'
+            try:
+                with open(sidecar, 'r') as _f:
+                    prev_placements = json.load(_f)
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                pass
+
+            cur_placements = {}
+
             for x, y, s in visible_stars:
                 if args.radec:
                     ra, dec = pos.radec_of(str(s[2]), str(s[3]))
@@ -634,11 +647,19 @@ def main():
                 best = None
                 best_n = float('inf')
 
+                prev = prev_placements.get(s[4])
+
                 for lx, ly in label_candidates(x, y, lw, asc, desc):
                     b = label_box(lx, ly, lw, asc, desc)
                     if b[0] < 0 or b[2] > image.width or b[1] < 0 or b[3] > image.height:
                         continue
                     n = count_overlaps(b)
+                    # Bias toward previous frame position for stability
+                    if prev is not None and n > 0:
+                        dx = lx - prev[0]
+                        dy = ly - prev[1]
+                        if math.sqrt(dx*dx + dy*dy) <= bias_radius:
+                            n = max(0, n - 1)
                     if n == 0:
                         best = (lx, ly, b)
                         break
@@ -651,6 +672,7 @@ def main():
 
                 lx, ly, b = int(best[0]), int(best[1]), best[2]
                 placed_arr = np.vstack([placed_arr, [b[0], b[1], b[2], b[3]]])
+                cur_placements[s[4]] = [lx, ly]
 
                 # Leader line: from circle edge to nearest point on label bounding box
                 near_x = max(b[0], min(x, b[2]))
@@ -676,7 +698,15 @@ def main():
             draw.text_alignment = 'left'
             for lx, ly, label, *_ in label_draws:
                 draw.text(int(lx), int(ly), label)
-        
+
+            # Save current placements for next frame's stability bias
+            if cur_placements:
+                try:
+                    with open(sidecar, 'w') as _f:
+                        json.dump(cur_placements, _f)
+                except OSError:
+                    pass
+
         draw(image)
 
         image.format = 'png'

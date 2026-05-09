@@ -12,12 +12,12 @@ let meteorCounts = null;
 
 // --- Icon Definitions ---
 const iconOptions = { iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] };
-export const blueIcon = new L.Icon({ iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
-export const redIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
-export const yellowIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
-export const greyIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-grey.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+export const blueIcon = new L.Icon({ iconUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+export const redIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+export const yellowIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
+export const greyIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-grey.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 // Add the new Dark Blue Icon
-export const darkBlueIcon = new L.Icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', ...iconOptions, shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' }); 
+export const darkBlueIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' }); 
 const createLightningIcon = (color, size) => L.divIcon({ className: `lightning-icon lightning-icon-${color} icon-size-${size}`, html: '⚡', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
 /**
@@ -538,7 +538,7 @@ function getCloudLayer(date) {
 
     if (cloudLayer && cloudLayer.wmsParams.time === effectiveDate) return cloudLayer;
     if (cloudLayer) map.removeLayer(cloudLayer);
-    cloudLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_CorrectedReflectance_TrueColor', format: 'image/png', transparent: true, time: effectiveDate, attribution: `NASA GIBS | ${effectiveDate}`, pane: 'dataOverlays' });
+    cloudLayer = L.tileLayer.wms('//gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_CorrectedReflectance_TrueColor', format: 'image/png', transparent: true, time: effectiveDate, attribution: `NASA GIBS | ${effectiveDate}`, pane: 'dataOverlays' });
     cloudLayer.setOpacity(0.5);
 
     if (isFallback) {
@@ -555,7 +555,7 @@ function getAuroraLayer(date) {
 
     if (auroraLayer && auroraLayer.wmsParams.time === effectiveDate) return auroraLayer;
     if (auroraLayer) map.removeLayer(auroraLayer);
-    auroraLayer = L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance', format: 'image/png', transparent: true, time: effectiveDate, attribution: `NASA GIBS | ${effectiveDate}`, pane: 'dataOverlays' });
+    auroraLayer = L.tileLayer.wms('//gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance', format: 'image/png', transparent: true, time: effectiveDate, attribution: `NASA GIBS | ${effectiveDate}`, pane: 'dataOverlays' });
     auroraLayer.setOpacity(0.5);
 
     if (isFallback) {

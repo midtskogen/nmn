@@ -225,13 +225,10 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
     cached_filename = f"grid_{station_id}_cam{cam_num}_{date_str}.png"
     cached_filepath = os.path.join(DOWNLOAD_DIR, cached_filename)
 
-    # Check if already cached (valid for 1 day)
+    # Check if already cached
     if os.path.exists(cached_filepath) and os.path.getsize(cached_filepath) > 0:
-        file_age = time.time() - os.path.getmtime(cached_filepath)
-        if file_age < 86400:
-            logging.info(f"{log_prefix} Using cached grid: {cached_filename}")
-            return {"success": True, "grid_url": f"download/{cached_filename}"}
-        logging.info(f"{log_prefix} Grid cache expired (age={file_age:.0f}s), refetching")
+        logging.info(f"{log_prefix} Using cached grid: {cached_filename}")
+        return {"success": True, "grid_url": f"download/{cached_filename}"}
 
     # Need to fetch from station
     try:
@@ -344,7 +341,7 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
         # Generate annotation with drawgrid.py
         cmd = [
             "python3", DRAWGRID_SCRIPT,
-            "--annotations-only", "--nopos",
+            "--annotations-only",
             "-Y", str(lat), "-X", str(lon),
             "-d", str(epoch_time),
             pto_path, output_path

@@ -88,10 +88,10 @@ except SyntaxError as e:
 
 HTML_TEMPLATE = """
 <!DOCTYPE html><html lang="en"><head><title>__{{html_title}}__</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<link rel="stylesheet" href="//unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="//unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="//cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="//cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <link rel="stylesheet" href="style.css?v=20260412">
 </head><body>
 <div class="container">

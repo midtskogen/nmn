@@ -523,14 +523,19 @@ def main():
             draw.fill_color = wand.color.Color('transparent')
             star_r = 7  # visual radius (circle perimeter at +5,+5 gives radius ≈ 7px)
             visible_stars = []
+            snap = 2  # snap to grid for stable label placement across frames
             for s in stars:
                 x, y = s[0] * args.xscale, s[1] * args.yscale
                 if 0 <= x < image.width and 0 <= y < image.height:
                     draw.circle((x, y), (x + 5, y + 5))
-                    visible_stars.append((x, y, s))
+                    # Snap position for label placement (circle drawn at exact pos)
+                    sx_snap = round(x / snap) * snap
+                    sy_snap = round(y / snap) * snap
+                    visible_stars.append((sx_snap, sy_snap, s))
 
-            # Sort brightest first so important stars get priority label positions
-            visible_stars.sort(key=lambda t: t[2][5])
+            # Sort brightest first so important stars get priority label positions.
+            # Use star name as tiebreaker for stable ordering across frames.
+            visible_stars.sort(key=lambda t: (t[2][5], t[2][4]))
 
             # --- Label placement with collision detection ---
             draw.translate(0, 0)

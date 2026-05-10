@@ -311,9 +311,27 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
         end_result = end_result or pto_mapper.map_pano_to_image(pto_data, end_x_wrapped, end_pano_y)
 
     if not start_result:
-        raise ProjectionError("Could not map start coordinates to an image.")
+        raise ProjectionError(
+            f"Could not map START coordinates to an image.\n"
+            f"  Input from config: startpos='{start_pos_str}', endpos='{end_pos_str}'\n"
+            f"  Parsed values: start_az={start_az}, start_alt={start_alt}\n"
+            f"  Panoramic dims: pano_w={pano_w}, pano_h={pano_h}\n"
+            f"  Panoramic coords: start_pano_x={start_pano_x}, start_pano_y={start_pano_y}\n"
+            f"  Wrapped fallback: start_x_wrapped={start_x_wrapped if 'start_x_wrapped' in dir() else 'N/A'}\n"
+            f"  PTO file used: {pto_file}\n"
+            f"  PTO data parsed: {len(pto_data[0]) if pto_data and pto_data[0] else 0} global options, "
+            f"{len(pto_data[1]) if pto_data and len(pto_data) > 1 else 0} image entries"
+        )
     if not end_result:
-        raise ProjectionError("Could not map end coordinates to an image.")
+        raise ProjectionError(
+            f"Could not map END coordinates to an image.\n"
+            f"  Input from config: startpos='{start_pos_str}', endpos='{end_pos_str}'\n"
+            f"  Parsed values: end_az={end_az}, end_alt={end_alt}\n"
+            f"  Panoramic dims: pano_w={pano_w}, pano_h={pano_h}\n"
+            f"  Panoramic coords: end_pano_x={end_pano_x}, end_pano_y={end_pano_y}\n"
+            f"  Wrapped fallback: end_x_wrapped={end_x_wrapped if 'end_x_wrapped' in dir() else 'N/A'}\n"
+            f"  PTO file used: {pto_file}"
+        )
 
     return [start_result[1], start_result[2]], [end_result[1], end_result[2]]
 

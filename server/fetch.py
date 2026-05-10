@@ -186,13 +186,58 @@ class Config:
     _TEST_CODE_BASE = Path('/home/steinar/norskmeteornettverk.no/nmn')
     _SERVER_CODE_BASE = Path('/home/httpd/norskmeteornettverk.no/nmn')
     _RESOLVED_CODE_BASE = Path(__file__).resolve().parents[1]
-    CODE_BASE_DIR = _TEST_CODE_BASE if _TEST_CODE_BASE.exists() else (_SERVER_CODE_BASE if _SERVER_CODE_BASE.exists() else _RESOLVED_CODE_BASE)
+
+    # Determine which path to use
+    # Use try-except for exists() checks because www-data may not have
+    # permission to access /home/steinar/, causing PermissionError
+    try:
+        _test_exists = _TEST_CODE_BASE.exists()
+    except (PermissionError, OSError):
+        _test_exists = False
+
+    try:
+        _server_exists = _SERVER_CODE_BASE.exists()
+    except (PermissionError, OSError):
+        _server_exists = False
+
+    if _test_exists:
+        CODE_BASE_DIR = _TEST_CODE_BASE
+        _CODE_BASE_SOURCE = 'TEST'
+    elif _server_exists:
+        CODE_BASE_DIR = _SERVER_CODE_BASE
+        _CODE_BASE_SOURCE = 'SERVER'
+    else:
+        CODE_BASE_DIR = _RESOLVED_CODE_BASE
+        _CODE_BASE_SOURCE = 'RESOLVED'
+
+    @classmethod
+    def log_paths(cls):
+        """Log the path configuration for debugging."""
+        logging.info(f"Config: CODE_BASE_DIR source = {cls._CODE_BASE_SOURCE}")
+        logging.info(f"Config: CODE_BASE_DIR = {cls.CODE_BASE_DIR}")
+        try:
+            _exists = cls.CODE_BASE_DIR.exists()
+        except (PermissionError, OSError):
+            _exists = False
+        logging.info(f"Config: CODE_BASE_DIR exists = {_exists}")
+        logging.info(f"Config: BIN_DIR = {cls.BIN_DIR}")
+        try:
+            _bin_exists = cls.BIN_DIR.exists()
+        except (PermissionError, OSError):
+            _bin_exists = False
+        logging.info(f"Config: BIN_DIR exists = {_bin_exists}")
+        logging.info(f"Config: BASE_HTTP_DIR = {cls.BASE_HTTP_DIR}")
+        logging.info(f"Config: METEOR_DATA_DIR = {cls.METEOR_DATA_DIR}")
 
     # Base directory for all meteor data on the local server.
     # Prefer the canonical server path if it exists to avoid writing into a
     # different tree during fetch mode.
     _CANONICAL_HTTP_DIR = Path('/home/httpd/norskmeteornettverk.no')
-    BASE_HTTP_DIR = _CANONICAL_HTTP_DIR if _CANONICAL_HTTP_DIR.exists() else CODE_BASE_DIR
+    try:
+        _canonical_exists = _CANONICAL_HTTP_DIR.exists()
+    except (PermissionError, OSError):
+        _canonical_exists = False
+    BASE_HTTP_DIR = _CANONICAL_HTTP_DIR if _canonical_exists else CODE_BASE_DIR
 
     METEOR_DATA_DIR = BASE_HTTP_DIR / 'meteor'
     # Always use scripts from this checkout to avoid running stale code.
@@ -358,12 +403,12 @@ def set_permissions(directory: Path):
             try:
                 Path(root, d).chmod(0o775)
             except OSError as e:
-                logging.warning(f"Could not set permissions on dir {root}/{d}: {e}")
+                logging.debug(f"Could not set permissions on dir {root}/{d}: {e}")
         for f in files:
             try:
                 Path(root, f).chmod(0o664)
             except OSError as e:
-                logging.warning(f"Could not set permissions on file {root}/{f}: {e}")
+                logging.debug(f"Could not set permissions on file {root}/{f}: {e}")
 
 
 def to_cartesian(az: float, alt: float) -> list:
@@ -1076,10 +1121,15 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             while pending and len(running) < max_jobs:
                 event_file = pending.pop(0)
                 report_log = event_file.parent / 'report.log'
-                report_cmd = [sys.executable, str(report_script), str(event_file)]
+                # Ensure we have a valid Python executable (PHP may not set sys.executable)
+                python_exe = sys.executable if sys.executable else '/usr/bin/python3'
+                report_cmd = [python_exe, str(report_script), str(event_file)]
                 logging.info(f"--- Spawning {report_script.name} for {event_file} ---")
+                logging.info(f"Spawn details: exe={python_exe} (sys.executable={sys.executable}), script={report_script}, cwd={event_file.parent}")
+                logging.info(f"Spawn details: report_log={report_log}, parent exists={event_file.parent.exists()}")
                 try:
                     log_file = report_log.open('w')
+                    logging.info(f"Log file opened: {report_log}")
                     proc = subprocess.Popen(
                         report_cmd,
                         cwd=str(event_file.parent),
@@ -1089,7 +1139,15 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     running.append((proc, log_file, time.monotonic()))
                     time.sleep(1)
                 except Exception as e:
-                    logging.error(f"Failed to spawn process.py for {event_file}: {e}")
+                    import traceback
+                    logging.error(f"Failed to spawn process.py for {event_file}: {type(e).__name__}: {e}")
+                    logging.error(f"Command was: {' '.join(report_cmd)}")
+                    logging.error(f"CWD was: {event_file.parent}")
+                    logging.error(f"Report log path: {report_log}")
+                    logging.error(f"sys.executable type: {type(sys.executable)}, value: {repr(sys.executable)}")
+                    logging.error(f"report_script type: {type(report_script)}, value: {repr(str(report_script))}")
+                    logging.error(f"event_file type: {type(event_file)}, value: {repr(str(event_file))}")
+                    logging.error(f"Exception traceback: {traceback.format_exc()}")
 
             still_running = []
             for proc, log_file, start_time in running:
@@ -1732,7 +1790,15 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
 
 def main():
     """Main script execution flow."""
-    
+
+    # Very early debug logging - write to /tmp before any setup
+    with open('/tmp/fetch_py_start.log', 'a') as _f:
+        _f.write(f"fetch.py main() started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        _f.write(f"  sys.argv: {sys.argv}\n")
+        _f.write(f"  __file__: {__file__}\n")
+        _f.write(f"  os.getcwd(): {os.getcwd()}\n")
+        _f.write(f"  getuid: {os.getuid()}\n")
+
     # --- Register cleanup to fix terminal echo on exit ---
     atexit.register(restore_terminal_state)
     
@@ -1856,7 +1922,8 @@ def main():
     log_path = final_event_dir / 'process.log'
     setup_logging(log_path)
     logging.info(f"--- Event merged into {final_event_dir}. Starting main processing. ---")
-    
+    Config.log_paths()  # Debug: log which paths are being used
+
     proc_date_str = final_event_dir.parent.name
     proc_time_str = final_event_dir.name
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')

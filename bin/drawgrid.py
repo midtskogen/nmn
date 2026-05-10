@@ -646,11 +646,8 @@ def main():
                 best = None
                 best_n = float('inf')
 
-<<<<<<< HEAD
                 prev = prev_placements.get(s[4])
 
-                for lx, ly in label_candidates(x, y, lw, asc, desc):
-=======
                 # Deterministic preferred direction from star name hash
                 pref_angle = (hash(s[4]) % 3600) / 3600.0 * 2 * math.pi
                 pref_cos = math.cos(pref_angle)
@@ -659,7 +656,6 @@ def main():
                                    key=lambda cs: -(cs[0]*pref_cos + cs[1]*pref_sin))
 
                 for lx, ly in label_candidates(x, y, lw, asc, desc, sorted_cs):
->>>>>>> 54bcc72 (Improve label stability)
                     b = label_box(lx, ly, lw, asc, desc)
                     if b[0] < 0 or b[2] > image.width or b[1] < 0 or b[3] > image.height:
                         continue
@@ -709,7 +705,6 @@ def main():
             for lx, ly, label, *_ in label_draws:
                 draw.text(int(lx), int(ly), label)
 
-<<<<<<< HEAD
             # Save current placements for next frame's stability bias
             if cur_placements:
                 try:
@@ -718,8 +713,6 @@ def main():
                 except OSError:
                     pass
 
-=======
->>>>>>> 54bcc72 (Improve label stability)
         draw(image)
 
         image.format = 'png'

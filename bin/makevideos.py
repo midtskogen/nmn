@@ -1430,15 +1430,18 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
                 f" --source-video {filenames['full']}"  # force clean source video
                 f" ."
             )
+            # Update event.txt BEFORE meteorcrop so it reads the correct startpos/endpos.
+            update_event_file(event_data)
+
             print(f"   meteorcrop sources: video='{filenames['full']}' image='{filenames['jpg']}'")
-            run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg", verbose)
+            try:
+                run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg", verbose)
+            except subprocess.CalledProcessError as e:
+                print(f"Warning: meteorcrop failed (non-fatal): {e}", file=sys.stderr)
             
             # Watermark the Gnomonic Image
             if logo_paths is not None:
                 add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose)
-
-        # Update event.txt before returning so client mode persists refined values too.
-        update_event_file(event_data)
 
         # Watermark the Stacked Image
         if logo_paths is not None:
@@ -1654,9 +1657,7 @@ def main(args):
 
     if event_data.get('refined_coords'):
         s_az, s_alt, e_az, e_alt = event_data['refined_coords']
-        print(f"{s_az:.2f} {s_alt:.2f} {e_az:.2f} {e_alt:.2f}")
-    else:
-        pass
+        print(f"AZALT: {s_az:.2f} {s_alt:.2f} {e_az:.2f} {e_alt:.2f}")
 
 def check_pid(pid):
     """Check For the existence of a unix pid."""

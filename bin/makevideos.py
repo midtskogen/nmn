@@ -1446,11 +1446,16 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
 
         try:
             event_data = get_event_data("event.txt")
-            start_coords = event_data.get('start_azalt', 'N/A,N/A').replace(',', ' ')
-            end_coords = event_data.get('end_azalt', 'N/A,N/A').replace(',', ' ')
-            print(f"Start: {start_coords}  End: {end_coords}")
+            start_azalt = event_data.get('start_azalt', 'N/A,N/A')
+            end_azalt = event_data.get('end_azalt', 'N/A,N/A')
+            # Parse and print just the 4 numeric values for report.py to consume
+            start_az, start_alt = start_azalt.split(',')
+            end_az, end_alt = end_azalt.split(',')
+            print(f"{float(start_az):.2f} {float(start_alt):.2f} {float(end_az):.2f} {float(end_alt):.2f}")
         except SystemExit:
             print("Could not read event.txt to report coordinates.")
+        except Exception as e:
+            print(f"Error reporting coordinates: {e}")
 
 def main(args):
     """Main function to orchestrate the video processing pipeline."""

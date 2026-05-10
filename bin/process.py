@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import calendar
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import re
 import ephem
@@ -631,26 +632,30 @@ def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: lis
 
     time_axis = [t - timestamps[0] for t in timestamps]
 
-    for lang in SUPPORTED_LANGS:
+    def _render_lang(lang):
         translations = load_translations(lang)
         file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-        
         svg_path = event_dir / f'{file_prefix}brightness.svg'
         jpg_path = event_dir / f'{file_prefix}brightness.jpg'
-
         try:
-            plt.figure()
-            plt.plot(time_axis, brightness)
-            plt.xlabel(translations.get("plot_time_x_label", "Time [s]"))
-            plt.ylabel(translations.get("brightness", "Brightness"))
-            plt.title(translations.get("brightness_plot_title", "Brightness over Time"))
-            
-            plt.savefig(svg_path)
-            plt.savefig(jpg_path)
-            plt.close()
-            print(f"  - Saved {svg_path.name} and {jpg_path.name}")
+            fig, ax = plt.subplots()
+            ax.plot(time_axis, brightness)
+            ax.set_xlabel(translations.get("plot_time_x_label", "Time [s]"))
+            ax.set_ylabel(translations.get("brightness", "Brightness"))
+            ax.set_title(translations.get("brightness_plot_title", "Brightness over Time"))
+            fig.savefig(svg_path)
+            fig.savefig(jpg_path)
+            plt.close(fig)
+            return f"  - Saved {svg_path.name} and {jpg_path.name}", None
         except Exception as e:
-            print(f"Error generating plot for language '{lang}': {e}")
+            return None, f"Error generating plot for language '{lang}': {e}"
+
+    with ThreadPoolExecutor(max_workers=len(SUPPORTED_LANGS)) as pool:
+        for msg, err in pool.map(_render_lang, SUPPORTED_LANGS):
+            if msg:
+                print(msg)
+            if err:
+                print(err)
 
 
 def main():

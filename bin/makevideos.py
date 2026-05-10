@@ -634,7 +634,7 @@ def overlay_video_with_image(video_path, overlay_path, output_path, verbose=Fals
         (
             ffmpeg
             .overlay(input_video, overlay_image)
-            .output(output_path, vcodec='libx264')
+            .output(output_path, vcodec='libx264', preset='fast')
             .overwrite_output()
             .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
         )
@@ -1079,10 +1079,27 @@ def refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose, pa
         refined_start = f"{s_az:.2f},{s_alt:.2f}"
         refined_end = f"{e_az:.2f},{e_alt:.2f}"
 
-        if event_data.get('start_azalt') != refined_start or event_data.get('end_azalt') != refined_end:
-            event_data['start_azalt'] = refined_start
-            event_data['end_azalt'] = refined_end
+        # Only regenerate if endpoints shifted by more than 0.5° — avoids a full
+        # reproject+stitch cycle for negligible refinements.
+        _REGEN_THRESHOLD_DEG = 0.5
+        needs_regen = False
+        try:
+            orig_start = event_data.get('start_azalt', '')
+            orig_end = event_data.get('end_azalt', '')
+            os_az, os_alt = (float(x) for x in orig_start.split(','))
+            oe_az, oe_alt = (float(x) for x in orig_end.split(','))
+            if (abs(s_az - os_az) > _REGEN_THRESHOLD_DEG or abs(s_alt - os_alt) > _REGEN_THRESHOLD_DEG or
+                    abs(e_az - oe_az) > _REGEN_THRESHOLD_DEG or abs(e_alt - oe_alt) > _REGEN_THRESHOLD_DEG):
+                needs_regen = True
+            else:
+                print(f"   Refined endpoints within {_REGEN_THRESHOLD_DEG}° of initial — skipping gnomonic regeneration.")
+        except Exception:
+            needs_regen = (event_data.get('start_azalt') != refined_start or event_data.get('end_azalt') != refined_end)
 
+        event_data['start_azalt'] = refined_start
+        event_data['end_azalt'] = refined_end
+
+        if needs_regen:
             generate_gnomonic_projection(
                 event_data, filenames, tmpdir, verbose, filenames['jpg'], padding_value=padding_value
             )
@@ -1164,11 +1181,11 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
     stacked_jpg_path = future_stacked_jpg.result() and filenames['jpg']
     future_gnomonic_base_image = executor.submit(generate_gnomonic_projection, 
                                                  event_data, filenames, tmpdir, verbose, stacked_jpg_path)
-    future_gnomonic_base_image.result() 
+    future_gnomonic_base_image.result()
 
     refined_data = refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose)
 
-    # 2. GNOMONIC VIDEO PIPELINE
+    # 2. GNOMONIC VIDEO PIPELINE — submitted in parallel with grid/logo work below
     future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
                                           filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
     
@@ -1177,30 +1194,37 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
     stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['source']} {raw_gnomonic_mp4}"
     future_stitch = executor.submit(lambda: run_command(future_modified_pto.result() and stitch_cmd_mp4, "Creating gnomonic video", verbose))
 
-    # Create 1080p Logo Layer (optional)
-    logo_layer_1080p = None
+    # Create 1080p Logo Layer in parallel with both the stitch and the grid pipeline
+    future_logo_layer_1080p = None
     if logo_paths is not None:
         logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
-        # Ensure this exists (might have been created in full view, but parallel safety says create again or check)
-        create_logo_overlay(1920, 1080, logo_paths, logo_layer_1080p)
+        future_logo_layer_1080p = executor.submit(create_logo_overlay, 1920, 1080, logo_paths, logo_layer_1080p)
 
-    # 3. GNOMONIC IMAGE/GRID PIPELINE
+    # 3. GNOMONIC IMAGE/GRID PIPELINE — runs in parallel with stitch + logo layer
     future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, logo_paths, verbose, refined_data)
 
-    # 4. FINAL ASSEMBLY
-    grid_assets = future_grid_assets.result() # Contains CLEAN cropped grid
-    future_stitch.result() # Wait for raw stitching
-    
-    # A. Watermark the Base Gnomonic Video -> [prefix]-gnomonic.mp4
-    # If logos are disabled, keep the base video clean.
+    # 4. FINAL ASSEMBLY — wait for all three parallel tracks
+    grid_assets = future_grid_assets.result()  # Contains CLEAN cropped grid
+    future_stitch.result()                     # Wait for raw stitching
+    logo_layer_1080p = future_logo_layer_1080p.result() if future_logo_layer_1080p is not None else None
+
+    # A and B run in parallel: both read raw_gnomonic_mp4 (read-only), write to separate outputs.
+    # A: raw_mp4 + logos           → [prefix]-gnomonic.mp4
+    # B: raw_mp4 + logos+grid      → [prefix]-gnomonic-grid.mp4
+    # For B we pre-compose logos+grid into one image so a single ffmpeg overlay pass
+    # produces the same result as the old serial A-then-B chain, with no ghosting.
+    cropped_grid = grid_assets["cropped_grid"]
     if logo_layer_1080p is not None:
-        overlay_video_with_image(raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+        logos_and_grid_path = f"{tmpdir}/gnomonic_logos_and_grid.png"
+        alpha_composite_images(logo_layer_1080p, cropped_grid, logos_and_grid_path, verbose=False)
+        future_overlay_a = executor.submit(overlay_video_with_image, raw_gnomonic_mp4, logo_layer_1080p, filenames['gnomonicmp4'], verbose)
+        future_overlay_b = executor.submit(overlay_video_with_image, raw_gnomonic_mp4, logos_and_grid_path, filenames['gnomonicgridmp4'], verbose)
     else:
-        shutil.copyfile(raw_gnomonic_mp4, filenames['gnomonicmp4'])
-    
-    # B. Create Grid Video: Overlay CLEAN grid onto WATERMARKED base video -> [prefix]-gnomonic-grid.mp4
-    # This prevents double logos (ghosting) while ensuring correct placement.
-    overlay_video_with_image(filenames['gnomonicmp4'], grid_assets["cropped_grid"], filenames['gnomonicgridmp4'], verbose)
+        future_overlay_a = executor.submit(shutil.copyfile, raw_gnomonic_mp4, filenames['gnomonicmp4'])
+        future_overlay_b = executor.submit(overlay_video_with_image, raw_gnomonic_mp4, cropped_grid, filenames['gnomonicgridmp4'], verbose)
+
+    for f in as_completed([future_overlay_a, future_overlay_b]):
+        f.result()
 
 def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, verbose):
     """Runs the entire gnomonic processing pipeline sequentially."""
@@ -1574,13 +1598,15 @@ def main(args):
                 _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
         else:
             with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-                # Change filenames['full'] to filenames['source']
                 stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['source']}"
                 future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", args.verbose)
 
                 # Ensure the clean stacked snapshot is taken as soon as stacking completes,
                 # before any other tasks can apply logos or modify the stacked JPG.
                 future_stacked_jpg.result()
+                # Save a clean copy immediately. jpg is already clean at this point —
+                # no logos have been applied yet. All parallel pipelines below read jpg
+                # as their base; meteorcrop also reads it directly.
                 try:
                     clean_stacked = Path(f"{filenames['name']}-clean.jpg")
                     if Path(filenames['jpg']).exists():
@@ -1588,14 +1614,39 @@ def main(args):
                 except Exception:
                     pass
 
+                # Submit full view, gnomonic view, and meteorcrop all in parallel.
+                # meteorcrop reads clean jpg (just restored above) and source video (read-only) —
+                # it has no dependency on either view pipeline.
                 future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
-                
+
                 if gnomonic_enabled:
                     future_gnomonic = executor.submit(_run_gnomonic_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
-                    future_gnomonic.result()
                 else:
+                    future_gnomonic = None
                     print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
 
+                # meteorcrop: depends only on stack.py being done (clean jpg already restored above)
+                meteorcrop_script = BIN_DIR / 'meteorcrop.py'
+                def _run_meteorcrop():
+                    if not meteorcrop_script.exists():
+                        print(f"Warning: {meteorcrop_script.name} not found. Skipping automatic cropping.", file=sys.stderr)
+                        return
+                    try:
+                        _cmd = (
+                            f"{sys.executable} {meteorcrop_script} --mode both"
+                            f" --source-video {filenames['source']}"
+                            f" ."
+                        )
+                        print(f"   meteorcrop sources: video='{filenames['source']}' image='{filenames['jpg']}'")
+                        run_command(_cmd, "Cropping meteor track to create fireball.jpg (on clean images)", args.verbose)
+                    except Exception as e:
+                        print(f"Warning: Failed to run meteorcrop.py: {e}", file=sys.stderr)
+                future_meteorcrop = executor.submit(_run_meteorcrop)
+
+                # Wait for all three tracks
+                future_meteorcrop.result()
+                if future_gnomonic is not None:
+                    future_gnomonic.result()
                 future_full_view.result()
 
         try:
@@ -1605,50 +1656,34 @@ def main(args):
         except Exception:
             pass
 
-        # --- KEY CHANGE: Generate fireball.jpg BEFORE watermarking ---
-        # This ensures the crop happens on the clean images
-        meteorcrop_script = BIN_DIR / 'meteorcrop.py'
-        if meteorcrop_script.exists():
-            try:
-                try:
-                    clean_stacked = Path(f"{filenames['name']}-clean.jpg")
-                    if clean_stacked.exists() and Path(filenames['jpg']).exists():
-                        shutil.copyfile(str(clean_stacked), str(filenames['jpg']))
-                except Exception:
-                    pass
-                # meteorcrop.py typically takes the directory '.' as argument
-                meteorcrop_cmd = (
-                    f"{sys.executable} {meteorcrop_script} --mode both"
-                    f" --source-video {filenames['source']}"
-                    f" ."
-                )
-                print(f"   meteorcrop sources: video='{filenames['source']}' image='{filenames['jpg']}'")
-                run_command(meteorcrop_cmd, "Cropping meteor track to create fireball.jpg (on clean images)", args.verbose)
-            except Exception as e:
-                print(f"Warning: Failed to run meteorcrop.py: {e}", file=sys.stderr)
-        else:
-             print(f"Warning: {meteorcrop_script.name} not found. Skipping automatic cropping.", file=sys.stderr)
-
-        # Watermark the base images (clean stacked and gnomonic) at the end
-        if logo_paths is not None:
-            add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose=args.verbose)
-            if gnomonic_enabled and Path(filenames['gnomonic']).exists():
-                 add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose=args.verbose)
-
-
-        # --- HEVC Transcoding Step ---
+        # Watermark stacked jpg and gnomonic jpg, plus HEVC transcode — all independent,
+        # run in parallel with a short-lived executor.
         print("\n--- Finalizing Videos ---")
-        
-        # We create a 1080p overlay specifically for the HEVC transcode process
-        # (Only relevant when logos are enabled)
-        if logo_paths is not None:
-            with tempfile.TemporaryDirectory() as hevc_tmp:
-                # Determine actual video resolution for the overlay - USE FULL because we are replacing it
-                if Path(filenames['full']).exists():
-                    vw, vh = get_video_resolution(filenames['full'])
-                    hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
-                    create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
-                    handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
+        def _add_logos_jpg():
+            if logo_paths is not None:
+                add_logos(filenames['jpg'], filenames['jpg'], logo_paths, verbose=args.verbose)
+
+        def _add_logos_gnomonic():
+            if logo_paths is not None and gnomonic_enabled and Path(filenames['gnomonic']).exists():
+                add_logos(filenames['gnomonic'], filenames['gnomonic'], logo_paths, verbose=args.verbose)
+
+        def _hevc_transcode():
+            if logo_paths is not None:
+                with tempfile.TemporaryDirectory() as hevc_tmp:
+                    if Path(filenames['full']).exists():
+                        vw, vh = get_video_resolution(filenames['full'])
+                        hevc_overlay_path = f"{hevc_tmp}/hevc_overlay.png"
+                        create_logo_overlay(vw, vh, logo_paths, hevc_overlay_path)
+                        handle_hevc_transcoding(filenames['full'], hevc_overlay_path, args.verbose)
+
+        with ThreadPoolExecutor(max_workers=3) as fin_executor:
+            fin_futures = [
+                fin_executor.submit(_add_logos_jpg),
+                fin_executor.submit(_add_logos_gnomonic),
+                fin_executor.submit(_hevc_transcode),
+            ]
+            for f in as_completed(fin_futures):
+                f.result()
 
         # Update event.txt before finishing
         update_event_file(event_data)

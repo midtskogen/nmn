@@ -20,6 +20,8 @@ import argparse
 import math
 import sys
 import numpy as np
+import numba
+from numba import prange
 from pathlib import Path
 from PIL import Image
 from collections import deque
@@ -75,6 +77,54 @@ def line(center: tuple[float, float], angle: float, length: float, steps: int) -
         line_points.append((x, y))
     return line_points
 
+@numba.njit(cache=True, fastmath=True)
+def _brightness_nb(img_y, start_x, start_y, end_x, end_y, steps):
+    """JIT-compiled brightness sampling along a line using bilinear interpolation on luma."""
+    length = math.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+    if steps == 0 or length == 0.0:
+        return 0.0
+    angle = math.atan2(end_y - start_y, end_x - start_x)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    step_size = length / steps
+    h, w = img_y.shape
+    total = 0.0
+    i = 0.0
+    while i < length:
+        x = start_x + cos_a * i
+        y = start_y + sin_a * i
+        xi, yi = int(x), int(y)
+        if 0 <= xi < w - 1 and 0 <= yi < h - 1:
+            xf, yf = x - xi, y - yi
+            p00 = img_y[yi, xi]
+            p10 = img_y[yi, xi + 1]
+            p01 = img_y[yi + 1, xi]
+            p11 = img_y[yi + 1, xi + 1]
+            p_top = p00 * (1.0 - xf) + p10 * xf
+            p_bot = p01 * (1.0 - xf) + p11 * xf
+            total += p_top * (1.0 - yf) + p_bot * yf
+        i += step_size
+    return total
+
+
+@numba.njit(cache=True, fastmath=True)
+def _phase1_search_nb(img_y, starts_x, starts_y, ends_x, ends_y, steps):
+    """JIT-compiled Phase 1 exhaustive search across all start/end pairs."""
+    n_s = len(starts_x)
+    n_e = len(ends_x)
+    best = -1.0
+    best_si = 0
+    best_ei = 0
+    for si in range(n_s):
+        for ei in range(n_e):
+            val = _brightness_nb(img_y, starts_x[si], starts_y[si], ends_x[ei], ends_y[ei], steps)
+            if val > best:
+                best = val
+                best_si = si
+                best_ei = ei
+    return best_si, best_ei
+
+
 def brightness(img, start: tuple[float, float], end: tuple[float, float], steps: int) -> list[float]:
     """Calculates brightness values along a line using bilinear interpolation."""
     brightness_values = []
@@ -97,6 +147,66 @@ def brightness(img, start: tuple[float, float], end: tuple[float, float], steps:
         except (IndexError, TypeError):
             pass
     return brightness_values
+
+@numba.njit(cache=True, fastmath=True)
+def _track_nb(img_y, start_x, start_y, end_x, end_y, steps):
+    """JIT-compiled track scan: returns arrays of (is_dim, last_x, last_y, x, y, is_very_bright)."""
+    length = math.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+    if steps == 0 or length == 0.0:
+        return (np.empty(0, np.bool_), np.empty(0, np.float64), np.empty(0, np.float64),
+                np.empty(0, np.float64), np.empty(0, np.float64), np.empty(0, np.bool_))
+    h, w = img_y.shape
+    angle = math.atan2(end_y - start_y, end_x - start_x)
+    perp = angle + math.pi / 2.0
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    cos_p, sin_p = math.cos(perp), math.sin(perp)
+    step_size = length / steps
+    n = int(length / step_size) + 1
+    is_dim_arr       = np.empty(n, np.bool_)
+    last_x_arr       = np.empty(n, np.float64)
+    last_y_arr       = np.empty(n, np.float64)
+    cur_x_arr        = np.empty(n, np.float64)
+    cur_y_arr        = np.empty(n, np.float64)
+    is_bright_arr    = np.empty(n, np.bool_)
+    count = 0
+    last_x, last_y = start_x, start_y
+    i_f = 0.0
+    while i_f < length:
+        x = start_x + cos_a * i_f
+        y = start_y + sin_a * i_f
+        xi, yi = int(x), int(y)
+        if 0 <= xi < w - 1 and 0 <= yi < h - 1:
+            xf, yf = x - xi, y - yi
+            p00 = img_y[yi, xi]; p10 = img_y[yi, xi + 1]
+            p01 = img_y[yi + 1, xi]; p11 = img_y[yi + 1, xi + 1]
+            pt_b = (p00*(1.0-xf)+p10*xf)*(1.0-yf) + (p01*(1.0-xf)+p11*xf)*yf
+            # background: 30-point perpendicular sample
+            bg_sum = 0.0
+            bg_n = 0
+            for k in range(30):
+                bx = x + cos_p * (-15.0 + k)
+                by = y + sin_p * (-15.0 + k)
+                bxi, byi = int(bx), int(by)
+                if 0 <= bxi < w - 1 and 0 <= byi < h - 1:
+                    bg_sum += img_y[byi, bxi]
+                    bg_n += 1
+            bg_avg = bg_sum / bg_n if bg_n > 0 else pt_b
+            is_dim = pt_b <= bg_avg
+            is_bright = pt_b > bg_avg + 24.0
+            if count < n:
+                is_dim_arr[count]    = is_dim
+                last_x_arr[count]    = last_x
+                last_y_arr[count]    = last_y
+                cur_x_arr[count]     = x
+                cur_y_arr[count]     = y
+                is_bright_arr[count] = is_bright
+                count += 1
+            if is_dim:
+                last_x, last_y = x, y
+        i_f += step_size
+    return (is_dim_arr[:count], last_x_arr[:count], last_y_arr[:count],
+            cur_x_arr[:count], cur_y_arr[:count], is_bright_arr[:count])
+
 
 def track(img, start: tuple[float, float], end: tuple[float, float], steps: int) -> list:
     """Scans a line to determine if points are dimmer than their surroundings."""
@@ -237,57 +347,71 @@ args = parser.parse_args()
 # Load image and initial properties
 im = Image.open(args.img)
 img_pixels = im.load()
+# Convert to luma numpy array once — used by all JIT-compiled hot paths
+img_y = np.array(im.convert('L'), dtype=np.float32)
 x1, y1 = args.start
 x2, y2 = args.end
 initial_angle = math.atan2(y2 - y1, x2 - x1)
 initial_length = dist(args.start, args.end)
 
-# 2. PHASE 1: FAST APPROXIMATION
+# 2. PHASE 1: FAST APPROXIMATION (JIT-compiled exhaustive search)
 start_search_line = line(args.start, initial_angle - math.pi / 2, args.radius * 2, args.radius)
 end_search_line = line(args.end, initial_angle - math.pi / 2, args.radius * 2, args.radius)
-best_brightness = 0
-best_start_approx, best_end_approx = (0, 0), (0, 0)
-for a in start_search_line:
-    for b in end_search_line:
-        current_brightness = sum(brightness(img_pixels, a, b, initial_length / 5))
-        if current_brightness > best_brightness:
-            best_start_approx, best_end_approx, best_brightness = a, b, current_brightness
+starts_x = np.array([p[0] for p in start_search_line], dtype=np.float64)
+starts_y = np.array([p[1] for p in start_search_line], dtype=np.float64)
+ends_x   = np.array([p[0] for p in end_search_line],   dtype=np.float64)
+ends_y   = np.array([p[1] for p in end_search_line],   dtype=np.float64)
+steps_p1 = max(1, int(initial_length / 5))
+best_si, best_ei = _phase1_search_nb(img_y, starts_x, starts_y, ends_x, ends_y, steps_p1)
+best_start_approx = (float(starts_x[best_si]), float(starts_y[best_si]))
+best_end_approx   = (float(ends_x[best_ei]),   float(ends_y[best_ei]))
 
-# 3. PHASE 2: DETAILED REFINEMENT
+# 3. PHASE 2: DETAILED REFINEMENT (JIT-compiled track scan)
 refined_angle = math.atan2(best_end_approx[1] - best_start_approx[1], best_end_approx[0] - best_start_approx[0])
-extended_start = (best_start_approx[0] + math.cos(refined_angle + math.pi) * initial_length * 10, best_start_approx[1] + math.sin(refined_angle + math.pi) * initial_length * 10)
-extended_end = (best_end_approx[0] + math.cos(refined_angle) * initial_length * 10, best_end_approx[1] + math.sin(refined_angle) * initial_length * 10)
+extended_start = (best_start_approx[0] + math.cos(refined_angle + math.pi) * initial_length * 10,
+                  best_start_approx[1] + math.sin(refined_angle + math.pi) * initial_length * 10)
+extended_end   = (best_end_approx[0] + math.cos(refined_angle) * initial_length * 10,
+                  best_end_approx[1] + math.sin(refined_angle) * initial_length * 10)
+extended_len = dist(extended_start, extended_end)
+steps_p2 = max(1, int(extended_len * 10))
+is_dim_a, lx_a, ly_a, cx_a, cy_a, ib_a = _track_nb(
+    img_y, extended_start[0], extended_start[1], extended_end[0], extended_end[1], steps_p2)
 first_bright_point, last_bright_point = None, None
-for i in track(img_pixels, extended_start, extended_end, dist(extended_start, extended_end) * 10):
-    if i[5]:
-        last_bright_point = (i[3], i[4])
-        if not first_bright_point:
-            first_bright_point = (i[3], i[4])
+for idx in range(len(ib_a)):
+    if ib_a[idx]:
+        last_bright_point = (float(cx_a[idx]), float(cy_a[idx]))
+        if first_bright_point is None:
+            first_bright_point = (float(cx_a[idx]), float(cy_a[idx]))
 if first_bright_point: best_start_approx = first_bright_point
-if last_bright_point: best_end_approx = last_bright_point
+if last_bright_point:  best_end_approx   = last_bright_point
 
-# 4. PHASE 3: FINAL PINPOINTING
+# 4. PHASE 3: FINAL PINPOINTING (JIT-compiled exhaustive search)
 args.radius = max(80, args.radius)
 start_search_line = line(best_start_approx, refined_angle - math.pi / 2, args.radius / 40, args.radius / 8)
-end_search_line = line(best_end_approx, refined_angle - math.pi / 2, args.radius / 40, args.radius / 8)
-best_brightness = 0
-for a in start_search_line:
-    for b in end_search_line:
-        current_brightness = sum(brightness(img_pixels, a, b, initial_length * 2))
-        if current_brightness >= best_brightness:
-            best_start_approx, best_end_approx = a, b
+end_search_line   = line(best_end_approx,   refined_angle - math.pi / 2, args.radius / 40, args.radius / 8)
+starts_x = np.array([p[0] for p in start_search_line], dtype=np.float64)
+starts_y = np.array([p[1] for p in start_search_line], dtype=np.float64)
+ends_x   = np.array([p[0] for p in end_search_line],   dtype=np.float64)
+ends_y   = np.array([p[1] for p in end_search_line],   dtype=np.float64)
+steps_p3 = max(1, int(initial_length * 2))
+best_si, best_ei = _phase1_search_nb(img_y, starts_x, starts_y, ends_x, ends_y, steps_p3)
+best_start_approx = (float(starts_x[best_si]), float(starts_y[best_si]))
+best_end_approx   = (float(ends_x[best_ei]),   float(ends_y[best_ei]))
 
-# 5. FIND LONGEST BRIGHT SEGMENT
-track_scan_data = track(img_pixels, best_start_approx, best_end_approx, dist(best_start_approx, best_end_approx) * 10)
+# 5. FIND LONGEST BRIGHT SEGMENT (JIT-compiled track scan)
+steps_p5 = max(1, int(dist(best_start_approx, best_end_approx) * 10))
+is_dim_a5, lx_a5, ly_a5, cx_a5, cy_a5, ib_a5 = _track_nb(
+    img_y, best_start_approx[0], best_start_approx[1],
+    best_end_approx[0], best_end_approx[1], steps_p5)
 run_length, bright_segments = 0, []
-for data_point in track_scan_data:
-    if data_point[0]:
-        bright_segments.append((run_length, data_point[1], data_point[2], data_point[3], data_point[4]))
+for idx in range(len(is_dim_a5)):
+    if is_dim_a5[idx]:
+        bright_segments.append((run_length, float(lx_a5[idx]), float(ly_a5[idx]), float(cx_a5[idx]), float(cy_a5[idx])))
         run_length = 0
     else:
         run_length += 1
-if run_length > 0:
-    bright_segments.append((run_length, track_scan_data[-1][1], track_scan_data[-1][2], track_scan_data[-1][3], track_scan_data[-1][4]))
+if run_length > 0 and len(cx_a5) > 0:
+    bright_segments.append((run_length, float(lx_a5[-1]), float(ly_a5[-1]), float(cx_a5[-1]), float(cy_a5[-1])))
 
 # --- DECISION LOGIC & FINAL OUTPUT ---
 if bright_segments:

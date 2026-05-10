@@ -33,6 +33,10 @@ import sys
 import time
 from pathlib import Path
 
+# Set umask to ensure files are created group-writable (0o664) and directories group-accessible (0o775)
+# This allows www-data to modify files created by steinar when they share the same group
+os.umask(0o002)
+
 # Ensure local project modules are importable even when this script is executed via symlink
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SCRIPT_DIR.parent
@@ -177,7 +181,12 @@ def _pick_infra_fit_for_mapping(infra_fit: dict, min_elev_km: float = 5.0, max_e
 class Config:
     """Configuration constants for the script."""
     # Script/code base directory (this checkout)
-    CODE_BASE_DIR = Path(__file__).resolve().parents[1]
+    # Check testing environment first, fall back to server path.
+    # When run from Apache, __file__ may resolve incorrectly via NFS.
+    _TEST_CODE_BASE = Path('/home/steinar/norskmeteornettverk.no/nmn')
+    _SERVER_CODE_BASE = Path('/home/httpd/norskmeteornettverk.no/nmn')
+    _RESOLVED_CODE_BASE = Path(__file__).resolve().parents[1]
+    CODE_BASE_DIR = _TEST_CODE_BASE if _TEST_CODE_BASE.exists() else (_SERVER_CODE_BASE if _SERVER_CODE_BASE.exists() else _RESOLVED_CODE_BASE)
 
     # Base directory for all meteor data on the local server.
     # Prefer the canonical server path if it exists to avoid writing into a

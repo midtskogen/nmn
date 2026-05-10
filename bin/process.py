@@ -32,6 +32,10 @@ from typing import Optional
 
 # Use a non-interactive backend for matplotlib
 
+# Set umask to ensure files are created group-writable (0o664) and directories group-accessible (0o775)
+# This allows www-data to modify files created by steinar when they share the same group
+os.umask(0o002)
+
 # Ensure local project modules are importable even when this script is executed via symlink
 _SCRIPT_PATH = Path(__file__).resolve()
 _PROJECT_DIR = None

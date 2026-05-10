@@ -151,7 +151,11 @@ def run_video_creation(
     print(f"Running command: {' '.join(command)}")
     try:
         proc = subprocess.run(command, cwd=event_dir, capture_output=True, text=True, check=True)
-        return proc.stdout.split()
+        for line in reversed(proc.stdout.splitlines()):
+            if line.startswith("AZALT:"):
+                return line.split()[1:]
+        print(f"Error: makevideos.py did not output an AZALT: line.\nStdout: {proc.stdout}", file=sys.stderr)
+        return None
     except subprocess.CalledProcessError as e:
         print(f"Error running makevideos.py: {e}\nStderr: {e.stderr}", file=sys.stderr)
         return None
@@ -161,8 +165,8 @@ def generate_reports(config: configparser.ConfigParser, video_output: list, even
     """Generates metrack, centroid, light data files and a brightness plot."""
     original_arc = config.getfloat('trail', 'arc')
     original_duration = config.getfloat('trail', 'duration')
-    start_az, start_alt = float(video_output[-4]), float(video_output[-3])
-    end_az, end_alt = float(video_output[-2]), float(video_output[-1])
+    start_az, start_alt = float(video_output[0]), float(video_output[1])
+    end_az, end_alt = float(video_output[2]), float(video_output[3])
     recalibrated_arc = haversine_arc(start_az, start_alt, end_az, end_alt)
     duration = original_duration * (recalibrated_arc / original_arc) if original_arc > 0 else 0
     lon = config.get('astronomy', 'longitude')
@@ -245,8 +249,8 @@ def update_event_file(config: configparser.ConfigParser, video_output: list, eve
     """Adds a [summary] section to the event file with key results."""
     original_duration = config.getfloat('trail', 'duration')
     original_arc = config.getfloat('trail', 'arc')
-    start_az, start_alt = float(video_output[-4]), float(video_output[-3])
-    end_az, end_alt = float(video_output[-2]), float(video_output[-1])
+    start_az, start_alt = float(video_output[0]), float(video_output[1])
+    end_az, end_alt = float(video_output[2]), float(video_output[3])
     recalibrated_arc = haversine_arc(start_az, start_alt, end_az, end_alt)
     duration = original_duration * (recalibrated_arc / original_arc) if original_arc > 0 else 0
     sun_alt, _ = get_sun_position(config, start_dt)

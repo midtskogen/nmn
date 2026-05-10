@@ -1451,7 +1451,7 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
             # Parse and print just the 4 numeric values for report.py to consume
             start_az, start_alt = start_azalt.split(',')
             end_az, end_alt = end_azalt.split(',')
-            print(f"{float(start_az):.2f} {float(start_alt):.2f} {float(end_az):.2f} {float(end_alt):.2f}")
+            print(f"AZALT: {float(start_az):.2f} {float(start_alt):.2f} {float(end_az):.2f} {float(end_alt):.2f}")
         except SystemExit:
             print("Could not read event.txt to report coordinates.")
         except Exception as e:

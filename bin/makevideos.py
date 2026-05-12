@@ -1013,34 +1013,42 @@ def _safe_move_file(src: str, dst: str) -> None:
     except Exception as unlink_err:
         print(f"Warning: Could not remove temporary file '{src}': {unlink_err}", file=sys.stderr)
 
-def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked_jpg_path, padding_value=1024):
-    """Generates the base gnomonic projection image (clean)."""
+def _run_reproject_pto(event_data, filenames, verbose):
+    """Runs reproject.py to produce gnomonic_pto and gnomonic_grid_pto. Fast (~0.3s)."""
     azalt_start = event_data.get('start_azalt')
     azalt_end = event_data.get('end_azalt')
     if not azalt_start or not azalt_end:
         print("Warning: Skipping gnomonic projection generation: 'coordinates' not found in event.txt.", file=sys.stderr)
         return None
-
     reproject_cmd = (
         f"{sys.executable} {BIN_DIR}/reproject.py -f 45 --width 1920 --height 2560 "
         f"-o {filenames['gnomonic_pto']} -g {filenames['gnomonic_grid_pto']} "
         f"-e {azalt_end} {filenames['lens_pto']} {azalt_start}"
     )
     run_command(reproject_cmd, "Reprojecting for gnomonic view", verbose)
+    return filenames['gnomonic_pto']
 
+
+def _stitch_gnomonic_jpg(filenames, tmpdir, verbose, padding_value=1024):
+    """Stitches the gnomonic JPG from the stacked image. Slow (~4s)."""
     tmp_gnomonic_jpg = f"{tmpdir}/{filenames['name']}-gnomonic-tmp.png"
     stitcher_cmd_jpg = (f"{sys.executable} {BIN_DIR}/stitcher.py --pad {padding_value} "
                         f"{filenames['gnomonic_pto']} {filenames['jpg']} {tmp_gnomonic_jpg}")
     run_command(stitcher_cmd_jpg, "Stitching gnomonic JPG", verbose)
-    
     try:
         _safe_move_file(tmp_gnomonic_jpg, filenames['gnomonic'])
     except PermissionError as e:
         print(f"Warning: Could not move '{tmp_gnomonic_jpg}' to '{filenames['gnomonic']}' due to permissions: {e}", file=sys.stderr)
         return None
-    
     print(f"   ...Done: Generated base gnomonic image '{filenames['gnomonic']}'.")
     return filenames['gnomonic']
+
+
+def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked_jpg_path, padding_value=1024):
+    """Generates the base gnomonic projection image (clean)."""
+    if not _run_reproject_pto(event_data, filenames, verbose):
+        return None
+    return _stitch_gnomonic_jpg(filenames, tmpdir, verbose, padding_value)
 
 def recalibrate_gnomonic_view(event_data, filenames, verbose):
     """Recalibrates the gnomonic view if necessary, with a fallback."""
@@ -1106,7 +1114,9 @@ def refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose, pa
             recalibrate_gnomonic_view(event_data, filenames, verbose)
     except Exception as e:
         print(f"Warning: Failed to recenter gnomonic projection using refined endpoints: {e}", file=sys.stderr)
+        needs_regen = False
 
+    refined_data['_pto_regenerated'] = needs_regen
     return refined_data
 
 def _generate_decorated_grid(event_data, filenames, refined_data, verbose):
@@ -1177,30 +1187,41 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
         print("Skipping gnomonic view: 'coordinates' not found in event.txt.")
         return
 
-    # 1. Generate the base gnomonic projection image.
-    stacked_jpg_path = future_stacked_jpg.result() and filenames['jpg']
-    future_gnomonic_base_image = executor.submit(generate_gnomonic_projection, 
-                                                 event_data, filenames, tmpdir, verbose, stacked_jpg_path)
-    future_gnomonic_base_image.result()
+    # 1. Run reproject.py to produce the PTO files (~0.3s). Wait for stacked jpg first.
+    future_stacked_jpg.result()
+    _run_reproject_pto(event_data, filenames, verbose)
 
-    refined_data = refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose)
-
-    # 2. GNOMONIC VIDEO PIPELINE — submitted in parallel with grid/logo work below
-    future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'], 
+    # As soon as the PTO exists, start the video stitch and logo layer — both are
+    # independent of the JPG stitch and refinement that follow.
+    future_modified_pto = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'],
                                           filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
-    
-    # Create raw stitch - USE SOURCE
     raw_gnomonic_mp4 = f"{tmpdir}/raw_gnomonic.mp4"
     stitch_cmd_mp4 = f"{sys.executable} {BIN_DIR}/stitcher.py --pad 0 {filenames['gnomonic_mp4_pto']} {filenames['source']} {raw_gnomonic_mp4}"
     future_stitch = executor.submit(lambda: run_command(future_modified_pto.result() and stitch_cmd_mp4, "Creating gnomonic video", verbose))
 
-    # Create 1080p Logo Layer in parallel with both the stitch and the grid pipeline
     future_logo_layer_1080p = None
     if logo_paths is not None:
         logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
         future_logo_layer_1080p = executor.submit(create_logo_overlay, 1920, 1080, logo_paths, logo_layer_1080p)
 
-    # 3. GNOMONIC IMAGE/GRID PIPELINE — runs in parallel with stitch + logo layer
+    # JPG stitch (~4s) and refinement run concurrently with the video stitch above.
+    future_gnomonic_jpg = executor.submit(_stitch_gnomonic_jpg, filenames, tmpdir, verbose)
+
+    refined_data = refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose)
+
+    # If refinement shifted endpoints enough to regenerate the PTO, the video stitch
+    # above used the old PTO — cancel it and restart on the updated one.
+    if refined_data and refined_data.get('_pto_regenerated'):
+        print("   Refined endpoints triggered PTO regeneration — restarting video stitch.")
+        future_stitch.cancel()
+        future_stitch.result() if not future_stitch.cancelled() else None
+        future_modified_pto2 = executor.submit(modify_pto_canvas, filenames['gnomonic_pto'],
+                                               filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
+        future_stitch = executor.submit(lambda: run_command(future_modified_pto2.result() and stitch_cmd_mp4, "Creating gnomonic video (refined)", verbose))
+
+    future_gnomonic_jpg.result()
+
+    # Grid pipeline depends on refined_data — submit now that refinement is done.
     future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, logo_paths, verbose, refined_data)
 
     # 4. FINAL ASSEMBLY — wait for all three parallel tracks

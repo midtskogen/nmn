@@ -582,7 +582,14 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     center_lon = np.mean(all_lons); center_lat = np.mean(all_lats); proj = ccrs.Gnomonic(central_longitude=center_lon, central_latitude=center_lat)
     lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1; lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
     fig_map, ax_map = pylab.subplots(figsize=(10, 10), subplot_kw={'projection': proj}); ax_map.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree()); lat_span = abs(lat_top - lat_bot); zoom_level = int(np.log2(360 / (lat_span + 1.5))); zoom_level = max(6, min(zoom_level, 10))
-    try: ax_map.add_image(OSM(), zoom_level)
+    try:
+        import socket as _socket
+        _old_timeout = _socket.getdefaulttimeout()
+        _socket.setdefaulttimeout(15)
+        try:
+            ax_map.add_image(OSM(), zoom_level)
+        finally:
+            _socket.setdefaulttimeout(_old_timeout)
     except Exception as e: print(f"Warning: Could not fetch OSM map tiles. Plot will have a plain background. Error: {e}")
     x_min_m, x_max_m, y_min_m, y_max_m = ax_map.get_extent(); buf = io.BytesIO(); fig_map.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0, transparent=False); pylab.close(fig_map); buf.seek(0)
 

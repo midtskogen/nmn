@@ -977,32 +977,34 @@ def worker_for_video_frame(args):
     pv_stride = pv_buffer.size // (sh_orig // 2)
     pv_src_orig = pv_buffer.reshape(sh_orig // 2, pv_stride)[:, :sw_orig // 2]
     
-    noise_level = estimate_noise(py_src_orig)
-
     pad_t = pad if 'top' in padsides else 0
     pad_b = pad if 'bottom' in padsides else 0
     pad_l = pad if 'left' in padsides else 0
     pad_r = pad if 'right' in padsides else 0
 
-    pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
-    pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
-    
-    py_src_all = np.pad(py_src_orig, pad_y_width, mode='edge')
-    pu_src_all = np.pad(pu_src_orig, pad_uv_width, mode='edge')
-    pv_src_all = np.pad(pv_src_orig, pad_uv_width, mode='edge')
+    if pad_t > 0 or pad_b > 0 or pad_l > 0 or pad_r > 0:
+        noise_level = estimate_noise(py_src_orig)
+        pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
+        pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
 
-    blur_size = 96
-    py_src_all = _blur_padded_area_numba(py_src_all.astype(np.float32), pad_t, pad_b, pad_l, pad_r, blur_size, noise_level)
+        py_src_all = np.pad(py_src_orig, pad_y_width, mode='edge')
+        pu_src_all = np.pad(pu_src_orig, pad_uv_width, mode='edge')
+        pv_src_all = np.pad(pv_src_orig, pad_uv_width, mode='edge')
 
-    pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
-    blur_size_uv = blur_size // 2
-    if pad_uv_t > 0 or pad_uv_b > 0 or pad_uv_l > 0 or pad_uv_r > 0:
-        pu_src_all = _blur_padded_area_numba(pu_src_all.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
-        pv_src_all = _blur_padded_area_numba(pv_src_all.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+        blur_size = 96
+        py_src_all = _blur_padded_area_numba(py_src_all.astype(np.float32), pad_t, pad_b, pad_l, pad_r, blur_size, noise_level)
 
-    target_h_y = sh_orig + pad_t + pad_b
-    target_h_uv = sh_orig // 2 + pad_uv_t + pad_uv_b
-    py_src, pu_src, pv_src = py_src_all[:target_h_y, :], pu_src_all[:target_h_uv, :], pv_src_all[:target_h_uv, :]
+        pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
+        blur_size_uv = blur_size // 2
+        if pad_uv_t > 0 or pad_uv_b > 0 or pad_uv_l > 0 or pad_uv_r > 0:
+            pu_src_all = _blur_padded_area_numba(pu_src_all.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+            pv_src_all = _blur_padded_area_numba(pv_src_all.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+
+        target_h_y = sh_orig + pad_t + pad_b
+        target_h_uv = sh_orig // 2 + pad_uv_t + pad_uv_b
+        py_src, pu_src, pv_src = py_src_all[:target_h_y, :], pu_src_all[:target_h_uv, :], pv_src_all[:target_h_uv, :]
+    else:
+        py_src, pu_src, pv_src = py_src_orig, pu_src_orig, pv_src_orig
 
     padded_sw_y = py_src.shape[1]
     map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
@@ -1228,12 +1230,19 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
             out_container = av.open(output_file, mode='w')
             out_stream = out_container.add_stream("libx264", rate=in_stream.average_rate)
             out_stream.width, out_stream.height, out_stream.pix_fmt = dw, dh, 'yuv420p'
-            out_stream.options = {"preset": "fast", "crf": "28"}
+            out_stream.options = {"preset": "ultrafast", "crf": "28"}
         except av.AVError as e:
             raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
         
         map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
         frame_count = 0
+
+        # Pre-compute pad dimensions once — they are constant across all frames.
+        pad_t = pad if 'top' in padsides else 0; pad_b = pad if 'bottom' in padsides else 0
+        pad_l = pad if 'left' in padsides else 0; pad_r = pad if 'right' in padsides else 0
+        _needs_pad = pad_t > 0 or pad_b > 0 or pad_l > 0 or pad_r > 0
+        pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
+        pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
 
         # --- Create output frame once to improve performance and stability ---
         try:
@@ -1245,65 +1254,78 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
                 f"Failed to allocate video frame buffer with dimensions {dw}x{dh}.\n"
                 "Please check system memory and ensure PTO parameters result in valid dimensions."
             )
-        
-        for frame in in_container.decode(in_stream):
-            frame_count += 1
-            if total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
-                percent_done = (frame_count / total_frames) * 100
-                if sys.stderr.isatty():
-                    bar_length = 40; filled_len = int(round(bar_length * frame_count / float(total_frames)))
-                    bar = '█' * filled_len + '-' * (bar_length - filled_len)
-                    sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
-                else:
-                    print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
-            if frame.format.name not in ("yuv420p", "yuvj420p"): frame = frame.reformat(format="yuv420p")
-            
-            sw, sh = frame.width, frame.height
-            
-            # Handle Y-plane stride
-            py_buffer = np.asarray(frame.planes[0])
-            py_stride = py_buffer.size // sh
-            py_src = py_buffer.reshape(sh, py_stride)[:, :sw]
-            
-            # Handle U-plane stride
-            pu_buffer = np.asarray(frame.planes[1])
-            pu_stride = pu_buffer.size // (sh // 2)
-            pu_src = pu_buffer.reshape(sh // 2, pu_stride)[:, :sw // 2]
-            
-            # Handle V-plane stride
-            pv_buffer = np.asarray(frame.planes[2])
-            pv_stride = pv_buffer.size // (sh // 2)
-            pv_src = pv_buffer.reshape(sh // 2, pv_stride)[:, :sw // 2]
-            
-            pad_t = pad if 'top' in padsides else 0; pad_b = pad if 'bottom' in padsides else 0
-            pad_l = pad if 'left' in padsides else 0; pad_r = pad if 'right' in padsides else 0
-            pad_y_width = ((pad_t, pad_b), (pad_l, pad_r)); pad_uv_width = ((pad_t//2, pad_b//2), (pad_l//2, pad_r//2))
-            
-            py_padded = np.pad(py_src, pad_y_width, mode='edge')
-            pu_padded = np.pad(pu_src, pad_uv_width, mode='edge')
-            pv_padded = np.pad(pv_src, pad_uv_width, mode='edge')
+        # Two buffer sets for double-buffering: while the encoder consumes buf[cur],
+        # the Numba reprojection fills buf[nxt] in a background thread.
+        # Unmapped pixels (outside the projection) are initialised once here and never
+        # overwritten, because reproject_y/uv only writes to mapped pixel positions
+        # and the projection map is constant across all frames.
+        _bufs = [
+            (np.zeros((dh, dw), dtype=np.uint8), np.full((dh//2, dw//2), 128, dtype=np.uint8), np.full((dh//2, dw//2), 128, dtype=np.uint8)),
+            (np.zeros((dh, dw), dtype=np.uint8), np.full((dh//2, dw//2), 128, dtype=np.uint8), np.full((dh//2, dw//2), 128, dtype=np.uint8)),
+        ]
 
-            y_final = np.zeros((dh, dw), dtype=np.uint8)
-            u_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
-            v_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
+        def _reproject_frame(frame, y_out, u_out, v_out):
+            if frame.format.name not in ("yuv420p", "yuvj420p"):
+                frame = frame.reformat(format="yuv420p")
+            sw_f, sh_f = frame.width, frame.height
+            py_buf = np.asarray(frame.planes[0])
+            py_s = py_buf.reshape(sh_f, py_buf.size // sh_f)[:, :sw_f]
+            pu_buf = np.asarray(frame.planes[1])
+            pu_s = pu_buf.reshape(sh_f // 2, pu_buf.size // (sh_f // 2))[:, :sw_f // 2]
+            pv_buf = np.asarray(frame.planes[2])
+            pv_s = pv_buf.reshape(sh_f // 2, pv_buf.size // (sh_f // 2))[:, :sw_f // 2]
+            if _needs_pad:
+                py_s = np.pad(py_s, pad_y_width, mode='edge')
+                pu_s = np.pad(pu_s, pad_uv_width, mode='edge')
+                pv_s = np.pad(pv_s, pad_uv_width, mode='edge')
+            reproject_y(py_s.ravel(), dw, dh, py_s.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_out.ravel())
+            reproject_uv(pu_s.ravel(), pv_s.ravel(), dw, dh, map_uv_idx.ravel(), u_out.ravel(), v_out.ravel())
+            return y_out, u_out, v_out
 
-            reproject_y(py_padded.ravel(), dw, dh, py_padded.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel())
-            reproject_uv(pu_padded.ravel(), pv_padded.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel())
-            
+        def _encode_yuv(y, u, v, pts):
             if enhance:
                 seed_y = int.from_bytes(os.urandom(4), 'little')
-                y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
-                u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-                v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-
-            # --- Update and encode the single, reused output frame ---
-            out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
-            # Set the Presentation Time Stamp (PTS)
-            out_frame.pts = frame_count - 1 
+                y = enhance_filter(y, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+                u = enhance_filter(u, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                v = enhance_filter(v, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+            out_frame.planes[0].update(y); out_frame.planes[1].update(u); out_frame.planes[2].update(v)
+            out_frame.pts = pts
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
-                
+
+        frame_iter = in_container.decode(in_stream)
+        with ThreadPoolExecutor(max_workers=1) as _pipe_ex:
+            cur = 0
+            first_frame = next(frame_iter, None)
+            if first_frame is not None:
+                _fut = _pipe_ex.submit(_reproject_frame, first_frame, *_bufs[cur])
+
+            for next_frame in frame_iter:
+                y_final, u_final, v_final = _fut.result()
+                nxt = 1 - cur
+                # Kick off reprojection of next frame while we encode current.
+                _fut = _pipe_ex.submit(_reproject_frame, next_frame, *_bufs[nxt])
+
+                frame_count += 1
+                if total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
+                    percent_done = (frame_count / total_frames) * 100
+                    if sys.stderr.isatty():
+                        bar_length = 40; filled_len = int(round(bar_length * frame_count / float(total_frames)))
+                        bar = '█' * filled_len + '-' * (bar_length - filled_len)
+                        sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
+                    else:
+                        print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
+
+                _encode_yuv(y_final, u_final, v_final, frame_count - 1)
+                cur = nxt
+
+            # Encode the last frame.
+            if first_frame is not None:
+                y_final, u_final, v_final = _fut.result()
+                frame_count += 1
+                _encode_yuv(y_final, u_final, v_final, frame_count - 1)
+
         if total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
         for packet in out_stream.encode(): out_container.mux(packet)
         out_container.close(); in_container.close()
@@ -1362,7 +1384,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, use_seam, level_su
         out_container = av.open(output_file, mode='w')
         out_stream = out_container.add_stream("libx264", rate=in_streams[0].average_rate)
         out_stream.width, out_stream.height, out_stream.pix_fmt = final_w, final_h, 'yuv420p'
-        out_stream.options = {"preset": "fast", "crf": "28"}
+        out_stream.options = {"preset": "ultrafast", "crf": "28"}
     except av.AVError as e:
         raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
         

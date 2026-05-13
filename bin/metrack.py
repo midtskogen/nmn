@@ -402,14 +402,26 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     lat_span = abs(lat_top - lat_bot)
     zoom_level = max(6, min(int(np.log2(360 / (lat_span + 1))), 9))
     
-    old_timeout = socket.getdefaulttimeout()
-    try:
-        socket.setdefaulttimeout(30)
-        ax.add_image(OSM(), zoom_level)
-    except Exception:
+    # Fetch OSM tiles with a hard wall-clock timeout.
+    # socket.setdefaulttimeout() only covers connect/handshake; ssl.read() can
+    # still block indefinitely inside cartopy's ThreadPoolExecutor.  Running the
+    # call in a daemon thread lets us abandon it if it hangs.
+    import threading as _threading
+    _tile_exc = [None]
+    def _add_image():
+        try:
+            old_to = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(15)
+            ax.add_image(OSM(), zoom_level)
+            socket.setdefaulttimeout(old_to)
+        except Exception as e:
+            _tile_exc[0] = e
+    _t = _threading.Thread(target=_add_image, daemon=True)
+    _t.start()
+    _t.join(timeout=30)
+    if _t.is_alive() or _tile_exc[0] is not None:
+        # Tile fetch timed out or failed — fall back to vector features
         ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
-    finally:
-        socket.setdefaulttimeout(old_timeout)
     
     ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
     gl = ax.gridlines(draw_labels=True, color='gray', alpha=0.5, linestyle='--', linewidth=0.5)

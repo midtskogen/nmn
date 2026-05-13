@@ -10,6 +10,7 @@ Usage:
 import configparser
 import datetime
 import calendar
+import json
 import math
 import socket
 import subprocess
@@ -56,6 +57,26 @@ REMOTE_REPORT_URL = "http://norskmeteornettverk.no/ssh/report.php"
 # Assume processing scripts are in the user's bin directory
 METEORCROP_PATH = Path.home() / "bin" / "meteorcrop.py"
 PREDICT_PATH = Path.home() / "bin" / "predict.py"
+
+# --- i18n ---
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi']
+DEFAULT_LANG = 'nb'
+LOC_DIR = Path(__file__).resolve().parent.parent / 'server' / 'loc'
+
+
+def load_translations(lang_code: str) -> dict:
+    """Loads translation dict for lang_code, falling back to DEFAULT_LANG."""
+    translations: dict = {}
+    default_path = LOC_DIR / f"{DEFAULT_LANG}.json"
+    if default_path.exists():
+        with default_path.open('r', encoding='utf-8') as f:
+            translations = json.load(f)
+    if lang_code != DEFAULT_LANG:
+        lang_path = LOC_DIR / f"{lang_code}.json"
+        if lang_path.exists():
+            with lang_path.open('r', encoding='utf-8') as f:
+                translations.update(json.load(f))
+    return translations
 
 
 def load_config(event_file_path: Path) -> configparser.ConfigParser:
@@ -200,13 +221,19 @@ def generate_reports(config: configparser.ConfigParser, video_output: list, even
     print("Generated centroid.txt and light.txt")
 
     time_points = [t - timestamps[0] for t in timestamps]
-    plt.figure()
-    plt.plot(time_points, list(map(float, brightness)))
-    plt.xlabel('Time [s]')
-    plt.ylabel('Brightness')
-    plt.savefig(event_dir / 'brightness.svg')
-    plt.savefig(event_dir / 'brightness.jpg')
-    print("Generated brightness plot.")
+    brightness_floats = list(map(float, brightness))
+    for lang in SUPPORTED_LANGS:
+        tr = load_translations(lang)
+        prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+        fig, ax = plt.subplots()
+        ax.plot(time_points, brightness_floats)
+        ax.set_xlabel(tr.get('plot_time_x_label', 'Time [s]'))
+        ax.set_ylabel(tr.get('brightness', 'Brightness'))
+        ax.set_title(tr.get('brightness_plot_title', 'Brightness over Time'))
+        fig.savefig(event_dir / f'{prefix}brightness.svg')
+        fig.savefig(event_dir / f'{prefix}brightness.jpg')
+        plt.close(fig)
+    print("Generated brightness plots (all languages).")
 
 
 def get_meteor_probability(event_dir: Path) -> float:

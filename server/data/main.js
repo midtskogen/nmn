@@ -417,7 +417,7 @@ passData.passes : aircraftData.crossings;
             };
 
             // Pass the retry callback to the UI manager
-            uiManager.showVideoModal(stationId, cameraNum, resolution, streamTaskId, onRetry);
+            uiManager.showVideoModal(stationId, cameraNum, resolution, streamTaskId, onRetry, stationsData);
         } catch (error) {
             alert(t('error_stream_start', { error: error.message }));
         }

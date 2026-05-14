@@ -642,7 +642,7 @@ def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: lis
             ax.plot(time_axis, brightness)
             ax.set_xlabel(translations.get("plot_time_x_label", "Time [s]"))
             ax.set_ylabel(translations.get("brightness", "Brightness"))
-            ax.set_title(translations.get("brightness_plot_title", "Brightness over Time"))
+            ax.set_title(translations.get("brightness_plot_title", "Brightness vs time"))
             fig.savefig(svg_path)
             fig.savefig(jpg_path)
             plt.close(fig)

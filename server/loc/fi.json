@@ -140,5 +140,17 @@
     "height": "Korkeus",
     "ground_dist": "Etäisyys maan pinnalla",
     "latitude": "Leveysaste",
-    "longitude": "Pituusaste"
+    "longitude": "Pituusaste",
+    "player_version": "Versio",
+    "player_reset": "Palauta",
+    "player_download": "Lataa",
+    "player_zoom": "Zoom",
+    "player_fullscreen": "Koko näyttö",
+    "player_play": "Toista",
+    "player_pause": "Tauko",
+    "player_frame_back": "Yksi kuva taaksepäin",
+    "player_frame_forward": "Yksi kuva eteenpäin",
+    "player_brightness": "Kirkkaus",
+    "player_contrast": "Kontrasti",
+    "player_reset_filters": "Palauta"
 }

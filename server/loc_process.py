@@ -268,7 +268,7 @@ def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: lis
             # Use translated labels, with fallbacks
             plt.xlabel(translations.get("plot_time_x_label", "Time [s]"))
             plt.ylabel(translations.get("brightness", "Brightness"))
-            plt.title(translations.get("brightness_plot_title", "Brightness over Time"))
+            plt.title(translations.get("brightness_plot_title", "Brightness vs time"))
             
             plt.savefig(svg_path)
             plt.savefig(jpg_path)

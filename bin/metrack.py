@@ -406,6 +406,8 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     # socket.setdefaulttimeout() only covers connect/handshake; ssl.read() can
     # still block indefinitely inside cartopy's ThreadPoolExecutor.  Running the
     # call in a daemon thread lets us abandon it if it hangs.
+    # NOTE: fig.canvas.draw() is called inside the thread to force the tile
+    # fetching to happen within the timeout window, before savefig triggers it.
     import threading as _threading
     _tile_exc = [None]
     def _add_image():
@@ -413,6 +415,10 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
             old_to = socket.getdefaulttimeout()
             socket.setdefaulttimeout(15)
             ax.add_image(OSM(), zoom_level)
+            # Force tile fetching now, inside the timeout window
+            fig = pylab.gcf()
+            if fig and fig.canvas:
+                fig.canvas.draw()
             socket.setdefaulttimeout(old_to)
         except Exception as e:
             _tile_exc[0] = e
@@ -594,15 +600,26 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     center_lon = np.mean(all_lons); center_lat = np.mean(all_lats); proj = ccrs.Gnomonic(central_longitude=center_lon, central_latitude=center_lat)
     lon_left, lon_right = min(all_lons) - 1, max(all_lons) + 1; lat_bot, lat_top = min(all_lats) - 0.5, max(all_lats) + 0.5
     fig_map, ax_map = pylab.subplots(figsize=(10, 10), subplot_kw={'projection': proj}); ax_map.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree()); lat_span = abs(lat_top - lat_bot); zoom_level = int(np.log2(360 / (lat_span + 1.5))); zoom_level = max(6, min(zoom_level, 10))
-    try:
-        import socket as _socket
-        _old_timeout = _socket.getdefaulttimeout()
-        _socket.setdefaulttimeout(15)
+    import threading as _threading
+    _tile_exc2 = [None]
+    def _add_image_interactive():
         try:
+            old_to = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(15)
             ax_map.add_image(OSM(), zoom_level)
-        finally:
-            _socket.setdefaulttimeout(_old_timeout)
-    except Exception as e: print(f"Warning: Could not fetch OSM map tiles. Plot will have a plain background. Error: {e}")
+            # Force tile fetching now, inside the timeout window
+            if fig_map and fig_map.canvas:
+                fig_map.canvas.draw()
+            socket.setdefaulttimeout(old_to)
+        except Exception as e:
+            _tile_exc2[0] = e
+    _t2 = _threading.Thread(target=_add_image_interactive, daemon=True)
+    _t2.start()
+    _t2.join(timeout=30)
+    if _t2.is_alive():
+        print("Warning: OSM tile fetch timed out. Plot will have a plain background.")
+    elif _tile_exc2[0] is not None:
+        print(f"Warning: Could not fetch OSM map tiles. Plot will have a plain background. Error: {_tile_exc2[0]}")
     x_min_m, x_max_m, y_min_m, y_max_m = ax_map.get_extent(); buf = io.BytesIO(); fig_map.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0, transparent=False); pylab.close(fig_map); buf.seek(0)
 
     traces = []

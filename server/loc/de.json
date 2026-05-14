@@ -135,5 +135,17 @@
   "height": "Höhe",
   "ground_dist": "Bodenabstand",
   "latitude": "Breite",
-  "longitude": "Länge"
+  "longitude": "Länge",
+  "player_version": "Version",
+  "player_reset": "Zurücksetzen",
+  "player_download": "Herunterladen",
+  "player_zoom": "Zoom",
+  "player_fullscreen": "Vollbild",
+  "player_play": "Wiedergabe",
+  "player_pause": "Pause",
+  "player_frame_back": "Ein Bild zurück",
+  "player_frame_forward": "Ein Bild vor",
+  "player_brightness": "Helligkeit",
+  "player_contrast": "Kontrast",
+  "player_reset_filters": "Zurücksetzen"
 }

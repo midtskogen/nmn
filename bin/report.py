@@ -229,7 +229,7 @@ def generate_reports(config: configparser.ConfigParser, video_output: list, even
         ax.plot(time_points, brightness_floats)
         ax.set_xlabel(tr.get('plot_time_x_label', 'Time [s]'))
         ax.set_ylabel(tr.get('brightness', 'Brightness'))
-        ax.set_title(tr.get('brightness_plot_title', 'Brightness over Time'))
+        ax.set_title(tr.get('brightness_plot_title', 'Brightness vs time'))
         fig.savefig(event_dir / f'{prefix}brightness.svg')
         fig.savefig(event_dir / f'{prefix}brightness.jpg')
         plt.close(fig)

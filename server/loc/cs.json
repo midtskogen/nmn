@@ -135,5 +135,17 @@
   "height": "Výška",
   "ground_dist": "Vzdálenost po zemi",
   "latitude": "Zeměpisná šířka",
-  "longitude": "Zeměpisná délka"
+  "longitude": "Zeměpisná délka",
+  "player_version": "Verze",
+  "player_reset": "Resetovat",
+  "player_download": "Stáhnout",
+  "player_zoom": "Přiblížení",
+  "player_fullscreen": "Celá obrazovka",
+  "player_play": "Přehrát",
+  "player_pause": "Pozastavit",
+  "player_frame_back": "O snímek zpět",
+  "player_frame_forward": "O snímek vpřed",
+  "player_brightness": "Jas",
+  "player_contrast": "Kontrast",
+  "player_reset_filters": "Resetovat"
 }

@@ -140,5 +140,17 @@
   "height": "Høgde",
   "ground_dist": "Bakkeavstand",
   "latitude": "Breddegrad",
-  "longitude": "Lengdegrad"
+  "longitude": "Lengdegrad",
+  "player_version": "Versjon",
+  "player_reset": "Nullstill",
+  "player_download": "Last ned",
+  "player_zoom": "Zoom",
+  "player_fullscreen": "Fullskjerm",
+  "player_play": "Spill",
+  "player_pause": "Pause",
+  "player_frame_back": "Éi ramme tilbake",
+  "player_frame_forward": "Éi ramme fram",
+  "player_brightness": "Lysstyrke",
+  "player_contrast": "Kontrast",
+  "player_reset_filters": "Nullstill filter"
 }

@@ -70,7 +70,7 @@
   "error_messages": "Error Messages",
   "log_file": "Log",
   "brightness": "Brightness",
-  "brightness_plot_title": "Brightness over Time",
+  "brightness_plot_title": "Brightness vs time",
   "sporadic": "sporadic",
   "uncertainty": "uncertainty",
   "best_estimate": "Best estimate",
@@ -140,5 +140,17 @@
   "height": "Height",
   "ground_dist": "Ground Dist",
   "latitude": "Latitude",
-  "longitude": "Longitude"
+  "longitude": "Longitude",
+  "player_version": "Version",
+  "player_reset": "Reset",
+  "player_download": "Download",
+  "player_zoom": "Zoom",
+  "player_fullscreen": "Fullscreen",
+  "player_play": "Play",
+  "player_pause": "Pause",
+  "player_frame_back": "Step back 1 frame",
+  "player_frame_forward": "Step forward 1 frame",
+  "player_brightness": "Brightness",
+  "player_contrast": "Contrast",
+  "player_reset_filters": "Reset"
 }

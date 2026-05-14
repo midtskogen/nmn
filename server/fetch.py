@@ -31,11 +31,16 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+import fcntl
 
 # Set umask to ensure files are created group-writable (0o664) and directories group-accessible (0o775)
 # This allows www-data to modify files created by steinar when they share the same group
 os.umask(0o002)
+
+# SPICE kernel file lock path - used for cross-process synchronization
+SPICE_LOCK_FILE = Path('/tmp/nmn_spice.lock')
 
 # Ensure local project modules are importable even when this script is executed via symlink
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -803,6 +808,143 @@ if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{
             ))
 
 
+def _convert_ephem_angles(obj):
+    """Recursively convert ephem.Angle objects to floats for pickling."""
+    # Check if it's an ephem.Angle (has __class__.__name__ but isn't a standard type)
+    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Angle':
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: _convert_ephem_angles(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_ephem_angles(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_convert_ephem_angles(item) for item in obj)
+    elif hasattr(obj, '__dict__'):
+        # For custom objects like MetrackInfo, convert their __dict__
+        for attr_name in list(obj.__dict__.keys()):
+            setattr(obj, attr_name, _convert_ephem_angles(getattr(obj, attr_name)))
+        return obj
+    return obj
+
+
+class SpiceLock:
+    """Cross-process lock for SPICE kernel file access using file locking."""
+    def __init__(self, lock_path: Path):
+        self.lock_path = lock_path
+        self.lock_file = None
+    
+    def __enter__(self):
+        # Ensure the lock file exists
+        self.lock_path.touch(exist_ok=True)
+        self.lock_file = open(self.lock_path, 'r')
+        # Acquire exclusive lock (blocking)
+        fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX)
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.lock_file:
+            fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+            self.lock_file.close()
+        return False
+
+
+def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: dict, plot_data: dict) -> tuple:
+    """Worker function to generate outputs for one language in a separate process.
+    
+    This runs in its own process, so matplotlib and SPICE are isolated per language.
+    """
+    try:
+        event_dir = Path(event_dir_str)
+        translations = load_translations(lang)
+        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+        
+        # HTML generation
+        generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
+        
+        current_orbit_data = {'valid': False}
+        
+        if plot_data and plot_data.get('orbit', {}).get('valid'):
+            # Resolve shower name
+            raw_shower_name = plot_data['orbit']['showername']
+            shower_code = None
+            
+            if raw_shower_name in translations.get('showers', {}):
+                shower_code = raw_shower_name
+            elif raw_shower_name and raw_shower_name.lower() in name_to_code:
+                shower_code = name_to_code[raw_shower_name.lower()]
+            
+            final_shower_name = ""
+            if shower_code:
+                final_shower_name = translations.get('showers', {}).get(shower_code, raw_shower_name)
+            else:
+                if not raw_shower_name or raw_shower_name.lower() in ['sporadic', 'spo', '']:
+                    final_shower_name = translations.get('sporadic', 'sporadic')
+                else:
+                    final_shower_name = raw_shower_name
+            
+            current_orbit_data['showername'] = final_shower_name
+            current_orbit_data['showername_sg'] = final_shower_name
+            current_orbit_data['entry_speed'] = plot_data['orbit']['entry_speed']
+            current_orbit_data['az'] = plot_data['orbit']['az']
+            current_orbit_data['alt'] = plot_data['orbit']['alt']
+            current_orbit_data['ra'] = plot_data['orbit']['ra']
+            current_orbit_data['dec'] = plot_data['orbit']['dec']
+            current_orbit_data['rp'] = plot_data['orbit']['rp']
+            current_orbit_data['ecc'] = plot_data['orbit']['ecc']
+            current_orbit_data['inc'] = plot_data['orbit']['inc']
+            current_orbit_data['lnode'] = plot_data['orbit']['lnode']
+            current_orbit_data['argp'] = plot_data['orbit']['argp']
+            current_orbit_data['m0'] = plot_data['orbit']['m0']
+            current_orbit_data['t0'] = plot_data['orbit']['t0']
+            current_orbit_data['valid'] = True
+            
+            plot_opts = {
+                'doplot': 'save',
+                'interactive': True,
+                'autoborders': True,
+                'azonly': False,
+                'mapres': 'i'
+            }
+            
+            # Run metrack plots (each process has its own matplotlib)
+            metrack_info = plot_data.get('metrack_info')
+            metrack_plot_data = plot_data.get('metrack_plot_data')
+            if metrack_info is not None and metrack_plot_data is not None:
+                generate_metrack_plots(metrack_info, metrack_plot_data,
+                                       plot_opts, translations=translations, output_prefix=file_prefix)
+            
+            # Run speed plots
+            fbspd_plot_data = plot_data.get('fbspd_plot_data')
+            if fbspd_plot_data is not None:
+                generate_speed_plots(fbspd_plot_data,
+                                     translations=translations, output_prefix=file_prefix)
+            
+            # Run orbit plot (this uses SPICE) - must hold file lock
+            res_filename = plot_data['resdat']
+            date_str = plot_data['date_str']
+            time_str = plot_data['time_str']
+            
+            with SpiceLock(SPICE_LOCK_FILE):
+                orbit(True, current_orbit_data['entry_speed'], 0, res_filename,
+                      date_str, time_str, 'save',
+                      interactive=True, translations=translations, output_prefix=file_prefix)
+            
+            # Convert SVG to JPG
+            dpi_map = {'map.svg': Config.SVG_MAP_DPI, 'orbit.svg': Config.SVG_ORBIT_DPI}
+            for svg_name in ["posvstime.svg", "spd_acc.svg", "orbit.svg", "height.svg", "map.svg"]:
+                svg_path = event_dir / f"{file_prefix}{svg_name}"
+                if svg_path.exists():
+                    dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
+                    svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
+            
+            # Note: Triangulation HTML report generation is done in the main process
+            # after parallel plotting, since it requires resdat which isn't easily picklable
+        
+        return (lang, None, current_orbit_data)
+    except Exception as e:
+        return (lang, str(e), None)
+
+
 def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showername_sg: str, count: int, first: bool, height_valid: bool, translations: dict):
     """Constructs and sends a tweet if conditions are met."""
     if not (count >= 2 and first and height_valid and len(sys.argv) == 4):
@@ -1319,167 +1461,100 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
         for code, name in nb_translations['showers'].items():
             name_to_code[name.lower()] = code
 
-    for lang in SUPPORTED_LANGS:
-        try:
-            logging.info(f"--- Generating outputs for language: [{lang}] ---")
-            translations = load_translations(lang)
-            file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-
-            generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
-
-            current_orbit_data = {'valid': False}
-
-            if is_multistation and analysis_results:
-                logging.info(f"Generating translated plots and reports for [{lang}]")
-                
-                # --- Resolve Shower Name Logic ---
-                current_orbit_data = analysis_results['orbit_data'].copy() 
-                
-                raw_shower_name = current_orbit_data.get('showername', '')
-                shower_code = None
-                
-                # 1. Check if the raw name is already a code
-                if raw_shower_name in translations.get('showers', {}):
-                    shower_code = raw_shower_name
-                # 2. Use the reverse map to find the code from the Norwegian/default name
-                elif raw_shower_name and raw_shower_name.lower() in name_to_code:
-                    shower_code = name_to_code[raw_shower_name.lower()]
-                
-                # Resolve the Final Name for the current language
-                final_shower_name = ""
-                if shower_code:
-                    final_shower_name = translations.get('showers', {}).get(shower_code, raw_shower_name)
-                else:
-                    # Fallback logic
-                    if not raw_shower_name or raw_shower_name.lower() in ['sporadic', 'spo', '']:
-                         final_shower_name = translations.get('sporadic', 'sporadic')
-                    else:
-                         final_shower_name = raw_shower_name
-
-                current_orbit_data['showername'] = final_shower_name
-                current_orbit_data['showername_sg'] = final_shower_name 
-                
-                plot_opts = {
-                    'doplot': 'save', 
-                    'interactive': True, 
-                    'autoborders': True,
-                    'azonly': False,
-                    'mapres': 'i'
-                }
-
-                try:
-                    infra_fit = analysis_results.get('infra_fit')
-                    infra_fit_for_maps, infra_pick_reason = _pick_infra_fit_for_mapping(infra_fit)
-                    if infra_fit_for_maps and 'lat' in infra_fit_for_maps and 'lon' in infra_fit_for_maps:
-                        elev_km = float(infra_fit_for_maps.get('elev_m', 0.0)) / 1000.0
-                        if 5.0 <= elev_km <= 80.0:
-                            if infra_pick_reason and infra_pick_reason != 'primary':
-                                logging.info(
-                                    f"Infrasound fit elevation out of range; using {infra_pick_reason} for map marker. "
-                                    f"elev_km={elev_km:.3f}"
-                                )
-                            extra_markers = []
-
-                            extra_markers.append({
-                                'kind': 'infra_source',
-                                'lat': float(infra_fit_for_maps['lat']),
-                                'lon': float(infra_fit_for_maps['lon']),
-                                'elev_m': float(infra_fit_for_maps.get('elev_m', 0.0)),
-                                'label': (lambda _t0: (translations.get('infrasound_source', 'Infrasound source') + (f" {_t0}" if _t0 else "")))(
-                                    (datetime.datetime.fromtimestamp(float(infra_fit_for_maps.get('t0_unix')), tz=datetime.timezone.utc).strftime('%H:%M:%S')
-                                     if infra_fit_for_maps.get('t0_unix') is not None else "")
-                                ),
-                                'color': '#006400',
-                                'label_color': 'black',
-                                'symbol': 'o',
-                                'plotly_symbol': 'circle',
-                                'size': 7,
-                                'drop_to_ground': True,
-                            })
-
-                            # Detection locations (include outliers too)
-                            infra_sites = infra_fit.get('stations_all') or infra_fit.get('stations') or []
-                            for st in infra_sites:
-                                try:
-                                    st_code = str(st.get('code', '')).strip()
-                                    st_name = str(st.get('station', '')).strip()
-                                    st_label = st_code or st_name
-                                    is_inlier = bool(st.get('is_inlier', True))
-                                    extra_markers.append({
-                                        'kind': 'infra_detection',
-                                        'lat': float(st.get('lat')),
-                                        'lon': float(st.get('lon')),
-                                        'elev_m': 0.0,
-                                        'label': st_label,
-                                        'color': '#006400' if is_inlier else '#777777',
-                                        'label_color': '#006400' if is_inlier else '#777777',
-                                        'symbol': '^' if is_inlier else 'o',
-                                        'plotly_symbol': 'triangle-up' if is_inlier else 'circle',
-                                        'size': 5 if is_inlier else 4,
-                                        'drop_to_ground': False,
-                                        'opacity': 0.9 if is_inlier else 0.55,
-                                    })
-                                except Exception:
-                                    continue
-
-                            plot_opts['extra_markers'] = extra_markers
-
-                            # Wind-corrected rings (isochrones)
-                            paths = []
-                            for ring in ((infra_fit.get('isochrones') if isinstance(infra_fit, dict) else None) or (infra_fit_for_maps.get('isochrones') or [])):
-                                try:
-                                    paths.append({
-                                        'label': f"Isochrone {ring.get('code','')}",
-                                        'color': '#006400',
-                                        'lats': ring.get('lats'),
-                                        'lons': ring.get('lons'),
-                                        'elev_km': float(ring.get('alt_km', elev_km)),
-                                        'station_lat': ring.get('station_lat'),
-                                        'station_lon': ring.get('station_lon'),
-                                        'station_elev_m': ring.get('station_elev_m'),
-                                    })
-                                except Exception:
-                                    continue
-                            if paths:
-                                plot_opts['extra_paths'] = paths
-                except Exception:
-                    pass
-            
-            metrack_info = analysis_results.get('metrack_info') if isinstance(analysis_results, dict) else None
-            metrack_plot_data = analysis_results.get('metrack_plot_data') if isinstance(analysis_results, dict) else None
-            if metrack_info is not None and metrack_plot_data is not None:
-                generate_metrack_plots(metrack_info, metrack_plot_data,
-                                       plot_opts, translations=translations, output_prefix=file_prefix)
-            else:
-                logging.info("Skipping metrack plots (no metrack data available).")
-
-            if analysis_results.get('fbspd_plot_data') is not None:
-                generate_speed_plots(analysis_results['fbspd_plot_data'], 
-                                     translations=translations, output_prefix=file_prefix)
-            else:
-                logging.info("Skipping speed plots (no FBSPD plot data available).")
-
-            if is_multistation and analysis_results and current_orbit_data.get('valid'):
-                orbit(True, current_orbit_data['entry_speed'], 0, str(res_filename), 
-                      date.strftime('%Y-%m-%d'), date.strftime('%H:%M:%S'), 'save', 
-                      interactive=True, translations=translations, output_prefix=file_prefix)
-            
-            dpi_map = {'map.svg': Config.SVG_MAP_DPI, 'orbit.svg': Config.SVG_ORBIT_DPI}
-            for svg_name in ["posvstime.svg", "spd_acc.svg", "orbit.svg", "height.svg", "map.svg"]:
-                svg_path = event_dir / f"{file_prefix}{svg_name}"
-                if svg_path.exists():
-                    dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
-                    svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
-            
-            if is_multistation and analysis_results:
-                generate_triangulation_html_report(event_dir / f"{file_prefix}tables.html", 
-                                                   analysis_results['resdat'], 
-                                                   current_orbit_data, 
-                                                   analysis_results['placename'], 
-                                                   translations, lang)
+    # --- PLOTTING OPERATIONS - Process Pool Approach ---
+    # Each language gets its own process to avoid matplotlib/SPICE conflicts
+    # Extract only picklable data from analysis_results
+    
+    plot_data = None
+    if is_multistation and analysis_results:
+        orbit_data = analysis_results.get('orbit_data', {})
+        # Extract data for plots - numpy arrays and simple objects are picklable
+        # But we must convert ephem.Angle objects to floats first
+        metrack_info = analysis_results.get('metrack_info')
+        metrack_plot_data = analysis_results.get('metrack_plot_data')
+        fbspd_plot_data = analysis_results.get('fbspd_plot_data')
         
-        except Exception as e:
-            logging.error(f"Failed to generate output for language '{lang}': {e}", exc_info=True)
+        # Convert any ephem.Angle objects to floats for pickling
+        metrack_info = _convert_ephem_angles(metrack_info) if metrack_info else None
+        metrack_plot_data = _convert_ephem_angles(metrack_plot_data) if metrack_plot_data else None
+        fbspd_plot_data = _convert_ephem_angles(fbspd_plot_data) if fbspd_plot_data else None
+        
+        plot_data = {
+            'orbit': {
+                'valid': orbit_data.get('valid', False),
+                'entry_speed': orbit_data.get('entry_speed'),
+                'showername': orbit_data.get('showername', ''),
+                'az': orbit_data.get('az', 0),
+                'alt': orbit_data.get('alt', 0),
+                'ra': orbit_data.get('ra', 0),
+                'dec': orbit_data.get('dec', 0),
+                'rp': orbit_data.get('rp', 0),
+                'ecc': orbit_data.get('ecc', 0),
+                'inc': orbit_data.get('inc', 0),
+                'lnode': orbit_data.get('lnode', 0),
+                'argp': orbit_data.get('argp', 0),
+                'm0': orbit_data.get('m0', 0),
+                't0': orbit_data.get('t0', 0),
+            },
+            'metrack_info': metrack_info,
+            'metrack_plot_data': metrack_plot_data,
+            'fbspd_plot_data': fbspd_plot_data,
+            'resdat': str(res_filename),
+            'date_str': date.strftime('%Y-%m-%d'),
+            'time_str': date.strftime('%H:%M:%S'),
+            'event_dir': str(event_dir),
+            'placename': analysis_results.get('placename', '') if isinstance(analysis_results, dict) else '',
+        }
+    
+    # Run all languages in parallel with process pool
+    orbit_data_by_lang = {}
+    if not plot_data:
+        # Single-station event: just generate station HTML reports
+        for lang in SUPPORTED_LANGS:
+            try:
+                translations = load_translations(lang)
+                file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
+                logging.info(f"Generated station report for language: [{lang}]")
+            except Exception as e:
+                logging.error(f"Failed to generate station report for language '{lang}': {e}")
+    else:
+        with ProcessPoolExecutor(max_workers=min(len(SUPPORTED_LANGS), 5)) as executor:
+            futures = {
+                executor.submit(
+                    _generate_language_in_process,
+                    lang, str(event_dir), name_to_code, plot_data
+                ): lang for lang in SUPPORTED_LANGS
+            }
+            for future in as_completed(futures):
+                lang, error, orbit_data = future.result()
+                if error:
+                    logging.error(f"Failed to generate output for language '{lang}': {error}")
+                else:
+                    logging.info(f"Successfully completed language: [{lang}]")
+                    if orbit_data:
+                        orbit_data_by_lang[lang] = orbit_data
+    
+    # Generate triangulation HTML reports sequentially (needs resdat which isn't picklable)
+    if is_multistation and analysis_results and plot_data:
+        resdat = analysis_results.get('resdat')
+        placename = analysis_results.get('placename', '')
+        if resdat:
+            for lang in SUPPORTED_LANGS:
+                try:
+                    translations = load_translations(lang)
+                    file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                    current_orbit_data = orbit_data_by_lang.get(lang, {'valid': False})
+                    if current_orbit_data.get('valid'):
+                        generate_triangulation_html_report(
+                            event_dir / f"{file_prefix}tables.html",
+                            resdat,
+                            current_orbit_data,
+                            placename,
+                            translations, lang
+                        )
+                except Exception as e:
+                    logging.warning(f"Failed to generate triangulation HTML for {lang}: {e}")
 
     if is_multistation and analysis_results:
         if WINDPROFILE_AVAILABLE:

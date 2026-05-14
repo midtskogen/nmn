@@ -284,8 +284,8 @@ footer { text-align: center; color: var(--muted); font-size: 0.9em; margin-top: 
 .modal-header h3{margin:0;font-size:16px;color:#e0e6ed}
 .modal-close{font-size:24px;background:none;border:none;cursor:pointer;color:#8aa4be;padding:0 4px;line-height:1;position:relative;z-index:21}
 .modal-close:hover{color:#fff}
-.media-wrapper{position:relative;width:100%;height:70vh;background:#050d18;display:flex;align-items:center;justify-content:center;overflow:hidden;z-index:1}
-.media-wrapper img,.media-wrapper video{max-width:100%;max-height:70vh;display:block;object-fit:contain}
+.media-wrapper{position:relative;width:100%;height:auto;max-height:75vh;background:#050d18;display:flex;align-items:center;justify-content:center;overflow:hidden;z-index:1}
+.media-wrapper img,.media-wrapper video{width:100%;height:auto;max-height:75vh;display:block;object-fit:cover}
 /* Hide browser native video controls */
 video::-webkit-media-controls{display:none!important}
 video::-webkit-media-controls-enclosure{display:none!important}
@@ -1308,8 +1308,8 @@ function openMediaPlayer(url, type, variants, stationLabel) {
     
     controls.appendChild(downloadBtn);
     
-    // Brightness and Contrast sliders for video
-    if (type === 'video') {
+    // Brightness and Contrast sliders for video and images
+    if (type === 'video' || type === 'image') {
         const filterControls = document.createElement('div');
         filterControls.style.display = 'flex';
         filterControls.style.gap = '10px';

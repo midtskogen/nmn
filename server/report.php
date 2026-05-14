@@ -1,422 +1,457 @@
 <?php
-// --- Configuration ---
-$DEFAULT_LANG = 'nb_NO';
-$LANG_DIR = '/home/httpd/norskmeteornettverk.no/bin/loc'; // Corrected to a full, unambiguous path as a best practice.
-// --- Setup ---
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
 
-/**
- * Gets the user's real IP address, safely handling proxies.
- * @return string The user's IP address.
- */
-function get_user_ip() {
-    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-        return trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+// --- Helper Functions ---
+
+function sanitize_input($data) {
+    if (is_array($data)) {
+        return array_map('sanitize_input', $data);
     }
-    if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
-        return trim($_SERVER['HTTP_X_REAL_IP']);
-    }
-    return $_SERVER['REMOTE_ADDR'] ?? 'unknown_ip';
+    return htmlspecialchars(stripslashes(trim($data)));
 }
 
-/**
- * Determines the desired language based on the same priorities as index.php.
- * Priority: URL Param > Cookie > Browser Header > GeoIP > Default.
- * @param string $default_lang The default language code to use as a fallback.
- * @return string The determined and validated language code (e.g., 'en_GB').
- */
-function get_language($default_lang) {
-    // ADDED 'fi_FI' to the list of supported languages
-    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI'];
-    if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs)) {
-        return $_GET['lang'];
-    }
-    if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
-        return $_COOKIE['lang'];
-    }
-    if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
-        preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1|0\.[0-9]+))?/i', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $matches);
-        if (count($matches[1])) {
-            $langs = array_combine($matches[1], $matches[4]);
-            foreach ($langs as $lang => $val) { if ($val === '') $langs[$lang] = 1; }
-            arsort($langs, SORT_NUMERIC);
-            foreach (array_keys($langs) as $browser_lang) {
-                $browser_lang_code = str_replace('-', '_', $browser_lang);
-                if (in_array($browser_lang_code, $supported_langs)) return $browser_lang_code;
-                $short_code = substr($browser_lang_code, 0, 2);
-                foreach ($supported_langs as $supported) {
-                    if (substr($supported, 0, 2) === $short_code) return $supported;
-                }
-            }
-        }
-    }
-    $country_to_lang_map = [
-        'NO' => 'nb_NO', 'SE' => 'nb_NO', 'DK' => 'nb_NO',
-        'GB' => 'en_GB', 'US' => 'en_GB', 'CA' => 'en_GB', 'AU' => 'en_GB', 'NZ' => 'en_GB', 'IE' => 'en_GB',
-        'DE' => 'de_DE', 'AT' => 'de_DE', 'CH' => 'de_DE',
-        'CZ' => 'cs_CZ', 'SK' => 'cs_CZ',
-        'FI' => 'fi_FI', // ADDED Finland to the country map
-    ];
-    $user_ip = get_user_ip();
-    $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
-    if ($geo_data_json) {
-        $geo_data = json_decode($geo_data_json);
-        if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
-            return $country_to_lang_map[$geo_data->countryCode];
-        }
-    }
-    return $default_lang;
+function generate_random_name($length = 5) {
+    return substr(str_shuffle(str_repeat('0123456789abcdefghijklmnopqrstuvwxyz', ceil($length/36))),1,$length);
 }
 
-// --- Main Logic ---
-$lang_code = get_language($DEFAULT_LANG);
-setcookie('lang', $lang_code, time() + (86400 * 365), "/");
-
-// Use the short 2-letter language code to build the filename (e.g., 'nb', 'en', 'fi')
-// This matches the actual filenames like 'nb.json', 'en.json', 'fi.json', etc.
-$lang_short = substr($lang_code, 0, 2);
-$default_lang_short = substr($DEFAULT_LANG, 0, 2);
-
-$t = [];
-$lang_file_path = $LANG_DIR . '/' . $lang_short . '.json';
-if (!file_exists($lang_file_path)) {
-    // Fallback to the default language's short code if the detected one doesn't exist
-    $lang_file_path = $LANG_DIR . '/' . $default_lang_short . '.json';
+function save_base64_image($base64_string, $output_file) {
+    $data = explode(',', $base64_string);
+    if (count($data) < 2) return false;
+    return file_put_contents($output_file, base64_decode($data[1])) !== false;
 }
 
-if (file_exists($lang_file_path)) {
-    $t_json = file_get_contents($lang_file_path);
-    if ($t_json) {
-        $t = json_decode($t_json, true);
-    }
+function normalize_coordinate_input($value) {
+    if ($value === null) return '';
+    return str_replace(',', '.', trim((string)$value));
 }
 
-// --- File Path Setup ---
-$a = array_reverse(explode('/', getcwd()));
-$path = "/meteor/" . $a[1] . "/" . $a[0] . "/";
-$date = substr_replace($a[1], '-', 4, 0);
-$date = substr_replace($date, '-', 7, 0);
-$time = substr_replace($a[0], ':', 2, 0);
-$time = substr_replace($time, ':', 5, 0);
-$time = preg_replace("/[a-z]/", "", $time);
-// The file prefix logic was already correct, using the short language code
-$file_prefix = ($lang_short === 'nb') ? '' : $lang_short . '_';
-
-$map_jpg_path        = "{$file_prefix}map.jpg";
-$map_html_path       = "{$file_prefix}map.html";
-$height_jpg_path     = "{$file_prefix}height.jpg";
-$orbit_jpg_path      = "{$file_prefix}orbit.jpg";
-$orbit_html_path     = "{$file_prefix}orbit.html";
-$tables_html_path    = "{$file_prefix}tables.html";
-$stations_html_path  = "{$file_prefix}stations.html";
-$posvstime_jpg_path  = "{$file_prefix}posvstime.jpg";
-$spd_acc_jpg_path    = "{$file_prefix}spd_acc.jpg";
-$wind_jpg_path       = "{$file_prefix}wind_profile.jpg"; // Path for wind profile plot
-$image_path          = "{$file_prefix}image.jpg";
-
-/**
- * Checks if a language-specific file exists, falling back to the default (non-prefixed) file.
- * @param string $specific_path The path with the language prefix (e.g., 'en_map.jpg').
- * @param string $default_path The path without the language prefix (e.g., 'map.jpg').
- * @return string|null The accessible file path, or null if neither exists.
- */
-function get_accessible_path($specific_path, $default_path) {
-    return file_exists($specific_path) ? $specific_path : (file_exists($default_path) ? $default_path : null);
+function parse_and_validate_coordinate($value, $min, $max) {
+    $normalized = normalize_coordinate_input($value);
+    if ($normalized === '') return null;
+    $parsed = filter_var($normalized, FILTER_VALIDATE_FLOAT);
+    if ($parsed === false) return null;
+    if ($parsed < $min || $parsed > $max) return null;
+    return $parsed;
 }
 
-$map_jpg_display     = get_accessible_path($map_jpg_path, "map.jpg");
-$map_html_display    = get_accessible_path($map_html_path, "map.html");
-$height_jpg_display  = get_accessible_path($height_jpg_path, "height.jpg");
-$orbit_jpg_display   = get_accessible_path($orbit_jpg_path, "orbit.jpg");
-$orbit_html_display  = get_accessible_path($orbit_html_path, "orbit.html");
-$tables_html_display   = get_accessible_path($tables_html_path, "tables.html");
-$stations_html_display = get_accessible_path($stations_html_path, "stations.html");
-$posvstime_jpg_display = get_accessible_path($posvstime_jpg_path, "posvstime.jpg");
-$spd_acc_jpg_display   = get_accessible_path($spd_acc_jpg_path, "spd_acc.jpg");
-$wind_jpg_display    = get_accessible_path($wind_jpg_path, "wind_profile.jpg"); // Check for wind profile
-?>
-<!DOCTYPE html>
-<html lang="<?php echo htmlspecialchars($lang_short); ?>">
-<head>
-  <meta charset="UTF-8">
-  <title><?php echo htmlspecialchars($t['report_title'] ?? 'Meteor Report'); ?></title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-<?php
-print '<meta property="og:url" content="' . $path . '">' . "\n";
-print '<meta property="og:type" content="article">' . "\n";
-print '<meta property="og:site_name" content="Norsk meteornettverk">' . "\n";
-$og_image_display = get_accessible_path($image_path, "image.jpg");
-if ($og_image_display) {
-    print '<meta property="og:image" content="' . $path . $og_image_display . '">' . "\n";
-}
-?>
+// --- Main Script Logic ---
 
-<style>
-:root {
-  --primary-color: #082060; --secondary-color: #c01010; --background-color: #f4f6f9;
-  --text-color: #333; --card-bg-color: #ffffff; --border-color: #dee2e6;
-  --header-font: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; --body-font: 'Verdana', sans-serif;
-}
-body { font-family: var(--body-font); font-size: 16px; margin: 0; padding: 0;
- background-color: var(--background-color); color: var(--text-color); line-height: 1.6; }
-.page-wrapper { margin: 0 auto; padding: 1em; position: relative; }
-h1 { color: var(--primary-color);
- font-family: var(--header-font); font-size: 2.5em; margin: 0.5em 0; font-weight: 300; letter-spacing: -1px; text-align: center; }
-p { text-align: justify;
-}
-a { color: var(--secondary-color); text-decoration: none; transition: color: 0.3s; }
-a:hover { color: #601010; text-decoration: underline; }
-img { max-width: 100%;
- height: auto; display: block; margin: 1em auto; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-.container { display: flex; flex-direction: row;
- gap: 2em; margin: 2em 0; align-items: flex-start; }
-.column { flex: 1; display: flex; flex-direction: column; background-color: var(--card-bg-color); padding: 1.5em;
- border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }
-iframe { width: 100%; min-height: 512px; border: none; border-radius: 8px; flex-grow: 1;
-}
-@media (max-width: 1024px) { .container { flex-direction: column; } iframe { min-height: 512px; height: 512px; } }
-.text-center { text-align: center;
-}
-table { width: 100%; border-collapse: collapse; margin-top: 1em; }
-th, td { padding: 0.75em; text-align: left; border-bottom: 1px solid var(--border-color);
-}
-.container .column > table td:first-child { font-weight: bold; color: var(--primary-color); }
-footer { text-align: center; margin-top: 2em; padding: 1em; color: #666;
- font-size: 0.9em; }
-
-/* Language switcher positioned absolutely */
-.language-switcher {
-    position: absolute;
-    top: 1em;
-    right: 1em;
-    z-index: 1000;
-    background-color: transparent;
-    padding: 0.25em 0.5em;
-    border-radius: 8px;
-    font-size: 1.5em;
-}
-.language-switcher a {
-    text-decoration: none;
-    margin: 0 0.25em;
-    opacity: 0.7;
-    transition: opacity 0.2s;
-    display: inline-block;
-    /* Ensures consistent behavior */
-}
-.language-switcher a:hover {
-    opacity: 1;
-}
-
-/* ADDED: Restore auto-scaling for images inside tables from stations.html */
-table img {
-    width: 100% !important;
-    /* Force override of inline width attribute */
-    height: auto;
-}
-@media (max-width: 768px) {
-  /* This targets the <td> elements of the main layout table 
-    in stations.html. The [valign="top"] attribute is 
-    a specific selector from that file's structure.
-  */
-  .column > table > tbody > tr > td[valign="top"] {
-    display: block;  /* Makes the table cells stack vertically */
-    width: 100%;     /* Ensures they take up the full width */
-    box-sizing: border-box;
-  }
-}
-</style>
-</head>
-<body>
-
-<div class="page-wrapper">
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
-    <div class="language-switcher">
-        <span style="font-size: 0.7em;">
-        <a href="?lang=nb_NO" title="Norsk">🇳🇴</a>
-        <a href="?lang=en_GB" title="English">🇬🇧</a>
-        <a href="?lang=de_DE" title="Deutsch">🇩🇪</a>
-        <a href="?lang=cs_CZ" title="Čeština">🇨🇿</a>
-        <a href="?lang=fi_FI" title="Suomi">🇫🇮</a> <?php // ADDED Finnish flag and link ?>
-	</span>
-    </div>
+    // --- Translation Data ---
+    $lang = sanitize_input($_POST['lang'] ?? 'nb_NO');
+    $translations = [
+        'nb_NO' => [
+            'report_title' => 'Meteor-rapport',
+            'thank_you_header' => 'Takk for rapporten!',
+            'thank_you_subheader' => 'Her er ei oppsummering av observasjonen din.',
+            'obs_time_and_place_header' => 'Observasjonstidspunkt og -sted',
+            'time_utc_label' => 'Tidspunkt (UTC):',
+            'accuracy_label' => 'Nøyaktighet:',
+            'obs_location_label' => 'Observasjonssted:',
+            'latitude_label' => 'Breddegrad',
+            'longitude_label' => 'Lengdegrad',
+            'meteor_path_header' => 'Meteorbane',
+            'start_point_label' => 'Startpunkt:',
+            'end_point_label' => 'Sluttpunkt:',
+            'direction_label' => 'Retning',
+            'altitude_label' => 'Høgde',
+            'other_info_header' => 'Andre opplysninger',
+            'color_label' => 'Dominerende farge:',
+            'brightness_label' => 'Største lysstyrke:',
+            'duration_label' => 'Varighet:',
+            'other_phenomena_label' => 'Andre fenomen:',
+            'no_phenomena_selected' => 'Ingen valgt.',
+            'sound_delay_label' => 'Tid fra syn til lyd:',
+            'observer_comments_label' => 'Observatørens kommentarer:',
+            'contact_info_header' => 'Kontaktinformasjon',
+            'name_label' => 'Navn:',
+            'phone_label' => 'Telefon:',
+            'email_label' => 'E-post:',
+            'attachments_header' => 'Vedlegg',
+            'report_id_label' => 'Rapport-ID',
+            'uploaded_image_alt' => 'Opplastet bilde',
+            'view_full_size' => 'Vis i full størrelse',
+            'view_video' => 'Se video:',
+            'email_subject' => 'Ny meteorrapport',
+            'email_body_intro' => 'En ny meteorrapport har blitt sendt inn.',
+            'email_full_report_link' => 'Full rapport',
+            'email_comments_label' => 'Kommentarer',
+            'time_accuracy' => ['unknown' => 'Veit ikke', 'pm1' => '±1 minutt', 'pm5' => '±5 minutt', 'pm15' => '±15 minutt', 'pm30' => '±30 minutt', 'gt30' => 'Mer enn 30 minutts usikkerhet'],
+            'dominant_color' => ['unknown' => 'Usikker', 'white' => 'Hvit', 'green' => 'Grønn', 'blue' => 'Blå', 'yellow' => 'Gul', 'orange' => 'Oransje', 'red' => 'Rød', 'other' => 'Annen'],
+            'brightness' => ['unknown' => 'Usikker', 'stars' => 'Som de klareste stjernene', 'brighter' => 'Litt sterkere enn stjernene', 'muchbrighter' => 'Mye sterkere enn stjernene men terrenget lyste ikke opp', 'lit' => 'Terrenget lyste opp', 'daylight' => 'Nesten som daglys', 'fulldaylight' => 'Fullt daglys'],
+            'duration' => ['unknown' => 'Usikker', 'lt2' => 'under 2 sekund', '2-4' => '2 - 4 sekund', '4-8' => '4 - 8 sekund', '8-16' => '8 - 16 sekund', 'gt16' => 'mer enn 16 sekund'],
+            'other_phenomena' => ['afterglow' => 'Etterglød', 'smoke' => 'Røykspor', 'fragmentation' => 'Oppsplitting', 'explosion' => 'Eksplosjon', 'sound' => 'Lyd/drønn'],
+            'sound_delay' => ['unknown' => 'Usikker', 'lt30s' => 'Mindre enn 30 sekund', '30s-1m' => '30 sekund til ett minutt', '1m-1.5m' => 'Ett minutt til halvannet minutt', '1.5m-2m' => 'Halvannet minutt til to minutt', 'gt2m' => 'Mer enn to minutt'],
+        ],
+        'en_GB' => [
+            'report_title' => 'Meteor Report',
+            'thank_you_header' => 'Thank you for your report!',
+            'thank_you_subheader' => 'Here is a summary of your observation.',
+            'obs_time_and_place_header' => 'Time and Location of Observation',
+            'time_utc_label' => 'Time (UTC):',
+            'accuracy_label' => 'Accuracy:',
+            'obs_location_label' => 'Observation Location:',
+            'latitude_label' => 'Latitude',
+            'longitude_label' => 'Longitude',
+            'meteor_path_header' => 'Meteor Path',
+            'start_point_label' => 'Start Point:',
+            'end_point_label' => 'End Point:',
+            'direction_label' => 'Direction',
+            'altitude_label' => 'Altitude',
+            'other_info_header' => 'Other Information',
+            'color_label' => 'Dominant Color:',
+            'brightness_label' => 'Peak Brightness:',
+            'duration_label' => 'Duration:',
+            'other_phenomena_label' => 'Other Phenomena:',
+            'no_phenomena_selected' => 'None selected.',
+            'sound_delay_label' => 'Time from Sight to Sound:',
+            'observer_comments_label' => "Observer's Comments:",
+            'contact_info_header' => 'Contact Information',
+            'name_label' => 'Name:',
+            'phone_label' => 'Phone:',
+            'email_label' => 'E-mail:',
+            'attachments_header' => 'Attachments',
+            'report_id_label' => 'Report ID',
+            'uploaded_image_alt' => 'Uploaded image',
+            'view_full_size' => 'View full size',
+            'view_video' => 'Watch video:',
+            'email_subject' => 'New meteor report',
+            'email_body_intro' => 'A new meteor report has been submitted.',
+            'email_full_report_link' => 'Full report',
+            'email_comments_label' => 'Comments',
+            'time_accuracy' => ['unknown' => 'Unsure', 'pm1' => '±1 minute', 'pm5' => '±5 minutes', 'pm15' => '±15 minutes', 'pm30' => '±30 minutes', 'gt30' => 'More than 30 minutes uncertainty'],
+            'dominant_color' => ['unknown' => 'Unsure', 'white' => 'White', 'green' => 'Green', 'blue' => 'Blue', 'yellow' => 'Yellow', 'orange' => 'Orange', 'red' => 'Red', 'other' => 'Other'],
+            'brightness' => ['unknown' => 'Unsure', 'stars' => 'Like the brightest stars', 'brighter' => 'Slightly brighter than the stars', 'muchbrighter' => 'Much brighter than stars, but landscape not lit up', 'lit' => 'The landscape was lit up', 'daylight' => 'Almost like daylight', 'fulldaylight' => 'Full daylight'],
+            'duration' => ['unknown' => 'Unsure', 'lt2' => 'less than 2 seconds', '2-4' => '2 - 4 seconds', '4-8' => '4 - 8 seconds', '8-16' => '8 - 16 seconds', 'gt16' => 'more than 16 seconds'],
+            'other_phenomena' => ['afterglow' => 'Afterglow', 'smoke' => 'Smoke trail', 'fragmentation' => 'Fragmentation', 'explosion' => 'Explosion', 'sound' => 'Sound/boom'],
+            'sound_delay' => ['unknown' => 'Unsure', 'lt30s' => 'Less than 30 seconds', '30s-1m' => '30 seconds to one minute', '1m-1.5m' => 'One to one and a half minutes', '1.5m-2m' => 'One and a half to two minutes', 'gt2m' => 'More than two minutes'],
+        ],
+        'de_DE' => [
+            'report_title' => 'Meteor-Bericht',
+            'thank_you_header' => 'Vielen Dank für Ihre Meldung!',
+            'thank_you_subheader' => 'Hier ist eine Zusammenfassung Ihrer Beobachtung.',
+            'obs_time_and_place_header' => 'Zeit und Ort der Beobachtung',
+            'time_utc_label' => 'Zeit (UTC):',
+            'accuracy_label' => 'Genauigkeit:',
+            'obs_location_label' => 'Beobachtungsort:',
+            'latitude_label' => 'Breitengrad',
+            'longitude_label' => 'Längengrad',
+            'meteor_path_header' => 'Meteorbahn',
+            'start_point_label' => 'Startpunkt:',
+            'end_point_label' => 'Endpunkt:',
+            'direction_label' => 'Richtung',
+            'altitude_label' => 'Höhe',
+            'other_info_header' => 'Weitere Informationen',
+            'color_label' => 'Dominante Farbe:',
+            'brightness_label' => 'Maximale Helligkeit:',
+            'duration_label' => 'Dauer:',
+            'other_phenomena_label' => 'Weitere Phänomene:',
+            'no_phenomena_selected' => 'Keine ausgewählt.',
+            'sound_delay_label' => 'Zeit von Sichtung bis Geräusch:',
+            'observer_comments_label' => 'Kommentare des Beobachters:',
+            'contact_info_header' => 'Kontaktinformationen',
+            'name_label' => 'Name:',
+            'phone_label' => 'Telefon:',
+            'email_label' => 'E-Mail:',
+            'attachments_header' => 'Anhänge',
+            'report_id_label' => 'Berichts-ID',
+            'uploaded_image_alt' => 'Hochgeladenes Bild',
+            'view_full_size' => 'Vollbild anzeigen',
+            'view_video' => 'Video ansehen:',
+            'email_subject' => 'Neuer Meteor-Bericht',
+            'email_body_intro' => 'Ein neuer Meteor-Bericht wurde eingereicht.',
+            'email_full_report_link' => 'Vollständiger Bericht',
+            'email_comments_label' => 'Kommentare',
+            'time_accuracy' => ['unknown' => 'Unsicher', 'pm1' => '±1 Minute', 'pm5' => '±5 Minuten', 'pm15' => '±15 Minuten', 'pm30' => '±30 Minuten', 'gt30' => 'Mehr als 30 Minuten Unsicherheit'],
+            'dominant_color' => ['unknown' => 'Unsicher', 'white' => 'Weiß', 'green' => 'Grün', 'blue' => 'Blau', 'yellow' => 'Gelb', 'orange' => 'Orange', 'red' => 'Rot', 'other' => 'Andere'],
+            'brightness' => ['unknown' => 'Unsicher', 'stars' => 'Wie die hellsten Sterne', 'brighter' => 'Etwas heller als die Sterne', 'muchbrighter' => 'Viel heller als Sterne, hat aber die Landschaft nicht erhellt', 'lit' => 'Die Landschaft wurde erhellt', 'daylight' => 'Fast wie Tageslicht', 'fulldaylight' => 'Volles Tageslicht'],
+            'duration' => ['unknown' => 'Unsicher', 'lt2' => 'weniger als 2 Sekunden', '2-4' => '2 - 4 Sekunden', '4-8' => '4 - 8 Sekunden', '8-16' => '8 - 16 Sekunden', 'gt16' => 'mehr als 16 Sekunden'],
+            'other_phenomena' => ['afterglow' => 'Nachglühen', 'smoke' => 'Rauchspur', 'fragmentation' => 'Fragmentierung', 'explosion' => 'Explosion', 'sound' => 'Geräusch/Knall'],
+            'sound_delay' => ['unknown' => 'Unsicher', 'lt30s' => 'Weniger als 30 Sekunden', '30s-1m' => '30 Sekunden bis eine Minute', '1m-1.5m' => 'Eine bis anderthalb Minuten', '1.5m-2m' => 'Anderthalb bis zwei Minuten', 'gt2m' => 'Mehr als zwei Minuten'],
+        ],
+        'cs_CZ' => [
+            'report_title' => 'Hlášení o meteoru',
+            'thank_you_header' => 'Děkujeme za vaše hlášení!',
+            'thank_you_subheader' => 'Zde je shrnutí vašeho pozorování.',
+            'obs_time_and_place_header' => 'Čas a místo pozorování',
+            'time_utc_label' => 'Čas (UTC):',
+            'accuracy_label' => 'Přesnost:',
+            'obs_location_label' => 'Místo pozorování:',
+            'latitude_label' => 'Zeměpisná šířka',
+            'longitude_label' => 'Zeměpisná délka',
+            'meteor_path_header' => 'Dráha meteoru',
+            'start_point_label' => 'Počáteční bod:',
+            'end_point_label' => 'Koncový bod:',
+            'direction_label' => 'Směr',
+            'altitude_label' => 'Výška',
+            'other_info_header' => 'Další informace',
+            'color_label' => 'Dominantní barva:',
+            'brightness_label' => 'Maximální jas:',
+            'duration_label' => 'Doba trvání:',
+            'other_phenomena_label' => 'Další jevy:',
+            'no_phenomena_selected' => 'Žádné vybrány.',
+            'sound_delay_label' => 'Doba od spatření po zvuk:',
+            'observer_comments_label' => 'Komentáře pozorovatele:',
+            'contact_info_header' => 'Kontaktní informace',
+            'name_label' => 'Jméno:',
+            'phone_label' => 'Telefon:',
+            'email_label' => 'E-mail:',
+            'attachments_header' => 'Přílohy',
+            'report_id_label' => 'ID hlášení',
+            'uploaded_image_alt' => 'Nahraný obrázek',
+            'view_full_size' => 'Zobrazit v plné velikosti',
+            'view_video' => 'Přehrát video:',
+            'email_subject' => 'Nové hlášení o meteoru',
+            'email_body_intro' => 'Bylo odesláno nové hlášení o meteoru.',
+            'email_full_report_link' => 'Celé hlášení',
+            'email_comments_label' => 'Komentáře',
+            'time_accuracy' => ['unknown' => 'Nevím', 'pm1' => '±1 minuta', 'pm5' => '±5 minut', 'pm15' => '±15 minut', 'pm30' => '±30 minut', 'gt30' => 'Více než 30 minut nejistoty'],
+            'dominant_color' => ['unknown' => 'Nevím', 'white' => 'Bílá', 'green' => 'Zelená', 'blue' => 'Modrá', 'yellow' => 'Žlutá', 'orange' => 'Oranžová', 'red' => 'Červená', 'other' => 'Jiná'],
+            'brightness' => ['unknown' => 'Nevím', 'stars' => 'Jako nejjasnější hvězdy', 'brighter' => 'O něco jasnější než hvězdy', 'muchbrighter' => 'Mnohem jasnější než hvězdy, ale krajinu neosvětlil', 'lit' => 'Krajina byla osvětlena', 'daylight' => 'Téměř jako denní světlo', 'fulldaylight' => 'Plné denní světlo'],
+            'duration' => ['unknown' => 'Nevím', 'lt2' => 'méně než 2 sekundy', '2-4' => '2 - 4 sekundy', '4-8' => '4 - 8 sekund', '8-16' => '8 - 16 sekund', 'gt16' => 'více než 16 sekund'],
+            'other_phenomena' => ['afterglow' => 'Dosvit', 'smoke' => 'Kouřová stopa', 'fragmentation' => 'Rozpad', 'explosion' => 'Exploze', 'sound' => 'Zvuk/rána'],
+            'sound_delay' => ['unknown' => 'Nevím', 'lt30s' => 'Méně než 30 sekund', '30s-1m' => '30 sekund až jedna minuta', '1m-1.5m' => 'Jedna až jedna a půl minuty', '1.5m-2m' => 'Jedna a půl až dvě minuty', 'gt2m' => 'Více než dvě minuty'],
+        ],
+        'fi_FI' => [
+            'report_title' => 'Meteorihavaintoilmoitus',
+            'thank_you_header' => 'Kiitos ilmoituksestasi!',
+            'thank_you_subheader' => 'Tässä on yhteenveto havainnostasi.',
+            'obs_time_and_place_header' => 'Havainnon aika ja paikka',
+            'time_utc_label' => 'Aika (UTC):',
+            'accuracy_label' => 'Tarkkuus:',
+            'obs_location_label' => 'Havaintopaikka:',
+            'latitude_label' => 'Leveyspiiri',
+            'longitude_label' => 'Pituuspiiri',
+            'meteor_path_header' => 'Meteorin lentorata',
+            'start_point_label' => 'Alkupiste:',
+            'end_point_label' => 'Loppupiste:',
+            'direction_label' => 'Suunta',
+            'altitude_label' => 'Korkeus',
+            'other_info_header' => 'Muita tietoja',
+            'color_label' => 'Hallitseva väri:',
+            'brightness_label' => 'Suurin kirkkaus:',
+            'duration_label' => 'Kesto:',
+            'other_phenomena_label' => 'Muita ilmiöitä:',
+            'no_phenomena_selected' => 'Ei valittu.',
+            'sound_delay_label' => 'Aika havainnosta ääneen:',
+            'observer_comments_label' => 'Havainnoitsijan kommentit:',
+            'contact_info_header' => 'Yhteystiedot',
+            'name_label' => 'Nimi:',
+            'phone_label' => 'Puhelin:',
+            'email_label' => 'Sähköposti:',
+            'attachments_header' => 'Liitteet',
+            'report_id_label' => 'Ilmoituksen ID',
+            'uploaded_image_alt' => 'Ladattu kuva',
+            'view_full_size' => 'Näytä täysikokoisena',
+            'view_video' => 'Katso video:',
+            'email_subject' => 'Uusi meteorihavaintoilmoitus',
+            'email_body_intro' => 'Uusi meteorihavaintoilmoitus on lähetetty.',
+            'email_full_report_link' => 'Koko ilmoitus',
+            'email_comments_label' => 'Kommentit',
+            'time_accuracy' => ['unknown' => 'Epävarma', 'pm1' => '±1 minuutti', 'pm5' => '±5 minuuttia', 'pm15' => '±15 minuuttia', 'pm30' => '±30 minuuttia', 'gt30' => 'Yli 30 minuutin epävarmuus'],
+            'dominant_color' => ['unknown' => 'Epävarma', 'white' => 'Valkoinen', 'green' => 'Vihreä', 'blue' => 'Sininen', 'yellow' => 'Keltainen', 'orange' => 'Oranssi', 'red' => 'Punainen', 'other' => 'Muu'],
+            'brightness' => ['unknown' => 'Epävarma', 'stars' => 'Kuin kirkkaimmat tähdet', 'brighter' => 'Hieman tähtiä kirkkaampi', 'muchbrighter' => 'Paljon tähtiä kirkkaampi, mutta ei valaissut maisemaa', 'lit' => 'Maisema valaistui', 'daylight' => 'Melkein kuin päivänvalo', 'fulldaylight' => 'Täysi päivänvalo'],
+            'duration' => ['unknown' => 'Epävarma', 'lt2' => 'alle 2 sekuntia', '2-4' => '2–4 sekuntia', '4-8' => '4–8 sekuntia', '8-16' => '8–16 sekuntia', 'gt16' => 'yli 16 sekuntia'],
+            'other_phenomena' => ['afterglow' => 'Jälkihohto', 'smoke' => 'Savuvana', 'fragmentation' => 'Hajoaminen', 'explosion' => 'Räjähdys', 'sound' => 'Ääni/pamaus'],
+            'sound_delay' => ['unknown' => 'Epävarma', 'lt30s' => 'Alle 30 sekuntia', '30s-1m' => '30 sekunnista minuuttiin', '1m-1.5m' => 'Minuutista puoleentoista', '1.5m-2m' => 'Puolestatoista kahteen minuuttiin', 'gt2m' => 'Yli kaksi minuuttia'],
+        ],
+    ];
 
-    <br>
-    <h1>
-    <?php
-    if (file_exists('location.txt') && filesize('location.txt') > 0) {
-        $location = trim(file_get_contents('location.txt'));
-        $title_str = '';
-        
-        if ($lang_short === 'cs') {
-            $declensions_path = $LANG_DIR . '/cs_declensions.json';
-            $declined_location = null;
-            if (file_exists($declensions_path)) {
-                $declensions = json_decode(file_get_contents($declensions_path), true);
-                if (isset($declensions[$location])) {
-                    $declined_location = $declensions[$location];
-                }
-            }
-            if ($declined_location) {
-                $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteor nad') . ' ' . htmlspecialchars($declined_location);
-            } else {
-                $title_str = htmlspecialchars($t['meteor'] ?? 'Meteor') . ', ' . htmlspecialchars($t['location'] ?? 'poloha') . ': ' . htmlspecialchars($location);
-            }
-        } elseif ($lang_short === 'fi') {
-            // HYBRID LOGIC: Check declension file first, then apply simple rule.
-            $declensions_path = $LANG_DIR . '/fi_declensions.json';
-            $declined_location = null;
-            if (file_exists($declensions_path)) {
-                $declensions = json_decode(file_get_contents($declensions_path), true);
-                if (isset($declensions[$location])) {
-                    $declined_location = $declensions[$location];
-                }
-            }
+    // Translation helper function
+    function t($key, $lang, $translations) {
+        // Fallback to Norwegian if key or language not found
+        return $translations[$lang][$key] ?? $translations['nb_NO'][$key] ?? $key;
+    }
 
-            // If not found in declensions, apply the simple fallback rule
-            if ($declined_location === null) {
-                $last_char = substr($location, -1);
-                // Finnish vowels
-                $vowels = ['a', 'e', 'i', 'o', 'u', 'y', 'ä', 'ö'];
-                
-                // Check against lowercase version of the last character
-                if (in_array(mb_strtolower($last_char, 'UTF-8'), $vowels)) {
-                    $declined_location = $location . 'n';
-                } else {
-                    $declined_location = $location . 'in';
+    // Translate a form value using the main translation array
+    function translate_value($key, $value, $lang, $translations) {
+        $values = $translations[$lang][$key] ?? $translations['nb_NO'][$key];
+        return $values[$value] ?? htmlspecialchars($value);
+    }
+
+    // 1. Sanitize and retrieve form data
+    $sighting_date_str = sanitize_input($_POST['sighting_date_full'] ?? '');
+    $sighting_time_str = sanitize_input($_POST['sighting_time_full'] ?? '');
+    $lat = parse_and_validate_coordinate($_POST['latitude'] ?? null, -90.0, 90.0);
+    $lon = parse_and_validate_coordinate($_POST['longitude'] ?? null, -180.0, 180.0);
+    if ($lat === null || $lon === null) {
+        http_response_code(400);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo "Invalid coordinates.";
+        exit();
+    }
+    $start_az = sanitize_input($_POST['bearing1'] ?? '');
+    $start_alt = sanitize_input($_POST['alt1'] ?? '');
+    $end_az = sanitize_input($_POST['bearing2'] ?? '');
+    $end_alt = sanitize_input($_POST['alt2'] ?? '');
+    $time_accuracy_val = sanitize_input($_POST['time_accuracy'] ?? 'unknown');
+    $dominant_color_val = sanitize_input($_POST['dominant_color'] ?? 'unknown');
+    $brightness_val = sanitize_input($_POST['brightness'] ?? 'unknown');
+    $duration_val = sanitize_input($_POST['duration'] ?? 'unknown');
+    
+    // *** FIX: Ensure 'other_phenomena' is always treated as an array ***
+    $other_phenomena = sanitize_input((array) ($_POST['other_phenomena'] ?? []));
+    
+    $sound_delay_val = sanitize_input($_POST['sound_delay'] ?? 'unknown');
+    $more_info = sanitize_input($_POST['more_info'] ?? '');
+    $contact_name = sanitize_input($_POST['contact_name'] ?? '');
+    $contact_phone = sanitize_input($_POST['contact_phone'] ?? '');
+    $contact_email = filter_var($_POST['contact_email'] ?? '', FILTER_SANITIZE_EMAIL);
+
+    // 2. Create directory structure
+    $date_obj = DateTime::createFromFormat('Y-m-d H:i:s', "{$sighting_date_str} {$sighting_time_str}") ?: new DateTime();
+    $report_dir = 'reports/' . $date_obj->format('Ymd/His') . '/';
+    if (!is_dir($report_dir)) mkdir($report_dir, 0777, true);
+
+    // 3. Generate unique filename and paths
+    $file_name = generate_random_name(5);
+    $report_file_path = "{$report_dir}{$file_name}.html";
+    
+    // 4. Handle image uploads from base64 data
+    $sky_view_image_name = '';
+    if (isset($_POST['sky_view_image'])) {
+        $sky_view_image_name = "sky-view-{$file_name}.png";
+        save_base64_image($_POST['sky_view_image'], $report_dir . $sky_view_image_name);
+    }
+    
+    $generated_map_image_name = '';
+    if (isset($_POST['generated_map_image'])) {
+        $generated_map_image_name = "map-view-{$file_name}.png";
+        save_base64_image($_POST['generated_map_image'], $report_dir . $generated_map_image_name);
+    }
+    
+    // 5. Handle File Uploads
+    $uploaded_files_html = $uploaded_files_text = '';
+    if (isset($_FILES['file_uploads'])) {
+        $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm'];
+        foreach ($_FILES['file_uploads']['tmp_name'] as $i => $tmp_name) {
+            if ($_FILES['file_uploads']['error'][$i] === UPLOAD_ERR_OK) {
+                $file_type = mime_content_type($tmp_name);
+                if (in_array($file_type, $allowed_types)) {
+                    $original_name = $_FILES['file_uploads']['name'][$i];
+                    $new_filename = "upload-{$i}-{$file_name}." . pathinfo($original_name, PATHINFO_EXTENSION);
+                    if (move_uploaded_file($tmp_name, $report_dir . $new_filename)) {
+                        $uploaded_files_text .= "- {$new_filename}\n";
+                        if (strpos($file_type, 'image/') === 0) {
+                            $uploaded_files_html .= "<div class='col-md-4 mb-3'><a href='{$new_filename}' target='_blank'><img src='{$new_filename}' class='img-fluid' alt='" . t('uploaded_image_alt', $lang, $translations) . "'></a><p class='text-center mt-1'><a href='{$new_filename}' target='_blank'>" . t('view_full_size', $lang, $translations) . "</a></p></div>";
+                        } elseif (strpos($file_type, 'video/') === 0) {
+                            $uploaded_files_html .= "<div class='col-md-4 mb-3'><p><a href='{$new_filename}' target='_blank'>" . t('view_video', $lang, $translations) . " {$new_filename}</a></p><video controls width='100%'><source src='{$new_filename}' type='{$file_type}'></video></div>";
+                        }
+                    }
                 }
             }
-            
-            $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteor') . ' ' . htmlspecialchars($declined_location) . ' yllä';
-            
-        } else {
-            // Default logic for nb, en, de
-            $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteor over') . ' ' . htmlspecialchars($location);
         }
-        
-        echo $title_str . " <span style=\"white-space: nowrap;\">$date</span> $time " . htmlspecialchars($t['utc'] ?? 'UTC');
-    } else {
-        echo htmlspecialchars(($t['report_title'] ?? 'Meteor Report') . " $date $time " . $t['utc']);
     }
-    ?>
-    </h1>
-
-    <?php // --- Container 1: Maps (Layout Change 2) --- ?>
-    <?php if ($map_html_display || $map_jpg_display): // Show container if any map exists ?>
-    <div class="container">
-      
-      <?php // Left Column: Primary Map (Interactive, or Static Fallback) ?>
-      <div class="column">
-        <?php if ($map_html_display): // Interactive Map exists ?>
-            <div id="map-placeholder">
-              <?php // The placeholder is empty, will be replaced by JS ?>
-            </div>
-            <script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('map-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '<?php echo $map_html_display; ?>'; ph.parentNode.replaceChild(iframe, ph); } });</script>
-            <p class='text-center'>
-                <a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><?php echo htmlspecialchars($t['kml_file'] ?? 'KML file'); ?></a>
-                &nbsp;|&nbsp;
-                <a href='<?php echo $map_html_display; ?>'><?php echo htmlspecialchars($t['interactive_map'] ?? 'Interactive map'); ?></a>
-            </p>
-            
-        <?php elseif ($map_jpg_display): // No Interactive map, but Static map exists ?>
-            <p><?php echo htmlspecialchars($t['map_caption'] ?? 'Map caption missing.'); ?></p> <?php // Caption stays here in "Static Only" mode ?>
-            <div id="map-placeholder">
-                <a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><img src='<?php echo $map_jpg_display; ?>' alt='map'></a>
-            </div>
-            <p class='text-center'><a href='obs_<?php echo $date; ?>_<?php echo $time; ?>.kml'><?php echo htmlspecialchars($t['kml_file'] ?? 'KML file'); ?></a></p>
-            
-        <?php endif; ?>
-      </div>
-      
-      <?php // Right Column: Secondary Map (Static, if side-by-side) or Spacer ?>
-      <?php if ($map_html_display && $map_jpg_display): // Side-by-side mode: Interactive (left) + Static (right) ?>
-          <div class="column">
-            <p><?php echo htmlspecialchars($t['map_caption'] ?? 'Map caption missing.'); ?></p> <?php // <-- CAPTION MOVED HERE ?>
-            <img src='<?php echo $map_jpg_display; ?>' alt='static map'>
-          </div>
-          
-      <?php elseif ($map_html_display || $map_jpg_display): // "Only" mode (Interactive Only OR Static Only) ?>
-          <?php // We need this spacer to prevent the left column from taking 100% width ?>
-          <div class="column" style="background: transparent; box-shadow: none; border: none; padding: 0;"></div>
-      <?php endif; ?>
-      
-    </div>
-    <?php endif; ?>
-
-
-    <?php // --- Container 2: Height and Wind Profiles (Layout Changes 2 & 3) --- ?>
-    <?php if ($height_jpg_display || $wind_jpg_display): // Show container if either exists ?>
-    <div class="container">
-      
-      <?php // Left Column: Height plot (or empty spacer) ?>
-      <?php if ($height_jpg_display): ?>
-        <div class="column"><img src='<?php echo $height_jpg_display; ?>' alt='height profile'></div>
-      <?php else: ?>
-        <?php // Add an invisible spacer column to maintain the 50/50 layout ?>
-        <div class="column" style="background: transparent; box-shadow: none; border: none; padding: 0;"></div>
-      <?php endif; ?>
-      
-      <?php // Right Column: Wind plot (or empty spacer) ?>
-      <?php if ($wind_jpg_display): ?>
-        <div class="column"><img src='<?php echo $wind_jpg_display; ?>' alt='wind profile'></div>
-      <?php else: ?>
-        <?php // Add an invisible spacer column to maintain the 50/50 layout ?>
-        <div class="column" style="background: transparent; box-shadow: none; border: none; padding: 0;"></div>
-      <?php endif; ?>
-
-    </div>
-    <?php endif; ?>
-
-
-    <?php if ($orbit_jpg_display || $orbit_html_display || $tables_html_display): ?>
-    <div class="container">
-      <?php if ($tables_html_display) { echo '<div class="column">'; include $tables_html_display; echo '</div>'; } ?>
-      <?php if ($orbit_jpg_display || $orbit_html_display): ?>
-      <div class="column">
-        <div id="orbit-placeholder">
-          <?php if ($orbit_jpg_display) echo "<img src='{$orbit_jpg_display}' alt='orbit plot'>"; ?>
-        </div>
-        <?php if ($orbit_html_display):
-          echo "<script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('orbit-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '$orbit_html_display'; ph.parentNode.replaceChild(iframe, ph); } });</script>";
-          echo "<p class='text-center'>";
-          if ($orbit_jpg_display) {
-             echo "<a href='{$orbit_jpg_display}'>" . htmlspecialchars($t['non_interactive_plot'] ?? 'Non-interactive plot') . "</a> | ";
-          }
-          echo "<a href='{$orbit_html_display}'>" . htmlspecialchars($t['interactive_plot'] ?? 'Interactive plot') . "</a>";
-          echo "</p>";
-        endif; ?>
-      </div>
-      <?php endif; ?>
-    </div>
-    <?php endif; ?>
-
-    <?php if ($posvstime_jpg_display || $spd_acc_jpg_display): ?>
-    <div class="container">
-      <?php if ($posvstime_jpg_display): ?>
-      <div class="column"><img src='<?php echo $posvstime_jpg_display; ?>' alt='position vs time'></div>
-      <?php endif; ?>
-      <?php if ($spd_acc_jpg_display): ?>
-      <div class="column"><img src='<?php echo $spd_acc_jpg_display; ?>' alt='speed and acceleration'></div>
-      <?php endif; ?>
-    </div>
-    <?php endif; ?>
-
-    <hr style="border: none; border-top: 1px solid var(--border-color); margin: 2em 0;">
-
-    <?php
-    if ($stations_html_display) {
-        // Alias $lang_short to $lang, as the included stations.html file
-        // (generated by fetch.py) expects a variable named $lang for its internal PHP logic.
-        $lang = $lang_short;
-        include $stations_html_display;
+    
+    // 6. Prepare URLs and translated values for the template
+    $protocol = 'https://'; // Force HTTPS to resolve mixed content issues
+    $base_url = $protocol . $_SERVER['HTTP_HOST'];
+    $absolute_report_url = "{$base_url}/{$report_file_path}";
+    
+    $time_accuracy_text = translate_value('time_accuracy', $time_accuracy_val, $lang, $translations);
+    $dominant_color_text = translate_value('dominant_color', $dominant_color_val, $lang, $translations);
+    $brightness_text = translate_value('brightness', $brightness_val, $lang, $translations);
+    $duration_text = translate_value('duration', $duration_val, $lang, $translations);
+    $sound_delay_text = translate_value('sound_delay', $sound_delay_val, $lang, $translations);
+    
+    $phenomena_list_html_items = '';
+    foreach ($other_phenomena as $p) {
+        $phenomena_list_html_items .= '<li>' . translate_value('other_phenomena', $p, $lang, $translations) . '</li>';
     }
-    ?>
+    $phenomena_list_html = !empty($phenomena_list_html_items) ? '<ul>' . $phenomena_list_html_items . '</ul>' : '<p>' . t('no_phenomena_selected', $lang, $translations) . '</p>';
+    
+    $phenomena_list_text = !empty($other_phenomena) ? implode(', ', array_map(function($p) use ($lang, $translations) { return translate_value('other_phenomena', $p, $lang, $translations); }, $other_phenomena)) : t('no_phenomena_selected', $lang, $translations);
+    
+    $sound_delay_html = in_array('sound', $other_phenomena) ? "<h6>" . t('sound_delay_label', $lang, $translations) . "</h6><p>{$sound_delay_text}</p>" : '';
+    $sound_delay_text_email = in_array('sound', $other_phenomena) ? t('sound_delay_label', $lang, $translations) . " {$sound_delay_text}\n" : '';
+    
+    // 7. Build the HTML content for the report file
+    $html_template = <<<HTML
+<!doctype html>
+<html lang="{$lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{REPORT_TITLE}: {$date_obj->format('Y-m-d H:i')}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><style>body{background-color:#f8f9fa}.map-img,.sky-img,.card video,.card img{max-width:100%;width:100%;height:auto;border:1px solid #dee2e6;border-radius:.375rem}</style></head><body><div class="container-fluid my-4">{HEADER_PLACEHOLDER}<div class="row"><div class="col-lg-6 mb-4"><div class="card h-100"><div class="card-header"><h5>{OBS_TIME_PLACE_HEADER}</h5></div><div class="card-body"><h6>{TIME_UTC_LABEL}</h6><p>{$date_obj->format('Y-m-d H:i:s')} UTC</p><h6>{ACCURACY_LABEL}</h6><p>{$time_accuracy_text}</p><h6>{OBS_LOCATION_LABEL}</h6><p>{LATITUDE_LABEL}: {$lat}<br>{LONGITUDE_LABEL}: {$lon}</p><img src="{MAP_IMAGE_SRC}" alt="Map of observation location" class="img-fluid map-img mt-3"></div></div></div><div class="col-lg-6 mb-4"><div class="card h-100"><div class="card-header"><h5>{METEOR_PATH_HEADER}</h5></div><div class="card-body"><div class="row"><div class="col-sm-6"><h6>{START_POINT_LABEL}</h6><p>{DIRECTION_LABEL}: {$start_az}°<br>{ALTITUDE_LABEL}: {$start_alt}°</p></div><div class="col-sm-6"><h6>{END_POINT_LABEL}</h6><p>{DIRECTION_LABEL}: {$end_az}°<br>{ALTITUDE_LABEL}: {$end_alt}°</p></div></div><img src="{SKY_VIEW_IMAGE_URL}" alt="Sky map of observation" class="img-fluid sky-img mt-3"></div></div></div></div><div class="card mb-4"><div class="card-header"><h5>{OTHER_INFO_HEADER}</h5></div><div class="card-body"><h6>{COLOR_LABEL}</h6><p>{$dominant_color_text}</p><h6>{BRIGHTNESS_LABEL}</h6><p>{$brightness_text}</p><h6>{DURATION_LABEL}</h6><p>{$duration_text}</p><h6>{OTHER_PHENOMENA_LABEL}</h6>{$phenomena_list_html}{$sound_delay_html}<h6>{OBSERVER_COMMENTS_LABEL}</h6><p class="text-muted">{$more_info}</p></div></div><div class="card mb-4"><div class="card-header"><h5>{CONTACT_INFO_HEADER}</h5></div><div class="card-body"><p><strong>{NAME_LABEL}</strong> {$contact_name}</p><p><strong>{PHONE_LABEL}</strong> {$contact_phone}</p><p><strong>{EMAIL_LABEL}</strong> {$contact_email}</p></div></div><div class="card"><div class="card-header"><h5>{ATTACHMENTS_HEADER}</h5></div><div class="card-body"><div class="row">{$uploaded_files_html}</div></div></div><div class="text-center text-muted py-3">{REPORT_ID_LABEL}: {$file_name}</div></div></body></html>
+HTML;
+    
+    // Replace all placeholders with translated text
+    $placeholders = [
+        '{REPORT_TITLE}' => t('report_title', $lang, $translations),
+        '{OBS_TIME_PLACE_HEADER}' => t('obs_time_and_place_header', $lang, $translations),
+        '{TIME_UTC_LABEL}' => t('time_utc_label', $lang, $translations),
+        '{ACCURACY_LABEL}' => t('accuracy_label', $lang, $translations),
+        '{OBS_LOCATION_LABEL}' => t('obs_location_label', $lang, $translations),
+        '{LATITUDE_LABEL}' => t('latitude_label', $lang, $translations),
+        '{LONGITUDE_LABEL}' => t('longitude_label', $lang, $translations),
+        '{METEOR_PATH_HEADER}' => t('meteor_path_header', $lang, $translations),
+        '{START_POINT_LABEL}' => t('start_point_label', $lang, $translations),
+        '{END_POINT_LABEL}' => t('end_point_label', $lang, $translations),
+        '{DIRECTION_LABEL}' => t('direction_label', $lang, $translations),
+        '{ALTITUDE_LABEL}' => t('altitude_label', $lang, $translations),
+        '{OTHER_INFO_HEADER}' => t('other_info_header', $lang, $translations),
+        '{COLOR_LABEL}' => t('color_label', $lang, $translations),
+        '{BRIGHTNESS_LABEL}' => t('brightness_label', $lang, $translations),
+        '{DURATION_LABEL}' => t('duration_label', $lang, $translations),
+        '{OTHER_PHENOMENA_LABEL}' => t('other_phenomena_label', $lang, $translations),
+        '{OBSERVER_COMMENTS_LABEL}' => t('observer_comments_label', $lang, $translations),
+        '{CONTACT_INFO_HEADER}' => t('contact_info_header', $lang, $translations),
+        '{NAME_LABEL}' => t('name_label', $lang, $translations),
+        '{PHONE_LABEL}' => t('phone_label', $lang, $translations),
+        '{EMAIL_LABEL}' => t('email_label', $lang, $translations),
+        '{ATTACHMENTS_HEADER}' => t('attachments_header', $lang, $translations),
+        '{REPORT_ID_LABEL}' => t('report_id_label', $lang, $translations),
+    ];
+    $translated_html = str_replace(array_keys($placeholders), array_values($placeholders), $html_template);
+    
+    // 8. Create and save the final HTML report file
+    $report_header = "<div class='text-center mb-4'><h1 class='display-4'>" . t('report_title', $lang, $translations) . "</h1></div>";
+    $file_html = str_replace(['{HEADER_PLACEHOLDER}', '{MAP_IMAGE_SRC}', '{SKY_VIEW_IMAGE_URL}'], [$report_header, $generated_map_image_name, $sky_view_image_name], $translated_html);
+    file_put_contents($report_file_path, $file_html);
 
-    <footer>
-        <p class="text-center"><?php echo htmlspecialchars($t['footer_text'] ?? 'This is an automatically generated report from the Norwegian Meteor Network.'); ?></p>
-    </footer>
+    // 9. Send Email Notification (Forced to Norwegian)
+    $to = "Steinar Midtskogen <steinar@norskmeteornettverk.no>, GEOTOP <mbgeotop@gmail.com>, Tor Einar Aslesen <taslesen@gmail.com>, Arne Danielsen <arne@soleskogobservatory.com>, Runar Sandnes <post@runarsandnes.com>, Vegard Lundby Rekaa <vegard@rekaa.no>";
 
-</div>
-</body>
-</html>
+    // Always use Norwegian for email subject and content
+    $email_lang = 'nb_NO';
+    $subject = t('email_subject', $email_lang, $translations) . " - " . $date_obj->format('Y-m-d H:i:s');
+
+    // Re-translate values specifically for the Norwegian email
+    $time_accuracy_text_no = translate_value('time_accuracy', $time_accuracy_val, $email_lang, $translations);
+    $dominant_color_text_no = translate_value('dominant_color', $dominant_color_val, $email_lang, $translations);
+    $brightness_text_no = translate_value('brightness', $brightness_val, $email_lang, $translations);
+    $duration_text_no = translate_value('duration', $duration_val, $email_lang, $translations);
+    $sound_delay_text_no = translate_value('sound_delay', $sound_delay_val, $email_lang, $translations);
+    $phenomena_list_text_no = !empty($other_phenomena) ? implode(', ', array_map(function($p) use ($email_lang, $translations) { return translate_value('other_phenomena', $p, $email_lang, $translations); }, $other_phenomena)) : t('no_phenomena_selected', $email_lang, $translations);
+    $sound_delay_text_email_no = in_array('sound', $other_phenomena) ? t('sound_delay_label', $email_lang, $translations) . " {$sound_delay_text_no}\n" : '';
+
+    $message = t('email_body_intro', $email_lang, $translations) . "\n\n" .
+        t('email_full_report_link', $email_lang, $translations) . ": {$absolute_report_url}\n\n" .
+        t('time_utc_label', $email_lang, $translations) . " " . $date_obj->format('Y-m-d H:i:s') . "\n" .
+        t('accuracy_label', $email_lang, $translations) . " " . $time_accuracy_text_no . "\n\n" .
+        t('obs_location_label', $email_lang, $translations) . "\n" . t('latitude_label', $email_lang, $translations) . ": {$lat}\n" . t('longitude_label', $email_lang, $translations) . ": {$lon}\n\n" .
+        t('meteor_path_header', $email_lang, $translations) . ":\n" . t('start_point_label', $email_lang, $translations) . " {$start_az}° Az, {$start_alt}° Alt\n" . t('end_point_label', $email_lang, $translations) . " {$end_az}° Az, {$end_alt}° Alt\n\n" .
+        t('other_info_header', $email_lang, $translations) . ":\n" . t('color_label', $email_lang, $translations) . " " . $dominant_color_text_no . "\n" . t('brightness_label', $email_lang, $translations) . " " . $brightness_text_no . "\n" . t('duration_label', $email_lang, $translations) . " " . $duration_text_no . "\n" . t('other_phenomena_label', $email_lang, $translations) . " " . $phenomena_list_text_no . "\n{$sound_delay_text_email_no}" .
+        t('email_comments_label', $email_lang, $translations) . ":\n{$more_info}\n\n" .
+        t('contact_info_header', $email_lang, $translations) . ":\n" . t('name_label', $email_lang, $translations) . " {$contact_name}\n" . t('phone_label', $email_lang, $translations) . " {$contact_phone}\n" . t('email_label', $email_lang, $translations) . " {$contact_email}\n\n" .
+        t('attachments_header', $email_lang, $translations) . ":\n{$uploaded_files_text}";
+
+    // Set Reply-To address dynamically
+    $reply_to_address = !empty($contact_email) && filter_var($contact_email, FILTER_VALIDATE_EMAIL) ? $contact_email : 'steinar@norskmeteornettverk.no';
+    $headers = "From: Norsk meteornettverk <steinar@norskmeteornettverk.no>\r\nReply-To: {$reply_to_address}\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Mailer: PHP/" . phpversion();
+    mail($to, $subject, $message, $headers);
+
+    // 10. Echo the confirmation HTML back to the user
+    $confirmation_header_html = "<div class='text-center mb-4'><h1 class='display-4'>" . t('thank_you_header', $lang, $translations) . "</h1><p class='lead'>" . t('thank_you_subheader', $lang, $translations) . "</p></div>";
+    $confirmation_html = str_replace(
+        ['{HEADER_PLACEHOLDER}', '{MAP_IMAGE_SRC}', '{SKY_VIEW_IMAGE_URL}'],
+        [$confirmation_header_html, "{$base_url}/{$report_dir}{$generated_map_image_name}", "{$base_url}/{$report_dir}{$sky_view_image_name}"],
+        $translated_html
+    );
+    $confirmation_html = preg_replace("/(src|href)='(upload-)/", "$1='{$base_url}/{$report_dir}$2", $confirmation_html);
+    echo $confirmation_html;
+
+} else {
+    // Redirect if accessed directly
+    header("Location: obs.html");
+    exit();
+}
+?>
+
+

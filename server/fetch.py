@@ -919,19 +919,11 @@ def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: d
                 generate_speed_plots(fbspd_plot_data,
                                      translations=translations, output_prefix=file_prefix)
             
-            # Run orbit plot (this uses SPICE) - must hold file lock
-            res_filename = plot_data['resdat']
-            date_str = plot_data['date_str']
-            time_str = plot_data['time_str']
+            # Note: Orbit plots (SPICE) are done sequentially in main process to avoid lock contention
             
-            with SpiceLock(SPICE_LOCK_FILE):
-                orbit(True, current_orbit_data['entry_speed'], 0, res_filename,
-                      date_str, time_str, 'save',
-                      interactive=True, translations=translations, output_prefix=file_prefix)
-            
-            # Convert SVG to JPG
-            dpi_map = {'map.svg': Config.SVG_MAP_DPI, 'orbit.svg': Config.SVG_ORBIT_DPI}
-            for svg_name in ["posvstime.svg", "spd_acc.svg", "orbit.svg", "height.svg", "map.svg"]:
+            # Convert SVG to JPG (orbit.svg is generated in main process)
+            dpi_map = {'map.svg': Config.SVG_MAP_DPI}
+            for svg_name in ["posvstime.svg", "spd_acc.svg", "height.svg", "map.svg"]:
                 svg_path = event_dir / f"{file_prefix}{svg_name}"
                 if svg_path.exists():
                     dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
@@ -1519,7 +1511,8 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             except Exception as e:
                 logging.error(f"Failed to generate station report for language '{lang}': {e}")
     else:
-        with ProcessPoolExecutor(max_workers=min(len(SUPPORTED_LANGS), 5)) as executor:
+        # Use 3 workers - optimal balance for 5 languages (3+2 batches)
+        with ProcessPoolExecutor(max_workers=min(len(SUPPORTED_LANGS), 3)) as executor:
             futures = {
                 executor.submit(
                     _generate_language_in_process,
@@ -1534,6 +1527,28 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     logging.info(f"Successfully completed language: [{lang}]")
                     if orbit_data:
                         orbit_data_by_lang[lang] = orbit_data
+    
+    # Run orbit plots sequentially in main process (avoids SPICE lock contention)
+    if is_multistation and analysis_results and plot_data:
+        res_filename = plot_data['resdat']
+        date_str = plot_data['date_str']
+        time_str = plot_data['time_str']
+        for lang in SUPPORTED_LANGS:
+            try:
+                translations = load_translations(lang)
+                file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                current_orbit_data = orbit_data_by_lang.get(lang, {'valid': False})
+                if current_orbit_data.get('valid'):
+                    logging.info(f"Generating orbit plot for language: [{lang}]")
+                    orbit(True, current_orbit_data['entry_speed'], 0, res_filename,
+                          date_str, time_str, 'save',
+                          interactive=True, translations=translations, output_prefix=file_prefix)
+                    # Convert orbit SVG to JPG
+                    svg_path = event_dir / f"{file_prefix}orbit.svg"
+                    if svg_path.exists():
+                        svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_ORBIT_DPI)
+            except Exception as e:
+                logging.warning(f"Failed to generate orbit plot for {lang}: {e}")
     
     # Generate triangulation HTML reports sequentially (needs resdat which isn't picklable)
     if is_multistation and analysis_results and plot_data:

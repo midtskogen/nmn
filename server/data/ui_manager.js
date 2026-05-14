@@ -1109,7 +1109,7 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     const modalContent = createEl('div', { id: 'video-modal-content' });
     const stationInfo = stationsData?.[stationId]?.station;
     const displayName = stationInfo?.display_name || (stationInfo?.name ? stationInfo.name.charAt(0).toUpperCase() + stationInfo.name.slice(1) : stationId);
-    const modalTitle = createEl('h3', { id: 'video-modal-title', textContent: `${displayName} – Kamera ${cameraNum}` });
+    const modalTitle = createEl('h3', { id: 'video-modal-title', textContent: `${displayName} – ${cameraNum}` });
     const videoContainer = createEl('div', { id: 'video-container', style: { aspectRatio: resolution === 'lowres' ? '800 / 448' : '1920 / 1080' } });
     const videoEl = createEl('video', { id: 'live-video', muted: true, autoplay: true, playsinline: true });
     const gridOverlay = createEl('img', { id: 'grid-overlay-image' });

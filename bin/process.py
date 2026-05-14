@@ -613,7 +613,6 @@ def sanitize_event_config(event_config: configparser.ConfigParser) -> configpars
 
 def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: list):
     """Generates translated brightness plots for all supported languages."""
-    print("Generating multilingual brightness plots...")
     if not timestamps or not brightness:
         print("Warning: No data available to generate brightness plot.")
         return
@@ -657,8 +656,6 @@ def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: lis
 
     with ThreadPoolExecutor(max_workers=len(SUPPORTED_LANGS)) as pool:
         for msg, err in pool.map(_render_lang, SUPPORTED_LANGS):
-            if msg:
-                print(msg)
             if err:
                 print(err)
 

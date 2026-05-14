@@ -268,6 +268,7 @@ SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi']
 DEFAULT_LANG = 'nb'
 _LOC_DIR_CANDIDATES = [
     Config.BIN_DIR / 'loc',
+    Config.CODE_BASE_DIR / 'server' / 'loc',
     Config.CODE_BASE_DIR.parent / 'bin' / 'loc',
 ]
 LOC_DIR = next((p for p in _LOC_DIR_CANDIDATES if p.is_dir()), _LOC_DIR_CANDIDATES[0])
@@ -802,37 +803,6 @@ if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{
             ))
 
 
-def generate_brightness_plots(event_dir: Path, timestamps: list, brightness: list):
-    """Generates translated brightness plots for all supported languages."""
-    logging.info(f"Generating multilingual brightness plots for {event_dir}...")
-    if not timestamps or not brightness:
-        logging.warning("Warning: No data available to generate brightness plot.")
-        return
-
-    time_axis = [t - timestamps[0] for t in timestamps]
-
-    for lang in SUPPORTED_LANGS:
-        translations = load_translations(lang)
-        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-        
-        svg_path = event_dir / f'{file_prefix}brightness.svg'
-        jpg_path = event_dir / f'{file_prefix}brightness.jpg'
-
-        try:
-            plt.figure()
-            plt.plot(time_axis, brightness)
-            plt.xlabel(translations.get("plot_time_x_label", "Time [s]"))
-            plt.ylabel(translations.get("brightness", "Brightness"))
-            plt.title(translations.get("brightness_plot_title", "Brightness vs time"))
-            
-            plt.savefig(svg_path)
-            plt.savefig(jpg_path)
-            plt.close()
-            logging.info(f"  - Saved {svg_path.name} and {jpg_path.name}")
-        except Exception as e:
-            logging.error(f"Error generating plot for language '{lang}': {e}")
-
-
 def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showername_sg: str, count: int, first: bool, height_valid: bool, translations: dict):
     """Constructs and sends a tweet if conditions are met."""
     if not (count >= 2 and first and height_valid and len(sys.argv) == 4):
@@ -1196,24 +1166,8 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
         if event_files:
             logging.info("All station processing jobs finished.")
     else:
-        # --fast mode: Skip process.py, but regenerate brightness plots manually
+        # --fast mode: Skip process.py (station video/classification)
         logging.info("--- FAST MODE: Skipping process.py (station video/classification). ---")
-        logging.info("--- FAST MODE: Regenerating station brightness plots... ---")
-        station_event_files = sorted(event_dir.glob('*/*/event.txt'))
-        
-        if not station_event_files:
-            logging.warning("--- FAST MODE: No station event.txt files found to regenerate brightness plots. ---")
-
-        for event_file in station_event_files:
-            try:
-                cfg = configparser.ConfigParser()
-                cfg.read(event_file)
-                timestamps = [float(t) for t in cfg.get('trail', 'timestamps').split()]
-                brightness = [float(b) for b in cfg.get('trail', 'brightness').split()]
-                # The plot function saves plots in the event_file's parent directory
-                generate_brightness_plots(event_file.parent, timestamps, brightness) 
-            except Exception as e:
-                logging.warning(f"Failed to regenerate brightness plot for {event_file}: {e}")
 
     # --- CRITICAL FIX: Ensure centroid2.txt exists for ALL stations ---
     # In reprocessing mode (or if files were deleted), these might be missing.

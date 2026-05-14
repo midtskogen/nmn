@@ -78,7 +78,12 @@ class Settings:
 # --- Internationalization (i18n) Setup ---
 SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi']
 DEFAULT_LANG = 'nb'
-LOC_DIR = Path(__file__).parent / 'loc'
+# Try multiple possible locations for locale files
+_LOC_CANDIDATES = [
+    Path(__file__).parent / 'loc',
+    Path(__file__).parent.parent / 'server' / 'loc',
+]
+LOC_DIR = next((p for p in _LOC_CANDIDATES if p.is_dir()), _LOC_CANDIDATES[1])
 
 def load_translations(lang_code: str) -> dict:
     """Loads the translation dictionary for a given language, with fallback to default."""

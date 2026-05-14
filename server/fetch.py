@@ -247,6 +247,7 @@ class Config:
     METEOR_DATA_DIR = BASE_HTTP_DIR / 'meteor'
     # Always use scripts from this checkout to avoid running stale code.
     BIN_DIR = CODE_BASE_DIR / 'bin'
+    STATIONS_FILE = BASE_HTTP_DIR / 'data' / 'stations.json'
 
     # Bandwidth limit for rsync in KB/s
     BW_LIMIT_DEFAULT = '1000'
@@ -299,6 +300,28 @@ def load_translations(lang_code: str) -> dict:
                 logging.error(f"Error parsing language file {lang_path}: {e}")
             
     return translations
+
+
+def load_station_display_names() -> dict:
+    """Returns a dict mapping ASCII station name -> display name (with proper Unicode).
+    
+    Falls back to title-cased ASCII name if no display_name is set.
+    """
+    display_names = {}
+    try:
+        with Config.STATIONS_FILE.open('r', encoding='utf-8') as f:
+            stations_data = json.load(f)
+        for entry in stations_data.values():
+            station = entry.get('station', {})
+            name = station.get('name', '')
+            if name:
+                display_names[name] = station.get('display_name', name.title())
+    except Exception as e:
+        logging.warning(f"Could not load station display names: {e}")
+    return display_names
+
+
+_STATION_DISPLAY_NAMES = load_station_display_names()
 
 
 def setup_logging(log_file_path: Path):
@@ -653,7 +676,7 @@ def generate_station_html_report(output_path: Path, event_dir: Path, translation
         for event_file in station_files:
             station = event_file.parent.parent.name
             cam = event_file.parent.name
-            location = station.title()
+            location = _STATION_DISPLAY_NAMES.get(station, station.title())
 
             cfg = configparser.ConfigParser()
             try:
@@ -1345,10 +1368,14 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
         return
         
     logging.info(f"Changed working directory to: {event_dir}")
-    if not Path('index.php').exists():
-        try: Path('index.php').symlink_to('../../report.php')
-        except OSError as e:
-             logging.warning(f"Could not create symlink index.php: {e}")
+    try:
+        p = Path('index.php')
+        if p.exists() and not p.is_symlink():
+            p.unlink()
+        if not p.exists():
+            p.symlink_to('../../report.php')
+    except OSError as e:
+        logging.warning(f"Could not create symlink index.php: {e}")
 
     is_multistation = len(station_codes) > 1
     analysis_results = {}
@@ -1907,10 +1934,14 @@ def main():
             logging.error(f"Could not deduce date from path '{final_event_dir}'. Path must end in '<YYYYMMDD>/<HHMMSS>'.")
             sys.exit(f"Could not deduce date from path '{final_event_dir}'. Path must end in '<YYYYMMDD>/<HHMMSS>'.")
         
-        if not (final_event_dir / 'index.php').exists():
-            try: (final_event_dir / 'index.php').symlink_to('../../report.php')
-            except OSError as e:
-                logging.warning(f"Could not create index.php symlink: {e}")
+        try:
+            p = final_event_dir / 'index.php'
+            if p.exists() and not p.is_symlink():
+                p.unlink()
+            if not p.exists():
+                p.symlink_to('../../report.php')
+        except OSError as e:
+            logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
             process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)

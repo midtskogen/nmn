@@ -102,7 +102,8 @@ def get_meteor_data():
             if not os.path.isdir(event_path): continue
 
             observing_station_ids = [name_to_id.get(d) for d in os.listdir(event_path)
-                                     if os.path.isdir(os.path.join(event_path, d)) and name_to_id.get(d)]
+                                     if os.path.isdir(os.path.join(event_path, d)) and name_to_id.get(d)
+                                     and _has_data(os.path.join(event_path, d))]
             observing_station_ids = list(set(observing_station_ids))
             for sid in observing_station_ids:
                 if not sid:
@@ -388,6 +389,14 @@ def _parse_trajectory_details(event_path):
     return result
 
 
+def _has_data(station_dir):
+    """Return True if the station dir has at least one camera subdir with event.txt."""
+    for cam in os.listdir(station_dir):
+        if os.path.exists(os.path.join(station_dir, cam, 'event.txt')):
+            return True
+    return False
+
+
 def get_station_stats(station_id, start_date=None, end_date=None):
     """
     Returns observation statistics for a single station over a date range.
@@ -458,7 +467,8 @@ def get_station_stats(station_id, start_date=None, end_date=None):
                 continue
 
             if not is_all:
-                if not os.path.isdir(os.path.join(event_path, station_name)):
+                station_dir = os.path.join(event_path, station_name)
+                if not os.path.isdir(station_dir) or not _has_data(station_dir):
                     continue
 
             total += 1
@@ -471,6 +481,7 @@ def get_station_stats(station_id, start_date=None, end_date=None):
                 name_to_id[d] for d in event_contents
                 if os.path.isdir(os.path.join(event_path, d))
                 and name_to_id.get(d)
+                and _has_data(os.path.join(event_path, d))
             ]
             observing_ids = list(set(observing_ids))
             num_stations = len(observing_ids)

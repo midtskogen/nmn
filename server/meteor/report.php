@@ -49,6 +49,26 @@ $lf = $LANG_DIR.'/'.$lang_short.'.json';
 if (!file_exists($lf)) $lf = $LANG_DIR.'/'.substr($DEFAULT_LANG,0,2).'.json';
 if (file_exists($lf)) { $j=file_get_contents($lf); if ($j) $t=json_decode($j,true); }
 
+// Load station display names from stations.json
+$station_display_names = [];
+$stations_json_candidates = [
+    '/home/httpd/norskmeteornettverk.no/data/stations.json',
+    '/home/steinar/norskmeteornettverk.no/data/stations.json',
+];
+foreach ($stations_json_candidates as $sjf) {
+    if (file_exists($sjf)) {
+        $sj = json_decode(file_get_contents($sjf), true);
+        if ($sj) {
+            foreach ($sj as $entry) {
+                $stn = $entry['station'] ?? [];
+                $n = $stn['name'] ?? '';
+                if ($n) $station_display_names[$n] = $stn['display_name'] ?? ucfirst($n);
+            }
+        }
+        break;
+    }
+}
+
 $a = array_reverse(explode('/', getcwd()));
 $path = "/meteor/".$a[1]."/".$a[0]."/";
 $date = substr_replace($a[1],'-',4,0); $date = substr_replace($date,'-',7,0);
@@ -103,10 +123,12 @@ foreach (glob('*/') as $stdir) {
         $cam_num = preg_replace('/^cam/i', '', $cam);
         $et = $camdir.'/event.txt';
         $cfg = file_exists($et) ? @parse_ini_file($et, true) : [];
-        $stn_name = $cfg['station']['name'] ?? '';
-        $stn_code = $cfg['station']['code'] ?? '';
-        if ($stn_name) {
-            $label = $stn_name;
+        $stn_name = trim($cfg['station']['name'] ?? '');
+        $stn_code = trim($cfg['station']['code'] ?? '');
+        $lookup_name = $stn_name ?: $station;
+        $stn_display = $station_display_names[$lookup_name] ?? ucfirst($lookup_name);
+        if ($stn_display) {
+            $label = $stn_display;
             if ($stn_code) $label .= ' ('.$stn_code.')';
             $label .= ' – '.$cam_num;
         } else {

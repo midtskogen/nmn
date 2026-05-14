@@ -240,7 +240,9 @@ function updateMeteorStationCountBadges() {
 export function addStationMarker(stationId, station, onClick, initialIcon = blueIcon) {
     const marker = L.marker([station.astronomy.latitude, station.astronomy.longitude], { icon: initialIcon }).addTo(map);
     marker.stationId = stationId;
-    marker.bindTooltip(`<b>${station.station.code} ${station.station.name} ${stationId}</b>`).on('click', onClick);
+    const n = station.station.name || '';
+    const stationDisplayName = station.station.display_name || (n.charAt(0).toUpperCase() + n.slice(1));
+    marker.bindTooltip(`<b>${station.station.code} ${stationDisplayName} ${stationId}</b>`).on('click', onClick);
     stationMarkers[stationId] = marker;
     return marker;
 }

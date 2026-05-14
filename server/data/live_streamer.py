@@ -736,10 +736,12 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
         ffmpeg_process, playlist_path, input_codec, output_codec, transcoding = _start_ffmpeg_relay(local_port, resolution, stream_dir, hevc_supported, log_prefix)
 
         # Wait for playlist in parallel so we can see whether ONVIF actually changes time-to-playlist.
+        # HD streams require transcoding and take longer to produce the first playlist segment.
+        playlist_timeout = 30 if transcoding else 20
         playlist_ready = {"ts": None, "error": None}
         def _playlist_waiter():
             try:
-                _wait_for_playlist(ffmpeg_process, playlist_path, log_prefix, timeout_seconds=10)
+                _wait_for_playlist(ffmpeg_process, playlist_path, log_prefix, timeout_seconds=playlist_timeout)
                 playlist_ready["ts"] = time.time()
             except Exception as e:
                 playlist_ready["error"] = e

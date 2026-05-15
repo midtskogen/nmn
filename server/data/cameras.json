@@ -597,6 +597,7 @@
     },
     "station": {
       "name": "orsta",
+      "display_name": "Ørsta",
       "code": "ORS",
       "quota": true,
       "infrasound_id": "R34F3"
@@ -892,6 +893,7 @@
     },
     "station": {
       "name": "vasteras",
+      "display_name": "Västerås",
       "code": "VAS"
     },
     "cam1": {
@@ -1479,6 +1481,7 @@
     },
     "station": {
       "name": "sorreisa",
+      "display_name": "Sørreisa",
       "code": "SOR",
       "infrasound_id": "RCFDD"
     },
@@ -3242,6 +3245,7 @@
     },
     "station": {
       "name": "loten",
+      "display_name": "Løten",
       "code": "LOT",
       "quota": true
     },
@@ -3536,6 +3540,7 @@
     },
     "station": {
       "name": "hagar",
+      "display_name": "Hågår",
       "code": "HGR",
       "infrasound_id": "R3D85"
     },

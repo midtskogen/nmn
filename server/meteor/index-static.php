@@ -213,13 +213,28 @@ function formatDayWithSuffix($day) {
  * @return string The generated HTML.
  */
 function generateMediaItem($imgPath, $videoExt, $altText) {
+    static $sizeCache = [];
     $basePath = str_replace(['_orig.jpg', '.jpg'], '', $imgPath);
     $videoFullPath = $basePath . $videoExt;
     $webVideoPath = '/meteor/' . $videoFullPath;
     $webImagePath = '/meteor/' . $imgPath;
     $videoDataAttr = file_exists($videoFullPath) ? "data-videosrc='{$webVideoPath}'" : '';
     $placeholderSrc = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-    $imageHTML = "<img src='{$placeholderSrc}' data-src='{$webImagePath}' width='256' loading='lazy' alt='{$altText}' {$videoDataAttr}>";
+    // Determine display dimensions: scale to width=256, preserve aspect ratio.
+    $displayWidth = 256;
+    $displayHeight = '';
+    if (!isset($sizeCache[$imgPath])) {
+        $info = @getimagesize($imgPath);
+        $sizeCache[$imgPath] = $info ? [$info[0], $info[1]] : null;
+    }
+    if ($sizeCache[$imgPath]) {
+        [$origW, $origH] = $sizeCache[$imgPath];
+        if ($origW > 0) {
+            $displayHeight = (int)round($origH * $displayWidth / $origW);
+        }
+    }
+    $sizeAttr = $displayHeight ? "width='{$displayWidth}' height='{$displayHeight}'" : "width='{$displayWidth}'";
+    $imageHTML = "<img src='{$placeholderSrc}' data-src='{$webImagePath}' {$sizeAttr} loading='lazy' alt='{$altText}' {$videoDataAttr}>";
     return "<div class='media-swap-container'>{$imageHTML}</div>";
 }
 
@@ -253,6 +268,142 @@ HTML;
 }
 
 /**
+ * Generates the HTML fragment (event list) for a single month.
+ * @param array $dates List of event paths for that month.
+ * @param array $t The translation array.
+ * @return string The inner HTML for the month-content div.
+ */
+function generateMonthContent($dates, $t) {
+    $content = '';
+    foreach ($dates as $date) {
+        $dateDir = basename(dirname($date));
+        $timeCode = basename($date);
+        $dayOfMonth = (int)substr($dateDir, 6, 2);
+        $formattedTime = substr_replace(substr_replace($timeCode, ':', 4, 0), ':', 2, 0);
+        if ($t['lang_short'] === 'en') {
+            $formattedTimeForDisplay = formatDayWithSuffix($dayOfMonth) . ' ' . $formattedTime;
+        } else {
+            $formattedTimeForDisplay = $dayOfMonth . '. ' . $formattedTime;
+        }
+        $lang_prefix = ($t['lang_short'] === 'nb') ? '' : $t['lang_short'] . '_';
+        $isMultiStation = file_exists("{$date}/{$lang_prefix}map.jpg") || file_exists("{$date}/map.jpg");
+        $eventType = $isMultiStation ? 'multi-station-normal' : 'single-station';
+        $linkClass = $isMultiStation ? 'normal-altitude' : 'unknown-altitude';
+        $showerType = 'none';
+        if ($isMultiStation) {
+            $tablesFile = "{$date}/{$lang_prefix}tables.html";
+            if (!file_exists($tablesFile)) $tablesFile = "{$date}/tables.html";
+            if (file_exists($tablesFile)) {
+                $tablesContent = file_get_contents($tablesFile);
+                $endAltitude = null; $entrySpeed = null; $startAltitude = null;
+                if (preg_match('/(Start height|Starthøgde|Anfangshöhe|Počáteční výška|Alkukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $startAltitude = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(End height|Slutthøgde|Endhöhe|Konečná výška|Loppukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $endAltitude = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupní rychlost|Tulonopeus):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tablesContent, $m)) $entrySpeed = (float)str_replace(',', '.', $m[2]);
+                if ($startAltitude !== null && $endAltitude !== null && $entrySpeed !== null &&
+                    $startAltitude > 40 && $startAltitude < 120 &&
+                    $endAltitude > 10 && $endAltitude < 40 &&
+                    $entrySpeed >= 10 && $entrySpeed <= 30) {
+                    $linkClass = 'low-altitude'; $eventType = 'meteorite-candidate';
+                }
+                if (stripos($tablesContent, 'Perseid') !== false) $showerType = 'perseider';
+                elseif (stripos($tablesContent, 'taurid') !== false) {
+                    if (stripos($tablesContent, 'Sørlige') !== false || stripos($tablesContent, 'Southern') !== false || stripos($tablesContent, 'Südliche') !== false || stripos($tablesContent, 'Jižní') !== false || stripos($tablesContent, 'Eteläiset') !== false) $showerType = 'sorlige-taurider';
+                    elseif (stripos($tablesContent, 'Nordlige') !== false || stripos($tablesContent, 'Northern') !== false || stripos($tablesContent, 'Nördliche') !== false || stripos($tablesContent, 'Severní') !== false || stripos($tablesContent, 'Pohjoiset') !== false) $showerType = 'nordlige-taurider';
+                }
+                elseif (stripos($tablesContent, 'Leonid') !== false) $showerType = 'leonider';
+                elseif (stripos($tablesContent, 'Geminid') !== false) $showerType = 'geminider';
+            }
+        }
+        $locationInfo = '';
+        if ($isMultiStation) {
+            $locationFile = "{$date}/location.txt";
+            if (file_exists($locationFile)) $locationInfo = htmlspecialchars(trim(file_get_contents($locationFile)));
+        } else {
+            $stationName = ''; $camNumbers = [];
+            $detectionPaths = glob("{$date}/*/*/fireball_orig.jpg");
+            if (empty($detectionPaths)) $detectionPaths = glob("{$date}/*/*/fireball.jpg");
+            foreach ($detectionPaths as $imgPath) {
+                $parts = explode('/', substr($imgPath, strlen($date) + 1));
+                if (count($parts) >= 2) {
+                    if (empty($stationName)) $stationName = $parts[0];
+                    $camNum = preg_replace('/[^0-9]/', '', $parts[1]);
+                    if (!empty($camNum) && !in_array($camNum, $camNumbers)) $camNumbers[] = $camNum;
+                }
+            }
+            if (!empty($stationName)) {
+                sort($camNumbers, SORT_NUMERIC);
+                $locationInfo = '(' . htmlspecialchars($stationName) . ' ' . implode(', ', $camNumbers) . ')';
+            }
+        }
+        $processedImages = glob("{$date}/*/*/fireball.jpg");
+        $unprocessedImages = glob("{$date}/*/*/fireball_orig.jpg");
+        $mediaHTML = '';
+        if (!empty($processedImages)) {
+            $mediaHTML .= "<div class='media-container processed-images' style='display: none;'>";
+            foreach ($processedImages as $imgPath) $mediaHTML .= generateMediaItem($imgPath, '.webm', 'Processed fireball image');
+            $mediaHTML .= "</div>";
+        }
+        if (!empty($unprocessedImages)) {
+            $mediaHTML .= "<div class='media-container unprocessed-images' style='display: none;'>";
+            foreach ($unprocessedImages as $imgPath) $mediaHTML .= generateMediaItem($imgPath, '_orig.webm', 'Unprocessed fireball image');
+            $mediaHTML .= "</div>";
+        }
+        $content .= "<div class='event-container' data-event-type='{$eventType}' data-shower='{$showerType}'>";
+        $content .= "<a href='/meteor/{$date}/' class='observation-link {$linkClass}'>";
+        $content .= "<span>{$formattedTimeForDisplay}</span>";
+        if ($locationInfo) $content .= "<small class='location-details'>{$locationInfo}</small>";
+        $content .= "</a>";
+        $content .= $mediaHTML;
+        if (trim($mediaHTML) !== '') $content .= "<hr class='image-separator'>";
+        $content .= "</div>\n";
+    }
+    return $content;
+}
+
+/**
+ * Counts events per filter type for a set of event paths.
+ * @param array $dates List of event paths.
+ * @param array $t The translation array.
+ * @return array Associative array of filter => count.
+ */
+function countEventsForFilters($dates, $t) {
+    $counts = ['all' => 0, 'multi-station' => 0, 'candidates' => 0,
+               'perseider' => 0, 'sorlige-taurider' => 0, 'nordlige-taurider' => 0,
+               'leonider' => 0, 'geminider' => 0];
+    $lang_prefix = ($t['lang_short'] === 'nb') ? '' : $t['lang_short'] . '_';
+    foreach ($dates as $date) {
+        $isMultiStation = file_exists("{$date}/{$lang_prefix}map.jpg") || file_exists("{$date}/map.jpg");
+        $counts['all']++;
+        if (!$isMultiStation) continue;
+        $counts['multi-station']++;
+        $eventType = 'multi-station-normal';
+        $showerType = 'none';
+        $tablesFile = "{$date}/{$lang_prefix}tables.html";
+        if (!file_exists($tablesFile)) $tablesFile = "{$date}/tables.html";
+        if (file_exists($tablesFile)) {
+            $tc = file_get_contents($tablesFile);
+            $sa = $ea = $sp = null;
+            if (preg_match('/(Start height|Starthøgde|Anfangshöhe|Počáteční výška|Alkukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tc, $m)) $sa = (float)str_replace(',','.', $m[2]);
+            if (preg_match('/(End height|Slutthøgde|Endhöhe|Konečná výška|Loppukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tc, $m)) $ea = (float)str_replace(',','.', $m[2]);
+            if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupní rychlost|Tulonopeus):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tc, $m)) $sp = (float)str_replace(',','.', $m[2]);
+            if ($sa !== null && $ea !== null && $sp !== null && $sa > 40 && $sa < 120 && $ea > 10 && $ea < 40 && $sp >= 10 && $sp <= 30) {
+                $eventType = 'meteorite-candidate';
+                $counts['candidates']++;
+            }
+            if (stripos($tc, 'Perseid') !== false) $showerType = 'perseider';
+            elseif (stripos($tc, 'taurid') !== false) {
+                if (stripos($tc, 'Sørlige') !== false || stripos($tc, 'Southern') !== false || stripos($tc, 'Südliche') !== false || stripos($tc, 'Jižní') !== false || stripos($tc, 'Eteläiset') !== false) $showerType = 'sorlige-taurider';
+                elseif (stripos($tc, 'Nordlige') !== false || stripos($tc, 'Northern') !== false || stripos($tc, 'Nördliche') !== false || stripos($tc, 'Severní') !== false || stripos($tc, 'Pohjoiset') !== false) $showerType = 'nordlige-taurider';
+            }
+            elseif (stripos($tc, 'Leonid') !== false) $showerType = 'leonider';
+            elseif (stripos($tc, 'Geminid') !== false) $showerType = 'geminider';
+            if ($showerType !== 'none') $counts[$showerType]++;
+        }
+    }
+    return $counts;
+}
+
+/**
  * Generates the HTML for the main observation table.
  * @param array $tableData The structured array of event data to display.
  * @param array $t The translation array for the current language.
@@ -268,176 +419,31 @@ function generateEventTable($tableData, $t, $isArchivePage = false) {
         list($year, $monthNum) = explode('-', $yearMonthKey);
 
         $isInitiallyVisible = ($isArchivePage || $monthCounter <= 3);
-        $initialDisplay = $isInitiallyVisible ? 'block' : 'none';
         $initialArrow = $isInitiallyVisible ? '&#9650;' : '&#9660;';
+
+        // Write the month fragment file
+        $lang_short = $t['lang_short'];
+        $fragmentFile = BASE_PATH . "/month-{$year}-{$monthNum}-{$lang_short}.html";
+        $monthContent = generateMonthContent($dates, $t);
+        file_put_contents($fragmentFile, $monthContent);
+        $fragmentUrl = "/meteor/month-{$year}-{$monthNum}-{$lang_short}.html";
+
+        // Pre-compute per-filter counts for the minimized-count fallback
+        $counts = countEventsForFilters($dates, $t);
+        $countAttrs = '';
+        foreach ($counts as $filter => $cnt) {
+            $countAttrs .= " data-count-{$filter}='{$cnt}'";
+        }
 
         $html .= "\t\t\t<td class='month-cell'>\n";
         $html .= "\t\t\t\t<strong class='month-header' data-toggle-month='month-{$year}-{$monthNum}'>" . ($monthNames[$monthNum] ?? '') . "&nbsp;<span class='toggle-icon'>{$initialArrow}</span></strong>\n";
-        $html .= "\t\t\t\t<div id='month-{$year}-{$monthNum}' class='month-content' style='display: {$initialDisplay};'>";
-
-        foreach ($dates as $date) {
-            $dateDir = basename(dirname($date));
-            $timeCode = basename($date);
-            
-            $dayOfMonth = (int)substr($dateDir, 6, 2);
-            $formattedTime = substr_replace(substr_replace($timeCode, ':', 4, 0), ':', 2, 0);
-
-            if ($t['lang_short'] === 'en') {
-                $formattedDay = formatDayWithSuffix($dayOfMonth);
-                $formattedTimeForDisplay = "{$formattedDay} {$formattedTime}";
-            } else {
-                // This format (15.) works for nb, de, cs, fi
-                $formattedDay = $dayOfMonth . '.';
-                $formattedTimeForDisplay = "{$formattedDay} {$formattedTime}";
-            }
-
-            // Use language-prefixed file to check for multi-station status, fallback to default.
-            $lang_prefix = ($t['lang_short'] === 'nb') ? '' : $t['lang_short'] . '_';
-            $isMultiStation = file_exists("{$date}/{$lang_prefix}map.jpg") || file_exists("{$date}/map.jpg");
-            
-            $eventType = $isMultiStation ? 'multi-station-normal' : 'single-station';
-            $linkClass = $isMultiStation ? 'normal-altitude' : 'unknown-altitude';
-            
-            // *** CORRECTION: Initialize $showerType outside the if-block ***
-            $showerType = 'none';
-
-            if ($isMultiStation) {
-                // Use language-prefixed tables.html if it exists
-                $tablesFile = "{$date}/{$lang_prefix}tables.html";
-                if (!file_exists($tablesFile)) {
-                    $tablesFile = "{$date}/tables.html"; // Fallback to default
-                }
-                
-                if (file_exists($tablesFile)) {
-                    $tablesContent = file_get_contents($tablesFile);
-                    
-                    $endAltitude = null;
-                    $entrySpeed = null;
-                    $startAltitude = null;
-                    
-                    // Regex keys based on default (Norwegian) translations as a stable fallback.
-                    // This is safer as we don't know if all languages have the translation.
-                    
-                    // Try to find Start Altitude (Starthøgde)
-                    if (preg_match('/(Start height|Starthøgde|Anfangshöhe|Počáteční výška|Alkukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $matchesStart)) {
-                        $startAltitude = (float)str_replace(',', '.', $matchesStart[2]);
-                    }
-
-                    // Try to find End Altitude (Slutthøgde)
-                    if (preg_match('/(End height|Slutthøgde|Endhöhe|Konečná výška|Loppukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $matchesAlt)) {
-                        $endAltitude = (float)str_replace(',', '.', $matchesAlt[2]);
-                    }
-
-                    // Try to find Entry Speed (Inngangshastighet)
-                    if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupní rychlost|Tulonopeus):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tablesContent, $matchesSpeed)) {
-                        $entrySpeed = (float)str_replace(',', '.', $matchesSpeed[2]);
-                    }
-
-                    // Check new criteria for meteorite candidate
-                    if ($startAltitude !== null && $endAltitude !== null && $entrySpeed !== null &&
-		        $startAltitude > 40 && $startAltitude < 120 &&
-		     	$endAltitude > 10 && $endAltitude < 40 &&
-    			$entrySpeed >= 10 && $entrySpeed <= 30) {
-                        
-                         $linkClass = 'low-altitude';
-                         $eventType = 'meteorite-candidate';
-                    }
-                    
-                    // Shower check (simple string search)
-                    // $showerType = 'none'; // This was already initialized
-                    if (stripos($tablesContent, 'Perseid') !== false) $showerType = 'perseider'; // Handles Perseidene, Perseidy, Perseiden, Perseidit
-                    elseif (stripos($tablesContent, 'taurid') !== false) { // Handles Tauridene, Tauridy, Tauriden, Tauridit
-                        if (stripos($tablesContent, 'Sørlige') !== false || stripos($tablesContent, 'Southern') !== false || stripos($tablesContent, 'Südliche') !== false || stripos($tablesContent, 'Jižní') !== false || stripos($tablesContent, 'Eteläiset') !== false) {
-                             $showerType = 'sorlige-taurider';
-                        } elseif (stripos($tablesContent, 'Nordlige') !== false || stripos($tablesContent, 'Northern') !== false || stripos($tablesContent, 'Nördliche') !== false || stripos($tablesContent, 'Severní') !== false || stripos($tablesContent, 'Pohjoiset') !== false) {
-                             $showerType = 'nordlige-taurider';
-                        }
-                    }
-                    elseif (stripos($tablesContent, 'Leonid') !== false) $showerType = 'leonider'; // Leonidit, Leoniden, Leonidy, Leonidene
-                    elseif (stripos($tablesContent, 'Geminid') !== false) $showerType = 'geminider'; // Geminidit, Geminiden, Geminidy, Geminidene
-                }
-            }
-
-            $locationInfo = ''; // Initialize
-            if ($isMultiStation) {
-                // Multi-station: Use location.txt
-                $locationFile = "{$date}/location.txt";
-                if (file_exists($locationFile)) {
-                    $locationInfo = htmlspecialchars(trim(file_get_contents($locationFile)));
-                }
-            } else {
-                // Single-station: Find station name and camera numbers
-                $stationName = '';
-                $camNumbers = [];
-                
-                // Use unprocessed images as the source of truth for detections
-                $detectionPaths = glob("{$date}/*/*/fireball_orig.jpg"); 
-                if (empty($detectionPaths)) {
-                     $detectionPaths = glob("{$date}/*/*/fireball.jpg"); // Fallback to processed
-                }
-
-                foreach ($detectionPaths as $imgPath) {
-                    $relativePath = substr($imgPath, strlen($date) + 1); // Remove "{$date}/"
-                    $parts = explode('/', $relativePath); // e.g., [StationName, CamDir, FileName]
-                    
-                    if (count($parts) >= 2) {
-                        if (empty($stationName)) {
-                            $stationName = $parts[0]; // Set station name on first find
-                        }
-                        // Extract number from cam directory, e.g., "cam3" -> "3"
-                        $camNum = preg_replace('/[^0-9]/', '', $parts[1]); 
-                        if (!empty($camNum) && !in_array($camNum, $camNumbers)) {
-                            $camNumbers[] = $camNum;
-                        }
-                    }
-                }
-                
-                if (!empty($stationName)) {
-                    sort($camNumbers, SORT_NUMERIC); // Sort them nicely, e.g., [3, 7]
-                    // Format: (StationName 3, 7)
-                    $locationInfo = '(' . htmlspecialchars($stationName) . ' ' . implode(', ', $camNumbers) . ')';
-                }
-            }
-
-
-	    // Find processed and unprocessed images from subdirectories
-	    $processedImages = glob("{$date}/*/*/fireball.jpg");
-	    $unprocessedImages = glob("{$date}/*/*/fireball_orig.jpg");
-	    $mediaHTML = '';
-
-	    // Processed images
-	    if (!empty($processedImages)) {
-    	       $mediaHTML .= "<div class='media-container processed-images' style='display: none;'>";
-    	       // We pass '.webm'.
-    	       // generateMediaItem takes ".../fireball.jpg", strips ".jpg" -> ".../fireball",
-    	       // and adds ".webm" -> ".../fireball.webm".
-    	       foreach ($processedImages as $imgPath) $mediaHTML .= generateMediaItem($imgPath, '.webm', 'Processed fireball image');
-    	       $mediaHTML .= "</div>";
-	    }
-
-	    // Unprocessed images
-	    if (!empty($unprocessedImages)) {
-	        $mediaHTML .= "<div class='media-container unprocessed-images' style='display: none;'>";
-    		// We pass '_orig.webm'.
-    		// generateMediaItem takes ".../fireball_orig.jpg", strips "_orig.jpg" -> ".../fireball",
-    		// and adds "_orig.webm" -> ".../fireball_orig.webm".
-    		foreach ($unprocessedImages as $imgPath) $mediaHTML .= generateMediaItem($imgPath, '_orig.webm', 'Unprocessed fireball image');
-    		$mediaHTML .= "</div>";
-	    }
-
-            $html .= "<div class='event-container' data-event-type='{$eventType}' data-shower='{$showerType}'>";
-            $html .= "<a href='/meteor/{$date}/' class='observation-link {$linkClass}'>";
-            $html .= "<span>{$formattedTimeForDisplay}</span>";
-            if ($locationInfo) {
-                $html .= "<small class='location-details'>{$locationInfo}</small>";
-            }
-            $html .= "</a>";
-            $html .= $mediaHTML;
-            if (trim($mediaHTML) !== '') {
-                $html .= "<hr class='image-separator'>";
-            }
-            $html .= "</div>\n";
+        // For initially visible months, embed content inline; others get a lazy placeholder
+        if ($isInitiallyVisible) {
+            $html .= "\t\t\t\t<div id='month-{$year}-{$monthNum}' class='month-content' style='display: block;'{$countAttrs}>{$monthContent}";
+        } else {
+            $html .= "\t\t\t\t<div id='month-{$year}-{$monthNum}' class='month-content' style='display: none;' data-month-src='{$fragmentUrl}'{$countAttrs}>";
         }
+
         $html .= "</div><span class='minimized-count' style='display: " . ($isInitiallyVisible ? 'none' : 'block') . ";'></span></td>\n";
     }
     $html .= "\t\t</tr>\n\t</table>\n";
@@ -458,19 +464,25 @@ function generatePageFooter($t) {
         if (window.filterScriptLoaded) return;
         window.filterScriptLoaded = true;
 
-        // --- Helper Functions ---
-        // (These are unchanged)
+        // --- Lazy image loading via IntersectionObserver ---
 
-        function loadImagesInContainer(container) {
-            if (!container) return;
-            const imagesToLoad = container.querySelectorAll('img[data-src]');
-            imagesToLoad.forEach(img => {
-                const src = img.getAttribute('data-src');
-                if (src) {
-                    img.src = src;
-                    img.removeAttribute('data-src');
+        const imgObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    const img = entry.target;
+                    const src = img.getAttribute('data-src');
+                    if (src) {
+                        img.src = src;
+                        img.removeAttribute('data-src');
+                    }
+                    imgObserver.unobserve(img);
                 }
             });
+        }, { rootMargin: '200px' });
+
+        function observeImagesInContainer(container) {
+            if (!container) return;
+            container.querySelectorAll('img[data-src]').forEach(img => imgObserver.observe(img));
         }
 
         function updateMinimizedCounts() {
@@ -485,22 +497,28 @@ function generatePageFooter($t) {
 
                 let count = 0;
                 const eventsInMonth = content.querySelectorAll('.event-container');
-                eventsInMonth.forEach(container => {
-                    const eventType = container.getAttribute('data-event-type');
-                    const showerType = container.getAttribute('data-shower');
-                    let isVisibleInFilter = false;
-                    const isMultiStation = (eventType === 'multi-station-normal' || eventType === 'meteorite-candidate');
+                if (eventsInMonth.length === 0 && content.hasAttribute('data-month-src')) {
+                    // Content not yet fetched — use the pre-computed count attribute
+                    const attr = content.getAttribute('data-count-' + selectedFilter);
+                    count = attr !== null ? parseInt(attr, 10) : 0;
+                } else {
+                    eventsInMonth.forEach(container => {
+                        const eventType = container.getAttribute('data-event-type');
+                        const showerType = container.getAttribute('data-shower');
+                        let isVisibleInFilter = false;
+                        const isMultiStation = (eventType === 'multi-station-normal' || eventType === 'meteorite-candidate');
 
-                    switch (selectedFilter) {
-                        case 'all': isVisibleInFilter = true; break;
-                        case 'multi-station': isVisibleInFilter = isMultiStation; break;
-                        case 'candidates': isVisibleInFilter = (eventType === 'meteorite-candidate'); break;
-                        case 'perseider': case 'sorlige-taurider': case 'nordlige-taurider': case 'leonider': case 'geminider':
-                            isVisibleInFilter = isMultiStation && (showerType === selectedFilter);
-                            break;
-                    }
-                    if (isVisibleInFilter) count++;
-                });
+                        switch (selectedFilter) {
+                            case 'all': isVisibleInFilter = true; break;
+                            case 'multi-station': isVisibleInFilter = isMultiStation; break;
+                            case 'candidates': isVisibleInFilter = (eventType === 'meteorite-candidate'); break;
+                            case 'perseider': case 'sorlige-taurider': case 'nordlige-taurider': case 'leonider': case 'geminider':
+                                isVisibleInFilter = isMultiStation && (showerType === selectedFilter);
+                                break;
+                        }
+                        if (isVisibleInFilter) count++;
+                    });
+                }
                 countSpan.textContent = count > 0 ? (count === 1 ? '1 $hidden_singular' : count + ' $hidden_plural') : '';
             });
         }
@@ -562,10 +580,33 @@ function generatePageFooter($t) {
                     const countSpan = this.parentElement.querySelector('.minimized-count');
                     if (monthContent && icon && countSpan) {
                         const isHidden = monthContent.style.display === 'none';
-                        monthContent.style.display = isHidden ? 'block' : 'none';
+                        if (isHidden) {
+                            const src = monthContent.getAttribute('data-month-src');
+                            if (src && monthContent.children.length === 0) {
+                                fetch(src)
+                                    .then(r => r.text())
+                                    .then(html => {
+                                        monthContent.innerHTML = html;
+                                        monthContent.removeAttribute('data-month-src');
+                                        monthContent.style.display = 'block';
+                                        icon.innerHTML = '&#9650;';
+                                        countSpan.style.display = 'none';
+                                        filterEvents();
+                                        updateDisplayChoice();
+                                        observeImagesInContainer(monthContent);
+                                        updateMinimizedCounts();
+                                    })
+                                    .catch(() => { monthContent.style.display = 'block'; });
+                                return;
+                            }
+                            monthContent.style.display = 'block';
+                            updateDisplayChoice();
+                            observeImagesInContainer(monthContent);
+                        } else {
+                            monthContent.style.display = 'none';
+                        }
                         icon.innerHTML = isHidden ? '&#9650;' : '&#9660;';
                         countSpan.style.display = isHidden ? 'none' : 'block';
-                        if (isHidden) loadImagesInContainer(monthContent); // Load images when expanding
                         updateMinimizedCounts();
                     }
                 });
@@ -626,10 +667,10 @@ function generatePageFooter($t) {
             // 2. Apply display choice based on current (or restored) radio state
             updateDisplayChoice();
             
-            // 3. Load images for all *visible* month containers
+            // 3. Register observer for all images in visible month containers
             document.querySelectorAll('.month-content').forEach(content => {
                 if (content.style.display === 'block') {
-                     loadImagesInContainer(content);
+                    observeImagesInContainer(content);
                 }
             });
         });

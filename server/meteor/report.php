@@ -215,8 +215,13 @@ h1.page-title { color: var(--primary); font-family: var(--font-head); font-size:
   border-radius: 0 !important; box-shadow: none !important; margin: 0 !important; }
 .thumb-card:hover .tc-img-wrap img { transform: scale(2.0); }
 /* Static label below image */
-.thumb-card .tc-label { font-size: 0.82em; font-family: var(--font-head); color: var(--primary);
-  padding: 0.4em 0.6em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thumb-card .tc-webm-wrap { width: 100%; height: 48px; overflow: hidden; background: #000;
+  border-radius: 8px 8px 0 0; }
+.thumb-card .tc-webm-wrap video { width: 100%; height: 48px; object-fit: cover; display: block; }
+.thumb-card .tc-webm-wrap + .tc-img-wrap { border-radius: 0; }
+.thumb-card .tc-label { font-size: 0.95em; font-family: var(--font-head); color: var(--primary);
+  height: 48px; display: flex; align-items: center; justify-content: center;
+  padding: 0 0.6em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* -- Scientific section -- */
 .sci-section { margin-bottom: 2em; }
@@ -377,6 +382,11 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
   <div class="thumb-strip">
     <?php foreach ($station_cams as $i => $sc): ?>
     <div class="thumb-card<?php echo $i===0?' active':''; ?>" onclick="showStn(<?php echo $i; ?>, true)" id="tc-<?php echo $i; ?>">
+      <?php if ($sc['webm']): ?>
+      <div class="tc-webm-wrap">
+        <video autoplay loop muted playsinline><source src="<?php echo htmlspecialchars($sc['webm']); ?>" type="video/webm"></video>
+      </div>
+      <?php endif; ?>
       <div class="tc-img-wrap">
         <?php if ($sc['thumb']): ?>
           <img src="<?php echo htmlspecialchars($sc['thumb']); ?>" alt="<?php echo htmlspecialchars($sc['label']); ?>">

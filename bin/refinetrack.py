@@ -425,7 +425,7 @@ if bright_segments:
     new_angle_deg = math.degrees(math.atan2(candidate_end[1] - candidate_start[1], candidate_end[0] - candidate_start[0]))
     angle_diff = abs(math.degrees(initial_angle) - new_angle_deg)
     if angle_diff > 180: angle_diff = 360 - angle_diff
-    if angle_diff > 5: revert_to_original = True
+    if angle_diff > 15: revert_to_original = True
 
     if revert_to_original:
         print(f'{args.start[0]:.2f},{args.start[1]:.2f} {args.end[0]:.2f},{args.end[1]:.2f}')

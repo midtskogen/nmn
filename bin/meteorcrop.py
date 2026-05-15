@@ -239,6 +239,39 @@ def run_command_with_progress(cmd: List[str], desc: str, total: float):
 #  COORDINATE AND PTO FILE HANDLING
 # ==============================================================================
 
+def _refine_gnomonic_coords(event_dir: Path, start_xy: List[float], end_xy: List[float]) -> Tuple[List[float], List[float]]:
+    """Runs refinetrack.py on the gnomonic-clean image to improve start/end pixel accuracy."""
+    candidates = sorted(event_dir.glob("*-gnomonic-clean.jpg"))
+    gnomonic_image = candidates[0] if candidates else None
+    if gnomonic_image is None:
+        return start_xy, end_xy
+
+    refinetrack = Path(__file__).resolve().parent / "refinetrack.py"
+    if not refinetrack.is_file():
+        return start_xy, end_xy
+
+    try:
+        cmd = [
+            sys.executable, str(refinetrack),
+            str(gnomonic_image),
+            f"{start_xy[0]:.2f},{start_xy[1]:.2f}",
+            f"{end_xy[0]:.2f},{end_xy[1]:.2f}",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return start_xy, end_xy
+        parts = result.stdout.strip().split()
+        if len(parts) >= 2:
+            sx, sy = map(float, parts[0].split(','))
+            ex, ey = map(float, parts[1].split(','))
+            print(f"   Track refined: ({start_xy[0]:.1f},{start_xy[1]:.1f})->({end_xy[0]:.1f},{end_xy[1]:.1f})"
+                  f"  =>  ({sx:.1f},{sy:.1f})->({ex:.1f},{ey:.1f})")
+            return [sx, sy], [ex, ey]
+    except Exception as e:
+        print(f"   Warning: refinetrack failed ({e}), using original coords.", file=sys.stderr)
+    return start_xy, end_xy
+
+
 def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) -> Tuple[List[float], List[float]]:
     """Uses pto_mapper to transform celestial coordinates (az/alt) to pixels."""
     try:
@@ -333,7 +366,9 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
             f"  PTO file used: {pto_file}"
         )
 
-    return [start_result[1], start_result[2]], [end_result[1], end_result[2]]
+    start_xy = [start_result[1], start_result[2]]
+    end_xy = [end_result[1], end_result[2]]
+    return _refine_gnomonic_coords(event_dir, start_xy, end_xy)
 
 
 def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: List[float], end_xy: List[float]) -> Tuple[int, int]:

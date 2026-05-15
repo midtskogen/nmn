@@ -964,6 +964,212 @@ export function showVideoPreview(videoUrl, title) {
 }
 
 /**
+ * Creates and displays a modal for viewing a downloaded image with brightness/contrast/zoom.
+ * @param {string} imageUrl - The URL of the image to preview.
+ * @param {string} title - The title for the modal.
+ */
+export function showImagePreview(imageUrl, title) {
+    const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
+    const modalContent = createEl('div', { id: 'video-modal-content', className: 'preview-modal' });
+
+    // Header
+    const header = createEl('div', { className: 'preview-header' });
+    header.appendChild(createEl('h3', { textContent: title, className: 'preview-title' }));
+    const closeButton = createEl('button', { className: 'preview-close-btn', textContent: '×' });
+    header.appendChild(closeButton);
+
+    // Image wrapper with pan/zoom
+    const imageWrapper = createEl('div', { className: 'preview-video-wrapper' });
+    const img = createEl('img', {
+        src: imageUrl,
+        className: 'preview-video',
+        style: { display: 'block', width: '100%', height: 'auto', objectFit: 'contain' }
+    });
+
+    // Grid and annotation overlays (hidden by default)
+    const gridOverlay = createEl('img', { className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 10 } });
+    const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 11 } });
+    gridOverlay.style.opacity = '0';
+    annotationOverlay.style.opacity = '0';
+
+    const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
+    imageWrapper.append(img, gridOverlay, annotationOverlay, loadingIndicator);
+
+    img.addEventListener('load', () => { loadingIndicator.style.display = 'none'; });
+
+    // Controls
+    const controls = createEl('div', { className: 'preview-controls' });
+
+    const downloadBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '⬇',
+        title: t('download_image', 'Download Image')
+    });
+    const fullscreenBtn = createEl('button', {
+        className: 'preview-control-btn',
+        textContent: '⛶',
+        title: t('fullscreen', 'Fullscreen')
+    });
+
+    controls.append(fullscreenBtn, downloadBtn);
+
+    // Filter controls
+    const filterControls = createEl('div', { className: 'preview-filter-controls' });
+    const brightnessSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'img-brightness-slider' });
+    const contrastSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'img-contrast-slider' });
+    const resetFiltersBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters', 'Reset'), title: t('reset_filters', 'Reset to default') });
+
+    const brightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    brightnessWrapper.append(createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'img-brightness-slider', className: 'preview-filter-label' }), brightnessSlider);
+    const contrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    contrastWrapper.append(createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'img-contrast-slider', className: 'preview-filter-label' }), contrastSlider);
+
+    // Parse station and camera from image filename (e.g., "GAU_cam1_20260429_2056_image.jpg")
+    const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_(\d{8})_(\d{4})/);
+    let gridToggleContainer = null, annotationToggleContainer = null;
+    let gridCheckbox = null, annotationCheckbox = null;
+
+    if (filenameMatch) {
+        const stationId = filenameMatch[1];
+        const cameraNum = filenameMatch[2];
+        const dateStr = filenameMatch[3];
+        const timeStr = filenameMatch[4];
+        const year = dateStr.substring(0, 4);
+        const month = dateStr.substring(4, 6);
+        const day = dateStr.substring(6, 8);
+        const hour = timeStr.substring(0, 2);
+        const minute = timeStr.substring(2, 4);
+        const imageTimestamp = `${year}-${month}-${day}T${hour}:${minute}:00`;
+        const annotationTimestamp = `${year}-${month}-${day}T${hour}:${minute}:30`;
+
+        // Grid overlay toggle - initially greyed out until loaded
+        gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        gridCheckbox = createEl('input', { type: 'checkbox', id: 'img-grid-overlay-toggle', disabled: true });
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+
+        // Annotation overlay toggle - initially greyed out until loaded
+        annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        annotationCheckbox = createEl('input', { type: 'checkbox', id: 'img-annotation-overlay-toggle', disabled: true });
+        annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle', 'Show Stars'));
+
+        // Fetch grid overlay
+        fetch(`index.php?action=fetch_archive_grid&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(imageTimestamp)}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.success && data.grid_url) {
+                    gridOverlay.src = data.grid_url;
+                    gridToggleContainer.style.opacity = '1';
+                    gridCheckbox.disabled = false;
+                }
+            })
+            .catch(() => {});
+
+        gridCheckbox.addEventListener('change', () => {
+            gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0';
+        });
+
+        // Fetch annotation overlay
+        fetch(`index.php?action=fetch_archive_annotation&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(annotationTimestamp)}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.success && data.annotation_url) {
+                    annotationOverlay.src = data.annotation_url;
+                    annotationToggleContainer.style.opacity = '1';
+                    annotationCheckbox.disabled = false;
+                }
+            })
+            .catch(() => {});
+
+        annotationCheckbox.addEventListener('change', () => {
+            annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.6' : '0';
+        });
+    }
+
+    const checkboxesWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '4px' } });
+    if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
+    if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
+
+    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper);
+    if (checkboxesWrapper.hasChildNodes()) filterControls.append(checkboxesWrapper);
+
+    function updateFilters() {
+        img.style.filter = `brightness(${brightnessSlider.value}) contrast(${contrastSlider.value})`;
+    }
+    brightnessSlider.addEventListener('input', updateFilters);
+    contrastSlider.addEventListener('input', updateFilters);
+    resetFiltersBtn.addEventListener('click', () => { brightnessSlider.value = 1; contrastSlider.value = 1; updateFilters(); });
+
+    // Assemble modal
+    modalContent.append(header, imageWrapper, controls, filterControls);
+    modalBackdrop.appendChild(modalContent);
+    document.body.appendChild(modalBackdrop);
+
+    // Pan/Zoom
+    let scale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
+    const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+    const updateTransform = () => {
+        const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+        img.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
+    };
+    img.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = '0 0';
+
+    const onWheel = e => {
+        e.preventDefault();
+        const rect = imageWrapper.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left, mouseY = e.clientY - rect.top;
+        const newScale = clamp(scale * (e.deltaY > 0 ? 0.9 : 1.1), 1, 8);
+        const newPanX = mouseX - (mouseX - panX) * (newScale / scale);
+        const newPanY = mouseY - (mouseY - panY) * (newScale / scale);
+        scale = newScale;
+        if (scale <= 1.01) { panX = 0; panY = 0; } else {
+            panX = clamp(newPanX, -(imageWrapper.clientWidth * (scale - 1)), 0);
+            panY = clamp(newPanY, -(imageWrapper.clientHeight * (scale - 1)), 0);
+        }
+        updateTransform();
+    };
+    const onMouseMove = e => { if (!isPanning) return; panX = clamp(startPanX + (e.clientX - panOriginX), -(imageWrapper.clientWidth * (scale - 1)), 0); panY = clamp(startPanY + (e.clientY - panOriginY), -(imageWrapper.clientHeight * (scale - 1)), 0); updateTransform(); };
+    const onMouseUp = () => { isPanning = false; imageWrapper.style.cursor = 'default'; window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
+    const onMouseDown = e => { if (e.button !== 0) return; e.preventDefault(); isPanning = true; imageWrapper.style.cursor = 'grabbing'; panOriginX = e.clientX; panOriginY = e.clientY; startPanX = panX; startPanY = panY; window.addEventListener('mousemove', onMouseMove); window.addEventListener('mouseup', onMouseUp); };
+    imageWrapper.addEventListener('wheel', onWheel); imageWrapper.addEventListener('mousedown', onMouseDown);
+
+    // Fullscreen
+    fullscreenBtn.addEventListener('click', () => {
+        if (imageWrapper.requestFullscreen) imageWrapper.requestFullscreen();
+        else if (imageWrapper.webkitRequestFullscreen) imageWrapper.webkitRequestFullscreen();
+    });
+    const onFullscreenChange = () => {
+        if (!document.fullscreenElement) { scale = 1; panX = 0; panY = 0; updateTransform(); }
+        gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
+        annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+
+    // Download
+    downloadBtn.addEventListener('click', () => {
+        const link = document.createElement('a');
+        link.href = imageUrl;
+        link.download = title;
+        link.click();
+    });
+
+    // Keyboard
+    modalBackdrop.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); closeButton.click(); }
+    });
+
+    // Close
+    closeButton.addEventListener('click', () => {
+        document.removeEventListener('fullscreenchange', onFullscreenChange);
+        imageWrapper.removeEventListener('wheel', onWheel);
+        imageWrapper.removeEventListener('mousedown', onMouseDown);
+        document.getElementById('video-modal-backdrop')?.remove();
+    });
+
+    modalBackdrop.setAttribute('tabindex', '0');
+    setTimeout(() => modalBackdrop.focus(), 100);
+}
+
+/**
  * Renders the results of a completed download task in the results panel.
  * @param {object} resultData - The data object from the backend, containing files and errors.
  * @param {object} dom - The DOM element cache.
@@ -1003,24 +1209,16 @@ export function displayResults(resultData, dom, hevcSupported) {
                         const thumbContainer = createEl('div', { className: `thumbnail-container${isVideo ? ' video' : ''}` });
                         thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 'thumbnail-preview' }));
 
-                        if (isVideo) {
-                            // Video thumbnails open preview player
-                            thumbContainer.style.cursor = 'pointer';
-                            thumbContainer.addEventListener('click', () => {
+                        // Both video and image thumbnails open a preview player
+                        thumbContainer.style.cursor = 'pointer';
+                        thumbContainer.addEventListener('click', () => {
+                            if (isVideo) {
                                 showVideoPreview(file.url, file.name);
-                            });
-                        } else {
-                            // Image thumbnails open in new tab
-                            const link = createEl('a', { href: file.url, target: '_blank', title: file.name });
-                            link.appendChild(thumbContainer);
-                            li.appendChild(link);
-                            thumbContainer.style.cursor = 'zoom-in';
-                        }
-
-                        // Only append directly for videos (images already appended via link)
-                        if (isVideo) {
-                            li.appendChild(thumbContainer);
-                        }
+                            } else {
+                                showImagePreview(file.url, file.name);
+                            }
+                        });
+                        li.appendChild(thumbContainer);
                      } else {
                         li.appendChild(createEl('a', { href: file.url, target: '_blank', textContent: file.name, title: file.name }));
                     }
@@ -1065,7 +1263,16 @@ export function displayResults(resultData, dom, hevcSupported) {
                  
                    });
                     Object.entries(preferredLinks).sort((a, b) => a[0].localeCompare(b[0])).forEach(([shortName, linkInfo]) => {
-                        linksContainer.appendChild(createEl('a', { href: linkInfo.url, target: '_blank', textContent: shortName }));
+                        const linkEl = createEl('a', { href: '#', textContent: shortName });
+                        linkEl.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            if (linkInfo.url.endsWith('.mp4')) {
+                                showVideoPreview(linkInfo.url, linkInfo.name);
+                            } else {
+                                showImagePreview(linkInfo.url, linkInfo.name);
+                            }
+                        });
+                        linksContainer.appendChild(linkEl);
                     });
                     if (linksContainer.hasChildNodes()) li.appendChild(linksContainer);
                     ul.appendChild(li);

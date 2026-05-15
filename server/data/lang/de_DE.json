@@ -180,5 +180,7 @@
     "reset_filters": "Zurücksetzen",
     "show_timestamp": "Zeitstempel anzeigen",
     "fullscreen": "Vollbild",
-    "show_overlay": "Overlay anzeigen"
+    "show_overlay": "Overlay anzeigen",
+    "saturation": "Sättigung",
+    "download_image": "Bild herunterladen"
 }

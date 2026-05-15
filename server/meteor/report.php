@@ -1378,6 +1378,26 @@ function openMediaPlayer(url, type, variants, stationLabel) {
         contrastWrap.appendChild(contrastLabel);
         contrastWrap.appendChild(contrastSlider);
         
+        // Saturation slider
+        const saturationWrap = document.createElement('div');
+        saturationWrap.style.display = 'flex';
+        saturationWrap.style.flexDirection = 'column';
+        saturationWrap.style.alignItems = 'center';
+        const saturationLabel = document.createElement('label');
+        saturationLabel.textContent = <?php echo json_encode($t['player_saturation'] ?? 'Saturation'); ?>;
+        saturationLabel.style.fontSize = '11px';
+        saturationLabel.style.color = '#8aa4be';
+        const saturationSlider = document.createElement('input');
+        saturationSlider.type = 'range';
+        saturationSlider.min = '0';
+        saturationSlider.max = '3';
+        saturationSlider.step = '0.1';
+        saturationSlider.value = '1';
+        saturationSlider.style.width = '80px';
+        saturationSlider.style.accentColor = '#4a9fd4';
+        saturationWrap.appendChild(saturationLabel);
+        saturationWrap.appendChild(saturationSlider);
+        
         // Reset button
         const resetFiltersBtn = document.createElement('button');
         resetFiltersBtn.className = 'media-btn';
@@ -1389,21 +1409,25 @@ function openMediaPlayer(url, type, variants, stationLabel) {
         function updateFilters() {
             const brightness = brightnessSlider.value;
             const contrast = contrastSlider.value;
-            mediaElement.style.filter = 'brightness(' + brightness + ') contrast(' + contrast + ')';
+            const saturation = saturationSlider.value;
+            mediaElement.style.filter = 'brightness(' + brightness + ') contrast(' + contrast + ') saturate(' + saturation + ')';
         }
         
         brightnessSlider.addEventListener('input', updateFilters);
         contrastSlider.addEventListener('input', updateFilters);
+        saturationSlider.addEventListener('input', updateFilters);
         
         resetFiltersBtn.onclick = function() {
             brightnessSlider.value = 1;
             contrastSlider.value = 1;
+            saturationSlider.value = 1;
             updateFilters();
         };
         
         filterControls.appendChild(resetFiltersBtn);
         filterControls.appendChild(brightnessWrap);
         filterControls.appendChild(contrastWrap);
+        filterControls.appendChild(saturationWrap);
         controls.appendChild(filterControls);
     }
     

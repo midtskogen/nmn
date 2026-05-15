@@ -147,5 +147,6 @@
   "player_frame_forward": "O snímek vpřed",
   "player_brightness": "Jas",
   "player_contrast": "Kontrast",
+  "player_saturation": "Sytost",
   "player_reset_filters": "Resetovat"
 }

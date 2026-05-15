@@ -180,5 +180,7 @@
     "reset_filters": "Obnovit",
     "show_timestamp": "Zobrazit časovou značku",
     "fullscreen": "Celá obrazovka",
-    "show_overlay": "Zobrazit překryv"
+    "show_overlay": "Zobrazit překryv",
+    "saturation": "Sytost",
+    "download_image": "Stáhnout obrázek"
 }

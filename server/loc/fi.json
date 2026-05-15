@@ -152,5 +152,6 @@
     "player_frame_forward": "Yksi kuva eteenpäin",
     "player_brightness": "Kirkkaus",
     "player_contrast": "Kontrasti",
+    "player_saturation": "Kylläisyys",
     "player_reset_filters": "Palauta"
 }

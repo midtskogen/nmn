@@ -592,6 +592,18 @@ export function showVideoPreview(videoUrl, title) {
         id: 'contrast-slider'
     });
 
+    // Saturation slider
+    const saturationSlider = createEl('input', {
+        type: 'range',
+        min: '0',
+        max: '3',
+        step: '0.1',
+        value: '1',
+        className: 'preview-slider',
+        title: t('saturation', 'Saturation'),
+        id: 'saturation-slider'
+    });
+
     // Reset filters button
     const resetFiltersBtn = createEl('button', {
         className: 'preview-control-btn reset',
@@ -658,12 +670,19 @@ export function showVideoPreview(videoUrl, title) {
         contrastSlider
     );
 
+    // Saturation: label above slider in a small inline column
+    const saturationWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    saturationWrapper.append(
+        createEl('label', { textContent: t('saturation', 'Saturation'), htmlFor: 'saturation-slider', className: 'preview-filter-label' }),
+        saturationSlider
+    );
+
     const checkboxesWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '4px' } });
     checkboxesWrapper.append(timestampToggleContainer);
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
 
-    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, checkboxesWrapper);
+    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, saturationWrapper, checkboxesWrapper);
 
     // Assemble modal
     modalContent.append(header, videoWrapper, controls, filterControls);
@@ -811,16 +830,19 @@ export function showVideoPreview(videoUrl, title) {
     function updateFilters() {
         const brightness = brightnessSlider.value;
         const contrast = contrastSlider.value;
-        video.style.filter = `brightness(${brightness}) contrast(${contrast})`;
+        const saturation = saturationSlider.value;
+        video.style.filter = `brightness(${brightness}) contrast(${contrast}) saturate(${saturation})`;
     }
 
     brightnessSlider.addEventListener('input', updateFilters);
     contrastSlider.addEventListener('input', updateFilters);
+    saturationSlider.addEventListener('input', updateFilters);
 
     // Reset filters button handler
     resetFiltersBtn.addEventListener('click', () => {
         brightnessSlider.value = 1;
         contrastSlider.value = 1;
+        saturationSlider.value = 1;
         updateFilters();
     });
 
@@ -1017,12 +1039,15 @@ export function showImagePreview(imageUrl, title) {
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
     const brightnessSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'img-brightness-slider' });
     const contrastSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'img-contrast-slider' });
+    const saturationSlider = createEl('input', { type: 'range', min: '0', max: '3', step: '0.1', value: '1', className: 'preview-slider', id: 'img-saturation-slider' });
     const resetFiltersBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters', 'Reset'), title: t('reset_filters', 'Reset to default') });
 
     const brightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
     brightnessWrapper.append(createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'img-brightness-slider', className: 'preview-filter-label' }), brightnessSlider);
     const contrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
     contrastWrapper.append(createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'img-contrast-slider', className: 'preview-filter-label' }), contrastSlider);
+    const saturationWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    saturationWrapper.append(createEl('label', { textContent: t('saturation', 'Saturation'), htmlFor: 'img-saturation-slider', className: 'preview-filter-label' }), saturationSlider);
 
     // Parse station and camera from image filename (e.g., "GAU_cam1_20260429_2056_image.jpg")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_(\d{8})_(\d{4})/);
@@ -1089,15 +1114,16 @@ export function showImagePreview(imageUrl, title) {
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
 
-    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper);
+    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, saturationWrapper);
     if (checkboxesWrapper.hasChildNodes()) filterControls.append(checkboxesWrapper);
 
     function updateFilters() {
-        img.style.filter = `brightness(${brightnessSlider.value}) contrast(${contrastSlider.value})`;
+        img.style.filter = `brightness(${brightnessSlider.value}) contrast(${contrastSlider.value}) saturate(${saturationSlider.value})`;
     }
     brightnessSlider.addEventListener('input', updateFilters);
     contrastSlider.addEventListener('input', updateFilters);
-    resetFiltersBtn.addEventListener('click', () => { brightnessSlider.value = 1; contrastSlider.value = 1; updateFilters(); });
+    saturationSlider.addEventListener('input', updateFilters);
+    resetFiltersBtn.addEventListener('click', () => { brightnessSlider.value = 1; contrastSlider.value = 1; saturationSlider.value = 1; updateFilters(); });
 
     // Assemble modal
     modalContent.append(header, imageWrapper, controls, filterControls);
@@ -1342,12 +1368,15 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     const liveFilterControls = createEl('div', { className: 'preview-filter-controls' });
     const liveBrightnessSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'live-brightness-slider' });
     const liveContrastSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'live-contrast-slider' });
+    const liveSaturationSlider = createEl('input', { type: 'range', min: '0', max: '3', step: '0.1', value: '1', className: 'preview-slider', id: 'live-saturation-slider' });
     const liveResetBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters', 'Reset'), title: t('reset_filters', 'Reset to default') });
     const liveBrightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
     liveBrightnessWrapper.append(createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'live-brightness-slider', className: 'preview-filter-label' }), liveBrightnessSlider);
     const liveContrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
     liveContrastWrapper.append(createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'live-contrast-slider', className: 'preview-filter-label' }), liveContrastSlider);
-    liveFilterControls.append(liveResetBtn, liveBrightnessWrapper, liveContrastWrapper);
+    const liveSaturationWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    liveSaturationWrapper.append(createEl('label', { textContent: t('saturation', 'Saturation'), htmlFor: 'live-saturation-slider', className: 'preview-filter-label' }), liveSaturationSlider);
+    liveFilterControls.append(liveResetBtn, liveBrightnessWrapper, liveContrastWrapper, liveSaturationWrapper);
 
     let baseStatusText = t('modal_starting_stream');
     let countdownSuffix = '';
@@ -1751,13 +1780,15 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
 
     // Live filter handlers
     function updateLiveFilters() {
-        videoEl.style.filter = `brightness(${liveBrightnessSlider.value}) contrast(${liveContrastSlider.value})`;
+        videoEl.style.filter = `brightness(${liveBrightnessSlider.value}) contrast(${liveContrastSlider.value}) saturate(${liveSaturationSlider.value})`;
     }
     liveBrightnessSlider.addEventListener('input', updateLiveFilters);
     liveContrastSlider.addEventListener('input', updateLiveFilters);
+    liveSaturationSlider.addEventListener('input', updateLiveFilters);
     liveResetBtn.addEventListener('click', () => {
         liveBrightnessSlider.value = 1;
         liveContrastSlider.value = 1;
+        liveSaturationSlider.value = 1;
         updateLiveFilters();
     });
 }

@@ -213,5 +213,7 @@
     "reset_filters": "Nullstill",
     "show_timestamp": "Vis tidsstempel",
     "fullscreen": "Fullskjerm",
-    "show_overlay": "Vis overlay"
+    "show_overlay": "Vis overlay",
+    "saturation": "Metning",
+    "download_image": "Last ned bilde"
 }

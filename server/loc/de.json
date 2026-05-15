@@ -147,5 +147,6 @@
   "player_frame_forward": "Ein Bild vor",
   "player_brightness": "Helligkeit",
   "player_contrast": "Kontrast",
+  "player_saturation": "Sättigung",
   "player_reset_filters": "Zurücksetzen"
 }

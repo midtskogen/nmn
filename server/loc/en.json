@@ -152,5 +152,6 @@
   "player_frame_forward": "Step forward 1 frame",
   "player_brightness": "Brightness",
   "player_contrast": "Contrast",
+  "player_saturation": "Saturation",
   "player_reset_filters": "Reset"
 }

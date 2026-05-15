@@ -152,5 +152,6 @@
   "player_frame_forward": "Éi ramme fram",
   "player_brightness": "Lysstyrke",
   "player_contrast": "Kontrast",
+  "player_saturation": "Metning",
   "player_reset_filters": "Nullstill filter"
 }

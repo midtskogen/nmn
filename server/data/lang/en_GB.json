@@ -212,5 +212,7 @@
     "reset_filters": "Reset",
     "show_timestamp": "Show timestamp",
     "fullscreen": "Fullscreen",
-    "show_overlay": "Show overlay"
+    "show_overlay": "Show overlay",
+    "saturation": "Saturation",
+    "download_image": "Download Image"
 }

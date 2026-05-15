@@ -180,5 +180,7 @@
     "reset_filters": "Palauta",
     "show_timestamp": "Näytä aikaleima",
     "fullscreen": "Koko näyttö",
-    "show_overlay": "Näytä peite"
+    "show_overlay": "Näytä peite",
+    "saturation": "Kylläisyys",
+    "download_image": "Lataa kuva"
 }

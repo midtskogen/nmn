@@ -703,8 +703,8 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
   <hr>
   <div class="tab-panel-wrap single">
     <div class="stn-detail">
-
       <div class="stn-img">
+        <h2 class="stn-heading"><?php echo htmlspecialchars($sc['label'] ?? 'Station'); ?></h2>
         <?php if ($sc['thumb']): ?>
           <img src="<?php echo htmlspecialchars($sc['thumb']); ?>" alt="<?php echo htmlspecialchars($sc['label']); ?>">
         <?php elseif ($sc['webm']): ?>

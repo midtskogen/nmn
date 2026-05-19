@@ -182,5 +182,7 @@
     "fullscreen": "Vollbild",
     "show_overlay": "Overlay anzeigen",
     "saturation": "Sättigung",
-    "download_image": "Bild herunterladen"
+    "download_image": "Bild herunterladen",
+    "previous": "Zurück",
+    "next": "Weiter"
 }

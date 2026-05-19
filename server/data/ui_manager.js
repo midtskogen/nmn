@@ -17,6 +17,8 @@ let stopStreamTimeout = null;
 // Timeout ID to automatically close the modal.
 let streamStatusPoller = null; // Interval ID for polling the stream's status.
 let onFullscreenChange = null; // Holds the fullscreen change event handler.
+let lastModalDimensions = null; // Stores dimensions for smooth prev/next navigation.
+let currentMediaList = []; // Global list of all media items for navigation - updated dynamically.
 
 let meteorReportExistenceCache = new Map();
 let meteorListRenderToken = 0;
@@ -475,10 +477,25 @@ function showIframeModal(url, title) {
  * Creates and displays a video preview player with frame controls, filters, and screenshot capability.
  * @param {string} videoUrl - The URL of the video to preview.
  * @param {string} title - The title for the modal.
+ * @param {Array} mediaList - Optional list of all media items for navigation.
+ * @param {number} mediaIndex - Optional index of current item in mediaList.
+ * @param {Object} initialDimensions - Optional {width, height} to use until content loads.
  */
-export function showVideoPreview(videoUrl, title) {
+export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex = -1, initialDimensions = null) {
     const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
     const modalContent = createEl('div', { id: 'video-modal-content', className: 'preview-modal' });
+
+    // Apply initial dimensions if provided (for smooth navigation)
+    if (initialDimensions) {
+        // Disable transitions temporarily to prevent visible resize
+        modalContent.style.transition = 'none';
+        modalContent.style.width = initialDimensions.width + 'px';
+        modalContent.style.height = initialDimensions.height + 'px';
+        modalContent.style.minWidth = 'auto';
+        modalContent.style.minHeight = 'auto';
+        // Re-enable transitions after a delay
+        setTimeout(() => { modalContent.style.transition = ''; }, 50);
+    }
 
     // Header with title and close button
     const header = createEl('div', { className: 'preview-header' });
@@ -563,7 +580,35 @@ export function showVideoPreview(videoUrl, title) {
         title: t('fullscreen', 'Fullscreen')
     });
 
-    controls.append(rewindBtn, frameBackBtn, playPauseBtn, frameForwardBtn, screenshotBtn, downloadBtn, fullscreenBtn);
+    // Navigation buttons (prev/next) - shown when mediaList is provided
+    // Always create buttons even with 1 item, since more may load later
+    // Buttons not disabled - click handlers check bounds dynamically using currentMediaList
+    let prevBtn = null, nextBtn = null, navInfo = null;
+    if (mediaList && mediaList.length > 0) {
+        prevBtn = createEl('button', {
+            className: 'preview-control-btn nav-btn',
+            textContent: '◀',
+            title: t('previous', 'Previous')
+        });
+        nextBtn = createEl('button', {
+            className: 'preview-control-btn nav-btn',
+            textContent: '▶',
+            title: t('next', 'Next')
+        });
+        // Use currentMediaList for dynamic total count
+        const totalCount = currentMediaList.length || mediaList.length;
+        navInfo = createEl('span', {
+            className: 'nav-info',
+            textContent: `${mediaIndex + 1} / ${totalCount}`,
+            style: { fontSize: '12px', color: '#8aa4be', margin: '0 8px' }
+        });
+    }
+
+    if (prevBtn && nextBtn) {
+        controls.append(prevBtn, navInfo, nextBtn, rewindBtn, frameBackBtn, playPauseBtn, frameForwardBtn, screenshotBtn, downloadBtn, fullscreenBtn);
+    } else {
+        controls.append(rewindBtn, frameBackBtn, playPauseBtn, frameForwardBtn, screenshotBtn, downloadBtn, fullscreenBtn);
+    }
 
     // Filter controls - all on one line
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
@@ -766,6 +811,13 @@ export function showVideoPreview(videoUrl, title) {
 
     video.addEventListener('loadedmetadata', () => {
         loadingIndicator.style.display = 'none';
+        // Clear fixed dimensions to allow natural video sizing
+        if (initialDimensions) {
+            modalContent.style.width = '';
+            modalContent.style.height = '';
+            modalContent.style.minWidth = '';
+            modalContent.style.minHeight = '';
+        }
         // Try to detect frame rate from video or default to 30
         frameStep = 1 / 30;
         // Advance one frame to get valid currentTime (avoid 1970 epoch issue)
@@ -950,16 +1002,56 @@ export function showVideoPreview(videoUrl, title) {
         link.click();
     });
 
-    // Keyboard shortcuts
+    // Navigation button handlers - use currentMediaList for dynamic bounds checking
+    if (prevBtn && nextBtn && mediaList && mediaIndex >= 0) {
+        prevBtn.addEventListener('click', () => {
+            if (mediaIndex > 0) {
+                const prevItem = currentMediaList[mediaIndex - 1];
+                // Capture current dimensions for smooth transition
+                const rect = modalContent.getBoundingClientRect();
+                lastModalDimensions = { width: rect.width, height: rect.height };
+                closeButton.click();
+                if (prevItem.isVideo) {
+                    showVideoPreview(prevItem.url, prevItem.name, currentMediaList, mediaIndex - 1, lastModalDimensions);
+                } else {
+                    showImagePreview(prevItem.url, prevItem.name, currentMediaList, mediaIndex - 1, lastModalDimensions);
+                }
+            }
+        });
+        nextBtn.addEventListener('click', () => {
+            if (mediaIndex < currentMediaList.length - 1) {
+                const nextItem = currentMediaList[mediaIndex + 1];
+                // Capture current dimensions for smooth transition
+                const rect = modalContent.getBoundingClientRect();
+                lastModalDimensions = { width: rect.width, height: rect.height };
+                closeButton.click();
+                if (nextItem.isVideo) {
+                    showVideoPreview(nextItem.url, nextItem.name, currentMediaList, mediaIndex + 1, lastModalDimensions);
+                } else {
+                    showImagePreview(nextItem.url, nextItem.name, currentMediaList, mediaIndex + 1, lastModalDimensions);
+                }
+            }
+        });
+    }
+
+    // Keyboard shortcuts - check bounds dynamically instead of using disabled state
     modalBackdrop.addEventListener('keydown', (e) => {
         switch(e.key) {
             case 'ArrowLeft':
                 e.preventDefault();
-                frameBackBtn.click();
+                if (e.shiftKey && prevBtn && mediaIndex > 0) {
+                    prevBtn.click();
+                } else {
+                    frameBackBtn.click();
+                }
                 break;
             case 'ArrowRight':
                 e.preventDefault();
-                frameForwardBtn.click();
+                if (e.shiftKey && nextBtn && mediaIndex < currentMediaList.length - 1) {
+                    nextBtn.click();
+                } else {
+                    frameForwardBtn.click();
+                }
                 break;
             case ' ':
                 e.preventDefault();
@@ -989,10 +1081,25 @@ export function showVideoPreview(videoUrl, title) {
  * Creates and displays a modal for viewing a downloaded image with brightness/contrast/zoom.
  * @param {string} imageUrl - The URL of the image to preview.
  * @param {string} title - The title for the modal.
+ * @param {Array} mediaList - Optional list of all media items for navigation.
+ * @param {number} mediaIndex - Optional index of current item in mediaList.
+ * @param {Object} initialDimensions - Optional {width, height} to use until content loads.
  */
-export function showImagePreview(imageUrl, title) {
+export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex = -1, initialDimensions = null) {
     const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
     const modalContent = createEl('div', { id: 'video-modal-content', className: 'preview-modal' });
+
+    // Apply initial dimensions if provided (for smooth navigation)
+    if (initialDimensions) {
+        // Disable transitions temporarily to prevent visible resize
+        modalContent.style.transition = 'none';
+        modalContent.style.width = initialDimensions.width + 'px';
+        modalContent.style.height = initialDimensions.height + 'px';
+        modalContent.style.minWidth = 'auto';
+        modalContent.style.minHeight = 'auto';
+        // Re-enable transitions after a delay
+        setTimeout(() => { modalContent.style.transition = ''; }, 50);
+    }
 
     // Header
     const header = createEl('div', { className: 'preview-header' });
@@ -1017,7 +1124,16 @@ export function showImagePreview(imageUrl, title) {
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
     imageWrapper.append(img, gridOverlay, annotationOverlay, loadingIndicator);
 
-    img.addEventListener('load', () => { loadingIndicator.style.display = 'none'; });
+    img.addEventListener('load', () => {
+        loadingIndicator.style.display = 'none';
+        // Clear fixed dimensions to allow natural image sizing
+        if (initialDimensions) {
+            modalContent.style.width = '';
+            modalContent.style.height = '';
+            modalContent.style.minWidth = '';
+            modalContent.style.minHeight = '';
+        }
+    });
 
     // Controls
     const controls = createEl('div', { className: 'preview-controls' });
@@ -1033,7 +1149,35 @@ export function showImagePreview(imageUrl, title) {
         title: t('fullscreen', 'Fullscreen')
     });
 
-    controls.append(fullscreenBtn, downloadBtn);
+    // Navigation buttons (prev/next) - shown when mediaList is provided
+    // Always create buttons even with 1 item, since more may load later
+    // Buttons not disabled - click handlers check bounds dynamically using currentMediaList
+    let prevBtn = null, nextBtn = null, navInfo = null;
+    if (mediaList && mediaList.length > 0) {
+        prevBtn = createEl('button', {
+            className: 'preview-control-btn nav-btn',
+            textContent: '◀',
+            title: t('previous', 'Previous')
+        });
+        nextBtn = createEl('button', {
+            className: 'preview-control-btn nav-btn',
+            textContent: '▶',
+            title: t('next', 'Next')
+        });
+        // Use currentMediaList for dynamic total count
+        const totalCount = currentMediaList.length || mediaList.length;
+        navInfo = createEl('span', {
+            className: 'nav-info',
+            textContent: `${mediaIndex + 1} / ${totalCount}`,
+            style: { fontSize: '12px', color: '#8aa4be', margin: '0 8px' }
+        });
+    }
+
+    if (prevBtn && nextBtn) {
+        controls.append(prevBtn, navInfo, nextBtn, fullscreenBtn, downloadBtn);
+    } else {
+        controls.append(fullscreenBtn, downloadBtn);
+    }
 
     // Filter controls
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
@@ -1178,9 +1322,50 @@ export function showImagePreview(imageUrl, title) {
         link.click();
     });
 
-    // Keyboard
+    // Navigation button handlers - use currentMediaList for dynamic bounds checking
+    if (prevBtn && nextBtn && mediaList && mediaIndex >= 0) {
+        prevBtn.addEventListener('click', () => {
+            if (mediaIndex > 0) {
+                const prevItem = currentMediaList[mediaIndex - 1];
+                // Capture current dimensions for smooth transition
+                const rect = modalContent.getBoundingClientRect();
+                lastModalDimensions = { width: rect.width, height: rect.height };
+                closeButton.click();
+                if (prevItem.isVideo) {
+                    showVideoPreview(prevItem.url, prevItem.name, currentMediaList, mediaIndex - 1, lastModalDimensions);
+                } else {
+                    showImagePreview(prevItem.url, prevItem.name, currentMediaList, mediaIndex - 1, lastModalDimensions);
+                }
+            }
+        });
+        nextBtn.addEventListener('click', () => {
+            if (mediaIndex < currentMediaList.length - 1) {
+                const nextItem = currentMediaList[mediaIndex + 1];
+                // Capture current dimensions for smooth transition
+                const rect = modalContent.getBoundingClientRect();
+                lastModalDimensions = { width: rect.width, height: rect.height };
+                closeButton.click();
+                if (nextItem.isVideo) {
+                    showVideoPreview(nextItem.url, nextItem.name, currentMediaList, mediaIndex + 1, lastModalDimensions);
+                } else {
+                    showImagePreview(nextItem.url, nextItem.name, currentMediaList, mediaIndex + 1, lastModalDimensions);
+                }
+            }
+        });
+    }
+
+    // Keyboard - check bounds dynamically instead of using disabled state
     modalBackdrop.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') { e.preventDefault(); closeButton.click(); }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeButton.click();
+        } else if (e.key === 'ArrowLeft' && e.shiftKey && prevBtn && mediaIndex > 0) {
+            e.preventDefault();
+            prevBtn.click();
+        } else if (e.key === 'ArrowRight' && e.shiftKey && nextBtn && mediaIndex < currentMediaList.length - 1) {
+            e.preventDefault();
+            nextBtn.click();
+        }
     });
 
     // Close
@@ -1204,6 +1389,37 @@ export function showImagePreview(imageUrl, title) {
 export function displayResults(resultData, dom, hevcSupported) {
     dom.resultsLog.innerHTML = '';
     const stationResults = resultData.files || {};
+    
+    // Build flat list of all media items for navigation - stored globally for dynamic updates
+    currentMediaList = [];
+    if (Object.keys(stationResults).length > 0) {
+        Object.keys(stationResults).sort().forEach((stationCode) => {
+            const timeGroupedFiles = stationResults[stationCode];
+            const startHour = parseInt(dom.hourSelect.value, 10);
+            
+            const getSortKey = (key) => {
+                const isRange = key.includes(' - ');
+                const timePart = isRange ? key.split(' - ')[1] : key;
+                const hour = parseInt(timePart.split(':')[0], 10);
+                const normalizedHour = hour < startHour ? hour + 24 : hour;
+                return `${String(normalizedHour).padStart(2, '0')}:${timePart.split(':')[1]}:${isRange ? '1' : '0'}`;
+            };
+            
+            Object.keys(timeGroupedFiles).sort((a, b) => getSortKey(a).localeCompare(getSortKey(b))).forEach((time) => {
+                timeGroupedFiles[time].forEach(file => {
+                    const isVideo = file.url.endsWith('.mp4');
+                    currentMediaList.push({
+                        url: file.url,
+                        name: file.name,
+                        thumb_url: file.thumb_url,
+                        isVideo: isVideo,
+                        alternatives: file.alternatives || []
+                    });
+                });
+            });
+        });
+    }
+    
     if (Object.keys(stationResults).length > 0) {
         dom.resultsLog.appendChild(createEl('h4', { textContent: t('downloaded_files_title') }));
         Object.keys(stationResults).sort().forEach((stationCode, stationIndex) => {
@@ -1212,22 +1428,20 @@ export function displayResults(resultData, dom, hevcSupported) {
             const timeGroupedFiles = stationResults[stationCode];
             const startHour = parseInt(dom.hourSelect.value, 10);
             
-            const getSortKey 
-            = (key) => {
+            const getSortKey = (key) => {
                 const isRange = key.includes(' - ');
                 const timePart = isRange ? key.split(' - ')[1] : key;
                 const hour = parseInt(timePart.split(':')[0], 10);
-               
-    
                 const normalizedHour = hour < startHour ? hour + 24 : hour;
                 return `${String(normalizedHour).padStart(2, '0')}:${timePart.split(':')[1]}:${isRange ? '1' : '0'}`;
             };
             Object.keys(timeGroupedFiles).sort((a, b) => getSortKey(a).localeCompare(getSortKey(b))).forEach((time, timeIndex) => {
-         
                const timeSetDiv = createEl('div', { className: `time-set ${timeIndex % 2 === 0 ? 'time-set-even' : 'time-set-odd'}` });
                 timeSetDiv.appendChild(createEl('h6', { textContent: t('time_results_title', { time: time }) }));
                 const ul = createEl('ul', { className: 'result-list' });
                 timeGroupedFiles[time].forEach(file => {
+                    // Find index in flat media list for navigation
+                    const mediaIndex = currentMediaList.findIndex(m => m.url === file.url && m.name === file.name);
                     const li = createEl('li');
                     const isVideo = file.url.endsWith('.mp4');
                     
@@ -1235,13 +1449,13 @@ export function displayResults(resultData, dom, hevcSupported) {
                         const thumbContainer = createEl('div', { className: `thumbnail-container${isVideo ? ' video' : ''}` });
                         thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 'thumbnail-preview' }));
 
-                        // Both video and image thumbnails open a preview player
+                        // Both video and image thumbnails open a preview player with navigation
                         thumbContainer.style.cursor = 'pointer';
                         thumbContainer.addEventListener('click', () => {
                             if (isVideo) {
-                                showVideoPreview(file.url, file.name);
+                                showVideoPreview(file.url, file.name, currentMediaList, mediaIndex);
                             } else {
-                                showImagePreview(file.url, file.name);
+                                showImagePreview(file.url, file.name, currentMediaList, mediaIndex);
                             }
                         });
                         li.appendChild(thumbContainer);
@@ -1292,10 +1506,12 @@ export function displayResults(resultData, dom, hevcSupported) {
                         const linkEl = createEl('a', { href: '#', textContent: shortName });
                         linkEl.addEventListener('click', (e) => {
                             e.preventDefault();
+                            // Find this link's index in media list
+                            const linkIndex = currentMediaList.findIndex(m => m.url === linkInfo.url && m.name === linkInfo.name);
                             if (linkInfo.url.endsWith('.mp4')) {
-                                showVideoPreview(linkInfo.url, linkInfo.name);
+                                showVideoPreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
                             } else {
-                                showImagePreview(linkInfo.url, linkInfo.name);
+                                showImagePreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
                             }
                         });
                         linksContainer.appendChild(linkEl);

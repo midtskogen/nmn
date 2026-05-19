@@ -182,5 +182,7 @@
     "fullscreen": "Celá obrazovka",
     "show_overlay": "Zobrazit překryv",
     "saturation": "Sytost",
-    "download_image": "Stáhnout obrázek"
+    "download_image": "Stáhnout obrázek",
+    "previous": "Předchozí",
+    "next": "Další"
 }

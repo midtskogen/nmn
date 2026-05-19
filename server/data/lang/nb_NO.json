@@ -215,5 +215,7 @@
     "fullscreen": "Fullskjerm",
     "show_overlay": "Vis overlay",
     "saturation": "Metning",
-    "download_image": "Last ned bilde"
+    "download_image": "Last ned bilde",
+    "previous": "Forrige",
+    "next": "Neste"
 }

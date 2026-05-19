@@ -1184,6 +1184,7 @@ button:hover:not(:disabled) {
     max-width: 95vw;
     max-height: 95vh;
     width: 900px;
+    min-height: 400px;
 }
 
 .preview-header {
@@ -1227,6 +1228,11 @@ button:hover:not(:disabled) {
     border-radius: 8px;
     overflow: hidden;
     margin-bottom: 10px;
+    min-height: 300px;
+    min-width: 400px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 /* Fullscreen mode for archive video preview */
@@ -1261,7 +1267,16 @@ button:hover:not(:disabled) {
 .preview-video {
     width: 100%;
     max-height: 60vh;
+    min-height: 300px;
     display: block;
+}
+
+/* Image preview - same styling as video for consistency */
+.preview-video-wrapper img.preview-video {
+    width: 100%;
+    max-height: 60vh;
+    min-height: 300px;
+    object-fit: contain;
 }
 
 .preview-timestamp {
@@ -1447,4 +1462,23 @@ button:hover:not(:disabled) {
 .thumbnail-container:not(.video):hover::after {
     opacity: 0.9;
     transform: translate(-50%, -50%) scale(1.1);
+}
+
+/* Navigation buttons in media viewer */
+.preview-control-btn.nav-btn {
+    font-size: 14px;
+    padding: 4px 10px;
+    min-width: 32px;
+}
+
+.preview-control-btn.nav-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.nav-info {
+    font-size: 12px;
+    color: #8aa4be;
+    margin: 0 8px;
+    font-family: var(--font-head, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif);
 }

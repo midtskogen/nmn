@@ -347,6 +347,9 @@ passData.passes : aircraftData.crossings;
         dom.lengthSelect.value = 1;
         dom.intervalSelect.value = 1;
         dom.dateInput.dispatchEvent(new Event('change'));
+        if (document.querySelector('input[name="primary_file_type"]:checked')?.value === 'image') {
+            document.getElementById('long-integration-switch').checked = true;
+        }
         const nearestStation = Object.values(stationsData).reduce((prev, curr) => L.latLng(strike.lat, strike.lon).distanceTo(L.latLng(prev.astronomy.latitude, prev.astronomy.longitude)) < L.latLng(strike.lat, strike.lon).distanceTo(L.latLng(curr.astronomy.latitude, curr.astronomy.longitude)) ? prev : curr);
         if (nearestStation) {
             selectedStations.clear();

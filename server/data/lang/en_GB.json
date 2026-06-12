@@ -102,6 +102,8 @@
     "download_all_button": "Download all",
     "lightning_list_item_station_info": "near {station_code} (camera {cams}, distance {dist} km, bearing {bearing}°, {type})",
     "lightning_list_item_station_info_no_cam": "near {station_code} (distance {dist} km, bearing {bearing}°, {type})",
+    "lightning_list_item_station_info_grouped": "near {station_code} (cameras {cams}, distance {dist} km, bearing {bearing}, {type})",
+    "lightning_list_item_station_info_no_cam_grouped": "near {station_code} (distance {dist} km, bearing {bearing}, {type})",
     "lightning_type_cg": "cloud-to-ground",
     "lightning_type_ic": "cloud-to-cloud",
     "modal_starting_stream": "Starting video stream...",

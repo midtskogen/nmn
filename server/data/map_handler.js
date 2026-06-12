@@ -412,28 +412,164 @@ export function displayLightningStrikes(is24hFilter, onStrikeSelect) {
     }
 }
 
+// Layer group for highlighting elements
+let highlightLayer = L.layerGroup();
+
 export function selectLightningStrikeOnMap(strike, shouldPan) {
+    // Store the selected strike for re-application after refreshes
+    window.lastSelectedLightningStrike = strike;
+    
+    // Clear previous selection
     if (selectedLightningMarker) {
         const { type } = selectedLightningMarker.strike;
         selectedLightningMarker.setIcon(createLightningIcon(type === 'ic' ? 'white' : 'yellow', type === 'ic' ? 14 : 18));
     }
     
-    let markerToSelect;
+    // Clear previous highlighting
+    if (highlightLayer) {
+        map.removeLayer(highlightLayer);
+        highlightLayer = L.layerGroup();
+    }
+    
+    // Clear any previous group highlighting
     if (lightningLayer) {
         lightningLayer.eachLayer(marker => {
-            if (marker.strike.id === strike.id) {
+            if (marker.isGroupHighlighted) {
+                const { type } = marker.strike;
+                const color = type === 'ic' ? '#666' : '#FFC051';
+                const size = type === 'ic' ? 14 : 18;
+                const resetIcon = L.divIcon({ 
+                    className: 'lightning-icon', 
+                    html: `<span style="color: ${color}; font-size: ${size}px; text-shadow: 0 0 3px black;">⚡</span>`, 
+                    iconSize: [size, size], 
+                    iconAnchor: [size/2, size/2] 
+                });
+                marker.setIcon(resetIcon);
+                marker.isGroupHighlighted = false;
+            }
+        });
+    }
+    
+    let markerToSelect;
+    let groupMarkers = [];
+    
+    if (lightningLayer) {
+        lightningLayer.eachLayer(marker => {
+            if (strike.isGrouped && strike.originalStrikes) {
+                // For grouped strikes, find all markers in the group
+                const isInGroup = strike.originalStrikes.some(s => s.id === marker.strike.id);
+                if (isInGroup) {
+                    groupMarkers.push(marker);
+                }
+            } else if (marker.strike.id === strike.id) {
                 markerToSelect = marker;
             }
         });
     }
 
-    if (markerToSelect) {
-        markerToSelect.setIcon(createLightningIcon('red', 24));
-        selectedLightningMarker = markerToSelect;
-        if (shouldPan) {
-            map.setView([markerToSelect.strike.lat, markerToSelect.strike.lon], 8);
+    if (shouldPan) {
+        // For grouped strikes, handle map view regardless of marker selection
+        if (strike.isGrouped && strike.originalStrikes && strike.station) {
+            const stationLat = strike.station.astronomy.latitude;
+            const stationLon = strike.station.astronomy.longitude;
+            
+            // Create bounds that include the station and all strikes
+            const bounds = L.latLngBounds([stationLat, stationLon], [stationLat, stationLon]);
+            strike.originalStrikes.forEach(s => {
+                bounds.extend([s.lat, s.lon]);
+            });
+            
+            // Fit the bounds with some padding, but limit maximum zoom
+            map.fitBounds(bounds, { padding: [50, 50], maxZoom: 12 });
+            
+            // Try to find and highlight the closest strike marker
+            if (strike.originalStrikes.length > 0) {
+                const closestStrike = strike.originalStrikes[0];
+                lightningLayer.eachLayer(marker => {
+                    if (marker.strike.id === closestStrike.id) {
+                        markerToSelect = marker;
+                    }
+                });
+            }
+        } else {
+            // Original behavior for single strikes
+            if (markerToSelect) {
+                map.setView([markerToSelect.strike.lat, markerToSelect.strike.lon], 8);
+            }
         }
     }
+
+    if (strike.isGrouped && groupMarkers.length > 0 && strike.station) {
+        // For grouped strikes, draw circles and lines
+        const stationLat = strike.station.astronomy.latitude;
+        const stationLon = strike.station.astronomy.longitude;
+        const stationLatLng = L.latLng(stationLat, stationLon);
+        
+        // Draw circles around each lightning strike
+        groupMarkers.forEach(marker => {
+            const circle = L.circle(marker.getLatLng(), {
+                radius: 500, // 500m radius
+                color: '#FF0000',
+                weight: 2,
+                fillOpacity: 0.1,
+                fillColor: '#FF0000'
+            });
+            highlightLayer.addLayer(circle);
+            
+            // Draw line from station to each strike
+            const line = L.polyline([stationLatLng, marker.getLatLng()], {
+                color: '#FFFFFF',
+                weight: 2,
+                opacity: 0.8,
+                dashArray: '5, 10'
+            });
+            highlightLayer.addLayer(line);
+        });
+        
+        // Add the highlight layer to the map
+        highlightLayer.addTo(map);
+        
+        // Set the closest strike as the selected marker
+        selectedLightningMarker = groupMarkers[0];
+        selectedLightningMarker.setIcon(createLightningIcon('red', 24));
+    } else if (markerToSelect) {
+        // Original behavior for single strikes
+        markerToSelect.setIcon(createLightningIcon('red', 24));
+        selectedLightningMarker = markerToSelect;
+    }
+}
+
+export function clearLightningHighlighting() {
+    // Clear the highlighting layer
+    if (highlightLayer) {
+        map.removeLayer(highlightLayer);
+        highlightLayer = L.layerGroup();
+    }
+    
+    // Reset any highlighted markers
+    if (lightningLayer) {
+        lightningLayer.eachLayer(marker => {
+            if (marker.isGroupHighlighted) {
+                const { type } = marker.strike;
+                const color = type === 'ic' ? '#666' : '#FFC051';
+                const size = type === 'ic' ? 14 : 18;
+                const resetIcon = L.divIcon({ 
+                    className: 'lightning-icon', 
+                    html: `<span style="color: ${color}; font-size: ${size}px; text-shadow: 0 0 3px black;">⚡</span>`, 
+                    iconSize: [size, size], 
+                    iconAnchor: [size/2, size/2] 
+                });
+                marker.setIcon(resetIcon);
+                marker.isGroupHighlighted = false;
+            }
+        });
+    }
+    
+    // Clear the selected lightning marker
+    selectedLightningMarker = null;
+    
+    // Clear the stored selected strike
+    window.lastSelectedLightningStrike = null;
 }
 
 export function displayMeteors(onMeteorClick, onMeteorMouseover, onMeteorMouseout) {

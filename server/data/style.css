@@ -761,8 +761,11 @@ button:hover:not(:disabled) {
 .lightning-icon-yellow { color: #FFC051; }
 .lightning-icon-white { color: #666; /* Using grey for better visibility on the map */ }
 .lightning-icon-red { color: red; } /* For selected strikes */
+.lightning-icon-green { color: #00FF00; font-size: 20px; } /* For grouped strikes - bright green to stand out */
+.lightning-icon-orange { color: #FF8C00; } /* For grouped strikes - bright green to stand out */
 .icon-size-14 { font-size: 14px; }
 .icon-size-18 { font-size: 18px; }
+.icon-size-20 { font-size: 20px; }
 .icon-size-24 { font-size: 24px; }
 
 /* --- Responsive Layout --- */

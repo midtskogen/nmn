@@ -388,10 +388,13 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
  */
 export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hFilter, onStrikeClick) {
     const lightningList = document.getElementById('lightning-list');
+    
+    // Store the last selected strike to re-apply highlighting
+    const lastSelectedStrike = window.lastSelectedLightningStrike;
     document.querySelector('#lightning-panel h2').textContent = is24hFilter ? t('lightning_panel_title_24h') : t('lightning_panel_title');
 
-    let filteredStrikes = strikes;
-    if (is24hFilter) {
+    let filteredStrikes = strikes || [];
+    if (is24hFilter && strikes) {
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         filteredStrikes = strikes.filter(strike => new Date(strike.time) >= twentyFourHoursAgo);
     }
@@ -401,41 +404,111 @@ export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hF
         return;
     }
 
+    // Group strikes by timestamp, station, and type
+    const groupedStrikes = {};
+    filteredStrikes.forEach(strike => {
+        const timestamp = new Date(strike.time).toISOString().slice(0, 19).replace('T', ' ');
+        const nearestStation = Object.values(stationInfo).reduce((prev, curr) => 
+            L.latLng(strike.lat, strike.lon).distanceTo(L.latLng(prev.astronomy.latitude, prev.astronomy.longitude)) < 
+            L.latLng(strike.lat, strike.lon).distanceTo(L.latLng(curr.astronomy.latitude, curr.astronomy.longitude)) ? prev : curr
+        );
+        
+        const stationCode = nearestStation ? nearestStation.station.code : 'Unknown';
+        const strikeTypeText = strike.type === 'cg' ? t('lightning_type_cg') : t('lightning_type_ic');
+        const groupKey = `${timestamp}|${stationCode}|${strikeTypeText}`;
+        
+        if (!groupedStrikes[groupKey]) {
+            groupedStrikes[groupKey] = {
+                timestamp,
+                stationCode,
+                station: nearestStation,
+                type: strike.type,
+                typeText: strikeTypeText,
+                strikes: []
+            };
+        }
+        groupedStrikes[groupKey].strikes.push(strike);
+    });
+
     lightningList.replaceChildren();
     const ul = createEl('ul', { className: 'lightning-list' });
-    filteredStrikes.sort((a, b) => new Date(b.time) - new Date(a.time)).forEach((strike, index) => {
-        strike.id = `lightning-${index}`;
-        const timestamp = new Date(strike.time).toISOString().slice(0, 19).replace('T', ' ');
-        const nearestStation = Object.values(stationInfo).reduce((prev, curr) => L.latLng(strike.lat, strike.lon).distanceTo(L.latLng(prev.astronomy.latitude, prev.astronomy.longitude)) < L.latLng(strike.lat, strike.lon).distanceTo(L.latLng(curr.astronomy.latitude, curr.astronomy.longitude)) ? prev : curr);
-     
+    
+    Object.values(groupedStrikes).forEach((group, groupIndex) => {
+        // Sort strikes in group by distance
+        group.strikes.sort((a, b) => a.dist - b.dist);
+        
+        // Collect all unique camera numbers
+        const allCams = new Set();
+        group.strikes.forEach(strike => {
+            const inViewCams = getCamerasInView(group.station, strike, cameraFovs);
+            inViewCams.forEach(cam => allCams.add(cam));
+        });
+        
+        // Create arrays for distances and bearings in the same order
+        const distances = group.strikes.map(s => s.dist.toFixed(1));
+        const bearings = group.strikes.map(s => {
+            const bearing = calculateBearing(group.station.astronomy.latitude, group.station.astronomy.longitude, s.lat, s.lon);
+            return Math.round(bearing);
+        });
+        
+        // Sort cameras numerically
+        const sortedCams = Array.from(allCams).sort((a, b) => parseInt(a) - parseInt(b));
+        
+        const li = createEl('li', { id: `lightning-group-${groupIndex}` });
+        li.appendChild(createEl('span', { className: `strike-type-indicator ${group.type}`, textContent: '⚡' }));
+        
         let stationText = '';
-        if (nearestStation) {
-            const inViewCams = 
-                getCamerasInView(nearestStation, strike, cameraFovs);
-            const bearing = calculateBearing(nearestStation.astronomy.latitude, nearestStation.astronomy.longitude, strike.lat, strike.lon);
-            const strikeTypeText = strike.type === 'cg' ? t('lightning_type_cg') : t('lightning_type_ic');
+        if (group.station) {
             const params = {
-                station_code: nearestStation.station.code,
-           
-             dist: strike.dist.toFixed(1),
-          
-                bearing: Math.round(bearing),
-                type: strikeTypeText
+                station_code: group.stationCode,
+                dist: distances.join(', '),
+                bearing: bearings.map(b => b + '°').join(', '),
+                type: group.typeText,
+                cams: sortedCams.join(', ')
             };
-            if (inViewCams.length > 0) {
-                params.cams = inViewCams.join(', ');
-                stationText = t('lightning_list_item_station_info', params);
+            
+            if (sortedCams.length > 0) {
+                stationText = t('lightning_list_item_station_info_grouped', params);
             } else {
-                stationText = t('lightning_list_item_station_info_no_cam', params);
+                stationText = t('lightning_list_item_station_info_no_cam_grouped', params);
             }
         }
-        const li = createEl('li', { id: strike.id });
-        li.appendChild(createEl('span', { className: `strike-type-indicator ${strike.type}`, textContent: '⚡' }));
-        li.appendChild(document.createTextNode(` ${timestamp} ${stationText}`));
-        li.onclick = () => onStrikeClick(strike, true);
+        
+        li.appendChild(document.createTextNode(` ${group.timestamp} ${stationText}`));
+        
+        // Create a custom strike object for grouped strikes with all cameras
+        li.onclick = () => {
+            // Use the closest strike as the base, but ensure all cameras are checked
+            const baseStrike = group.strikes[0];
+            // Create a modified strike that will trigger checking all cameras in the group
+            const groupedStrike = {
+                ...baseStrike,
+                isGrouped: true,
+                allCams: sortedCams,
+                originalStrikes: group.strikes,
+                station: group.station, // Add station information for map centering
+                id: `lightning-group-${groupIndex}` // Use the list item ID for highlighting
+            };
+            
+            // Store the selected strike immediately before any display refreshes
+            window.lastSelectedLightningStrike = groupedStrike;
+            
+            onStrikeClick(groupedStrike, true);
+        };
         ul.appendChild(li);
     });
+    
     lightningList.appendChild(ul);
+    
+    // Re-apply highlighting if there was a previously selected strike
+    if (lastSelectedStrike) {
+        setTimeout(() => {
+            // Trigger the selection again to re-apply highlighting
+            if (typeof onStrikeClick === 'function') {
+                onStrikeClick(lastSelectedStrike, false);
+            }
+        }, 100);
+    }
 }
 
 
@@ -1726,7 +1799,6 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
 
             // 3. Wait a moment for backend FFmpeg to restart (1.5s is usually enough)
             setTimeout(() => {
-                console.log("Reloading HLS source...");
                 const playlistUrl = `streams/${data.station_id}_${cameraNum}_${data.resolution}/playlist.m3u8`;
                 
                 if (hls) {
@@ -2151,6 +2223,11 @@ export function togglePanelAndLayer(panelType, isChecked, mapHandler) {
     if (panelType === 'lightning') {
         document.getElementById('lightning-filter-label').style.display = isChecked ? 'inline-flex' : 'none';
         mapHandler.toggleLayer('lightning', isChecked);
+        
+        // Clear highlighting when lightning is turned off
+        if (!isChecked) {
+            mapHandler.clearLightningHighlighting();
+        }
     }
 }
 

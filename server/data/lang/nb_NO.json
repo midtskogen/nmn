@@ -103,6 +103,8 @@
     "download_all_button": "Last ned alle",
     "lightning_list_item_station_info": "nær {station_code} (kamera {cams}, avstand {dist} km, retning {bearing}°, {type})",
     "lightning_list_item_station_info_no_cam": "nær {station_code} (avstand {dist} km, retning {bearing}°, {type})",
+    "lightning_list_item_station_info_grouped": "nær {station_code} (kamera {cams}, avstand {dist} km, retning {bearing}, {type})",
+    "lightning_list_item_station_info_no_cam_grouped": "nær {station_code} (avstand {dist} km, retning {bearing}, {type})",
     "lightning_type_cg": "bakke-til-sky",
     "lightning_type_ic": "sky-til-sky",
     "modal_starting_stream": "Starter videostrøm...",

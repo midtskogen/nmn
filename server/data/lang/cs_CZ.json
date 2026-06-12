@@ -103,6 +103,8 @@
     "download_all_button": "Stáhnout vše",
     "lightning_list_item_station_info": "poblíž {station_code} (kamera {cams}, vzdálenost {dist} km, azimut {bearing}°, {type})",
     "lightning_list_item_station_info_no_cam": "poblíž {station_code} (vzdálenost {dist} km, azimut {bearing}°, {type})",
+    "lightning_list_item_station_info_grouped": "poblíž {station_code} (kamery {cams}, vzdálenost {dist} km, azimut {bearing}, {type})",
+    "lightning_list_item_station_info_no_cam_grouped": "poblíž {station_code} (vzdálenost {dist} km, azimut {bearing}, {type})",
     "lightning_type_cg": "mrak-země",
     "lightning_type_ic": "v mraku",
     "modal_starting_stream": "Spouštím živé vysílání...",

@@ -359,8 +359,20 @@ passData.passes : aircraftData.crossings;
                 m.setIcon(selectedStations.has(m.stationId) ? mapHandler.redIcon : baseIcon);
             });
             uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
-            const inViewCams = uiManager.getCamerasInView(nearestStation, strike, cameraFovs);
-            document.querySelectorAll('input[name="cameras"]').forEach(cb => cb.checked = inViewCams.includes(cb.value));
+            
+            // For grouped strikes, check all cameras from the group
+            if (strike.isGrouped && strike.allCams) {
+                document.querySelectorAll('input[name="cameras"]').forEach(cb => {
+                    cb.checked = strike.allCams.includes(cb.value);
+                });
+            } else {
+                // Original behavior for single strikes
+                const inViewCams = uiManager.getCamerasInView(nearestStation, strike, cameraFovs);
+                document.querySelectorAll('input[name="cameras"]').forEach(cb => cb.checked = inViewCams.includes(cb.value));
+            }
+            
+            // Scroll to download form to make it visible
+            dom.downloadForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
     }
 

@@ -103,6 +103,8 @@
     "download_all_button": "Lataa kaikki",
     "lightning_list_item_station_info": "lähellä {station_code} (kamera {cams}, etäisyys {dist} km, suunta {bearing}°, {type})",
     "lightning_list_item_station_info_no_cam": "lähellä {station_code} (etäisyys {dist} km, suunta {bearing}°, {type})",
+    "lightning_list_item_station_info_grouped": "lähellä {station_code} (kamerat {cams}, etäisyys {dist} km, suunta {bearing}, {type})",
+    "lightning_list_item_station_info_no_cam_grouped": "lähellä {station_code} (etäisyys {dist} km, suunta {bearing}, {type})",
     "lightning_type_cg": "pilvestä maahan",
     "lightning_type_ic": "pilven sisäinen",
     "modal_starting_stream": "Käynnistetään videolähetystä...",

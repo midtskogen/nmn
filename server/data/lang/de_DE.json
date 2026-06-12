@@ -103,6 +103,8 @@
     "download_all_button": "Alle herunterladen",
     "lightning_list_item_station_info": "nahe {station_code} (Kamera {cams}, Entfernung {dist} km, Richtung {bearing}°, {type})",
     "lightning_list_item_station_info_no_cam": "nahe {station_code} (Entfernung {dist} km, Richtung {bearing}°, {type})",
+    "lightning_list_item_station_info_grouped": "nahe {station_code} (Kameras {cams}, Entfernung {dist} km, Richtung {bearing}, {type})",
+    "lightning_list_item_station_info_no_cam_grouped": "nahe {station_code} (Entfernung {dist} km, Richtung {bearing}, {type})",
     "lightning_type_cg": "Wolke-zu-Boden",
     "lightning_type_ic": "in-Wolke",
     "modal_starting_stream": "Starte Videostream...",

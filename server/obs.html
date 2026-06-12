@@ -329,9 +329,9 @@
               <div class="card-body">
                 <div class="row">
                   <div class="col-md-6 mb-3">
-                    <label for="sighting_date_display" class="form-label" data-translate="date_label">Dato</label>
+                    <label for="sighting_date_display" class="form-label" data-translate="date_label">Dato <span class="text-danger">*</span></label>
                     <div class="input-group position-relative">
-                        <input type="text" class="form-control" id="sighting_date_display" placeholder="dd/mm/åååå" required autocomplete="off" inputmode="numeric">
+                        <input type="text" class="form-control" id="sighting_date_display" placeholder="dd/mm/åååå" required autocomplete="off" inputmode="numeric" aria-label="Dato (dd.mm.åååå)">
                         <span class="input-group-text position-relative" aria-hidden="true"><i class="bi bi-calendar"></i>
                           <input type="date" id="sighting_date_picker_native" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;">
                         </span>
@@ -342,24 +342,27 @@
                     <input type="hidden" id="sighting_time" name="sighting_time">
                   </div>
                   <div class="col-md-6 mb-3">
-                    <label for="sighting_hour" class="form-label" data-translate="time_label">Klokkeslett</label>
+                    <label for="sighting_hour" class="form-label" data-translate="time_label">Klokkeslett <span class="text-danger">*</span></label>
                     <div class="input-group" id="time-native-group">
-                      <input type="time" class="form-control" id="sighting_time_native" step="1" required>
+                      <input type="time" class="form-control" id="sighting_time_native" step="1" required aria-label="Klokkeslett">
                     </div>
 
                     <div class="input-group" id="time-desktop-group" style="display:none">
-                      <input type="text" class="form-control" id="sighting_time_desktop_display" placeholder="HH:MM:SS" required readonly>
-                      <button class="btn btn-outline-secondary" type="button" id="time-desktop-open-btn"><i class="bi bi-clock"></i></button>
+                      <input type="text" class="form-control" id="sighting_time_desktop_display" placeholder="HH:MM:SS" required readonly aria-label="Klokkeslett (HH:MM:SS)">
+                      <button class="btn btn-outline-secondary" type="button" id="time-desktop-open-btn" aria-label="Åpne tidvelger"><i class="bi bi-clock"></i></button>
                     </div>
 
-                    <div style="display:none">
-                      <select class="form-select" id="sighting_hour" name="sighting_hour" required>
+                    <div class="no-js-fallback" style="display:none">
+                      <noscript>
+                        <style>.no-js-fallback { display: block !important; } #time-desktop-group, #time-native-group { display: none !important; }</style>
+                      </noscript>
+                      <select class="form-select" id="sighting_hour" name="sighting_hour" required aria-label="Time">
                         <option value="" data-translate="hour_option">Time</option>
                       </select>
-                      <select class="form-select" id="sighting_minute" name="sighting_minute" required>
+                      <select class="form-select" id="sighting_minute" name="sighting_minute" required aria-label="Minutt">
                         <option value="" data-translate="minute_option">Minutt</option>
                       </select>
-                      <select class="form-select" id="sighting_second" name="sighting_second">
+                      <select class="form-select" id="sighting_second" name="sighting_second" aria-label="Sekund">
                         <option value="" data-translate="second_option">Sek</option>
                       </select>
                     </div>
@@ -421,11 +424,11 @@
                 </div>
                 <div class="row mb-3">
                   <div class="col-md-6">
-                    <label for="obs_lat" class="form-label" data-translate="latitude_label">Breddegrad</label>
+                    <label for="obs_lat" class="form-label" data-translate="latitude_label">Breddegrad <span class="text-danger">*</span></label>
                     <input type="number" step="any" class="form-control" id="obs_lat" name="latitude" required>
                   </div>
                   <div class="col-md-6">
-                    <label for="obs_lon" class="form-label" data-translate="longitude_label">Lengdegrad</label>
+                    <label for="obs_lon" class="form-label" data-translate="longitude_label">Lengdegrad <span class="text-danger">*</span></label>
                     <input type="number" step="any" class="form-control" id="obs_lon" name="longitude" required>
                   </div>
                 </div>
@@ -656,7 +659,8 @@
                     </div>
                     <div class="mb-3">
                         <label for="more_info" class="form-label"><strong data-translate="more_info_label">Fortell gjerne mer om observasjonen:</strong></label>
-                        <textarea class="form-control" id="more_info" name="more_info" rows="4"></textarea>
+                        <textarea class="form-control" id="more_info" name="more_info" rows="4" maxlength="2000"></textarea>
+                        <div class="form-text text-end"><span id="more-info-char-count">0</span> / 2000</div>
                     </div>
                 </div>
             </div>
@@ -678,8 +682,8 @@
                     </div>
                     <div class="mb-3">
                         <label for="contact_phone" class="form-label"><strong data-translate="phone_label">Telefonnummer:</strong></label>
-                        <input type="tel" class="form-control" id="contact_phone" name="contact_phone" pattern="[+0-9\s]+">
-                        <div class="invalid-feedback" data-translate="invalid_phone">Vennligst oppgi et gyldig telefonnummer (kun tall, +, og mellomrom).</div>
+                        <input type="tel" class="form-control" id="contact_phone" name="contact_phone" pattern="[\+0-9\s\-\(\)\.]+" maxlength="20">
+                        <div class="invalid-feedback" data-translate="invalid_phone">Vennligst oppgi et gyldig telefonnummer (tall, +, mellomrom, bindestrek, parentes er tillatt).</div>
                     </div>
                     <div class="mb-3">
                         <label for="contact_email" class="form-label"><strong data-translate="email_label">E-post:</strong></label>
@@ -691,9 +695,10 @@
                 <div class="card step-card" id="step-6">
                   <div class="card-header">
                     <div class="step-header-bar">
-                      <h5 class="mb-0"><strong data-translate="step6_title">Steg 6: Last opp bilder eller videoer</strong></h5>
+                      <h5 class="mb-0"><strong data-translate="step6_title">Steg 6: Last opp bilder eller videoer</strong> <span class="badge bg-success ms-2 d-none" id="step6-complete-badge" data-translate="step_complete">Fullført</span></h5>
                       <div class="step-header-actions">
                         <button type="button" class="btn btn-outline-secondary btn-sm" data-step-nav="prev" data-step="6" data-translate="step_nav_prev">Forrige</button>
+                        <span class="text-muted small ms-2" data-translate="step_final">Siste steg</span>
                       </div>
                     </div>
                   </div>
@@ -797,19 +802,20 @@
     </div>
 
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
-      // /js/leaflet.js
-    </script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/js/tz-lookup.js"></script>
-    <script src="/js/luxon.min.js"></script>
-    <script src="/js/astronomy.browser.min.js">
-      // https://cdn.jsdelivr.net/npm/astronomy-engine@2.1.19/astronomy.browser.min.js
-    </script> 
-    <script src="/js/html2canvas.min.js">
-      // https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
-    </script>
-    <script src="/js/stars.js">
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" onerror="this.src='/js/leaflet.js'"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" onerror="this.src='/js/bootstrap.bundle.min.js'"></script>
+    <script src="/js/tz-lookup.js" onerror="console.warn('tz-lookup.js failed to load')"></script>
+    <script src="/js/luxon.min.js" onerror="console.warn('luxon.min.js failed to load')"></script>
+    <script src="/js/astronomy.browser.min.js" onerror="this.src='https://cdn.jsdelivr.net/npm/astronomy-engine@2.1.19/astronomy.browser.min.js'"></script>
+    <script src="/js/html2canvas.min.js" onerror="this.src='https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'"></script>
+    <script src="/js/stars.js"></script>
+    <script>
+        window.jsLoadErrors = [];
+        window.addEventListener('error', function(e) {
+            if (e.target.tagName === 'SCRIPT') {
+                window.jsLoadErrors.push(e.target.src);
+            }
+        }, true);
     </script>
 
     <script>
@@ -911,6 +917,10 @@
                 "invalid_phone": "Vennligst oppgi et gyldig telefonnummer (kun tall, +, og mellomrom).",
                 "invalid_email": "Vennligst oppgi en gyldig e-postadresse.",
                 "step6_title": "Steg 6: Last opp bilder eller videoer",
+                "step_complete": "Fullført",
+                "step_final": "Siste steg",
+                "step_status_complete": "Fullført",
+                "step_status_in_progress": "Pågår",
                 "file_upload_info": "Velg éi eller flere filer. Maks 10 filer, 50 MB totalt.",
                 "file_limit_error": "Du kan maksimalt laste opp 10 filer.",
                 "file_size_error": "Total filstørrelse overstiger 50 MB. Vennligst fjern en fil for å fortsette.",
@@ -1037,9 +1047,13 @@
                 "name_label": "Name:",
                 "phone_label": "Phone number:",
                 "email_label": "E-mail:",
-                "invalid_phone": "Please provide a valid phone number (only numbers, +, and spaces).",
+                "invalid_phone": "Please provide a valid phone number (numbers, +, spaces, hyphens, parentheses allowed).",
                 "invalid_email": "Please provide a valid e-mail address.",
                 "step6_title": "Step 6: Upload images or videos",
+                "step_complete": "Complete",
+                "step_final": "Final step",
+                "step_status_complete": "Complete",
+                "step_status_in_progress": "In progress",
                 "file_upload_info": "Select one or more files. Max 10 files, 50 MB total.",
                 "file_limit_error": "You can upload a maximum of 10 files.",
                 "file_size_error": "Total file size exceeds 50 MB. Please remove a file to continue.",
@@ -1166,9 +1180,13 @@
                 "name_label": "Name:",
                 "phone_label": "Telefonnummer:",
                 "email_label": "E-Mail:",
-                "invalid_phone": "Bitte geben Sie eine gültige Telefonnummer an (nur Zahlen, +, und Leerzeichen).",
+                "invalid_phone": "Bitte geben Sie eine gültige Telefonnummer an (Zahlen, +, Leerzeichen, Bindestriche, Klammern erlaubt).",
                 "invalid_email": "Bitte geben Sie eine gültige E-Mail-Adresse an.",
                 "step6_title": "Schritt 6: Bilder oder Videos hochladen",
+                "step_complete": "Abgeschlossen",
+                "step_final": "Letzter Schritt",
+                "step_status_complete": "Abgeschlossen",
+                "step_status_in_progress": "In Bearbeitung",
                 "file_upload_info": "Wählen Sie eine oder mehrere Dateien aus. Max. 10 Dateien, 50 MB insgesamt.",
                 "file_limit_error": "Sie können maximal 10 Dateien hochladen.",
                 "file_size_error": "Die Gesamtdateigröße überschreitet 50 MB. Bitte entfernen Sie eine Datei, um fortzufahren.",
@@ -1295,9 +1313,13 @@
                 "name_label": "Jméno:",
                 "phone_label": "Telefonní číslo:",
                 "email_label": "E-mail:",
-                "invalid_phone": "Zadejte platné telefonní číslo (pouze čísla, +, a mezery).",
+                "invalid_phone": "Zadejte platné telefonní číslo (čísla, +, mezery, pomlčky, závorky povoleny).",
                 "invalid_email": "Zadejte platnou e-mailovou adresu.",
                 "step6_title": "Krok 6: Nahrajte obrázky nebo videa",
+                "step_complete": "Dokončeno",
+                "step_final": "Poslední krok",
+                "step_status_complete": "Dokončeno",
+                "step_status_in_progress": "Probíhá",
                 "file_upload_info": "Vyberte jeden nebo více souborů. Max. 10 souborů, celkem 50 MB.",
                 "file_limit_error": "Můžete nahrát maximálně 10 souborů.",
                 "file_size_error": "Celková velikost souboru přesahuje 50 MB. Chcete-li pokračovat, odeberte soubor.",
@@ -1424,9 +1446,13 @@
                 "name_label": "Nimi:",
                 "phone_label": "Puhelinnumero:",
                 "email_label": "Sähköposti:",
-                "invalid_phone": "Anna kelvollinen puhelinnumero (vain numerot, + ja välilyönnit).",
+                "invalid_phone": "Anna kelvollinen puhelinnumero (numerot, +, välilyönnit, viivat, sulut sallittu).",
                 "invalid_email": "Anna kelvollinen sähköpostiosoite.",
                 "step6_title": "Vaihe 6: Lataa kuvia tai videoita",
+                "step_complete": "Valmis",
+                "step_final": "Viimeinen vaihe",
+                "step_status_complete": "Valmis",
+                "step_status_in_progress": "Kesken",
                 "file_upload_info": "Valitse yksi tai useampi tiedosto. Enintään 10 tiedostoa, yhteensä 50 MB.",
                 "file_limit_error": "Voit ladata enintään 10 tiedostoa.",
                 "file_size_error": "Tiedostojen kokonaiskoko ylittää 50 MB. Poista jokin tiedosto jatkaaksesi.",
@@ -1858,6 +1884,11 @@
                 updateStepNavButtons();
                 timeDisplay.innerHTML = "";
                 updateTimeReadout();
+            }
+
+            // Update step completion indicators
+            if (typeof updateStepIndicators === 'function') {
+                updateStepIndicators();
             }
         }
 
@@ -2954,6 +2985,9 @@
                 updateObserverPosition(L.latLng(lat, lon));
                 updateStep1TimezoneDisplay(lat, lon);
             }
+            if (typeof updateStepIndicators === 'function') {
+                updateStepIndicators();
+            }
         }
         
         function updateFromAzAltInputs() {
@@ -2978,6 +3012,9 @@
                 }
             }
             redrawSkyView();
+            if (typeof updateStepIndicators === 'function') {
+                updateStepIndicators();
+            }
         }
 
         latInput.addEventListener('change', updateFromLatLonInputs);
@@ -3278,10 +3315,86 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
     }
 });
 
+        // --- Character counter for more_info textarea ---
+        const moreInfoTextarea = document.getElementById('more_info');
+        const charCountDisplay = document.getElementById('more-info-char-count');
+        if (moreInfoTextarea && charCountDisplay) {
+            moreInfoTextarea.addEventListener('input', () => {
+                charCountDisplay.textContent = moreInfoTextarea.value.length;
+            });
+        }
+
+        // --- Visual step completion indicators ---
+        function updateStepIndicators() {
+            const dateHidden = document.getElementById('sighting_date');
+            const timeHidden = document.getElementById('sighting_time');
+            const dateDisplay = document.getElementById('sighting_date_display');
+            const timeNative = document.getElementById('sighting_time_native');
+            const timeDesktop = document.getElementById('sighting_time_desktop_display');
+
+            // Check step 1 completion (date and time) - check both hidden and visible fields
+            const hasDate = (dateHidden && dateHidden.value) || (dateDisplay && dateDisplay.value);
+            const hasTime = (timeHidden && timeHidden.value) ||
+                           (timeNative && timeNative.value) ||
+                           (timeDesktop && timeDesktop.value);
+            const step1Complete = hasDate && hasTime;
+
+            // Check step 2 completion (location)
+            const lat = document.getElementById('obs_lat');
+            const lon = document.getElementById('obs_lon');
+            const step2Complete = lat && lat.value && lon && lon.value;
+
+            // Check step 3 completion (azimuth directions)
+            const startAz = document.getElementById('start_azimuth');
+            const endAz = document.getElementById('end_azimuth');
+            const step3Complete = startAz && startAz.value && endAz && endAz.value;
+
+            const steps = [
+                { id: 1, complete: step1Complete },
+                { id: 2, complete: step2Complete },
+                { id: 3, complete: step3Complete },
+                { id: 4, complete: false }, // Optional step
+                { id: 5, complete: false }, // Optional step
+                { id: 6, complete: false }  // Optional step
+            ];
+
+            steps.forEach(step => {
+                const stepEl = document.getElementById(`step-${step.id}`);
+                if (!stepEl) return;
+
+                const header = stepEl.querySelector('.card-header h5');
+                if (!header) return;
+
+                // Determine if this is a required step
+                const isRequiredStep = step.id <= 3;
+
+                // Update visual indicator
+                let indicator = header.querySelector('.step-status-indicator');
+                if (!indicator) {
+                    indicator = document.createElement('span');
+                    indicator.className = 'step-status-indicator ms-2';
+                    header.appendChild(indicator);
+                }
+
+                if (step.complete) {
+                    indicator.innerHTML = '<i class="bi bi-check-circle-fill text-success"></i>';
+                    indicator.title = t('step_status_complete', 'Fullført');
+                } else if (isRequiredStep) {
+                    indicator.innerHTML = '<i class="bi bi-circle text-muted"></i>';
+                    indicator.title = t('step_status_in_progress', 'Pågår');
+                } else {
+                    indicator.innerHTML = '';
+                }
+            });
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             const lang = getLanguage();
             translatePage(lang);
             setTimeout(resizeSkyView, 10);
+
+            // Initial update on page load
+            updateStepIndicators();
         });
     </script>
   </body>

@@ -2,6 +2,7 @@
     "html_title": "Tilgang til videoer og bilder",
     "page_title": "Tilgang til videoer og bilder",
     "map_panel_title": "1. Velg stasjoner på kartet",
+    "map_snapshot_button": "Ta bilde av kartet",
     "map_description_archive": "Arkivet dekker som regel noen uker bakover i tid, men det kan være stor variasjon mellom stasjonene, og noen stasjoner kan også være ute av drift. Noen stasjoner har treg forbindelse og nedlasting kan ta lang tid. Intervallfunksjonen sammen med et passende antall kan være nyttig til å sjekke skydekke eller nordlys over en periode.",
     "map_description_lightning_source": "Lyndata fra Meteorologisk institutt.",
     "control_panel_title": "2. Velg tidspunkt og filtype",

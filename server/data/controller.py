@@ -109,6 +109,9 @@ HTML_TEMPLATE = """
         <div id="map-panel">
             <h2>__{{map_panel_title}}__</h2>
             <div id="map"></div>
+            <div class="map-controls">
+                <button id="map-snapshot-btn" class="btn btn-secondary">__{{map_snapshot_button}}__</button>
+            </div>
             <p class="map-description">
                  __{{map_description_archive}}__ __{{map_description_lightning_source}}__
             </p>

@@ -2,6 +2,7 @@
     "html_title": "Zugriff auf Videos und Bilder",
     "page_title": "Zugriff auf Videos und Bilder",
     "map_panel_title": "1. Stationen auf der Karte auswählen",
+    "map_snapshot_button": "Karten-Snapshot erstellen",
     "map_description_archive": "Das Archiv deckt in der Regel einige Wochen ab, dies kann jedoch von Station zu Station stark variieren, und einige Stationen können außer Betrieb sein. Einige Stationen haben eine langsame Verbindung, und das Herunterladen kann lange dauern. Die Intervallfunktion in Kombination mit einer passenden Anzahl kann nützlich sein, um die Wolkendecke oder Polarlichter über einen Zeitraum zu überprüfen.",
     "map_description_lightning_source": "Blitzdaten vom Norwegischen Meteorologischen Institut.",
     "control_panel_title": "2. Zeitpunkt und Dateityp auswählen",

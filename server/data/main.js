@@ -802,6 +802,170 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
             uiManager.displayLightningStrikes(lightningData, stationsData, cameraFovs, is24h, handleLightningSelect);
             mapHandler.displayLightningStrikes(is24h, handleLightningSelect);
         });
+        
+        // Map snapshot functionality
+        let isProcessingSnapshot = false;
+
+        function drawLeafletLayerOnCanvas(ctx, layer, map) {
+            if (layer instanceof L.LayerGroup) {
+                layer.eachLayer(l => drawLeafletLayerOnCanvas(ctx, l, map));
+            } else if (layer instanceof L.Circle) {
+                const center = map.latLngToContainerPoint(layer.getLatLng());
+                const lat = layer.getLatLng().lat;
+                const metersPerPixel = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+                const radiusPx = layer.getRadius() / metersPerPixel;
+                ctx.beginPath();
+                ctx.arc(center.x, center.y, radiusPx, 0, 2 * Math.PI);
+                ctx.strokeStyle = layer.options.color || '#FF0000';
+                ctx.lineWidth = layer.options.weight || 2;
+                ctx.stroke();
+                if (layer.options.fillOpacity > 0) {
+                    ctx.fillStyle = layer.options.fillColor || layer.options.color;
+                    ctx.globalAlpha = layer.options.fillOpacity;
+                    ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+            } else if (layer instanceof L.CircleMarker) {
+                const center = map.latLngToContainerPoint(layer.getLatLng());
+                const radiusPx = layer.options.radius || 3;
+                ctx.beginPath();
+                ctx.arc(center.x, center.y, radiusPx, 0, 2 * Math.PI);
+                ctx.strokeStyle = layer.options.color || '#FF0000';
+                ctx.lineWidth = layer.options.weight || 2;
+                ctx.stroke();
+                if (layer.options.fillOpacity > 0) {
+                    ctx.fillStyle = layer.options.fillColor || layer.options.color;
+                    ctx.globalAlpha = layer.options.fillOpacity;
+                    ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+            } else if (layer instanceof L.Polygon) {
+                const rings = layer.getLatLngs();
+                rings.forEach(ring => {
+                    const pts = (Array.isArray(ring[0]) ? ring.flat() : ring);
+                    if (pts.length < 2) return;
+                    ctx.beginPath();
+                    pts.forEach((latlng, i) => {
+                        const pt = map.latLngToContainerPoint(latlng);
+                        i === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y);
+                    });
+                    ctx.closePath();
+                    if ((layer.options.weight || 2) > 0) {
+                        ctx.strokeStyle = layer.options.color || '#FF0000';
+                        ctx.lineWidth = layer.options.weight || 2;
+                        ctx.stroke();
+                    }
+                    if (layer.options.fillOpacity > 0) {
+                        ctx.fillStyle = layer.options.fillColor || layer.options.color;
+                        ctx.globalAlpha = layer.options.fillOpacity;
+                        ctx.fill();
+                        ctx.globalAlpha = 1;
+                    }
+                });
+            } else if (layer instanceof L.Polyline) {
+                const latlngs = layer.getLatLngs().flat();
+                if (latlngs.length < 2) return;
+                ctx.beginPath();
+                ctx.strokeStyle = layer.options.color || '#FFFFFF';
+                ctx.lineWidth = layer.options.weight || 2;
+                ctx.globalAlpha = layer.options.opacity != null ? layer.options.opacity : 1;
+                if (layer.options.dashArray) {
+                    ctx.setLineDash(layer.options.dashArray.split(',').map(Number));
+                }
+                latlngs.forEach((latlng, i) => {
+                    const pt = map.latLngToContainerPoint(latlng);
+                    i === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y);
+                });
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        document.getElementById('map-snapshot-btn').addEventListener('click', () => {
+            if (isProcessingSnapshot) return;
+            isProcessingSnapshot = true;
+
+            const mapContainer = document.getElementById('map');
+            if (!mapContainer) { isProcessingSnapshot = false; return; }
+
+            if (typeof html2canvas !== 'undefined') {
+                const map = mapHandler.getMap();
+                if (!map) { isProcessingSnapshot = false; return; }
+
+                const overlayPane = map.getPane('overlayPane');
+                const originalVisibility = overlayPane ? overlayPane.style.visibility : '';
+                if (overlayPane) overlayPane.style.visibility = 'hidden';
+
+                const controlContainer = mapContainer.querySelector('.leaflet-control-container');
+                const originalControlVisibility = controlContainer ? controlContainer.style.visibility : '';
+                if (controlContainer) controlContainer.style.visibility = 'hidden';
+
+                const overlayCanvas = document.createElement('canvas');
+                overlayCanvas.width = mapContainer.offsetWidth;
+                overlayCanvas.height = mapContainer.offsetHeight;
+                overlayCanvas.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:9999;';
+                mapContainer.appendChild(overlayCanvas);
+
+                const ctx = overlayCanvas.getContext('2d');
+
+                drawLeafletLayerOnCanvas(ctx, mapHandler.getHighlightLayer(), map);
+
+                const groundTrackLayers = mapHandler.getGroundTrackLayers();
+                Object.values(groundTrackLayers).forEach(layer => {
+                    if (layer && map.hasLayer(layer)) {
+                        drawLeafletLayerOnCanvas(ctx, layer, map);
+                    }
+                });
+
+                const bearingLineLayer = mapHandler.getBearingLineLayer();
+                if (bearingLineLayer && map.hasLayer(bearingLineLayer)) {
+                    drawLeafletLayerOnCanvas(ctx, bearingLineLayer, map);
+                }
+
+                const meteorLayer = mapHandler.getMeteorLayer();
+                if (meteorLayer && map.hasLayer(meteorLayer)) {
+                    drawLeafletLayerOnCanvas(ctx, meteorLayer, map);
+                }
+
+                const cleanup = () => {
+                    mapContainer.removeChild(overlayCanvas);
+                    if (overlayPane) overlayPane.style.visibility = originalVisibility;
+                    if (controlContainer) controlContainer.style.visibility = originalControlVisibility;
+                    isProcessingSnapshot = false;
+                };
+
+                html2canvas(mapContainer, {
+                    useCORS: true,
+                    allowTaint: true,
+                    scale: 1,
+                    backgroundColor: null,
+                    logging: false
+                }).then(canvas => {
+                    cleanup();
+                    canvas.toBlob(blob => {
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.download = `map-snapshot-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.png`;
+                        link.href = url;
+                        link.click();
+                        URL.revokeObjectURL(url);
+                    });
+                }).catch(error => {
+                    cleanup();
+                    console.error('Error capturing map:', error);
+                    alert('Unable to take screenshot. Please try using your browser\'s built-in screenshot function.');
+                });
+            } else {
+                const script = document.createElement('script');
+                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                script.onload = () => {
+                    isProcessingSnapshot = false;
+                    document.getElementById('map-snapshot-btn').click();
+                };
+                document.head.appendChild(script);
+            }
+        });
         document.getElementById('satellite-toggle').addEventListener('change', (e) => {
             if (e.target.checked) {
                 document.getElementById('aircraft-toggle').checked = false;

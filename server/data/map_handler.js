@@ -620,6 +620,11 @@ export function getMeteorData() { return meteorData; }
 
 export function getMap() { return map; }
 
+export function getHighlightLayer() { return highlightLayer; }
+export function getGroundTrackLayers() { return groundTrackLayers; }
+export function getBearingLineLayer() { return bearingLineLayer; }
+export function getMeteorLayer() { return meteorLayer; }
+
 function getTerminatorLayer() { 
     if (!terminatorLayer) terminatorLayer = new L.GridLayer.Terminator({ pane: 'dataOverlays' });
     return terminatorLayer;

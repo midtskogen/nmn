@@ -2,6 +2,7 @@
     "html_title": "Přístup k videím a snímkům",
     "page_title": "Přístup k videím a snímkům",
     "map_panel_title": "1. Vyberte stanice na mapě",
+    "map_snapshot_button": "Pořídit snímek mapy",
     "map_description_archive": "Archiv obvykle pokrývá několik týdnů zpětně, ale to se může mezi stanicemi značně lišit a některé stanice mohou být mimo provoz. Některé stanice mají pomalé připojení a stahování může trvat dlouho. Funkce intervalu v kombinaci s vhodným počtem může být užitečná pro kontrolu oblačnosti nebo polární záře v průběhu času.",
     "map_description_lightning_source": "Data o blescích z Norského meteorologického institutu.",
     "control_panel_title": "2. Vyberte čas a typ souboru",

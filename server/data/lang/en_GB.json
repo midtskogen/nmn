@@ -2,6 +2,7 @@
     "html_title": "Access to Videos and Images",
     "page_title": "Access to Videos and Images",
     "map_panel_title": "1. Select stations on the map",
+    "map_snapshot_button": "Take map snapshot",
     "map_description_archive": "The archive usually covers the most recent weeks, but this can vary greatly between stations, and some stations may be out of service. Some stations have a slow connection, and downloading can take a long time. The interval option, combined with a suitable number, can be useful for checking cloud cover or auroras over a period.",
     "map_description_lightning_source": "Lightning data from the Norwegian Meteorological Institute.",
     "control_panel_title": "2. Select time and file type",

@@ -3,6 +3,8 @@
 import sys
 import json
 import os
+import io
+import tarfile
 import subprocess
 import logging
 import time
@@ -280,7 +282,12 @@ class FileProcessor:
         if self.ssh_control_socket and os.path.exists(self.ssh_control_socket):
             command += ["-o", f"ControlPath={self.ssh_control_socket}"]
         command += [f"{self.station_id}:{remote_path}", temp_path]
-        subprocess.run(command, check=True, timeout=360, capture_output=True)
+        try:
+            subprocess.run(command, check=True, timeout=360, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            if os.path.exists(temp_path): os.remove(temp_path)
+            stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ''
+            raise FileNotFoundError(f"Remote file not found: {self.station_id}:{remote_path} ({stderr.strip()})") from None
         os.rename(temp_path, local_path)
         self.total_bytes_downloaded += os.path.getsize(local_path)
 
@@ -407,6 +414,8 @@ class FileProcessor:
             final_overlay = (self.overlay_filepath_hevc if '_hevc' in base_media_path else self.overlay_filepath_h264) if not self.is_image else self.overlay_filepath
             final_path = final_overlay if os.path.exists(final_overlay) else base_media_path
             return self.get_final_result(final_path, is_flight=self.relevant_pass and 'flight_info' in self.relevant_pass)
+        except FileNotFoundError as e:
+            logging.debug(f"Skipping missing file: {e}")
         except Exception as e:
             self.errors.append(f"error_for_camera|cam={self.cam},time={self.time_utc.strftime('%H:%M')}")
             logging.error(f"Processing error: {e}", exc_info=True)
@@ -487,6 +496,46 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         except OSError as e:
             logging.warning(f"Worker {task_id} - SSH ControlMaster failed to start: {e}")
 
+        station_code = stations[station_id]['station']['code']
+
+        # --- Batch prefetch images via tar pipe (one SSH exec per remote dir) ---
+        is_image_dl = data['file_type'].startswith('image') and not data['file_type'].endswith('_long')
+        if is_image_dl:
+            source_prefix = 'mini' if 'lowres' in data['file_type'] else 'full'
+            # Group files by remote directory
+            by_dir = {}
+            for fi in files_to_process:
+                t = fi['time']
+                remote_dir = f"/meteor/cam{fi['cam']}/{t.strftime('%Y%m%d')}/{t.strftime('%H')}"
+                remote_file = f"{source_prefix}_{t.strftime('%M')}.jpg"
+                local_name = f"{station_code}_cam{fi['cam']}_{t.strftime('%Y%m%d')}_{t.strftime('%H%M')}_{data['file_type']}.jpg"
+                local_path = os.path.join(DOWNLOAD_DIR, local_name)
+                if not os.path.exists(local_path):
+                    by_dir.setdefault(remote_dir, []).append((remote_file, local_path))
+            for remote_dir, file_list in by_dir.items():
+                filenames = [rf for rf, _ in file_list]
+                local_map = {rf: lp for rf, lp in file_list}
+                ssh_cmd = ["ssh"]
+                if ssh_control_socket and os.path.exists(ssh_control_socket):
+                    ssh_cmd += ["-o", f"ControlPath={ssh_control_socket}"]
+                ssh_cmd += [station_id, f"cd {remote_dir} && tar -czf - {' '.join(filenames)} 2>/dev/null"]
+                try:
+                    result = subprocess.run(ssh_cmd, capture_output=True, timeout=120)
+                    if result.returncode == 0 and result.stdout:
+                        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode='r:gz') as tar:
+                            for member in tar.getmembers():
+                                bname = os.path.basename(member.name)
+                                if bname in local_map:
+                                    f = tar.extractfile(member)
+                                    if f:
+                                        tmp = local_map[bname] + ".part"
+                                        with open(tmp, 'wb') as out:
+                                            out.write(f.read())
+                                        os.rename(tmp, local_map[bname])
+                        logging.info(f"Worker {task_id} - batch prefetch done for {remote_dir} ({len(filenames)} files)")
+                except Exception as e:
+                    logging.warning(f"Worker {task_id} - batch prefetch failed for {remote_dir}: {e}")
+
         files_iterator = iter(enumerate(files_to_process))
         current_file_idx, current_file_item = next(files_iterator, (None, None))
         processing_done = False
@@ -494,7 +543,6 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         do_fisheye  = data.get('stitch_fisheye',  False)
         do_equirect = data.get('stitch_equirect', False)
         is_hires    = data['file_type'] in ('image', 'image_long')
-        station_code = stations[station_id]['station']['code']
         do_stitch   = (do_fisheye or do_equirect) and os.path.exists(STITCH_SCRIPT)
 
         # Pre-compute expected camera count per timestamp for stitch triggering

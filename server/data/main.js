@@ -882,7 +882,8 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
             }
         }
 
-        document.getElementById('map-snapshot-btn').addEventListener('click', () => {
+        const snapshotBtn = document.getElementById('map-snapshot-btn');
+        if (snapshotBtn) snapshotBtn.addEventListener('click', () => {
             if (isProcessingSnapshot) return;
             isProcessingSnapshot = true;
 
@@ -961,7 +962,8 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
                 script.onload = () => {
                     isProcessingSnapshot = false;
-                    document.getElementById('map-snapshot-btn').click();
+                    const btn = document.getElementById('map-snapshot-btn');
+                    if (btn) btn.click();
                 };
                 document.head.appendChild(script);
             }

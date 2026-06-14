@@ -92,7 +92,7 @@ HTML_TEMPLATE = """
 <script src="//unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="//cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="//cdn.jsdelivr.net/npm/hls.js@latest"></script>
-<link rel="stylesheet" href="style.css?v=20260412">
+<link rel="stylesheet" href="style.css?v=20260614c">
 </head><body>
 <div class="container">
     <header>
@@ -110,7 +110,7 @@ HTML_TEMPLATE = """
             <h2>__{{map_panel_title}}__</h2>
             <div id="map"></div>
             <div class="map-controls">
-                <button id="map-snapshot-btn" class="btn btn-secondary">__{{map_snapshot_button}}__</button>
+                <button id="map-snapshot-btn" class="btn btn-secondary">__{{snapshot_button}}__</button>
             </div>
             <p class="map-description">
                  __{{map_description_archive}}__ __{{map_description_lightning_source}}__

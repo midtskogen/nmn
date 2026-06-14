@@ -82,13 +82,13 @@ header h1 {
 #map-panel { grid-area: map; }
 #control-panel { grid-area: controls; }
 
-/* Map controls styling */
 .map-controls {
     margin: 10px 0;
     text-align: right;
 }
 
 #map-snapshot-btn {
+    width: auto;
     padding: 8px 16px;
     font-size: 14px;
     border-radius: 6px;
@@ -101,7 +101,6 @@ header h1 {
     transform: translateY(-1px);
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
 }
-
 
 /* --- Panel Styling (Neumorphism) --- */
 /* Defines the primary "neumorphic" or "soft UI" style for all panels.
@@ -537,6 +536,16 @@ button:hover:not(:disabled) {
 }
 
 /* --- Leaflet Map Customizations --- */
+.leaflet-control button {
+    width: auto;
+    padding: 4px 8px;
+    background-color: #fff;
+    color: #333;
+    border: 2px solid rgba(0,0,0,0.2);
+    border-radius: 4px;
+    font-size: 12px;
+}
+
 .leaflet-reset-view-control {
     background-color: #fff;
     border: 2px solid rgba(0,0,0,0.2);

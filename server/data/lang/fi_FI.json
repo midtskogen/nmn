@@ -2,7 +2,7 @@
     "html_title": "Videoiden ja kuvien käyttö",
     "page_title": "Videoiden ja kuvien käyttö",
     "map_panel_title": "1. Valitse asemat kartalta",
-    "map_snapshot_button": "Ota kartasta kuva",
+    "snapshot_button": "Ota kuva",
     "map_description_archive": "Arkisto kattaa yleensä viimeisimmät viikot, mutta tämä voi vaihdella suuresti asemien välillä, ja jotkin asemat voivat olla poissa käytöstä. Joillakin asemilla on hidas yhteys, ja lataaminen voi kestää kauan. Intervallivaihtoehto sopivalla lukumäärällä voi olla hyödyllinen pilvipeitteen tai revontulien tarkistamiseen tietyltä ajanjaksolta.",
     "map_description_lightning_source": "Salamatiedot Norjan ilmatieteen laitokselta.",
     "control_panel_title": "2. Valitse aika ja tiedostotyyppi",

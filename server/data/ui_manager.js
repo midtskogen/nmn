@@ -1544,6 +1544,10 @@ export function displayResults(resultData, dom, hevcSupported) {
                     const getShortName = (filename) => {
                         if (filename.includes('_image_long_stacked.jpg')) return 'bhL';
                         if (filename.includes('_image_lowres_long_stacked.jpg')) return 'blL';
+                        if (filename.includes('_hires_fisheye.jpg')) return 'be';
+                        if (filename.includes('_lowres_fisheye.jpg')) return 'be';
+                        if (filename.includes('_hires_equirect.jpg')) return 'eq';
+                        if (filename.includes('_lowres_equirect.jpg')) return 'eq';
                         const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
                         let baseType = filename;
                         let isOverlay = false;

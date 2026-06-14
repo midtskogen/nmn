@@ -535,6 +535,15 @@ button:hover:not(:disabled) {
     width: auto;
 }
 
+.stitch-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-color);
+}
+
 /* --- Leaflet Map Customizations --- */
 .leaflet-control button {
     width: auto;

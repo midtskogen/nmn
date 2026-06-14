@@ -75,7 +75,9 @@ function pollTaskStatus(taskId, statusAction, { onProgress, onComplete, onError 
                 if (onError) onError(data);
             }
         } catch (error) {
-            clearInterval(intervalId); // Stop polling on network or parsing errors.
+            // Transient JSON parse errors (e.g. file mid-write) should not stop polling.
+            if (error instanceof SyntaxError) return;
+            clearInterval(intervalId); // Stop polling on genuine network errors.
             if (onError) onError({ message: error.message });
         }
     }, 2000); // Poll every 2 seconds.

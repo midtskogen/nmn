@@ -773,8 +773,31 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
         dom.lengthSelect.addEventListener('change', refreshTimeUiState);
         dom.intervalSelect.addEventListener('change', refreshTimeUiState);
         refreshTimeUiState();
-        document.querySelector('input[name="primary_file_type"][value="video"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'none'; });
-        document.querySelector('input[name="primary_file_type"][value="image"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'flex'; });
+        const updateStitchOptions = () => {
+            const isVideo = document.querySelector('input[name="primary_file_type"]:checked')?.value === 'video';
+            const fisheyeSwitch = document.getElementById('fisheye-switch');
+            const equirectSwitch = document.getElementById('equirect-switch');
+            const fisheyeLabel = document.getElementById('fisheye-label');
+            const equirectLabel = document.getElementById('equirect-label');
+            if (fisheyeSwitch) { fisheyeSwitch.disabled = isVideo; if (isVideo) fisheyeSwitch.checked = false; }
+            if (equirectSwitch) { equirectSwitch.disabled = isVideo; if (isVideo) equirectSwitch.checked = false; }
+            if (fisheyeLabel) fisheyeLabel.style.opacity = isVideo ? '0.4' : '';
+            if (equirectLabel) equirectLabel.style.opacity = isVideo ? '0.4' : '';
+            const stitchActive = !isVideo && ((fisheyeSwitch?.checked) || (equirectSwitch?.checked));
+            document.querySelectorAll('input[name="cameras"]').forEach(cb => {
+                if (stitchActive) {
+                    cb.checked = true;
+                    cb.disabled = true;
+                } else {
+                    cb.disabled = false;
+                }
+            });
+        };
+        document.querySelector('input[name="primary_file_type"][value="video"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'none'; updateStitchOptions(); });
+        document.querySelector('input[name="primary_file_type"][value="image"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'flex'; updateStitchOptions(); });
+        document.getElementById('fisheye-switch')?.addEventListener('change', updateStitchOptions);
+        document.getElementById('equirect-switch')?.addEventListener('change', updateStitchOptions);
+        updateStitchOptions();
         
         document.getElementById('cloud-toggle').addEventListener('change', (e) => {
             if (e.target.checked) document.getElementById('aurora-toggle').checked = false;
@@ -1057,18 +1080,20 @@ false, false);
                 ? (isHighRes ? 'hires' : 'lowres')
                 : (isHighRes ?
 (isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres'));
+            const isFisheye = document.getElementById('fisheye-switch')?.checked || false;
+            const isEquirect = document.getElementById('equirect-switch')?.checked || false;
             const payload = {
                 stations: [...selectedStations],
                 date: dom.dateInput.value,
                 hour: dom.hourSelect.value,
                 minute: dom.minuteSelect.value,
                 length: dom.lengthSelect.value,
-   
-         
                 interval: dom.intervalSelect.value,
                 cameras: selectedCameras,
                 file_type: fileType,
-                hevc_supported: isHevcSupported()
+                hevc_supported: isHevcSupported(),
+                stitch_fisheye: isFisheye,
+                stitch_equirect: isEquirect
             };
             if (currentHighlightedPassId && passData.passes) {
                 const pass = passData.passes.find(p => p.pass_id === currentHighlightedPassId);

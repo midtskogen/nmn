@@ -865,7 +865,8 @@ function openMediaPlayer(url, type, variants, stationLabel) {
     const header = document.createElement('div');
     header.className = 'modal-header';
     const title = document.createElement('h3');
-    const versionDesc = variants && variants[0] ? (variants[0].desc || variants[0].label) : '';
+    const currentVariant = variants ? variants.find(v => v.url === url) : null;
+    const versionDesc = currentVariant ? (currentVariant.desc || currentVariant.label) : (variants && variants[0] ? (variants[0].desc || variants[0].label) : '');
     title.textContent = (stationLabel || '') + (versionDesc ? ' - ' + versionDesc : '');
     const closeBtn = document.createElement('button');
     closeBtn.className = 'modal-close';

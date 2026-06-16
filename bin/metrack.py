@@ -1256,7 +1256,7 @@ def _load_and_prepare_data(filepath):
                 'weight': float(words[6]), 'duration': float(words[7]), 'length': float(words[8]),
                 'color': tuple(map(int, words[9:12])), 'names': " ".join(words[12:idx]),
                 'timestamp': float(words[idx]) if idx < len(words) else None,
-                'height_m': float(words[idx+1]) / 1000.0 if idx+1 < len(words) else 0.0
+                'height_m': float(words[idx+1]) / 1000.0 if idx+1 < len(words) and is_number(words[idx+1]) else 0.0
             })
 
     if not station_data_list:

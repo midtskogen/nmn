@@ -1538,6 +1538,15 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             except Exception as e:
                 logging.error(f"Failed to generate station report for language '{lang}': {e}")
     else:
+        # Pre-download cartopy shapefiles in the main process before spawning parallel workers.
+        # Without this, concurrent workers race to download the same zips and corrupt each other's cache.
+        try:
+            import cartopy.feature as _cfeature
+            for _feat in [_cfeature.COASTLINE, _cfeature.BORDERS, _cfeature.LAND]:
+                _ = _feat.geometries()
+        except Exception:
+            pass
+
         # Use 3 workers - optimal balance for 5 languages (3+2 batches)
         with ProcessPoolExecutor(max_workers=min(len(SUPPORTED_LANGS), 3)) as executor:
             futures = {

@@ -479,24 +479,34 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 for cam in data['cameras']:
                     files_to_process.append({'time': start_time + timedelta(minutes=i*int(data['interval'])), 'cam': int(cam)})
 
-        # Open an SSH ControlMaster connection to the station so that all subsequent
-        # scp calls reuse the same TCP session instead of handshaking per file.
+        station_code = stations[station_id]['station']['code']
+
+        # Open an SSH ControlMaster only when at least one required file is missing
+        # from disk.  For image file types we can cheaply pre-check all expected
+        # local paths, saving ~1 s on a fully-cached request.
         ssh_control_socket = os.path.join(LOCK_DIR, f"ssh_ctl_{task_id}_{station_id}")
         ssh_master_proc = None
-        try:
-            ssh_master_proc = subprocess.Popen(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=60",
-                 "-o", f"ControlPath={ssh_control_socket}",
-                 "-o", "ControlMaster=yes", "-o", "ControlPersist=120",
-                 "-N", station_id],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            import time as _time; _time.sleep(1)  # give master time to establish
-            logging.info(f"Worker {task_id} - SSH ControlMaster opened for {station_id} (socket={ssh_control_socket})")
-        except OSError as e:
-            logging.warning(f"Worker {task_id} - SSH ControlMaster failed to start: {e}")
-
-        station_code = stations[station_id]['station']['code']
+        need_ssh = not data['file_type'].startswith('image') or any(
+            not os.path.exists(os.path.join(DOWNLOAD_DIR,
+                f"{station_code}_cam{fi['cam']}_{fi['time'].strftime('%Y%m%d')}"
+                f"_{fi['time'].strftime('%H%M')}_{data['file_type']}.jpg"))
+            for fi in files_to_process
+        )
+        if need_ssh:
+            try:
+                ssh_master_proc = subprocess.Popen(
+                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=60",
+                     "-o", f"ControlPath={ssh_control_socket}",
+                     "-o", "ControlMaster=yes", "-o", "ControlPersist=120",
+                     "-N", station_id],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                import time as _time; _time.sleep(1)  # give master time to establish
+                logging.info(f"Worker {task_id} - SSH ControlMaster opened for {station_id} (socket={ssh_control_socket})")
+            except OSError as e:
+                logging.warning(f"Worker {task_id} - SSH ControlMaster failed to start: {e}")
+        else:
+            logging.info(f"Worker {task_id} - All files cached for {station_id}, skipping SSH ControlMaster")
 
         # --- Batch prefetch images via tar pipe (one SSH exec per remote dir) ---
         is_image_dl = data['file_type'].startswith('image') and not data['file_type'].endswith('_long')
@@ -543,6 +553,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         do_fisheye  = data.get('stitch_fisheye',  False)
         do_equirect = data.get('stitch_equirect', False)
         is_hires    = data['file_type'] in ('image', 'image_long')
+        is_long     = data['file_type'].endswith('_long')
         do_stitch   = (do_fisheye or do_equirect) and os.path.exists(STITCH_SCRIPT)
 
         # Pre-compute expected camera count per timestamp for stitch triggering
@@ -555,6 +566,9 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         stitch_ready     = {}   # t_key -> {cam: abs_path}  (downloaded so far)
         stitch_launched  = set()  # t_keys already handed to stitch.py
         stitch_jobs      = []   # [{process, t_key, t_iso, stdout_path}]
+        stitch_done      = 0    # stitch outputs added to results so far
+        stitch_output_count = (int(do_fisheye) + int(do_equirect)) * len(stitch_cams_expected) if do_stitch else 0
+        total_steps = len(files_to_process) + stitch_output_count
 
         master_lock_file = os.path.join(LOCK_DIR, f"{master_task_id}.lock")
         while not processing_done:
@@ -563,7 +577,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 break
                 
             if current_file_item:
-                update_status(station_status_file, "progress", {"step": current_file_idx, "total": len(files_to_process), "message": f"status_processing_file_of_total|i={current_file_idx+1},total={len(files_to_process)}", "files": results, "errors": errors})
+                update_status(station_status_file, "progress", {"step": current_file_idx, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
                 
                 proc = FileProcessor(task_id, station_id, station_code, current_file_item['cam'], current_file_item['time'], data['file_type'], pass_data_list, pto_data_cache, data.get('hevc_supported', False), translations=translations, ssh_control_socket=ssh_control_socket)
                 job = proc.process()
@@ -576,7 +590,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 elif job:
                     t_key_dl = current_file_item['time'].strftime('%H:%M')
                     results.setdefault(t_key_dl, []).append(job)
-                    update_status(station_status_file, "progress", {"step": current_file_idx + 1, "total": len(files_to_process), "message": f"status_processing_file_of_total|i={current_file_idx+1},total={len(files_to_process)}", "files": results, "errors": errors})
+                    update_status(station_status_file, "progress", {"step": current_file_idx + 1, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
 
                     # Track downloaded image for stitch readiness check
                     if do_stitch:
@@ -602,23 +616,47 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                                 stitch_launched.add(t_key_s)
                                 t_obj = datetime.strptime(f"{data['date']} {t_key_s}", '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
                                 base_name = f"{station_code}_{t_obj.strftime('%Y%m%d')}_{t_obj.strftime('%H%M')}"
-                                cmd = [
-                                    sys.executable, STITCH_SCRIPT,
-                                    '--station-id', station_id,
-                                    '--station-code', station_code,
-                                    '--image-paths'] + list(ready_cams.values()) + [
-                                    '--cameras'] + [str(c) for c in ready_cams.keys()] + [
-                                    '--output-dir', DOWNLOAD_DIR,
-                                    '--base-name', base_name,
-                                ]
-                                if is_hires:    cmd.append('--hires')
-                                if do_fisheye:  cmd.append('--fisheye')
-                                if do_equirect: cmd.append('--equirect')
-                                stdout_path = os.path.join(LOCK_DIR, f"{task_id}_stitch_{t_key_s.replace(':', '')}.json")
-                                logging.info(f"Worker {task_id} STITCH-DEBUG: launching background stitch for {t_key_s}, cams={sorted(ready_cams.keys())}")
-                                with open(stdout_path, 'w') as sf:
-                                    sp = subprocess.Popen(cmd, stdout=sf, stderr=subprocess.PIPE)
-                                stitch_jobs.append({'process': sp, 't_key': t_key_s, 't_iso': t_obj.isoformat(), 'stdout_path': stdout_path})
+                                res_suffix = ("hires" if is_hires else "lowres") + ("_long" if is_long else "")
+
+                                # Register any already-existing stitch outputs immediately.
+                                stitch_hit = {}
+                                for proj, flag in [('fisheye', do_fisheye), ('equirect', do_equirect)]:
+                                    if flag:
+                                        fname = f"{base_name}_{res_suffix}_{proj}.jpg"
+                                        fpath = os.path.join(DOWNLOAD_DIR, fname)
+                                        if os.path.exists(fpath):
+                                            stitch_hit[proj] = {'path': fpath, 'name': fname}
+                                _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
+                                for proj, info in stitch_hit.items():
+                                    thumb_kwargs = {"task_id": task_id, "path": info['path'], "file_type": 'image', "station_code": station_code, "cam_num": _STITCH_CAM.get(proj, 0)}
+                                    stitch_entry = {"url": f"download/{info['name']}", "name": info['name'], "utc_time_iso": t_obj.isoformat(), "alternatives": []}
+                                    if thumb := create_thumbnail(**thumb_kwargs): stitch_entry["thumb_url"] = f"download/{thumb}"
+                                    results.setdefault(t_key_s, []).append(stitch_entry)
+                                stitch_done += len(stitch_hit)
+
+                                need_fisheye  = do_fisheye  and 'fisheye'  not in stitch_hit
+                                need_equirect = do_equirect and 'equirect' not in stitch_hit
+                                if need_fisheye or need_equirect:
+                                    cmd = [
+                                        sys.executable, STITCH_SCRIPT,
+                                        '--station-id', station_id,
+                                        '--station-code', station_code,
+                                        '--image-paths'] + list(ready_cams.values()) + [
+                                        '--cameras'] + [str(c) for c in ready_cams.keys()] + [
+                                        '--output-dir', DOWNLOAD_DIR,
+                                        '--base-name', base_name,
+                                    ]
+                                    if is_hires:       cmd.append('--hires')
+                                    if is_long:        cmd.append('--long')
+                                    if need_fisheye:   cmd.append('--fisheye')
+                                    if need_equirect:  cmd.append('--equirect')
+                                    stdout_path = os.path.join(LOCK_DIR, f"{task_id}_stitch_{t_key_s.replace(':', '')}.json")
+                                    logging.info(f"Worker {task_id} STITCH-DEBUG: launching background stitch for {t_key_s}, cams={sorted(ready_cams.keys())}")
+                                    with open(stdout_path, 'w') as sf:
+                                        sp = subprocess.Popen(cmd, stdout=sf, stderr=subprocess.PIPE)
+                                    stitch_jobs.append({'process': sp, 't_key': t_key_s, 't_iso': t_obj.isoformat(), 'stdout_path': stdout_path})
+                                else:
+                                    logging.info(f"Worker {task_id} STITCH-DEBUG: all stitch outputs cached for {t_key_s}, skipping subprocess")
 
                 current_file_idx, current_file_item = next(files_iterator, (None, None))
 
@@ -648,13 +686,15 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                         try:
                             with open(sjob['stdout_path']) as sf:
                                 stitch_results = json.loads(sf.read().strip())
+                            _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
                             for key, info in stitch_results.items():
                                 if info and os.path.exists(info['path']):
-                                    thumb_kwargs = {"task_id": task_id, "path": info['path'], "file_type": 'image', "station_code": station_code, "cam_num": 0}
+                                    thumb_kwargs = {"task_id": task_id, "path": info['path'], "file_type": 'image', "station_code": station_code, "cam_num": _STITCH_CAM.get(key, 0)}
                                     stitch_entry = {"url": f"download/{info['name']}", "name": info['name'], "utc_time_iso": sjob['t_iso'], "alternatives": []}
                                     if thumb := create_thumbnail(**thumb_kwargs): stitch_entry["thumb_url"] = f"download/{thumb}"
                                     results.setdefault(sjob['t_key'], []).append(stitch_entry)
                                     logging.info(f"Worker {task_id} STITCH-DEBUG: added result {info['name']}")
+                                    stitch_done += 1
                         except Exception as e:
                             logging.error(f"Worker {task_id} STITCH-DEBUG: failed to read stitch output: {e}")
                             errors.append("error_internal")
@@ -669,7 +709,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             stitch_jobs = remaining_stitch_jobs
             
             if blends_finished_this_cycle:
-                update_status(station_status_file, "progress", {"step": current_file_idx or len(files_to_process), "total": len(files_to_process), "message": f"status_waiting_for_blend|count={len(blending_jobs)}", "files": results, "errors": errors})
+                update_status(station_status_file, "progress", {"step": len(files_to_process) + stitch_done, "total": total_steps, "message": f"status_waiting_for_blend|count={len(blending_jobs)}", "files": results, "errors": errors})
 
             if current_file_item is None and not blending_jobs and not stitch_jobs:
                 processing_done = True

@@ -33,6 +33,12 @@ import subprocess
 import sys
 import tempfile
 import shutil
+import numpy as np
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+    logging.warning("PIL not available, some image operations may be limited")
 
 # ---------------------------------------------------------------------------
 # Logging — write to the same activity.log as controller.py
@@ -65,11 +71,18 @@ EQUIRECT_LOWRES_H = 848
 # Remote path template for lens calibration files
 REMOTE_LENS_PTO = "/meteor/cam{cam}/lens.pto"
 
+# Cameras that carry a timestamp overlay in the lower-left corner.
+# The overlay is made transparent (alpha=0) before nona sees the image so it
+# is never blended into the panorama.
+TIMESTAMP_CAMS = frozenset({6, 7})
+# (x1, y1, x2, y2) — exclusive end coords, matched by image height threshold.
+_TIMESTAMP_BOX_HD = (0, 1040, 305, 1080)   # height >= 900
+_TIMESTAMP_BOX_SD = (0,  430, 155, 448)    # height < 900
+
 # Absolute paths to tools (needed because www-data's PATH omits /usr/local/bin)
 BIN_NONA        = "/usr/local/bin/nona"
 BIN_MULTIBLEND  = "/usr/local/bin/multiblend"
 BIN_PANO_MODIFY = "/usr/local/bin/pano_modify"
-BIN_IDENTIFY    = "/usr/bin/identify"
 BIN_CONVERT     = "/usr/bin/convert"
 
 
@@ -150,32 +163,60 @@ def _scp_lens_fallback(station_id: str, cams: list, workdir: str) -> dict:
 
 
 def build_pto_header(w: int, h: int, projection: str) -> str:
-    """
-    Return the two-line PTO header for nona/hugin.
+    """Return the two-line PTO header for nona/hugin.
     projection: 'fisheye' (f3) or 'equirect' (f2)
     """
-    if projection == 'fisheye':
-        # f3 = equi-solid-angle (fisheye); full canvas, apply_fisheye_mask does the circular crop
-        p_line = f'p f3 w{w} h{h} v360 E0 R0 n"TIFF_m c:LZW"'
-    else:
-        # f2 = equirectangular; S crops to the useful strip used in stitch.sh
-        p_line = f'p f2 w{w} h{h} v360 E0 R0 n"TIFF_m c:LZW"'
-    m_line = 'm g1 i0 f0 m2 p0.00784314'
-    return p_line + "\n" + m_line + "\n"
+    f = 3 if projection == 'fisheye' else 2
+    return (f'p f{f} w{w} h{h} v360 E0 R0 n"TIFF_m c:LZW"\n'
+            f'm g1 i0 f0 m2 p0.00784314\n')
 
 
 def get_image_dimensions(path: str):
-    """Return (width, height) of an image using identify, or None on failure."""
+    """Return (width, height) of an image via PIL, or None on failure."""
     try:
-        result = subprocess.run(
-            [BIN_IDENTIFY, "-format", "%w %h", path],
-            capture_output=True, text=True, timeout=30, check=True
-        )
-        w, h = result.stdout.strip().split()
-        return int(w), int(h)
+        with Image.open(path) as img:
+            return img.size  # (width, height)
     except Exception as e:
         logging.warning(f"stitch get_image_dimensions: failed for {path}: {e}")
         return None
+
+
+def _read_cal_dims(lens_path: str):
+    """Return (cal_w, cal_h) from the i-line of a lens.pto, or (None, None)."""
+    try:
+        with open(lens_path, 'r') as f:
+            for line in f:
+                if line.startswith('i ') or line.startswith('i\t'):
+                    m_w = re.search(r'\bw(\d+)\b', line)
+                    m_h = re.search(r'\bh(\d+)\b', line)
+                    if m_w and m_h:
+                        return int(m_w.group(1)), int(m_h.group(1))
+                    break
+    except OSError:
+        pass
+    return None, None
+
+
+def erase_timestamp(src_path: str, dst_tif: str) -> bool:
+    """Write a copy of src_path as TIFF with the timestamp region set to alpha=0.
+
+    The timestamp box in the lower-left corner is made fully transparent so
+    nona ignores those pixels entirely (transparent TIFF input → no contribution
+    to the blended panorama from that region).
+    """
+    try:
+        img = Image.open(src_path)
+        iw, ih = img.size
+        x1, y1, x2, y2 = _TIMESTAMP_BOX_HD if ih >= 900 else _TIMESTAMP_BOX_SD
+        arr = np.array(img.convert('RGBA'))
+        arr[y1:y2, x1:x2, 3] = 0
+        Image.fromarray(arr).save(dst_tif, compression='tiff_lzw')
+        logging.info(f"stitch erase_timestamp: {os.path.basename(src_path)} "
+                     f"box=({x1},{y1},{x2},{y2}) size={iw}x{ih} -> {dst_tif}")
+        return True
+    except Exception as e:
+        logging.warning(f"stitch erase_timestamp: failed for {src_path}: {e}")
+        return False
 
 
 def build_pto(header: str, cam_lens_files: dict, image_paths: dict) -> str:
@@ -232,26 +273,32 @@ def run_nona(pto_path: str, out_prefix: str, images: list, workdir: str) -> bool
 
 
 def run_multiblend(out_tifs: list, out_jpg: str, quality: int, workdir: str) -> bool:
-    """Run multiblend to merge reprojected TIFFs."""
+    """Run multiblend to merge reprojected TIFFs, filling gaps via alpha channel.
+
+    Runs multiblend with TIFF output so we can read the alpha channel.  Any
+    pixel with alpha==0 in the blended TIFF is a gap (no camera covers it);
+    these are filled with the nearest covered pixel colour before saving as JPEG.
+    """
     existing = [t for t in out_tifs if os.path.exists(os.path.join(workdir, t))]
     logging.info(f"stitch run_multiblend: existing tifs={existing}, out_jpg={out_jpg}")
     if not existing:
         logging.error("stitch run_multiblend: no nona output TIFFs found")
         return False
+
+    # Output to TIFF so we can inspect the alpha channel for gap filling.
+    out_tif = out_jpg + '_blend.tif'
     cmd = [
         BIN_MULTIBLEND,
         "--primary-seam-generator=graph-cut",
         "-d", "8",
-        f"--compression={quality}",
-        "-o", out_jpg,
+        "-o", out_tif,
     ] + existing
     logging.info(f"stitch run_multiblend: cmd={cmd} cwd={workdir}")
     try:
         result = subprocess.run(cmd, check=True, timeout=600, capture_output=True, cwd=workdir)
         if result.stderr:
             logging.info(f"stitch run_multiblend: stderr={result.stderr.decode('utf-8', errors='ignore')!r}")
-        logging.info("stitch run_multiblend: SUCCESS")
-        return True
+        logging.info("stitch run_multiblend: blend SUCCESS")
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ''
         stdout = e.stdout.decode('utf-8', errors='ignore') if e.stdout else ''
@@ -264,30 +311,123 @@ def run_multiblend(out_tifs: list, out_jpg: str, quality: int, workdir: str) -> 
         logging.error("stitch run_multiblend: 'multiblend' not found in PATH")
         return False
 
+    # Convert TIFF to JPEG with gap filling via alpha channel.
+    try:
+        img = Image.open(out_tif)
+        arr = np.array(img)
+        logging.info(f"stitch run_multiblend: blend TIFF mode={img.mode} shape={arr.shape}")
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            rgb = arr[:, :, :3].astype(np.float32)
+            alpha = arr[:, :, 3]
+            gap = alpha == 0
+            n_gap = int(gap.sum())
+            logging.info(f"stitch run_multiblend: gap pixels={n_gap} total={gap.size}")
+            if n_gap > 0:
+                # Fill gaps with normalized Gaussian convolution: each gap pixel
+                # receives a weighted average of nearby covered pixels, producing a
+                # smooth colour gradient.  Pixels far from any camera (e.g. outer
+                # fisheye corners) have near-zero weight and stay black — no explicit
+                # border exclusion needed.  The fisheye mask cleans up corners later.
+                try:
+                    from scipy.ndimage import gaussian_filter, distance_transform_edt
+                    # Downsample before blurring: 64x fewer pixels → 64x faster.
+                    # Smooth gradients are low-frequency so the quality loss is negligible.
+                    S = 8
+                    h, w = gap.shape
+                    sw, sh = max(1, w // S), max(1, h // S)
+                    sigma_s = max(3, min(w // 80, 80) // S)
+
+                    coverage = (~gap).astype(np.float32)
+                    masked_rgb = rgb * coverage[:, :, np.newaxis]  # gap pixels → 0
+
+                    small_cov = np.array(
+                        Image.fromarray((coverage * 255).astype(np.uint8)).resize(
+                            (sw, sh), Image.BOX)).astype(np.float32) / 255.0
+                    small_masked = np.array(
+                        Image.fromarray(masked_rgb.clip(0, 255).astype(np.uint8)).resize(
+                            (sw, sh), Image.BOX)).astype(np.float32)
+
+                    blurred_w  = gaussian_filter(small_cov, sigma=sigma_s)
+                    blurred_ch = gaussian_filter(small_masked, sigma=(sigma_s, sigma_s, 0))
+                    w_b = blurred_w[:, :, np.newaxis]
+                    filled_small = np.where(w_b > 1e-3, blurred_ch / np.maximum(w_b, 1e-3), 0.0)
+
+                    fill_full = np.array(
+                        Image.fromarray(filled_small.clip(0, 255).astype(np.uint8)).resize(
+                            (w, h), Image.BILINEAR)).astype(np.float32)
+
+                    # Feathered blend: compute each pixel's distance to the nearest
+                    # gap pixel, then blend original → fill over feather_radius px.
+                    feather_radius = 20
+                    dist = distance_transform_edt(~gap)
+                    blend_w = np.clip(dist / feather_radius, 0.0, 1.0)[:, :, np.newaxis]
+                    filled = (rgb * blend_w + fill_full * (1 - blend_w)).clip(0, 255)
+                    logging.info(f"stitch run_multiblend: gap fill done S={S} sigma_s={sigma_s} feather={feather_radius}px")
+                except ImportError:
+                    logging.info("stitch run_multiblend: scipy unavailable, using iterative fill")
+                    interior_gap = gap.copy()
+                    filled = rgb.copy()
+                    remaining = interior_gap.copy()
+                    for _ in range(600):
+                        if not remaining.any():
+                            break
+                        changed = False
+                        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            valid_nb = np.roll(~remaining, dy, axis=0)
+                            valid_nb = np.roll(valid_nb, dx, axis=1)
+                            can_fill = remaining & valid_nb
+                            if can_fill.any():
+                                src = np.roll(np.roll(filled, dy, axis=0), dx, axis=1)
+                                filled[can_fill] = src[can_fill]
+                                remaining[can_fill] = False
+                                changed = True
+                        if not changed:
+                            break
+            else:
+                filled = rgb
+        else:
+            # No alpha — just use as-is (no gap fill possible)
+            filled = arr[:, :, :3] if arr.ndim == 3 and arr.shape[2] >= 3 else arr
+        Image.fromarray(filled.astype(np.uint8)).save(out_jpg, 'JPEG', quality=quality)
+        logging.info(f"stitch run_multiblend: saved JPEG -> {out_jpg}")
+        return True
+    except Exception as e:
+        logging.error(f"stitch run_multiblend: TIFF->JPEG conversion failed: {e}")
+        # Fall back: try direct JPEG output if TIFF approach failed
+        try:
+            cmd2 = [
+                BIN_MULTIBLEND,
+                "--primary-seam-generator=graph-cut",
+                "-d", "8",
+                f"--compression={quality}",
+                "-o", out_jpg,
+            ] + existing
+            subprocess.run(cmd2, check=True, timeout=600, capture_output=True, cwd=workdir)
+            return True
+        except Exception as e2:
+            logging.error(f"stitch run_multiblend: fallback JPEG also failed: {e2}")
+            return False
+    finally:
+        if os.path.exists(out_tif):
+            os.remove(out_tif)
+
 
 def apply_fisheye_mask(jpg_path: str, w: int, h: int, out_path: str) -> bool:
     """Sharpen and apply a circular black border mask to the fisheye image."""
     cx, cy = w // 2, h // 2
-    r = min(cx, cy)  # full radius touching edges
-    mask_path = jpg_path + "_mask.png"
+    r = min(cx, cy)
     try:
-        # Create a white circle on black background as mask
+        # Single convert call: sharpen the source, generate the circular mask inline,
+        # then multiply them together — no temp file needed.
         subprocess.run([
             BIN_CONVERT,
-            "-size", f"{w}x{h}", "xc:black",
-            "-fill", "white",
-            "-draw", f"circle {cx},{cy} {cx},{cy - r}",
-            mask_path
-        ], check=True, timeout=120, capture_output=True)
-
-        # Sharpen source, then multiply with mask to black out corners
-        subprocess.run([
-            BIN_CONVERT,
-            "-sharpen", "2x2",
-            jpg_path, mask_path,
+            jpg_path, "-sharpen", "2x2",
+            "(", "-size", f"{w}x{h}", "xc:black",
+                 "-fill", "white",
+                 "-draw", f"circle {cx},{cy} {cx},{cy - r}",
+            ")",
             "-compose", "Multiply", "-composite",
-            "-quality", "90",
-            out_path
+            "-quality", "90", out_path
         ], check=True, timeout=120, capture_output=True)
         logging.info(f"stitch: fisheye mask applied, out={out_path}")
         return True
@@ -295,9 +435,6 @@ def apply_fisheye_mask(jpg_path: str, w: int, h: int, out_path: str) -> bool:
         stderr = e.stderr.decode('utf-8', errors='ignore') if hasattr(e, 'stderr') and e.stderr else str(e)
         logging.error(f"stitch: fisheye mask failed: {stderr}")
         return False
-    finally:
-        if os.path.exists(mask_path):
-            os.remove(mask_path)
 
 
 def sharpen_jpg(in_path: str, out_path: str) -> bool:
@@ -315,10 +452,13 @@ def sharpen_jpg(in_path: str, out_path: str) -> bool:
 def rotate_fisheye_pto(pto_path: str) -> bool:
     """Apply the -90° pitch rotation that stitch.sh does for the fisheye."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             [BIN_PANO_MODIFY, "--rotate", "0,-90,0", pto_path, "-o", pto_path],
             check=True, timeout=60, capture_output=True
         )
+        # Log any stdout/stderr for debugging, but don't let it pollute JSON output
+        if result.stdout:
+            logging.debug(f"stitch: pano_modify stdout: {result.stdout.decode('utf-8', errors='ignore')[:200]}")
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
         logging.warning(f"stitch: pano_modify not available or failed: {e}")
@@ -332,6 +472,7 @@ def stitch(
     output_dir: str,
     base_name: str,
     hires: bool,
+    long_integration: bool,
     do_fisheye: bool,
     do_equirect: bool,
 ) -> dict:
@@ -340,6 +481,7 @@ def stitch(
     each containing {'path': ..., 'name': ...} on success, or None on failure.
     """
     results = {}
+
     if not do_fisheye and not do_equirect:
         logging.info("stitch: nothing requested, returning empty")
         return results
@@ -347,11 +489,26 @@ def stitch(
     logging.info(f"stitch: START station_id={station_id}, base_name={base_name}, hires={hires}, do_fisheye={do_fisheye}, do_equirect={do_equirect}")
     logging.info(f"stitch: image_paths={image_paths}")
 
-    res_suffix = "hires" if hires else "lowres"
+    res_suffix = ("hires" if hires else "lowres") + ("_long" if long_integration else "")
     fw = FISHEYE_HIRES_W  if hires else FISHEYE_LOWRES_W
     fh = FISHEYE_HIRES_H  if hires else FISHEYE_LOWRES_H
     ew = EQUIRECT_HIRES_W if hires else EQUIRECT_LOWRES_W
     eh = EQUIRECT_HIRES_H if hires else EQUIRECT_LOWRES_H
+
+    # Return cached output files immediately if they already exist.
+    eq_name = f"{base_name}_{res_suffix}_equirect.jpg"
+    fy_name = f"{base_name}_{res_suffix}_fisheye.jpg"
+    if do_equirect and os.path.exists(os.path.join(output_dir, eq_name)):
+        results['equirect'] = {'path': os.path.join(output_dir, eq_name), 'name': eq_name}
+        logging.info(f"stitch: equirect cached -> {eq_name}")
+        do_equirect = False
+    if do_fisheye and os.path.exists(os.path.join(output_dir, fy_name)):
+        results['fisheye'] = {'path': os.path.join(output_dir, fy_name), 'name': fy_name}
+        logging.info(f"stitch: fisheye cached -> {fy_name}")
+        do_fisheye = False
+    if not do_fisheye and not do_equirect:
+        return results
+
     logging.info(f"stitch: fisheye size={fw}x{fh}, equirect size={ew}x{eh}")
 
     # Work in a temp dir so nona's out0000.tif etc. don't pollute download/
@@ -378,33 +535,39 @@ def stitch(
                 continue
             camdir = os.path.join(workdir, f"cam{cam}")
             os.makedirs(camdir, exist_ok=True)
+            stem = os.path.basename(abs_path).rsplit('.', 1)[0]
             rel_name = os.path.basename(abs_path)
-            dst = os.path.join(camdir, rel_name)
-            if not os.path.exists(dst):
-                # Read calibrated dimensions from lens.pto i-line
-                cal_w, cal_h = None, None
-                try:
-                    with open(cam_lens[cam], 'r') as lf:
-                        for line in lf:
-                            if line.startswith('i ') or line.startswith('i\t'):
-                                m_w = re.search(r'\bw(\d+)\b', line)
-                                m_h = re.search(r'\bh(\d+)\b', line)
-                                if m_w and m_h:
-                                    cal_w, cal_h = int(m_w.group(1)), int(m_h.group(1))
-                                break
-                except OSError:
-                    pass
-                actual = get_image_dimensions(abs_path)
-                if cal_w and cal_h and actual and (actual[0] != cal_w or actual[1] != cal_h):
-                    logging.info(f"stitch: cam {cam} scaling {actual[0]}x{actual[1]} -> {cal_w}x{cal_h}")
-                    subprocess.run(
-                        [BIN_CONVERT, abs_path, "-resize", f"{cal_w}x{cal_h}!", dst],
-                        check=True, timeout=60, capture_output=True
-                    )
+
+            # For timestamp cameras erase overlay into a clean TIFF before any scaling.
+            if cam in TIMESTAMP_CAMS:
+                src = os.path.join(camdir, stem + '_clean.tif')
+                if not erase_timestamp(abs_path, src):
+                    src = abs_path
+            else:
+                src = abs_path
+
+            # Scale to calibrated dimensions if needed, otherwise symlink.
+            cal_w, cal_h = _read_cal_dims(cam_lens[cam])
+            actual = get_image_dimensions(abs_path)
+            if cal_w and cal_h and actual and (actual[0] != cal_w or actual[1] != cal_h):
+                if cam in TIMESTAMP_CAMS:
+                    out = os.path.join(camdir, stem + '_clean_scaled.tif')
+                    img_rel[cam] = f"cam{cam}/{stem}_clean_scaled.tif"
                 else:
+                    out = os.path.join(camdir, rel_name)
+                    img_rel[cam] = f"cam{cam}/{rel_name}"
+                logging.info(f"stitch: cam {cam} scaling {actual[0]}x{actual[1]} -> {cal_w}x{cal_h}")
+                subprocess.run([BIN_CONVERT, src, "-resize", f"{cal_w}x{cal_h}!", out],
+                               check=True, timeout=60, capture_output=True)
+            elif cam in TIMESTAMP_CAMS:
+                img_rel[cam] = f"cam{cam}/{stem}_clean.tif"
+            else:
+                dst = os.path.join(camdir, rel_name)
+                if not os.path.exists(dst):
                     os.symlink(abs_path, dst)
-                    logging.info(f"stitch: symlinked cam {cam}: {abs_path} -> {dst}")
-            img_rel[cam] = os.path.join(f"cam{cam}", rel_name)
+                logging.info(f"stitch: symlinked cam {cam}: {abs_path} -> {dst}")
+                img_rel[cam] = f"cam{cam}/{rel_name}"
+
         logging.info(f"stitch: img_rel={img_rel}")
 
         ordered_imgs = [img_rel[c] for c in sorted(img_rel.keys())]
@@ -424,24 +587,25 @@ def stitch(
             logging.info(f"stitch: equirect.pto content:\n{pto_content}")
             with open(eq_pto_path, 'w') as f:
                 f.write(pto_content)
-
+            
             raw_jpg = os.path.join(workdir, "equirect_raw.jpg")
             final_name = f"{base_name}_{res_suffix}_equirect.jpg"
             final_path = os.path.join(output_dir, final_name)
             logging.info(f"stitch: equirect output will be {final_path}")
 
+            logging.info("stitch: using nona+multiblend for equirect")
             if run_nona(eq_pto_path, os.path.join(workdir, "out"), ordered_imgs, workdir):
-                existing_tifs = [t for t in out_tifs if os.path.exists(os.path.join(workdir, t))]
-                logging.info(f"stitch: equirect nona produced tifs: {existing_tifs}")
-                if run_multiblend(existing_tifs, raw_jpg, 80, workdir):
-                    logging.info(f"stitch: equirect multiblend OK, raw_jpg exists={os.path.exists(raw_jpg)}")
-                    if sharpen_jpg(raw_jpg, final_path):
-                        results['equirect'] = {'path': final_path, 'name': final_name}
-                        logging.info(f"stitch: equirect SUCCESS -> {final_path}")
+                    existing_tifs = [t for t in out_tifs if os.path.exists(os.path.join(workdir, t))]
+                    logging.info(f"stitch: equirect nona produced tifs: {existing_tifs}")
+                    if run_multiblend(existing_tifs, raw_jpg, 80, workdir):
+                        logging.info(f"stitch: equirect multiblend OK, raw_jpg exists={os.path.exists(raw_jpg)}")
+                        if sharpen_jpg(raw_jpg, final_path):
+                            results['equirect'] = {'path': final_path, 'name': final_name}
+                            logging.info(f"stitch: equirect SUCCESS -> {final_path}")
+                        else:
+                            logging.error("stitch: equirect sharpen failed")
                     else:
-                        logging.error("stitch: equirect sharpen failed")
-                else:
-                    logging.error("stitch: equirect multiblend failed")
+                        logging.error("stitch: equirect multiblend failed")
             else:
                 logging.error("stitch: equirect nona failed")
 
@@ -462,7 +626,7 @@ def stitch(
             logging.info(f"stitch: fisheye.pto content:\n{pto_content}")
             with open(fy_pto_path, 'w') as f:
                 f.write(pto_content)
-
+            
             rotate_fisheye_pto(fy_pto_path)
 
             raw_jpg   = os.path.join(workdir, "fisheye_raw.jpg")
@@ -470,27 +634,27 @@ def stitch(
             final_path = os.path.join(output_dir, final_name)
             logging.info(f"stitch: fisheye output will be {final_path}")
 
+            logging.info("stitch: using nona+multiblend for fisheye")
             if run_nona(fy_pto_path, os.path.join(workdir, "out"), ordered_imgs, workdir):
-                existing_tifs = [t for t in out_tifs if os.path.exists(os.path.join(workdir, t))]
-                logging.info(f"stitch: fisheye nona produced tifs: {existing_tifs}")
-                if run_multiblend(existing_tifs, raw_jpg, 90, workdir):
-                    logging.info(f"stitch: fisheye multiblend OK, raw_jpg exists={os.path.exists(raw_jpg)}")
-                    actual_dims = get_image_dimensions(raw_jpg)
-                    mask_w, mask_h = actual_dims if actual_dims else (fw, fh)
-                    logging.info(f"stitch: fisheye raw_jpg actual dims={mask_w}x{mask_h}")
-                    masked_path = raw_jpg + "_masked.jpg"
-                    if apply_fisheye_mask(raw_jpg, mask_w, mask_h, masked_path):
-                        shutil.move(masked_path, final_path)
-                        results['fisheye'] = {'path': final_path, 'name': final_name}
-                        logging.info(f"stitch: fisheye SUCCESS -> {final_path}")
-                    else:
-                        logging.warning("stitch: fisheye mask failed, falling back to sharpened un-masked")
-                        # fall back: at least save the un-masked version
-                        if sharpen_jpg(raw_jpg, final_path):
+                    existing_tifs = [t for t in out_tifs if os.path.exists(os.path.join(workdir, t))]
+                    logging.info(f"stitch: fisheye nona produced tifs: {existing_tifs}")
+                    if run_multiblend(existing_tifs, raw_jpg, 90, workdir):
+                        logging.info(f"stitch: fisheye multiblend OK, raw_jpg exists={os.path.exists(raw_jpg)}")
+                        actual_dims = get_image_dimensions(raw_jpg)
+                        mask_w, mask_h = actual_dims if actual_dims else (fw, fh)
+                        logging.info(f"stitch: fisheye raw_jpg actual dims={mask_w}x{mask_h}")
+                        masked_path = raw_jpg + "_masked.jpg"
+                        if apply_fisheye_mask(raw_jpg, mask_w, mask_h, masked_path):
+                            shutil.move(masked_path, final_path)
                             results['fisheye'] = {'path': final_path, 'name': final_name}
-                            logging.info(f"stitch: fisheye fallback SUCCESS -> {final_path}")
-                else:
-                    logging.error("stitch: fisheye multiblend failed")
+                            logging.info(f"stitch: fisheye SUCCESS -> {final_path}")
+                        else:
+                            logging.warning("stitch: fisheye mask failed, falling back to sharpened un-masked")
+                            if sharpen_jpg(raw_jpg, final_path):
+                                results['fisheye'] = {'path': final_path, 'name': final_name}
+                                logging.info(f"stitch: fisheye fallback SUCCESS -> {final_path}")
+                    else:
+                        logging.error("stitch: fisheye multiblend failed")
             else:
                 logging.error("stitch: fisheye nona failed")
 
@@ -511,6 +675,7 @@ def main():
     parser.add_argument('--output-dir',    required=True)
     parser.add_argument('--base-name',     required=True)
     parser.add_argument('--hires',         action='store_true')
+    parser.add_argument('--long',          action='store_true', help='Long-integration stacked image')
     parser.add_argument('--fisheye',       action='store_true')
     parser.add_argument('--equirect',      action='store_true')
     args = parser.parse_args()
@@ -528,6 +693,7 @@ def main():
         output_dir=args.output_dir,
         base_name=args.base_name,
         hires=args.hires,
+        long_integration=args.long,
         do_fisheye=args.fisheye,
         do_equirect=args.equirect,
     )

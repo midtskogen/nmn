@@ -996,8 +996,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         video.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
     video.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = '0 0';
-    const onWheel = e => { e.preventDefault(); const rect=videoWrapper.getBoundingClientRect(); const mouseX=e.clientX-rect.left; const mouseY=e.clientY-rect.top; const newScale=clamp(scale*(e.deltaY>0?0.9:1.1),1,8); const newPanX=mouseX-(mouseX-panX)*(newScale/scale); const newPanY=mouseY-(mouseY-panY)*(newScale/scale); scale=newScale; if(scale<=1.01){panX=0;panY=0;}else{panX=clamp(newPanX,-(videoWrapper.clientWidth*(scale-1)),0); panY=clamp(newPanY,-(videoWrapper.clientHeight*(scale-1)),0);} updateTransform(); };
-    const onMouseMove = e => { if(!isPanning)return; panX=clamp(startPanX+(e.clientX-panOriginX),-(videoWrapper.clientWidth*(scale-1)),0); panY=clamp(startPanY+(e.clientY-panOriginY),-(videoWrapper.clientHeight*(scale-1)),0); updateTransform(); };
+    const onWheel = e => { e.preventDefault(); const rect=videoWrapper.getBoundingClientRect(); const videoRect=video.getBoundingClientRect(); const mouseX=e.clientX-rect.left; const mouseY=e.clientY-rect.top; const newScale=clamp(scale*(e.deltaY>0?0.9:1.1),1,8); const newPanX=mouseX-(mouseX-panX)*(newScale/scale); const newPanY=mouseY-(mouseY-panY)*(newScale/scale); scale=newScale; if(scale<=1.01){panX=0;panY=0;}else{panX=clamp(newPanX,-(videoRect.width*(scale-1)),0); panY=clamp(newPanY,-(videoRect.height*(scale-1)),0);} updateTransform(); };
+    const onMouseMove = e => { if(!isPanning)return; const videoRect=video.getBoundingClientRect(); panX=clamp(startPanX+(e.clientX-panOriginX),-(videoRect.width*(scale-1)),0); panY=clamp(startPanY+(e.clientY-panOriginY),-(videoRect.height*(scale-1)),0); updateTransform(); };
     const onMouseUp = () => { isPanning=false; videoWrapper.style.cursor='default'; window.removeEventListener('mousemove',onMouseMove); window.removeEventListener('mouseup',onMouseUp); };
     const onMouseDown = e => { if(e.button!==0)return; e.preventDefault(); isPanning=true; videoWrapper.style.cursor='grabbing'; panOriginX=e.clientX; panOriginY=e.clientY; startPanX=panX; startPanY=panY; window.addEventListener('mousemove',onMouseMove); window.addEventListener('mouseup',onMouseUp); };
     videoWrapper.addEventListener('wheel', onWheel); videoWrapper.addEventListener('mousedown', onMouseDown);
@@ -1354,23 +1354,44 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
         img.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
-    img.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = '0 0';
+    img.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = 'center center';
 
     const onWheel = e => {
         e.preventDefault();
         const rect = imageWrapper.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left, mouseY = e.clientY - rect.top;
+        const imgNaturalWidth = img.naturalWidth || img.offsetWidth;
+        const imgNaturalHeight = img.naturalHeight || img.offsetHeight;
+        const wrapperAspect = rect.width / rect.height;
+        const imgAspect = imgNaturalWidth / imgNaturalHeight;
+        let baseImgWidth, baseImgHeight, baseImgX, baseImgY;
+        if (imgAspect > wrapperAspect) {
+            baseImgWidth = rect.width;
+            baseImgHeight = rect.width / imgAspect;
+            baseImgX = 0;
+            baseImgY = (rect.height - baseImgHeight) / 2;
+        } else {
+            baseImgWidth = rect.height * imgAspect;
+            baseImgHeight = rect.height;
+            baseImgX = (rect.width - baseImgWidth) / 2;
+            baseImgY = 0;
+        }
+        const centerX = baseImgX + baseImgWidth / 2;
+        const centerY = baseImgY + baseImgHeight / 2;
+        const mouseX = e.clientX - rect.left - centerX;
+        const mouseY = e.clientY - rect.top - centerY;
         const newScale = clamp(scale * (e.deltaY > 0 ? 0.9 : 1.1), 1, 8);
         const newPanX = mouseX - (mouseX - panX) * (newScale / scale);
         const newPanY = mouseY - (mouseY - panY) * (newScale / scale);
         scale = newScale;
         if (scale <= 1.01) { panX = 0; panY = 0; } else {
-            panX = clamp(newPanX, -(imageWrapper.clientWidth * (scale - 1)), 0);
-            panY = clamp(newPanY, -(imageWrapper.clientHeight * (scale - 1)), 0);
+            const maxPanX = baseImgWidth * (scale - 1) / 2;
+            const maxPanY = baseImgHeight * (scale - 1) / 2;
+            panX = clamp(newPanX, -maxPanX, maxPanX);
+            panY = clamp(newPanY, -maxPanY, maxPanY);
         }
         updateTransform();
     };
-    const onMouseMove = e => { if (!isPanning) return; panX = clamp(startPanX + (e.clientX - panOriginX), -(imageWrapper.clientWidth * (scale - 1)), 0); panY = clamp(startPanY + (e.clientY - panOriginY), -(imageWrapper.clientHeight * (scale - 1)), 0); updateTransform(); };
+    const onMouseMove = e => { if (!isPanning) return; const rect = imageWrapper.getBoundingClientRect(); const imgNaturalWidth = img.naturalWidth || img.offsetWidth; const imgNaturalHeight = img.naturalHeight || img.offsetHeight; const wrapperAspect = rect.width / rect.height; const imgAspect = imgNaturalWidth / imgNaturalHeight; let baseImgWidth, baseImgHeight; if (imgAspect > wrapperAspect) { baseImgWidth = rect.width; baseImgHeight = rect.width / imgAspect; } else { baseImgWidth = rect.height * imgAspect; baseImgHeight = rect.height; } const maxPanX = baseImgWidth * (scale - 1) / 2; const maxPanY = baseImgHeight * (scale - 1) / 2; panX = clamp(startPanX + (e.clientX - panOriginX), -maxPanX, maxPanX); panY = clamp(startPanY + (e.clientY - panOriginY), -maxPanY, maxPanY); updateTransform(); };
     const onMouseUp = () => { isPanning = false; imageWrapper.style.cursor = 'default'; window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
     const onMouseDown = e => { if (e.button !== 0) return; e.preventDefault(); isPanning = true; imageWrapper.style.cursor = 'grabbing'; panOriginX = e.clientX; panOriginY = e.clientY; startPanX = panX; startPanY = panY; window.addEventListener('mousemove', onMouseMove); window.addEventListener('mouseup', onMouseUp); };
     imageWrapper.addEventListener('wheel', onWheel); imageWrapper.addEventListener('mousedown', onMouseDown);
@@ -1754,8 +1775,8 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
         videoEl.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
     videoEl.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = '0 0';
-    const onWheel = e => { e.preventDefault(); const rect=videoContainer.getBoundingClientRect(); const mouseX=e.clientX-rect.left; const mouseY=e.clientY-rect.top; const newScale=clamp(scale*(e.deltaY>0?0.9:1.1),1,8); const newPanX=mouseX-(mouseX-panX)*(newScale/scale); const newPanY=mouseY-(mouseY-panY)*(newScale/scale); scale=newScale; if(scale<=1.01){panX=0;panY=0;}else{panX=clamp(newPanX,-(videoContainer.clientWidth*(scale-1)),0); panY=clamp(newPanY,-(videoContainer.clientHeight*(scale-1)),0);} updateTransform(); };
-    const onMouseMove = e => { if(!isPanning)return; panX=clamp(startPanX+(e.clientX-panOriginX),-(videoContainer.clientWidth*(scale-1)),0); panY=clamp(startPanY+(e.clientY-panOriginY),-(videoContainer.clientHeight*(scale-1)),0); updateTransform(); };
+    const onWheel = e => { e.preventDefault(); const rect=videoContainer.getBoundingClientRect(); const videoRect=videoEl.getBoundingClientRect(); const mouseX=e.clientX-rect.left; const mouseY=e.clientY-rect.top; const newScale=clamp(scale*(e.deltaY>0?0.9:1.1),1,8); const newPanX=mouseX-(mouseX-panX)*(newScale/scale); const newPanY=mouseY-(mouseY-panY)*(newScale/scale); scale=newScale; if(scale<=1.01){panX=0;panY=0;}else{panX=clamp(newPanX,-(videoRect.width*(scale-1)),0); panY=clamp(newPanY,-(videoRect.height*(scale-1)),0);} updateTransform(); };
+    const onMouseMove = e => { if(!isPanning)return; const videoRect=videoEl.getBoundingClientRect(); panX=clamp(startPanX+(e.clientX-panOriginX),-(videoRect.width*(scale-1)),0); panY=clamp(startPanY+(e.clientY-panOriginY),-(videoRect.height*(scale-1)),0); updateTransform(); };
     const onMouseUp = () => { isPanning=false; videoContainer.style.cursor='grab'; window.removeEventListener('mousemove',onMouseMove); window.removeEventListener('mouseup',onMouseUp); };
     const onMouseDown = e => { if(e.button!==0)return; e.preventDefault(); isPanning=true; videoContainer.style.cursor='grabbing'; panOriginX=e.clientX; panOriginY=e.clientY; startPanX=panX; startPanY=panY; window.addEventListener('mousemove',onMouseMove); window.addEventListener('mouseup',onMouseUp); };
     let cursorIdleTimer=null; const handleIdleCursor=()=>{if(!videoContainer||!document.fullscreenElement)return; videoContainer.style.cursor='default'; clearTimeout(cursorIdleTimer); cursorIdleTimer=setTimeout(()=>{videoContainer.style.cursor='none';},2000);};

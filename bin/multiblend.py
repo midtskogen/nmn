@@ -1720,9 +1720,12 @@ def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
 
-    print()
-    print(f"multiblend.py v{__version__} (based on David Horman's multiblend)")
-    print("-" * 60)
+    _hdr_verbosity = 1 + argv.count('-v') + argv.count('--verbose') \
+                       - argv.count('-q') - argv.count('--quiet')
+    if _hdr_verbosity >= 1:
+        print()
+        print(f"multiblend.py v{__version__} (based on David Horman's multiblend)")
+        print("-" * 60)
 
     if not argv or argv[0] in ('-h', '--help', '/?'):
         _help()
@@ -1730,7 +1733,8 @@ def main(argv=None):
     if len(argv) < 2:
         sys.exit("not enough arguments (try --help)")
 
-    print()
+    if _hdr_verbosity >= 1:
+        print()
 
     max_levels       = 1_000_000
     sub_levels       = 0

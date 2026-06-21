@@ -894,38 +894,79 @@ if _NUMBA_OK:
                     b[row, col] = b[src_r, src_c]
 
     @_njit(parallel=True, cache=True)
+    def _nb_assign_mask(assignment, i_val, mask):
+        """Fill mask[r,c] = 1.0 where assignment[r,c]==i_val, else 0.0 (full workspace)."""
+        H = assignment.shape[0]; W = assignment.shape[1]
+        for r in _prange(H):
+            for c in range(W):
+                mask[r, c] = np.float32(1.0) if assignment[r, c] == i_val else np.float32(0.0)
+
+    @_njit(parallel=True, cache=True)
     def _nb_fill_border(ws, r0, r1, c0, c1):
-        """Fill gauss[0] (C,H,W) outside [r0:r1, c0:c1] by edge replication.
-        Order: top/bottom rows first (band only), then left/right cols (full height)
-        so corners are filled from the already-replicated edge rows."""
+        """Fill gauss[0] (C,H,W) outside [r0:r1, c0:c1] by mirror (symmetric) padding.
+        Mirror: row r0-1 → r0, r0-2 → r0+1, … so the extension mirrors image content.
+        This prevents constant edge pixels from biasing the coarse Gaussian levels,
+        which causes visible brightness gradients (vignetting) at image boundaries.
+        Order: top/bottom rows first (image-col band only), then left/right cols (full
+        height including already-mirrored top/bottom) so corners get double-mirror."""
         C = ws.shape[0]; H = ws.shape[1]; W = ws.shape[2]
         if r0 > 0:
             for c_ri in _prange(C * r0):
                 ch = c_ri // r0
                 ri = c_ri %  r0
+                src_r = 2 * r0 - 1 - ri        # mirror: ri=r0-1 → r0, ri=0 → 2r0-1
+                if src_r >= r1: src_r = r1 - 1  # clamp to last image row
                 for col in range(c0, c1):
-                    ws[ch, ri, col] = ws[ch, r0, col]
+                    ws[ch, ri, col] = ws[ch, src_r, col]
         n_bot = H - r1
         if n_bot > 0:
             for c_ri in _prange(C * n_bot):
                 ch = c_ri // n_bot
-                ri = r1 + c_ri % n_bot
+                ri = c_ri % n_bot
+                src_r = r1 - 1 - ri             # mirror: ri=0 → r1-1, ri=1 → r1-2
+                if src_r < r0: src_r = r0       # clamp to first image row
                 for col in range(c0, c1):
-                    ws[ch, ri, col] = ws[ch, r1 - 1, col]
+                    ws[ch, r1 + ri, col] = ws[ch, src_r, col]
         if c0 > 0:
             for c_ri in _prange(C * H):
                 ch = c_ri // H
                 ri = c_ri %  H
-                v = ws[ch, ri, c0]
                 for col in range(c0):
-                    ws[ch, ri, col] = v
+                    src_c = 2 * c0 - 1 - col    # mirror: col=c0-1 → c0, col=0 → 2c0-1
+                    if src_c >= c1: src_c = c1 - 1
+                    ws[ch, ri, col] = ws[ch, ri, src_c]
         if c1 < W:
             for c_ri in _prange(C * H):
                 ch = c_ri // H
                 ri = c_ri %  H
-                v = ws[ch, ri, c1 - 1]
                 for col in range(c1, W):
-                    ws[ch, ri, col] = v
+                    src_c = 2 * c1 - 1 - col    # mirror: col=c1 → c1-1, col=c1+1 → c1-2
+                    if src_c < c0: src_c = c0
+                    ws[ch, ri, col] = ws[ch, ri, src_c]
+
+    @_njit(parallel=True, cache=True)
+    def _nb_gamma_u8(src, gamma, dst):
+        """Apply power-curve (gamma) correction to uint8.
+        dst = round((src/255)^gamma * 255).  Output always in [0,255] – never clips."""
+        H = src.shape[0]; W = src.shape[1]
+        for row in _prange(H):
+            for col in range(W):
+                v = np.float32(src[row, col]) * np.float32(1.0 / 255.0)
+                if v > np.float32(0.0):
+                    v = v ** gamma
+                dst[row, col] = np.uint8(v * np.float32(255.0) + np.float32(0.5))
+
+    @_njit(parallel=True, cache=True)
+    def _nb_gamma_u16(src, gamma, dst):
+        """Apply power-curve (gamma) correction to uint16.
+        dst = round((src/65535)^gamma * 65535).  Output always in [0,65535] – never clips."""
+        H = src.shape[0]; W = src.shape[1]
+        for row in _prange(H):
+            for col in range(W):
+                v = np.float32(src[row, col]) * np.float32(1.0 / 65535.0)
+                if v > np.float32(0.0):
+                    v = v ** gamma
+                dst[row, col] = np.uint16(v * np.float32(65535.0) + np.float32(0.5))
 
     @_njit(parallel=True, cache=True)
     def _nb_dither_clip_u8(src, dither, out):
@@ -1243,14 +1284,24 @@ def _place_channels_3d(img: ImageInfo, workheight: int, workwidth: int, bgr: boo
     for c in range(3):
         ci = (2 - c) if bgr else c
         ws[c, r0:r1, c0:c1] = img.channels[ci]
-        if r0 > 0:            ws[c, :r0, c0:c1] = ws[c, r0, c0:c1]
-        if r1 < workheight:   ws[c, r1:, c0:c1] = ws[c, r1 - 1, c0:c1]
-        if c0 > 0:            ws[c, :, :c0]     = ws[c, :, c0:c0 + 1]
-        if c1 < workwidth:    ws[c, :, c1:]     = ws[c, :, c1 - 1:c1]
+        if r0 > 0:
+            src_r = np.clip(np.arange(2 * r0 - 1, r0 - 1, -1), r0, r1 - 1)
+            ws[c, :r0, c0:c1] = ws[c][src_r, c0:c1]
+        if r1 < workheight:
+            n_bot = workheight - r1
+            src_r = np.clip(np.arange(r1 - 1, r1 - 1 - n_bot, -1), r0, r1 - 1)
+            ws[c, r1:, c0:c1] = ws[c][src_r, c0:c1]
+        if c0 > 0:
+            src_c = np.clip(np.arange(2 * c0 - 1, c0 - 1, -1), c0, c1 - 1)
+            ws[c, :, :c0] = ws[c][:, src_c]
+        if c1 < workwidth:
+            n_right = workwidth - c1
+            src_c = np.clip(np.arange(c1 - 1, c1 - 1 - n_right, -1), c0, c1 - 1)
+            ws[c, :, c1:] = ws[c][:, src_c]
     return ws
 
 
-def _exposure_correct(images: List[ImageInfo]) -> None:
+def _exposure_correct(images: List[ImageInfo], verbosity: int = 1) -> None:
     """Per-channel multiplicative gain correction to normalise overlap-zone means.
 
     Image 0 is the reference (gain=1).  For every spatially overlapping pair
@@ -1298,31 +1349,56 @@ def _exposure_correct(images: List[ImageInfo]) -> None:
         for k, (i, j, lr) in enumerate(ch_edges):
             if i > 0: A[k, i - 1] =  1.0
             if j > 0: A[k, j - 1] = -1.0
-            b[k] = lr
+            b[k] = -lr
         x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
         gains_log[1:, ch] = x
 
-    # Cap gains to ±2 stops (factor 4) to avoid wild corrections.
-    gains_log = np.clip(gains_log, -np.log(4), np.log(4))
-
+    # Cap gains to ±4 stops (factor 16) to handle large exposure differences.
+    _MAX_STOPS = np.log(16)
+    capped = gains_log.copy()
+    gains_log = np.clip(gains_log, -_MAX_STOPS, _MAX_STOPS)
     for i, img in enumerate(images):
-        g = np.exp(gains_log[i])          # shape (3,)
-        if np.allclose(g, 1.0, atol=1e-5):
-            continue
         dtype = img.channels[0].dtype
+        maxv_f = float(0xffff if dtype == np.uint16 else 0xff)
+
+        # Convert per-channel log-gains to gamma exponents.
+        # If source_mean^gamma ≈ target_mean, then gamma = log(target)/log(source).
+        # A power function maps [0,1]→[0,1] for gamma>0, so highlights never clip.
+        gammas = np.ones(3, dtype=np.float64)
+        for ch in range(3):
+            if abs(gains_log[i, ch]) < 1e-7:
+                continue
+            mean_norm = float(np.mean(img.channels[ch].astype(np.float64))) / maxv_f
+            if not (1e-4 < mean_norm < 1.0 - 1e-4):
+                continue  # all-black or all-white channel — skip
+            target = float(np.clip(mean_norm * np.exp(gains_log[i, ch]), 1e-4, 1.0 - 1e-4))
+            gammas[ch] = np.log(target) / np.log(mean_norm)
+        gammas = np.clip(gammas, 0.1, 10.0)
+
+        if verbosity >= 2:
+            g   = np.exp(gains_log[i])
+            raw = np.exp(capped[i])
+            cap_tag = " (CAPPED)" if np.any(np.abs(capped[i]) > _MAX_STOPS) else ""
+            print(f"    exposure img {i}: gamma R={gammas[0]:.3f} G={gammas[1]:.3f} B={gammas[2]:.3f}"
+                  f"  gain R={g[0]:.3f} G={g[1]:.3f} B={g[2]:.3f}{cap_tag}")
+
+        if np.allclose(gammas, 1.0, atol=1e-5):
+            continue
+
         if _NUMBA_OK:
             if dtype == np.uint8:
                 for ch in range(3):
-                    _nb_gain_clip_u8(img.channels[ch], np.float32(g[ch]), img.channels[ch])
+                    if abs(gammas[ch] - 1.0) > 1e-5:
+                        _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
             else:
                 for ch in range(3):
-                    _nb_gain_clip_u16(img.channels[ch], np.float32(g[ch]), img.channels[ch])
+                    if abs(gammas[ch] - 1.0) > 1e-5:
+                        _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
         else:
-            maxv = np.float32(0xffff if dtype == np.uint16 else 0xff)
             for ch in range(3):
-                arr = img.channels[ch].astype(np.float32)
-                arr *= np.float32(g[ch])
-                img.channels[ch] = np.clip(arr, 0, maxv).astype(dtype)
+                if abs(gammas[ch] - 1.0) > 1e-5:
+                    arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
+                    img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
 
 
 def blend(images: List[ImageInfo], assignment: np.ndarray,
@@ -1333,7 +1409,7 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
         print("  blending...")
 
     if exposure_correct:
-        _exposure_correct(images)
+        _exposure_correct(images, verbosity=verbosity)
 
     if levels == 0:
         dtype      = np.uint8 if workbpp == 8 else np.uint16
@@ -1368,22 +1444,20 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
         r0, r1 = img.ypos, img.ypos + img.height
         c0, c1 = img.xpos, img.xpos + img.width
 
-        # Mask pyramid
-        mr0 = max(0, r0 - 1); mr1 = min(workheight, r1 + 1)
-        mc0 = max(0, c0 - 1); mc1 = min(workwidth,  c1 + 1)
-        mask_g[0][mr0:mr1, mc0:mc1] = (assignment[mr0:mr1, mc0:mc1] == i)
+        # Mask pyramid: use the full workspace so the Gaussian downsample does not
+        # taper near the image bounding-box edge.  A banded init (±1 row/col) leaves
+        # zeroes outside the band; _nb_ds2 propagates those zeroes inward, causing a
+        # brightness gradient up to 2^(levels-1) pixels wide near any image edge that
+        # doesn't reach the workspace boundary.
+        if _NUMBA_OK:
+            _nb_assign_mask(assignment, np.uint8(i), mask_g[0])
+        else:
+            mask_g[0][:] = (assignment == np.uint8(i))
         for l in range(levels - 1):
             if _NUMBA_OK:
                 _nb_ds2(mask_g[l], mask_g[l + 1])
             else:
-                rl0 = r0 >> l;  rl1 = min((r1 + (1 << l) - 1) >> l, pyr_shapes[l][0])
-                cl0 = c0 >> l;  cl1 = min((c1 + (1 << l) - 1) >> l, pyr_shapes[l][1])
-                _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1], rl0, rl1, cl0, cl1)
-        # Reset band to zero so the next image starts with a zero background.
-        # Both _nb_ds2 (full-workspace) and _downsample_into (banded) propagate the
-        # surrounding values into dst, so stale non-zero values here would corrupt
-        # mask at all pyramid levels for the next image.
-        mask_g[0][mr0:mr1, mc0:mc1] = 0
+                _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
 
         # Place all 3 channels into gauss[0] in-place
         for c in range(3):

@@ -225,5 +225,10 @@
     "saturation": "Metning",
     "download_image": "Last ned bilde",
     "previous": "Forrige",
-    "next": "Neste"
+    "next": "Neste",
+    "sort_by_label": "Sorter etter:",
+    "sort_by_time": "Tid",
+    "sort_by_station": "Stasjon",
+    "sort_by_distance": "Avstand",
+    "then_sort_by_label": "deretter:"
 }

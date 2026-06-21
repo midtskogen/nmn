@@ -192,5 +192,10 @@
     "saturation": "Sytost",
     "download_image": "Stáhnout obrázek",
     "previous": "Předchozí",
-    "next": "Další"
+    "next": "Další",
+    "sort_by_label": "Seřadit podle:",
+    "sort_by_time": "času",
+    "sort_by_station": "stanice",
+    "sort_by_distance": "vzdálenosti",
+    "then_sort_by_label": "pak:"
 }

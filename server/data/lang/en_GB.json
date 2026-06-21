@@ -224,5 +224,10 @@
     "saturation": "Saturation",
     "download_image": "Download Image",
     "previous": "Previous",
-    "next": "Next"
+    "next": "Next",
+    "sort_by_label": "Sort by:",
+    "sort_by_time": "Time",
+    "sort_by_station": "Station",
+    "sort_by_distance": "Distance",
+    "then_sort_by_label": "then:"
 }

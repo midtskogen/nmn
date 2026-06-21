@@ -192,5 +192,10 @@
     "saturation": "Kylläisyys",
     "download_image": "Lataa kuva",
     "previous": "Edellinen",
-    "next": "Seuraava"
+    "next": "Seuraava",
+    "sort_by_label": "Järjestä:",
+    "sort_by_time": "aikaan",
+    "sort_by_station": "asemaan",
+    "sort_by_distance": "etäisyyteen",
+    "then_sort_by_label": "sitten:"
 }

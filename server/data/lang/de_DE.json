@@ -192,5 +192,10 @@
     "saturation": "Sättigung",
     "download_image": "Bild herunterladen",
     "previous": "Zurück",
-    "next": "Weiter"
+    "next": "Weiter",
+    "sort_by_label": "Sortieren nach:",
+    "sort_by_time": "Zeit",
+    "sort_by_station": "Station",
+    "sort_by_distance": "Entfernung",
+    "then_sort_by_label": "dann:"
 }

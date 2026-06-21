@@ -386,7 +386,7 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
  * @param {boolean} is24hFilter - Whether to filter for the last 24 hours only.
  * @param {function} onStrikeClick - Callback for when a strike list item is clicked.
  */
-export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hFilter, onStrikeClick) {
+export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hFilter, onStrikeClick, sortBy = 'time', subSortBy = 'time') {
     const lightningList = document.getElementById('lightning-list');
     
     // Store the last selected strike to re-apply highlighting
@@ -430,10 +430,39 @@ export function displayLightningStrikes(strikes, stationInfo, cameraFovs, is24hF
         groupedStrikes[groupKey].strikes.push(strike);
     });
 
+    // Sort grouped strikes based on sortBy parameter
+    const sortedGroups = Object.values(groupedStrikes);
+    if (sortBy === 'time') {
+        sortedGroups.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    } else if (sortBy === 'station') {
+        // Primary sort by station code
+        sortedGroups.sort((a, b) => a.stationCode.localeCompare(b.stationCode));
+        // Secondary sort within each station group
+        if (subSortBy === 'time') {
+            sortedGroups.sort((a, b) => {
+                if (a.stationCode !== b.stationCode) return 0;
+                return new Date(b.timestamp) - new Date(a.timestamp);
+            });
+        } else if (subSortBy === 'distance') {
+            sortedGroups.sort((a, b) => {
+                if (a.stationCode !== b.stationCode) return 0;
+                const minDistA = Math.min(...a.strikes.map(s => s.dist));
+                const minDistB = Math.min(...b.strikes.map(s => s.dist));
+                return minDistA - minDistB;
+            });
+        }
+    } else if (sortBy === 'distance') {
+        sortedGroups.sort((a, b) => {
+            const minDistA = Math.min(...a.strikes.map(s => s.dist));
+            const minDistB = Math.min(...b.strikes.map(s => s.dist));
+            return minDistA - minDistB;
+        });
+    }
+
     lightningList.replaceChildren();
     const ul = createEl('ul', { className: 'lightning-list' });
     
-    Object.values(groupedStrikes).forEach((group, groupIndex) => {
+    sortedGroups.forEach((group, groupIndex) => {
         // Sort strikes in group by distance
         group.strikes.sort((a, b) => a.dist - b.dist);
         

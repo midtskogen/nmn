@@ -134,7 +134,7 @@ function initializeApp() {
                 chartHandler.plotAuroraChart(chartCtx, formattedKpData, handleChartBarClick);
             }
 
-            uiManager.displayLightningStrikes(data.lightning, stationsData, cameraFovs, false, handleLightningSelect);
+            uiManager.displayLightningStrikes(data.lightning, stationsData, cameraFovs, false, handleLightningSelect, 'time', 'time');
             mapHandler.displayLightningStrikes(false, handleLightningSelect);
             handleMapMoveEnd();
             uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
@@ -329,6 +329,12 @@ passData.passes : aircraftData.crossings;
             isFirstCameraClickSincePassChange = true;
         }
 
+        // Uncheck fisheye and equirect since satellite/aircraft selection only selects specific cameras
+        const fisheyeSwitch = document.getElementById('fisheye-switch');
+        const equirectSwitch = document.getElementById('equirect-switch');
+        if (fisheyeSwitch) fisheyeSwitch.checked = false;
+        if (equirectSwitch) equirectSwitch.checked = false;
+
         Object.keys(mapHandler.getStationMarkers()).forEach(stationId => {
             const baseIcon = getBaseIconForStation(stationId);
             mapHandler.updateStationMarkerIcon(stationId, selectedStations.has(stationId) ? mapHandler.redIcon : baseIcon);
@@ -370,6 +376,12 @@ passData.passes : aircraftData.crossings;
                 const inViewCams = uiManager.getCamerasInView(nearestStation, strike, cameraFovs);
                 document.querySelectorAll('input[name="cameras"]').forEach(cb => cb.checked = inViewCams.includes(cb.value));
             }
+            
+            // Uncheck fisheye and equirect since lightning selection only selects specific cameras
+            const fisheyeSwitch = document.getElementById('fisheye-switch');
+            const equirectSwitch = document.getElementById('equirect-switch');
+            if (fisheyeSwitch) fisheyeSwitch.checked = false;
+            if (equirectSwitch) equirectSwitch.checked = false;
             
             // Scroll to download form to make it visible
             dom.downloadForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -822,8 +834,35 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
         });
         document.getElementById('lightning-24h-toggle').addEventListener('change', () => {
             const is24h = document.getElementById('lightning-24h-toggle').checked;
-            uiManager.displayLightningStrikes(lightningData, stationsData, cameraFovs, is24h, handleLightningSelect);
+            const sortBy = document.querySelector('input[name="lightning-sort"]:checked').value;
+            const subSortBy = document.querySelector('input[name="lightning-station-subsort"]:checked')?.value || 'time';
+            uiManager.displayLightningStrikes(lightningData, stationsData, cameraFovs, is24h, handleLightningSelect, sortBy, subSortBy);
             mapHandler.displayLightningStrikes(is24h, handleLightningSelect);
+        });
+        document.querySelectorAll('input[name="lightning-sort"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                const is24h = document.getElementById('lightning-24h-toggle').checked;
+                const sortBy = document.querySelector('input[name="lightning-sort"]:checked').value;
+                const subSortBy = document.querySelector('input[name="lightning-station-subsort"]:checked')?.value || 'time';
+                // Show/hide sub-sort options based on main sort selection
+                const subSortDiv = document.getElementById('lightning-station-subsort');
+                if (sortBy === 'station') {
+                    subSortDiv.style.display = 'block';
+                } else {
+                    subSortDiv.style.display = 'none';
+                }
+                uiManager.displayLightningStrikes(lightningData, stationsData, cameraFovs, is24h, handleLightningSelect, sortBy, subSortBy);
+                mapHandler.displayLightningStrikes(is24h, handleLightningSelect);
+            });
+        });
+        document.querySelectorAll('input[name="lightning-station-subsort"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                const is24h = document.getElementById('lightning-24h-toggle').checked;
+                const sortBy = document.querySelector('input[name="lightning-sort"]:checked').value;
+                const subSortBy = document.querySelector('input[name="lightning-station-subsort"]:checked').value;
+                uiManager.displayLightningStrikes(lightningData, stationsData, cameraFovs, is24h, handleLightningSelect, sortBy, subSortBy);
+                mapHandler.displayLightningStrikes(is24h, handleLightningSelect);
+            });
         });
         
         // Map snapshot functionality

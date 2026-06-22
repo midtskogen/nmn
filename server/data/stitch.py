@@ -38,7 +38,6 @@ try:
     from PIL import Image
 except ImportError:
     Image = None
-    logging.warning("PIL not available, some image operations may be limited")
 
 # ---------------------------------------------------------------------------
 # Logging — write to the same activity.log as controller.py
@@ -54,6 +53,24 @@ logging.basicConfig(
         logging.StreamHandler(sys.stderr),
     ]
 )
+
+if Image is None:
+    logging.warning("PIL not available, some image operations may be limited")
+
+# Import multiblend from our worktree instead of using subprocess
+# stitch.py is at nmn/server/data/stitch.py, multiblend.py is at nmn/bin/multiblend.py
+# Use realpath to resolve symlinks and get the actual path
+stitch_realpath = os.path.realpath(os.path.abspath(__file__))
+multiblend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(stitch_realpath))), 'bin')
+sys.path.insert(0, multiblend_path)
+logging.info(f"stitch: attempting to import multiblend from {multiblend_path}")
+logging.info(f"stitch: __file__={__file__}, realpath={stitch_realpath}")
+try:
+    import multiblend
+    logging.info(f"stitch: multiblend module imported successfully, version={getattr(multiblend, '__version__', 'unknown')}")
+except ImportError as e:
+    multiblend = None
+    logging.warning(f"stitch: multiblend module not available, falling back to subprocess: {e}")
 
 # ---------------------------------------------------------------------------
 # Constants matching stitch.sh
@@ -287,29 +304,65 @@ def run_multiblend(out_tifs: list, out_jpg: str, quality: int, workdir: str) -> 
 
     # Output to TIFF so we can inspect the alpha channel for gap filling.
     out_tif = out_jpg + '_blend.tif'
-    cmd = [
-        BIN_MULTIBLEND,
-        "--primary-seam-generator=graph-cut",
-        "-d", "8",
-        "-o", out_tif,
-    ] + existing
-    logging.info(f"stitch run_multiblend: cmd={cmd} cwd={workdir}")
-    try:
-        result = subprocess.run(cmd, check=True, timeout=600, capture_output=True, cwd=workdir)
-        if result.stderr:
-            logging.info(f"stitch run_multiblend: stderr={result.stderr.decode('utf-8', errors='ignore')!r}")
-        logging.info("stitch run_multiblend: blend SUCCESS")
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ''
-        stdout = e.stdout.decode('utf-8', errors='ignore') if e.stdout else ''
-        logging.error(f"stitch run_multiblend: FAILED returncode={e.returncode} stderr={stderr!r} stdout={stdout!r}")
-        return False
-    except subprocess.TimeoutExpired:
-        logging.error("stitch run_multiblend: TIMED OUT")
-        return False
-    except FileNotFoundError:
-        logging.error("stitch run_multiblend: 'multiblend' not found in PATH")
-        return False
+    
+    # Use direct function call if multiblend module is available
+    if multiblend is not None:
+        logging.info(f"stitch run_multiblend: using direct multiblend.go() call with exposure correction")
+        try:
+            # Convert to absolute paths for multiblend
+            input_paths = [os.path.join(workdir, t) for t in existing]
+            output_path = os.path.join(workdir, out_tif)
+            logging.info(f"stitch run_multiblend: input_paths={input_paths}, output_path={output_path}")
+            
+            # Define a print function that logs to activity.log
+            log_count = [0]
+            def log_print(text):
+                log_count[0] += 1
+                if text.strip():
+                    for line in text.strip().split('\n'):
+                        if line:
+                            logging.info(f"stitch run_multiblend: {line}")
+            
+            logging.info("stitch run_multiblend: calling multiblend.go()")
+            multiblend.go(
+                input_files=input_paths,
+                output_file=output_path,
+                workbpp_cmd=8,
+                exposure_correct=True,
+                saturation_correct=False,
+                verbosity=2,
+                print_func=log_print,
+            )
+            logging.info(f"stitch run_multiblend: multiblend.go() returned, log_print called {log_count[0]} times")
+            logging.info("stitch run_multiblend: blend SUCCESS")
+        except (ValueError, RuntimeError, FileNotFoundError) as e:
+            logging.error(f"stitch run_multiblend: FAILED {e}")
+            return False
+    else:
+        # Fallback to subprocess call
+        cmd = [
+            BIN_MULTIBLEND,
+            "--primary-seam-generator=graph-cut",
+            "-d", "8",
+            "-o", out_tif,
+        ] + existing
+        logging.info(f"stitch run_multiblend: cmd={cmd} cwd={workdir}")
+        try:
+            result = subprocess.run(cmd, check=True, timeout=600, capture_output=True, cwd=workdir)
+            if result.stderr:
+                logging.info(f"stitch run_multiblend: stderr={result.stderr.decode('utf-8', errors='ignore')!r}")
+            logging.info("stitch run_multiblend: blend SUCCESS")
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ''
+            stdout = e.stdout.decode('utf-8', errors='ignore') if e.stdout else ''
+            logging.error(f"stitch run_multiblend: FAILED returncode={e.returncode} stderr={stderr!r} stdout={stdout!r}")
+            return False
+        except subprocess.TimeoutExpired:
+            logging.error("stitch run_multiblend: TIMED OUT")
+            return False
+        except FileNotFoundError:
+            logging.error("stitch run_multiblend: 'multiblend' not found in PATH")
+            return False
 
     # Convert TIFF to JPEG with gap filling via alpha channel.
     try:

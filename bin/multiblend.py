@@ -37,7 +37,7 @@ import numpy as np
 import tifffile
 from scipy.ndimage import distance_transform_edt, convolve1d
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Callable
 
 __version__ = '0.6.2'
 
@@ -214,7 +214,8 @@ def _geotiff_read(tags: dict) -> Optional[GeoTIFFInfo]:
     return geo
 
 
-def load_images(filenames: List[str], verbosity: int = 1) -> tuple:
+def load_images(filenames: List[str], verbosity: int = 1,
+                print_func: Callable = print) -> tuple:
     """Load TIFF images; returns (images, workbpp, xres, yres, geotiff, workwidth, workheight)."""
     images: List[ImageInfo] = []
     workbpp = None
@@ -224,7 +225,7 @@ def load_images(filenames: List[str], verbosity: int = 1) -> tuple:
 
     for filename in filenames:
         if verbosity >= 1:
-            print(f"  processing {filename}...")
+            print_func(f"  processing {filename}...")
 
         with tifffile.TiffFile(filename) as tif:
             page = tif.pages[0]
@@ -268,7 +269,7 @@ def load_images(filenames: List[str], verbosity: int = 1) -> tuple:
                     xres, yres = tiff_xres, tiff_yres
                 elif tiff_xres > 0 and (tiff_xres != xres or tiff_yres != yres):
                     if verbosity >= 0:
-                        print(f"  WARNING: resolution mismatch ({xres}/{tiff_xres} dpi)")
+                        print_func(f"  WARNING: resolution mismatch ({xres}/{tiff_xres} dpi)")
 
             row_lo, row_hi = _strip_row_hint(page)
             data = tif.asarray()
@@ -614,9 +615,10 @@ def _seam_palette():
     return palette
 
 
-def _save_seams_png(filename: str, assignment: np.ndarray, workwidth: int, workheight: int, verbosity: int):
+def _save_seams_png(filename: str, assignment: np.ndarray, workwidth: int, workheight: int,
+                    verbosity: int, print_func: Callable = print):
     if verbosity >= 1:
-        print(f"  saving seams to {filename}...")
+        print_func(f"  saving seams to {filename}...")
     pal = _seam_palette()
     try:
         import png as _png
@@ -633,12 +635,13 @@ def _save_seams_png(filename: str, assignment: np.ndarray, workwidth: int, workh
         img.putpalette(pal_flat)
         img.save(filename)
     except ImportError:
-        print("WARNING: pypng and Pillow unavailable; cannot save seams PNG")
+        print_func("WARNING: pypng and Pillow unavailable; cannot save seams PNG")
 
 
-def _load_seams_png(filename: str, workwidth: int, workheight: int, verbosity: int) -> np.ndarray:
+def _load_seams_png(filename: str, workwidth: int, workheight: int,
+                    verbosity: int, print_func: Callable = print) -> np.ndarray:
     if verbosity >= 1:
-        print(f"  loading seams from {filename}...")
+        print_func(f"  loading seams from {filename}...")
     try:
         from PIL import Image
         return np.array(Image.open(filename).convert('P'), dtype=np.uint8)
@@ -658,14 +661,15 @@ def compute_seams(images: List[ImageInfo], workwidth: int, workheight: int,
                   seam_load_filename: Optional[str] = None,
                   seam_save_filename: Optional[str] = None,
                   xor_filename: Optional[str] = None,
-                  verbosity: int = 1) -> Tuple[np.ndarray, List[bool]]:
+                  verbosity: int = 1,
+                  print_func: Callable = print) -> Tuple[np.ndarray, List[bool]]:
     n = len(images)
 
     if seam_load_filename:
-        assignment = _load_seams_png(seam_load_filename, workwidth, workheight, verbosity)
+        assignment = _load_seams_png(seam_load_filename, workwidth, workheight, verbosity, print_func)
     else:
         if verbosity >= 1:
-            print("  seaming...")
+            print_func("  seaming...")
         if simple_seam:
             assignment = _simple_seam(images, workwidth, workheight)
         else:
@@ -676,10 +680,10 @@ def compute_seams(images: List[ImageInfo], workwidth: int, workheight: int,
     counts = np.bincount(assignment.ravel(), minlength=n + 1)
     seam_present = [bool(counts[i]) for i in range(n)]
     if not all(seam_present):
-        print("WARNING: some images are completely overlapped")
+        print_func("WARNING: some images are completely overlapped")
 
     if seam_save_filename:
-        _save_seams_png(seam_save_filename, assignment, workwidth, workheight, verbosity)
+        _save_seams_png(seam_save_filename, assignment, workwidth, workheight, verbosity, print_func)
 
     if xor_filename:
         ws_masks2 = _build_workspace_masks(images, workwidth, workheight)
@@ -687,7 +691,7 @@ def compute_seams(images: List[ImageInfo], workwidth: int, workheight: int,
         xor_map   = np.full((workheight, workwidth), 255, dtype=np.uint8)
         for i, m in enumerate(ws_masks2):
             xor_map[m & (coverage == 1)] = i
-        _save_seams_png(xor_filename, xor_map, workwidth, workheight, verbosity)
+        _save_seams_png(xor_filename, xor_map, workwidth, workheight, verbosity, print_func)
 
     return assignment, seam_present
 
@@ -967,6 +971,53 @@ if _NUMBA_OK:
                 if v > np.float32(0.0):
                     v = v ** gamma
                 dst[row, col] = np.uint16(v * np.float32(65535.0) + np.float32(0.5))
+
+    @_njit(parallel=True, cache=True)
+    def _nb_sat_scale_u8(ch0, ch1, ch2, scale):
+        """Scale colour saturation in-place for uint8.
+        corrected = grey + (ch - grey) * scale,  grey = (ch0+ch1+ch2)/3."""
+        H = ch0.shape[0]; W = ch0.shape[1]
+        for row in _prange(H):
+            for col in range(W):
+                v0 = np.float32(ch0[row, col])
+                v1 = np.float32(ch1[row, col])
+                v2 = np.float32(ch2[row, col])
+                g  = (v0 + v1 + v2) * np.float32(1.0 / 3.0)
+                v0 = g + (v0 - g) * scale
+                v1 = g + (v1 - g) * scale
+                v2 = g + (v2 - g) * scale
+                if v0 <   0.0: v0 =   0.0
+                elif v0 > 255.0: v0 = 255.0
+                if v1 <   0.0: v1 =   0.0
+                elif v1 > 255.0: v1 = 255.0
+                if v2 <   0.0: v2 =   0.0
+                elif v2 > 255.0: v2 = 255.0
+                ch0[row, col] = np.uint8(v0 + np.float32(0.5))
+                ch1[row, col] = np.uint8(v1 + np.float32(0.5))
+                ch2[row, col] = np.uint8(v2 + np.float32(0.5))
+
+    @_njit(parallel=True, cache=True)
+    def _nb_sat_scale_u16(ch0, ch1, ch2, scale):
+        """Scale colour saturation in-place for uint16."""
+        H = ch0.shape[0]; W = ch0.shape[1]
+        for row in _prange(H):
+            for col in range(W):
+                v0 = np.float32(ch0[row, col])
+                v1 = np.float32(ch1[row, col])
+                v2 = np.float32(ch2[row, col])
+                g  = (v0 + v1 + v2) * np.float32(1.0 / 3.0)
+                v0 = g + (v0 - g) * scale
+                v1 = g + (v1 - g) * scale
+                v2 = g + (v2 - g) * scale
+                if v0 <     0.0: v0 =     0.0
+                elif v0 > 65535.0: v0 = 65535.0
+                if v1 <     0.0: v1 =     0.0
+                elif v1 > 65535.0: v1 = 65535.0
+                if v2 <     0.0: v2 =     0.0
+                elif v2 > 65535.0: v2 = 65535.0
+                ch0[row, col] = np.uint16(v0 + np.float32(0.5))
+                ch1[row, col] = np.uint16(v1 + np.float32(0.5))
+                ch2[row, col] = np.uint16(v2 + np.float32(0.5))
 
     @_njit(parallel=True, cache=True)
     def _nb_dither_clip_u8(src, dither, out):
@@ -1301,7 +1352,8 @@ def _place_channels_3d(img: ImageInfo, workheight: int, workwidth: int, bgr: boo
     return ws
 
 
-def _exposure_correct(images: List[ImageInfo], verbosity: int = 1) -> None:
+def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
+                      print_func: Callable = print) -> List[dict]:
     """Per-channel multiplicative gain correction to normalise overlap-zone means.
 
     Image 0 is the reference (gain=1).  For every spatially overlapping pair
@@ -1311,7 +1363,8 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1) -> None:
     """
     n = len(images)
     if n < 2:
-        return
+        return [{'gains': [1.0, 1.0, 1.0], 'gammas': [1.0, 1.0, 1.0],
+                 'method': ['none', 'none', 'none'], 'capped': False} for _ in images]
 
     edges = []  # (i, j, ch, log_ratio)  where log_ratio = log(mean_i / mean_j)
     for i in range(n):
@@ -1357,59 +1410,195 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1) -> None:
     _MAX_STOPS = np.log(16)
     capped = gains_log.copy()
     gains_log = np.clip(gains_log, -_MAX_STOPS, _MAX_STOPS)
+    info: List[dict] = []
     for i, img in enumerate(images):
         dtype = img.channels[0].dtype
         maxv_f = float(0xffff if dtype == np.uint16 else 0xff)
 
-        # Convert per-channel log-gains to gamma exponents.
-        # If source_mean^gamma ≈ target_mean, then gamma = log(target)/log(source).
-        # A power function maps [0,1]→[0,1] for gamma>0, so highlights never clip.
-        gammas = np.ones(3, dtype=np.float64)
+        # Per-channel correction strategy (hybrid):
+        #   gain <= 1 (darkening): apply linear gain — exact, never clips when darkening.
+        #   gain >  1 (brightening): apply gamma power curve — prevents highlight clipping.
+        #     gamma = log(target_mean) / log(source_mean)  so source_mean^gamma = target_mean.
+        #
+        # Using gamma for darkening channels too causes opposite-direction power curves on
+        # different channels (e.g. B gamma>1 while R/G gamma<1), which creates hue flips in
+        # the shadows that appear as increased colour saturation artefacts.
+        lin_gains = np.exp(gains_log[i])   # shape (3,) — used directly for gain<=1
+        gammas    = np.ones(3, dtype=np.float64)
+        use_gamma = np.zeros(3, dtype=bool)
         for ch in range(3):
-            if abs(gains_log[i, ch]) < 1e-7:
-                continue
-            mean_norm = float(np.mean(img.channels[ch].astype(np.float64))) / maxv_f
-            if not (1e-4 < mean_norm < 1.0 - 1e-4):
-                continue  # all-black or all-white channel — skip
-            target = float(np.clip(mean_norm * np.exp(gains_log[i, ch]), 1e-4, 1.0 - 1e-4))
-            gammas[ch] = np.log(target) / np.log(mean_norm)
-        gammas = np.clip(gammas, 0.1, 10.0)
+            if gains_log[i, ch] > 1e-7:   # brightening: use gamma
+                mean_norm = float(np.mean(img.channels[ch].astype(np.float64))) / maxv_f
+                if 1e-4 < mean_norm < 1.0 - 1e-4:
+                    target = float(np.clip(mean_norm * lin_gains[ch], 1e-4, 1.0 - 1e-4))
+                    gammas[ch] = np.clip(np.log(target) / np.log(mean_norm), 0.1, 10.0)
+                    use_gamma[ch] = True
 
         if verbosity >= 2:
-            g   = np.exp(gains_log[i])
             raw = np.exp(capped[i])
             cap_tag = " (CAPPED)" if np.any(np.abs(capped[i]) > _MAX_STOPS) else ""
-            print(f"    exposure img {i}: gamma R={gammas[0]:.3f} G={gammas[1]:.3f} B={gammas[2]:.3f}"
-                  f"  gain R={g[0]:.3f} G={g[1]:.3f} B={g[2]:.3f}{cap_tag}")
+            ch_strs = []
+            for ch, name in enumerate('RGB'):
+                if use_gamma[ch]:
+                    ch_strs.append(f"{name}=gamma({gammas[ch]:.3f})")
+                elif abs(lin_gains[ch] - 1.0) > 1e-5:
+                    ch_strs.append(f"{name}=linear({lin_gains[ch]:.3f})")
+            print_func(f"    exposure img {i}: {' '.join(ch_strs)}{cap_tag}")
 
-        if np.allclose(gammas, 1.0, atol=1e-5):
+        method = []
+        for ch in range(3):
+            if use_gamma[ch]:
+                method.append('gamma')
+            elif abs(lin_gains[ch] - 1.0) > 1e-5:
+                method.append('linear')
+            else:
+                method.append('none')
+        info.append({
+            'gains':     lin_gains.tolist(),
+            'gammas':    gammas.tolist(),
+            'method':    method,
+            'capped':    bool(np.any(np.abs(capped[i]) > _MAX_STOPS)),
+        })
+
+        any_change = (np.any(use_gamma) or
+                      np.any(np.abs(gains_log[i]) > 1e-7))
+        if not any_change:
             continue
 
         if _NUMBA_OK:
             if dtype == np.uint8:
                 for ch in range(3):
-                    if abs(gammas[ch] - 1.0) > 1e-5:
+                    if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
                         _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+                    elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
+                        _nb_gain_clip_u8(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
             else:
                 for ch in range(3):
-                    if abs(gammas[ch] - 1.0) > 1e-5:
+                    if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
                         _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+                    elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
+                        _nb_gain_clip_u16(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
         else:
+            maxv_np = np.float32(maxv_f)
             for ch in range(3):
-                if abs(gammas[ch] - 1.0) > 1e-5:
+                if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
                     arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
                     img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
+                elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
+                    arr = img.channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
+                    img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
+
+    return info
+
+
+def _saturation_correct(images: List[ImageInfo], verbosity: int = 1,
+                        print_func: Callable = print) -> List[float]:
+    """Per-image saturation scale correction via overlap-zone RMS chroma ratios.
+
+    For each overlapping pair the RMS chroma (per-pixel deviation from grey,
+    grey = (R+G+B)/3) is compared.  A log-space least-squares solve finds one
+    saturation scale per image (image 0 = reference, scale=1).
+    Correction applied in-place: corrected = grey + (ch - grey) * scale.
+    """
+    n = len(images)
+    if n < 2:
+        return [1.0] * len(images)
+
+    edges = []  # (i, j, log_ratio)  log_ratio = log(chroma_i / chroma_j)
+    for i in range(n):
+        img_i = images[i]
+        r0_i, r1_i = img_i.ypos, img_i.ypos + img_i.height
+        c0_i, c1_i = img_i.xpos, img_i.xpos + img_i.width
+        for j in range(i + 1, n):
+            img_j = images[j]
+            r0_j, r1_j = img_j.ypos, img_j.ypos + img_j.height
+            c0_j, c1_j = img_j.xpos, img_j.xpos + img_j.width
+            r0 = max(r0_i, r0_j); r1 = min(r1_i, r1_j)
+            c0 = max(c0_i, c0_j); c1 = min(c1_i, c1_j)
+            if r1 <= r0 or c1 <= c0:
+                continue
+            chs_i = [images[i].channels[ch][r0 - r0_i:r1 - r0_i, c0 - c0_i:c1 - c0_i]
+                     .astype(np.float64) for ch in range(3)]
+            chs_j = [images[j].channels[ch][r0 - r0_j:r1 - r0_j, c0 - c0_j:c1 - c0_j]
+                     .astype(np.float64) for ch in range(3)]
+            grey_i = (chs_i[0] + chs_i[1] + chs_i[2]) / 3.0
+            grey_j = (chs_j[0] + chs_j[1] + chs_j[2]) / 3.0
+            # Normalise chroma by mean luminance so the ratio is brightness-independent.
+            # Without this, a brighter image has larger absolute deviations from grey even
+            # at the same relative saturation, causing incorrect corrections.
+            lum_i = max(float(np.mean(grey_i)), 1.0)
+            lum_j = max(float(np.mean(grey_j)), 1.0)
+            chroma_i = float(np.sqrt(np.mean(
+                (chs_i[0] - grey_i)**2 + (chs_i[1] - grey_i)**2 + (chs_i[2] - grey_i)**2
+            ))) / lum_i
+            chroma_j = float(np.sqrt(np.mean(
+                (chs_j[0] - grey_j)**2 + (chs_j[1] - grey_j)**2 + (chs_j[2] - grey_j)**2
+            ))) / lum_j
+            if chroma_i > 1e-6 and chroma_j > 1e-6:
+                edges.append((i, j, np.log(chroma_i) - np.log(chroma_j)))
+
+    if not edges:
+        return [1.0] * n
+
+    scales_log = np.zeros(n, dtype=np.float64)
+    A = np.zeros((len(edges), n - 1), dtype=np.float64)
+    b = np.zeros(len(edges), dtype=np.float64)
+    for k, (i, j, lr) in enumerate(edges):
+        if i > 0: A[k, i - 1] =  1.0
+        if j > 0: A[k, j - 1] = -1.0
+        b[k] = -lr
+    x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    scales_log[1:] = x
+
+    _MAX_SAT = np.log(4.0)  # cap at ±2 stops of saturation
+    scales_log = np.clip(scales_log, -_MAX_SAT, _MAX_SAT)
+
+    if verbosity >= 2:
+        print_func("    saturation scales: " +
+                   "  ".join(f"img{i}={np.exp(scales_log[i]):.3f}" for i in range(n)))
+
+    for i, img in enumerate(images):
+        s = float(np.exp(scales_log[i]))
+        if abs(s - 1.0) < 1e-5:
+            continue
+        dtype = img.channels[0].dtype
+        if _NUMBA_OK:
+            if dtype == np.uint8:
+                _nb_sat_scale_u8(img.channels[0], img.channels[1], img.channels[2],
+                                 np.float32(s))
+            else:
+                _nb_sat_scale_u16(img.channels[0], img.channels[1], img.channels[2],
+                                  np.float32(s))
+        else:
+            maxv = float(0xffff if dtype == np.uint16 else 0xff)
+            grey = (img.channels[0].astype(np.float64) +
+                    img.channels[1].astype(np.float64) +
+                    img.channels[2].astype(np.float64)) / 3.0
+            for ch in range(3):
+                arr = grey + (img.channels[ch].astype(np.float64) - grey) * s
+                img.channels[ch] = np.clip(np.round(arr), 0, maxv).astype(dtype)
+
+    return [float(np.exp(scales_log[i])) for i in range(n)]
 
 
 def blend(images: List[ImageInfo], assignment: np.ndarray,
           workwidth: int, workheight: int, levels: int, workbpp: int,
           bgr: bool = False, verbosity: int = 1,
-          exposure_correct: bool = False) -> List[np.ndarray]:
+          exposure_correct: bool = False,
+          saturation_correct: bool = False,
+          out_info: Optional[dict] = None,
+          print_func: Callable = print) -> List[np.ndarray]:
     if verbosity >= 1:
-        print("  blending...")
+        print_func("  blending...")
 
     if exposure_correct:
-        _exposure_correct(images, verbosity=verbosity)
+        exp_info = _exposure_correct(images, verbosity=verbosity, print_func=print_func)
+        if out_info is not None:
+            out_info['exposure'] = exp_info
+    if saturation_correct:
+        sat_info = _saturation_correct(images, verbosity=verbosity, print_func=print_func)
+        if out_info is not None:
+            out_info['saturation'] = sat_info
 
     if levels == 0:
         dtype      = np.uint8 if workbpp == 8 else np.uint16
@@ -1659,7 +1848,9 @@ def go(input_files: List[str], output_file: Optional[str] = None,
        seam_save_filename: Optional[str] = None, seam_load_filename: Optional[str] = None,
        xor_filename: Optional[str] = None, timing: bool = False,
        no_output: bool = False, exposure_correct: bool = False,
-       verbosity: int = 1) -> dict:
+       saturation_correct: bool = False,
+       verbosity: int = 1,
+       print_func: Callable = print) -> dict:
 
     t0 = time.perf_counter()
     n  = len(input_files)
@@ -1667,13 +1858,13 @@ def go(input_files: List[str], output_file: Optional[str] = None,
     if n > 255:  raise ValueError("Too many (>255) input images")
 
     if verbosity >= 1:
-        print("  opening images...")
+        print_func("  opening images...")
 
     t1 = time.perf_counter()
     images, workbpp, xres, yres, geotiff, workwidth, workheight = load_images(
-        input_files, verbosity=verbosity)
+        input_files, verbosity=verbosity, print_func=print_func)
     if timing:
-        print(f"  load: {time.perf_counter() - t1:.3f}s")
+        print_func(f"  load: {time.perf_counter() - t1:.3f}s")
 
     if not images:
         raise ValueError("No valid input files")
@@ -1688,14 +1879,14 @@ def go(input_files: List[str], output_file: Optional[str] = None,
     pseudowrap = (n == 1)
     if pseudowrap:
         if verbosity >= 1:
-            print("  Only one image; pseudo-wrapping mode")
+            print_func("  Only one image; pseudo-wrapping mode")
         images = _pseudowrap_split(images)
         levels = pseudowrap_levels(workwidth)
     else:
         levels = compute_levels(images, workwidth, workheight, wideblend, max_levels, sub_levels)
 
     if verbosity >= 1:
-        print(f"  {workwidth}x{workheight}, {workbpp}bpp, {levels} levels")
+        print_func(f"  {workwidth}x{workheight}, {workbpp}bpp, {levels} levels")
 
     t1 = time.perf_counter()
     if pseudowrap:
@@ -1706,11 +1897,12 @@ def go(input_files: List[str], output_file: Optional[str] = None,
             reverse=reverse, simple_seam=simple_seam, content_seam=content_seam,
             seam_load_filename=seam_load_filename,
             seam_save_filename=seam_save_filename,
-            xor_filename=xor_filename, verbosity=verbosity)
+            xor_filename=xor_filename, verbosity=verbosity, print_func=print_func)
     if timing:
-        print(f"  seaming: {time.perf_counter() - t1:.3f}s")
+        print_func(f"  seaming: {time.perf_counter() - t1:.3f}s")
 
     out_channels = None
+    corrections: dict = {}
 
     if not no_output:
         t1 = time.perf_counter()
@@ -1718,9 +1910,11 @@ def go(input_files: List[str], output_file: Optional[str] = None,
             images=images, assignment=assignment,
             workwidth=workwidth, workheight=workheight,
             levels=levels, workbpp=workbpp, bgr=bgr, verbosity=verbosity,
-            exposure_correct=exposure_correct)
+            exposure_correct=exposure_correct,
+            saturation_correct=saturation_correct,
+            out_info=corrections, print_func=print_func)
         if timing:
-            print(f"  blend: {time.perf_counter() - t1:.3f}s")
+            print_func(f"  blend: {time.perf_counter() - t1:.3f}s")
 
         if pseudowrap:
             split = workwidth >> 1
@@ -1732,7 +1926,7 @@ def go(input_files: List[str], output_file: Optional[str] = None,
 
         if output_file:
             if verbosity >= 1:
-                print(f"  writing {output_file}...")
+                print_func(f"  writing {output_file}...")
             t1  = time.perf_counter()
             ext = output_file.rsplit('.', 1)[-1].lower()
             if ext in ('jpg', 'jpeg'):
@@ -1747,14 +1941,15 @@ def go(input_files: List[str], output_file: Optional[str] = None,
             else:
                 raise ValueError(f"Unknown output extension: .{ext}")
             if timing:
-                print(f"  write: {time.perf_counter() - t1:.3f}s")
+                print_func(f"  write: {time.perf_counter() - t1:.3f}s")
 
     if timing:
-        print(f"  total: {time.perf_counter() - t0:.3f}s")
+        print_func(f"  total: {time.perf_counter() - t0:.3f}s")
 
     return dict(images=images, assignment=assignment, out_channels=out_channels,
                 workwidth=workwidth, workheight=workheight, workbpp=workbpp,
-                min_left=min_left, min_top=min_top, xres=xres, yres=yres, geotiff=geotiff)
+                min_left=min_left, min_top=min_top, xres=xres, yres=yres, geotiff=geotiff,
+                corrections=corrections if (exposure_correct or saturation_correct) else {})
 
 
 # ============================================================
@@ -1829,8 +2024,9 @@ def main(argv=None):
     seam_load        = None
     xor_save         = None
     no_output        = False
-    exposure_correct = False
-    content_seam     = False
+    exposure_correct    = False
+    saturation_correct  = False
+    content_seam        = False
 
     i = 0
     while i < len(argv):
@@ -1854,7 +2050,8 @@ def main(argv=None):
         elif arg == '--reverse':     reverse     = True
         elif arg in ('--simple-seam', '--simpleseam'): simple_seam = True
         elif arg == '--timing':      timing           = True
-        elif arg == '--exposure':      exposure_correct = True
+        elif arg == '--exposure':      exposure_correct    = True
+        elif arg == '--saturation':    saturation_correct  = True
         elif arg == '--content-seam':  content_seam     = True
         elif arg == '--no-output':   no_output   = True
         elif arg in ('-v', '--verbose'): verbosity += 1
@@ -1912,7 +2109,8 @@ def main(argv=None):
             compression=compression, jpeg_quality=jpeg_quality, bigtiff=bigtiff,
             seam_save_filename=seam_save, seam_load_filename=seam_load,
             xor_filename=xor_save, timing=timing, no_output=no_output,
-            exposure_correct=exposure_correct, verbosity=verbosity,
+            exposure_correct=exposure_correct,
+            saturation_correct=saturation_correct, verbosity=verbosity,
         )
     except (ValueError, RuntimeError, FileNotFoundError) as exc:
         sys.exit(str(exc))

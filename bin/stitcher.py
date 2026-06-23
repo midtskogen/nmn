@@ -15,6 +15,10 @@ import json
 import re
 import tempfile
 import glob
+try:
+    import cv2 as _cv2
+except ImportError:
+    _cv2 = None
 
 # --- Dependency Imports with User-Friendly Error Handling ---
 
@@ -71,31 +75,36 @@ except ImportError:
     print("Error: 'multiblend' module is required. Please ensure multiblend.py is available.", file=sys.stderr)
     sys.exit(1)
 
+@numba.njit(parallel=True, fastmath=True, cache=True)
+def _yuv420_to_rgb_kernel(y_flat, u_flat, v_flat, r_out, g_out, b_out, h, w, uv_w):
+    """BT.601 YUV420 -> RGB in a single parallel pass. All arrays are flat (row-major)."""
+    for yi in prange(h):
+        uv_row = (yi >> 1) * uv_w
+        y_row  = yi * w
+        for xi in range(w):
+            yv = np.float32(y_flat[y_row + xi])
+            uv = np.float32(u_flat[uv_row + (xi >> 1)]) - np.float32(128)
+            vv = np.float32(v_flat[uv_row + (xi >> 1)]) - np.float32(128)
+            rv = yv + np.float32(1.402)  * vv
+            gv = yv - np.float32(0.344136) * uv - np.float32(0.714136) * vv
+            bv = yv + np.float32(1.772)  * uv
+            r_out[y_row + xi] = np.uint8(min(np.float32(255), max(np.float32(0), rv)))
+            g_out[y_row + xi] = np.uint8(min(np.float32(255), max(np.float32(0), gv)))
+            b_out[y_row + xi] = np.uint8(min(np.float32(255), max(np.float32(0), bv)))
+
 def yuv_to_rgb(y_plane, u_plane, v_plane):
-    """Convert YUV420 planes to RGB using the standard BT.601 conversion.
-    Processes one channel at a time to minimise peak memory usage."""
+    """Convert YUV420 planes to RGB using the standard BT.601 conversion (Numba JIT)."""
     h, w = y_plane.shape
-    u_up = np.repeat(np.repeat(u_plane, 2, axis=0), 2, axis=1)[:h, :w]
-    v_up = np.repeat(np.repeat(v_plane, 2, axis=0), 2, axis=1)[:h, :w]
-
-    y = y_plane.astype(np.float32)
-    u = u_up.astype(np.float32);  del u_up;  u -= 128.0
-    v = v_up.astype(np.float32);  del v_up;  v -= 128.0
-
-    # Compute each channel in-place, clip, convert — never stack all 3 at once.
-    r = y + 1.402 * v
-    np.clip(r, 0, 255, out=r)
-    r_out = r.astype(np.uint8);  del r
-
-    g = y - 0.344136 * u - 0.714136 * v
-    np.clip(g, 0, 255, out=g)
-    g_out = g.astype(np.uint8);  del g
-
-    b = y + 1.772 * u
-    del y, u, v
-    np.clip(b, 0, 255, out=b)
-    b_out = b.astype(np.uint8);  del b
-
+    uv_h, uv_w = u_plane.shape
+    r_out = np.empty((h, w), dtype=np.uint8)
+    g_out = np.empty((h, w), dtype=np.uint8)
+    b_out = np.empty((h, w), dtype=np.uint8)
+    _yuv420_to_rgb_kernel(
+        np.ascontiguousarray(y_plane).ravel(),
+        np.ascontiguousarray(u_plane).ravel(),
+        np.ascontiguousarray(v_plane).ravel(),
+        r_out.ravel(), g_out.ravel(), b_out.ravel(),
+        h, w, uv_w)
     return r_out, g_out, b_out
 
 def create_image_info_from_yuv(y_plane, u_plane, v_plane, weight_map=None, xpos=0, ypos=0):
@@ -108,25 +117,37 @@ def create_image_info_from_yuv(y_plane, u_plane, v_plane, weight_map=None, xpos=
         channels=[r, g, b], mask=mask,
     )
 
+@numba.njit(parallel=True, fastmath=True, cache=True)
+def _rgb_to_yuv420_kernel(r_flat, g_flat, b_flat, y_out, u_out, v_out, h, w):
+    """BT.601 RGB -> YUV420 in a single parallel pass.
+    y_out is h*w, u_out/v_out are (h//2)*(w//2)."""
+    uv_w = w >> 1
+    for yi in prange(h):
+        row = yi * w
+        for xi in range(w):
+            rv = np.float32(r_flat[row + xi])
+            gv = np.float32(g_flat[row + xi])
+            bv = np.float32(b_flat[row + xi])
+            yv = np.float32(0.299)*rv + np.float32(0.587)*gv + np.float32(0.114)*bv
+            y_out[row + xi] = np.uint8(min(np.float32(255), max(np.float32(0), yv)))
+            if (yi & 1) == 0 and (xi & 1) == 0:
+                uv = -np.float32(0.169)*rv - np.float32(0.331)*gv + np.float32(0.5)*bv + np.float32(128)
+                vv =  np.float32(0.5)*rv   - np.float32(0.419)*gv - np.float32(0.081)*bv + np.float32(128)
+                idx = (yi >> 1) * uv_w + (xi >> 1)
+                u_out[idx] = np.uint8(min(np.float32(255), max(np.float32(0), uv)))
+                v_out[idx] = np.uint8(min(np.float32(255), max(np.float32(0), vv)))
+
 def rgb_to_yuv(rgb_channels):
-    """Convert RGB channels to YUV420 planes. One channel at a time to save memory."""
-    r = rgb_channels[0].astype(np.float32)
-    g = rgb_channels[1].astype(np.float32)
-    b = rgb_channels[2].astype(np.float32)
-
-    y = 0.299 * r + 0.587 * g + 0.114 * b
-    np.clip(y, 0, 255, out=y)
-    y_out = y.astype(np.uint8);  del y
-
-    u = -0.169 * r - 0.331 * g + 0.5 * b + 128.0
-    np.clip(u, 0, 255, out=u)
-    u_out = u.astype(np.uint8)[::2, ::2].copy();  del u
-
-    v = 0.5 * r - 0.419 * g - 0.081 * b + 128.0
-    del r, g, b
-    np.clip(v, 0, 255, out=v)
-    v_out = v.astype(np.uint8)[::2, ::2].copy();  del v
-
+    """Convert RGB channels to YUV420 planes (Numba JIT)."""
+    h, w = rgb_channels[0].shape
+    y_out  = np.empty((h, w),          dtype=np.uint8)
+    u_out  = np.empty((h // 2, w // 2), dtype=np.uint8)
+    v_out  = np.empty((h // 2, w // 2), dtype=np.uint8)
+    _rgb_to_yuv420_kernel(
+        np.ascontiguousarray(rgb_channels[0]).ravel(),
+        np.ascontiguousarray(rgb_channels[1]).ravel(),
+        np.ascontiguousarray(rgb_channels[2]).ravel(),
+        y_out.ravel(), u_out.ravel(), v_out.ravel(), h, w)
     return y_out, u_out, v_out
 
 
@@ -629,7 +650,13 @@ def _precompile_numba_functions():
     reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y)
     reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v)
     reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float)
-    
+    _yuv420_to_rgb_kernel(p_y, p_uv, p_uv,
+        np.zeros(dw*dh,dtype=np.uint8), np.zeros(dw*dh,dtype=np.uint8), np.zeros(dw*dh,dtype=np.uint8),
+        dh, dw, dw//2)
+    _rgb_to_yuv420_kernel(p_y, p_y, p_y,
+        np.zeros(dw*dh,dtype=np.uint8), np.zeros((dh//2)*(dw//2),dtype=np.uint8), np.zeros((dh//2)*(dw//2),dtype=np.uint8),
+        dh, dw)
+
     print("Pre-compilation complete.")
 
 def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False):
@@ -850,7 +877,6 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         # Gap fill: EDT nearest-pixel + Gaussian smooth + feathered blend.
         # Processed one channel at a time to avoid large HxWx3 allocations.
         from scipy.ndimage import gaussian_filter, distance_transform_edt
-        from PIL import Image as _PIL2
         H, W = gap.shape
         S = 8
         sw, sh = max(1, W // S), max(1, H // S)
@@ -880,13 +906,20 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
             ch_fill = ch_f.copy()
             ch_fill[gap] = ch_f[ri[gap], ci[gap]]
             # Gaussian smooth at downscale.
-            small = np.array(
-                _PIL2.fromarray(ch_fill.clip(0, 255).astype(np.uint8)).resize((sw, sh), _PIL2.BOX)
-            ).astype(np.float32)
+            src_u8 = ch_fill.clip(0, 255).astype(np.uint8)
+            if _cv2 is not None:
+                small = _cv2.resize(src_u8, (sw, sh), interpolation=_cv2.INTER_AREA).astype(np.float32)
+            else:
+                from PIL import Image as _PIL2
+                small = np.array(_PIL2.fromarray(src_u8).resize((sw, sh), _PIL2.BOX)).astype(np.float32)
             blurred = gaussian_filter(small, sigma=sigma_s);  del small
-            full = np.array(
-                _PIL2.fromarray(blurred.clip(0, 255).astype(np.uint8)).resize((W, H), _PIL2.BILINEAR)
-            ).astype(np.float32);  del blurred
+            blurred_u8 = blurred.clip(0, 255).astype(np.uint8)
+            if _cv2 is not None:
+                full = _cv2.resize(blurred_u8, (W, H), interpolation=_cv2.INTER_LINEAR).astype(np.float32)
+            else:
+                from PIL import Image as _PIL2
+                full = np.array(_PIL2.fromarray(blurred_u8).resize((W, H), _PIL2.BILINEAR)).astype(np.float32)
+            del blurred, blurred_u8
             # Feathered blend.
             result = (ch_f * blend_w + full * (1.0 - blend_w))
             del ch_f, full, ch_fill
@@ -1192,7 +1225,7 @@ def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
             
     return synchronized_frame_groups
 
-def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False):
+def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -1216,7 +1249,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             in_stream = in_container.streams.video[0]
             in_stream.thread_type = 'AUTO'
             total_frames = in_stream.frames if in_stream.frames > 0 else 0
-            
+            if max_frames > 0 and (total_frames == 0 or total_frames > max_frames):
+                total_frames = max_frames
+
             out_container = av.open(output_file, mode='w')
             out_stream = out_container.add_stream("libx264", rate=in_stream.average_rate)
             out_stream.width, out_stream.height, out_stream.pix_fmt = dw, dh, 'yuv420p'
@@ -1393,7 +1428,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     del _tmp_weights, _tmp_reproj
 
     from scipy.ndimage import gaussian_filter, distance_transform_edt as _geo_edt
-    from PIL import Image as _PIL2
     H_geo, W_geo = geo_gap.shape
     S_geo = 8
     feather_radius = max(1, round(20 * W_geo / 4096))
@@ -1410,6 +1444,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     geo_dist = _geo_edt(~geo_gap)
     geo_blend_w = np.clip(geo_dist / feather_radius, 0.0, 1.0).astype(np.float32); del geo_dist
     geo_n_gap = int(geo_gap.sum())
+    geo_gap_idx = np.where(geo_gap)  # precomputed tuple for fast per-frame fill
+    # Precompute the EDT source row/col at gap pixels (1D arrays) — used for fast fill
+    geo_ri_gap = geo_ri[geo_gap_idx]  # shape (geo_n_gap,)
+    geo_ci_gap = geo_ci[geo_gap_idx]  # shape (geo_n_gap,)
     print(f"  gap pixels: {geo_n_gap}, feather: {feather_radius}px")
 
     # Per-camera bounding boxes, eroded masks, and inpaint maps (geometry-only)
@@ -1510,6 +1548,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     else:
         geo_outside_y = geo_outside_uv = None
 
+    # Preallocate gap-fill working buffer (reused every frame)
+    _geo_fill_u8 = np.empty((H_geo, W_geo), dtype=np.uint8) if geo_n_gap > 0 else None
+
     # --- Stitching Pass ---
     print("\nStarting stitching process...")
     try:
@@ -1531,6 +1572,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         frame_counts = [s.frames for s in in_streams if s.frames > 0]
         if frame_counts:
             total_frames = min(frame_counts)
+    if max_frames > 0 and total_frames > max_frames:
+        total_frames = max_frames
 
     cached_seam_weights, target_leveling_params, previous_leveling_params = None, None, None
     recalc_frame_number = 1
@@ -1544,9 +1587,41 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     frame_v_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     frame_weights_y = np.empty((num_images, final_h, final_w), dtype=np.float32)
     frame_weights_uv = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.float32)
-    
+    # Preallocate canvas buffers — reused every frame with .fill()
+    _canvas_r = np.empty((final_h, final_w), dtype=np.float32)
+    _canvas_g = np.empty((final_h, final_w), dtype=np.float32)
+    _canvas_b = np.empty((final_h, final_w), dtype=np.float32)
+
     blend_weights_y = _tmp_blend_weights_y  # already computed during geometry precompute
     pad_t = _tmp_pad_t; pad_b = _tmp_pad_b; pad_l = _tmp_pad_l; pad_r = _tmp_pad_r
+
+    def _yuv_crop_inpaint(i):
+        """Convert reprojected YUV planes to RGB, crop to eroded bbox, inpaint holes.
+        Crops Y/U/V planes to the bbox before conversion to minimise work in yuv_to_rgb."""
+        bbox = cam_bboxes[i]
+        if bbox is None:
+            return i, None
+        r0, r1, c0, c1 = bbox
+        # Align UV crop to even boundaries (YUV420 requirement)
+        ur0, ur1 = r0 // 2, (r1 + 1) // 2
+        uc0, uc1 = c0 // 2, (c1 + 1) // 2
+        y_crop_src = frame_y_planes[i][r0:r1, c0:c1]
+        u_crop_src = frame_u_planes[i][ur0:ur1, uc0:uc1]
+        v_crop_src = frame_v_planes[i][ur0:ur1, uc0:uc1]
+        r, g, b = yuv_to_rgb(y_crop_src, u_crop_src, v_crop_src)
+        # yuv_to_rgb may produce (r1-r0) or (r1-r0+1) rows depending on UV upscale;
+        # slice back to exact bbox height/width.
+        h_bb, w_bb = r1 - r0, c1 - c0
+        r_crop = r[:h_bb, :w_bb].copy()
+        g_crop = g[:h_bb, :w_bb].copy()
+        b_crop = b[:h_bb, :w_bb].copy()
+        inpaint = cam_inpaint[i]
+        if inpaint is not None:
+            ri_i, ci_i, invalid_i = inpaint
+            r_crop[invalid_i] = r_crop[ri_i[invalid_i], ci_i[invalid_i]]
+            g_crop[invalid_i] = g_crop[ri_i[invalid_i], ci_i[invalid_i]]
+            b_crop[invalid_i] = b_crop[ri_i[invalid_i], ci_i[invalid_i]]
+        return i, (r_crop, g_crop, b_crop)
 
     frame_iters = [c.decode(s) for c, s in zip(in_containers, in_streams)]
     frame_count = 0
@@ -1589,6 +1664,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             
             if any(f is None for f in final_group_frames): continue
             frame_count += 1
+            if max_frames > 0 and frame_count > max_frames: break
             
             if total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
                 percent_done = (frame_count / total_frames) * 100
@@ -1604,32 +1680,20 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
             list(executor.map(worker_for_video_frame, worker_args))
-            
-            y_planes, u_planes, v_planes = frame_y_planes, frame_u_planes, frame_v_planes
 
-            # Build cropped+inpainted ImageInfo objects using precomputed geometry
+            # Build ImageInfo list: yuv_to_rgb + crop + inpaint per camera
             images = []
             for i in range(num_images):
-                bbox = cam_bboxes[i]
-                if bbox is None:
+                _, rgb_crops = _yuv_crop_inpaint(i)
+                if rgb_crops is None:
                     continue
-                r0, r1, c0, c1 = bbox
+                r0, r1, c0, c1 = cam_bboxes[i]
                 tight_ypos, tight_xpos = cam_tight_pos[i]
-                r, g, b = yuv_to_rgb(y_planes[i], u_planes[i], v_planes[i])
-                r_crop = r[r0:r1, c0:c1].copy()
-                g_crop = g[r0:r1, c0:c1].copy()
-                b_crop = b[r0:r1, c0:c1].copy()
-                inpaint = cam_inpaint[i]
-                if inpaint is not None:
-                    ri_i, ci_i, invalid_i = inpaint
-                    r_crop[invalid_i] = r_crop[ri_i[invalid_i], ci_i[invalid_i]]
-                    g_crop[invalid_i] = g_crop[ri_i[invalid_i], ci_i[invalid_i]]
-                    b_crop[invalid_i] = b_crop[ri_i[invalid_i], ci_i[invalid_i]]
                 images.append(multiblend.ImageInfo(
                     filename="", bpp=8, width=c1-c0, height=r1-r0,
                     xpos=tight_xpos, ypos=tight_ypos,
-                    channels=[r_crop, g_crop, b_crop],
-                    mask=cam_masks[i],  # precomputed eroded mask
+                    channels=list(rgb_crops),
+                    mask=cam_masks[i],
                 ))
 
             workwidth, workheight = geo_workwidth, geo_workheight
@@ -1669,30 +1733,33 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 saturation_correct=False,
                 verbosity=0
             )
-            # Composite blended patch back onto full canvas
-            canvas_r = np.zeros((final_h, final_w), dtype=np.float32)
-            canvas_g = np.zeros((final_h, final_w), dtype=np.float32)
-            canvas_b = np.zeros((final_h, final_w), dtype=np.float32)
+            # Composite blended patch back onto preallocated canvas
+            _canvas_r.fill(0); _canvas_g.fill(0); _canvas_b.fill(0)
             t, l = geo_min_top, geo_min_left
-            canvas_r[t:t+workheight, l:l+workwidth] = rgb_blended[0]
-            canvas_g[t:t+workheight, l:l+workwidth] = rgb_blended[1]
-            canvas_b[t:t+workheight, l:l+workwidth] = rgb_blended[2]
+            _canvas_r[t:t+workheight, l:l+workwidth] = rgb_blended[0]
+            _canvas_g[t:t+workheight, l:l+workwidth] = rgb_blended[1]
+            _canvas_b[t:t+workheight, l:l+workwidth] = rgb_blended[2]
+            canvas_r, canvas_g, canvas_b = _canvas_r, _canvas_g, _canvas_b
 
             # Gap fill using precomputed geometry (EDT + Gaussian smooth + feather)
             if geo_n_gap > 0:
                 out_channels = []
                 for ch_f in (canvas_r, canvas_g, canvas_b):
-                    ch_fill = ch_f.copy()
-                    ch_fill[geo_gap] = ch_f[geo_ri[geo_gap], geo_ci[geo_gap]]
-                    small = np.array(
-                        _PIL2.fromarray(ch_fill.clip(0, 255).astype(np.uint8)).resize(
-                            (geo_sw, geo_sh), _PIL2.BOX)
-                    ).astype(np.float32)
-                    blurred = gaussian_filter(small, sigma=geo_sigma_s)
-                    full = np.array(
-                        _PIL2.fromarray(blurred.clip(0, 255).astype(np.uint8)).resize(
-                            (W_geo, H_geo), _PIL2.BILINEAR)
-                    ).astype(np.float32)
+                    # Clip to uint8 in-place into preallocated buffer; patch gap pixels
+                    np.clip(ch_f, 0, 255, out=ch_f)
+                    np.copyto(_geo_fill_u8, ch_f, casting='unsafe')
+                    _geo_fill_u8[geo_gap_idx] = ch_f[geo_ri_gap, geo_ci_gap].astype(np.uint8)
+                    if _cv2 is not None:
+                        small = _cv2.resize(_geo_fill_u8, (geo_sw, geo_sh), interpolation=_cv2.INTER_AREA).astype(np.float32)
+                    else:
+                        from PIL import Image as _PIL2
+                        small = np.array(_PIL2.fromarray(_geo_fill_u8).resize((geo_sw, geo_sh), _PIL2.BOX)).astype(np.float32)
+                    blurred_u8 = gaussian_filter(small, sigma=geo_sigma_s).clip(0, 255).astype(np.uint8)
+                    if _cv2 is not None:
+                        full = _cv2.resize(blurred_u8, (W_geo, H_geo), interpolation=_cv2.INTER_LINEAR).astype(np.float32)
+                    else:
+                        from PIL import Image as _PIL2
+                        full = np.array(_PIL2.fromarray(blurred_u8).resize((W_geo, H_geo), _PIL2.BILINEAR)).astype(np.float32)
                     result = ch_f * geo_blend_w + full * (1.0 - geo_blend_w)
                     np.clip(result, 0, 255, out=result)
                     out_channels.append(result.astype(np.uint8))
@@ -1952,6 +2019,9 @@ def main():
     parser.add_argument("--pad", type=int, default=0, help="Pixels to pad source images before reprojection (extends edges with blurred content).")
     parser.add_argument("--padsides", type=str, default="", help="Comma-separated sides to pad: top,bottom,left,right (default: all sides if --pad > 0).")
     
+    parser.add_argument("-n", "--max-frames", type=int, default=0, metavar="N",
+        help="Stop after encoding N frames (video only). Useful for quick tests.")
+
     sync_group = parser.add_argument_group('Video Synchronization Options')
     sync_group.add_argument("--sync", action='store_true', help="Synchronize video streams by their embedded timestamps before stitching.")
     sync_group.add_argument("--model", type=str, default=None, help="Specify the model for timestamp extraction.")
@@ -2034,7 +2104,7 @@ def main():
                 args.pto_file, args.input_files, args.output_file,
                 args.pad, num_cores, padsides, args.sync, args.model,
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance,
-                fisheye_mask=args.fisheye
+                fisheye_mask=args.fisheye, max_frames=args.max_frames
             )
         else:
             print("Error: Input files must all be of the same type (either all images or all videos).", file=sys.stderr)

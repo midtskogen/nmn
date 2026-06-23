@@ -83,8 +83,8 @@ def parse_pto_file(pto_file):
             if not line or line.startswith('#'):
                 continue
             line_type = line[0]
-            if line_type not in ('p', 'i', 'm'):
-                continue  # Also parse 'm' lines for i-line modifiers
+            if line_type not in ('p', 'i'):
+                continue
 
             content_parts = line.split(' ', 1)
             if len(content_parts) < 2:
@@ -96,10 +96,6 @@ def parse_pto_file(pto_file):
                 global_options.update(params)
             elif line_type == 'i':
                 images.append(params)
-            elif line_type == 'm':
-                # Apply modifier to the last image line
-                if images:
-                    images[-1].update(params)
 
     if not global_options or not images:
         raise ValueError("Could not parse panorama or image lines from PTO file.")
@@ -472,6 +468,63 @@ def map_image_to_pano(pto_data, image_index, x, y):
         pano_y = (pano_y - center_y) * pano_s + center_y
 
     return pano_x, pano_y
+
+def _set_rotation_pt(yaw_rad, pitch_rad, roll_rad):
+    """Build rotation matrix using Hugin/panotools SetRotationPT convention.
+    Mirrors Matrix3::SetRotationPT from Hugin source (Matrix3.cpp)."""
+    cosr, sinr = math.cos(roll_rad),  math.sin(roll_rad)
+    cosp, sinp = math.cos(pitch_rad), math.sin(-pitch_rad)
+    cosy, siny = math.cos(yaw_rad),   math.sin(-yaw_rad)
+    rollm  = np.array([[1,    0,     0    ],
+                       [0,    cosr, -sinr ],
+                       [0,    sinr,  cosr ]], dtype=np.float64)
+    pitchm = np.array([[ cosp, 0,  sinp],
+                       [ 0,    1,  0   ],
+                       [-sinp, 0,  cosp]], dtype=np.float64)
+    yawm   = np.array([[ cosy, -siny, 0],
+                       [ siny,  cosy, 0],
+                       [ 0,     0,    1]], dtype=np.float64)
+    return yawm @ pitchm @ rollm
+
+
+def _get_rotation_pt(m):
+    """Extract (yaw, pitch, roll) in radians from a rotation matrix using
+    Hugin/panotools GetRotationPT convention.
+    Mirrors Matrix3::GetRotationPT from Hugin source (Matrix3.cpp)."""
+    roll  = math.atan2(m[2][1], m[2][2])
+    pitch = -math.asin(max(-1.0, min(1.0, -m[2][0])))
+    yaw   = math.atan2(-m[1][0], m[0][0])
+    return yaw, pitch, roll
+
+
+def rotate_panorama(pto_data, yaw_deg, pitch_deg, roll_deg):
+    """Apply a global rotation to all camera poses in a PTO data structure.
+    Modifies the y/p/r of each image in-place.
+    Replicates RotatePanorama::rotatePano from Hugin source (RotatePanorama.cpp).
+
+    Args:
+        pto_data: (global_options, images) tuple from parse_pto_file().
+        yaw_deg, pitch_deg, roll_deg: Global rotation angles in degrees.
+
+    Returns:
+        The same pto_data tuple with image poses updated.
+    """
+    _, images = pto_data
+    transform = _set_rotation_pt(
+        math.radians(yaw_deg), math.radians(pitch_deg), math.radians(roll_deg)
+    )
+    for img in images:
+        y = img.get('y', 0.0)
+        p = img.get('p', 0.0)
+        r = img.get('r', 0.0)
+        cam_mat = _set_rotation_pt(math.radians(y), math.radians(p), math.radians(r))
+        rotated = transform @ cam_mat
+        y_new, p_new, r_new = _get_rotation_pt(rotated)
+        img['y'] = math.degrees(y_new)
+        img['p'] = math.degrees(p_new)
+        img['r'] = math.degrees(r_new)
+    return pto_data
+
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
 def calculate_source_coords(coords_y, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, sw, sh, R_pr_inv, camera_yaw, src_focal, src_norm_radius, a, b, c, cx, cy, src_proj_f, pano_r=0.0, pano_s=1.0):

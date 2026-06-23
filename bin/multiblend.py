@@ -1379,11 +1379,16 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
             c0 = max(c0_i, c0_j); c1 = min(c1_i, c1_j)
             if r1 <= r0 or c1 <= c0:
                 continue
+            mask_i = images[i].mask[r0 - r0_i:r1 - r0_i, c0 - c0_i:c1 - c0_i]
+            mask_j = images[j].mask[r0 - r0_j:r1 - r0_j, c0 - c0_j:c1 - c0_j]
+            overlap_mask = mask_i & mask_j
+            if not overlap_mask.any():
+                continue
             for ch in range(3):
                 pi = images[i].channels[ch][r0 - r0_i:r1 - r0_i, c0 - c0_i:c1 - c0_i]
                 pj = images[j].channels[ch][r0 - r0_j:r1 - r0_j, c0 - c0_j:c1 - c0_j]
-                mi = np.mean(pi, dtype=np.float64)
-                mj = np.mean(pj, dtype=np.float64)
+                mi = float(np.mean(pi[overlap_mask].astype(np.float64)))
+                mj = float(np.mean(pj[overlap_mask].astype(np.float64)))
                 if mi > 0 and mj > 0:
                     edges.append((i, j, ch, np.log(mi) - np.log(mj)))
 

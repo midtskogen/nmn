@@ -1547,6 +1547,42 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
     return info
 
 
+def _apply_exposure_info(images: List[ImageInfo], exp_info: List[dict]) -> None:
+    """Apply previously computed exposure correction gains in-place.
+
+    This is the second half of _exposure_correct: it takes the same info
+    dictionary and applies the stored linear gains / gamma curves to each image.
+    """
+    for i, img in enumerate(images):
+        info = exp_info[i]
+        lin_gains = np.asarray(info['gains'], dtype=np.float64)
+        gammas = np.asarray(info['gammas'], dtype=np.float64)
+        method = info['method']
+        dtype = img.channels[0].dtype
+        maxv_f = float(0xffff if dtype == np.uint16 else 0xff)
+        maxv_np = np.float32(maxv_f)
+
+        for ch in range(3):
+            if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
+                if _NUMBA_OK:
+                    if dtype == np.uint8:
+                        _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+                    else:
+                        _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+                else:
+                    arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
+                    img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
+            elif method[ch] == 'linear' and abs(lin_gains[ch] - 1.0) > 1e-5:
+                if _NUMBA_OK:
+                    if dtype == np.uint8:
+                        _nb_gain_clip_u8(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
+                    else:
+                        _nb_gain_clip_u16(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
+                else:
+                    arr = img.channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
+                    img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
+
+
 def _saturation_correct(images: List[ImageInfo], verbosity: int = 1,
                         print_func: Callable = print) -> List[float]:
     """Per-image saturation scale correction via overlap-zone RMS chroma ratios.
@@ -1643,12 +1679,17 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
           exposure_correct: bool = False,
           saturation_correct: bool = False,
           out_info: Optional[dict] = None,
-          print_func: Callable = print) -> List[np.ndarray]:
+          print_func: Callable = print,
+          exposure_info: Optional[List[dict]] = None) -> List[np.ndarray]:
     if verbosity >= 1:
         print_func("  blending...")
 
     if exposure_correct:
-        exp_info = _exposure_correct(images, verbosity=verbosity, print_func=print_func)
+        if exposure_info is None:
+            exp_info = _exposure_correct(images, verbosity=verbosity, print_func=print_func)
+        else:
+            _apply_exposure_info(images, exposure_info)
+            exp_info = exposure_info
         if out_info is not None:
             out_info['exposure'] = exp_info
     if saturation_correct:

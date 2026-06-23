@@ -42,17 +42,19 @@ if _PROJECT_DIR is not None:
 
 try:
     import pto_mapper
-except ImportError:
-    print("FATAL ERROR: The required 'pto_mapper.py' module was not found.", file=sys.stderr)
-    print("Please ensure 'pto_mapper.py' is in the same directory as this script.", file=sys.stderr)
-    sys.exit(1)
+except ImportError as e:
+    raise ImportError(
+        "The required 'pto_mapper.py' module was not found. "
+        "Please ensure 'pto_mapper.py' is in the same directory as this script."
+    ) from e
 
 try:
     from stack import enhance_filter
-except ImportError:
-    print("FATAL ERROR: The 'stack.py' module was not found.", file=sys.stderr)
-    print("Please ensure 'stack.py' (containing the enhancement filter) is in the same directory.", file=sys.stderr)
-    sys.exit(1)
+except ImportError as e:
+    raise ImportError(
+        "The 'stack.py' module was not found. "
+        "Please ensure 'stack.py' (containing the enhancement filter) is in the same directory."
+    ) from e
 
 # The timestamp import is now deferred to the video processing function where it is needed.
 
@@ -71,9 +73,10 @@ except ImportError:
 # Import multiblend for blending functionality
 try:
     import multiblend
-except ImportError:
-    print("Error: 'multiblend' module is required. Please ensure multiblend.py is available.", file=sys.stderr)
-    sys.exit(1)
+except ImportError as e:
+    raise ImportError(
+        "The 'multiblend' module is required. Please ensure multiblend.py is available."
+    ) from e
 
 # Global quiet flag. When True, all normal text output is suppressed.
 _quiet = False
@@ -1265,7 +1268,7 @@ def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
             
     return synchronized_frame_groups
 
-def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0):
+def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -1721,6 +1724,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             np.clip(result, 0, 255, out=result)
             return result.astype(np.uint8)
 
+    # Cache exposure correction info to support --level-subsample.
+    cached_exp_info = None
+
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         current_frame_indices = [-1] * num_images
         
@@ -1806,7 +1812,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                     except Exception:
                         assignment = np.zeros((workheight, workwidth), dtype=np.uint8)
 
-            # Blend using multiblend with exposure correction
+            # Blend using multiblend with exposure correction. Recompute only
+            # every level_subsample frames; reuse cached correction otherwise.
+            recompute_exposure = (frame_count - 1) % level_subsample == 0
+            blend_out_info = {}
             rgb_blended = multiblend.blend(
                 images=images,
                 assignment=assignment,
@@ -1818,7 +1827,11 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 saturation_correct=False,
                 verbosity=0,
                 print_func=_print,
+                exposure_info=None if recompute_exposure else cached_exp_info,
+                out_info=blend_out_info,
             )
+            if recompute_exposure and 'exposure' in blend_out_info:
+                cached_exp_info = blend_out_info['exposure']
             # Composite blended patch back onto preallocated canvas
             _canvas_r.fill(0); _canvas_g.fill(0); _canvas_b.fill(0)
             t, l = geo_min_top, geo_min_left
@@ -1869,6 +1882,150 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         except:
             pass
 
+
+def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
+           pad=0, padsides=None, enhance=False, fisheye_mask=False,
+           force_video_dims=False, max_frames=0, level_subsample=1,
+           sync=False, model=None, save_sync=None, load_sync=None,
+           quiet=False, num_cores=None):
+    """Stitch images or videos into a panoramic image or video.
+
+    This is the public API entry point for programs that import stitcher.py.
+    It mirrors the command-line interface and dispatches to either
+    reproject_images() or reproject_videos() based on the input file types.
+
+    Parameters
+    ----------
+    input_files : str or list[str]
+        One or more input image or video files. All must be the same type.
+    output_file : str
+        Path for the output panorama.
+    pto_file : str, optional
+        Path to a Hugin .pto project file. If None, a PTO is generated from
+        lens.pto files found relative to the inputs using ``projection``.
+    projection : {'equirect', 'fisheye'}, optional
+        Projection used when generating a PTO (default: 'equirect').
+    pad : int, optional
+        Pixels to pad source images before reprojection.
+    padsides : str, set, or None, optional
+        Sides to pad. None means all sides when pad > 0, otherwise none.
+    enhance : bool, optional
+        Apply the adaptive enhancement filter.
+    fisheye_mask : bool, optional
+        Apply a circular mask (fisheye output).
+    force_video_dims : bool, optional
+        Round output dimensions to multiples of 16 even for images.
+    max_frames : int, optional
+        Stop after encoding this many frames (video only).
+    level_subsample : int, optional
+        Recompute exposure correction every N frames (video only, default 1).
+    sync : bool, optional
+        Synchronize video streams by embedded timestamps.
+    model : str, optional
+        Timestamp model for synchronization.
+    save_sync : str, optional
+        JSON file to save the synchronization map.
+    load_sync : str, optional
+        JSON file to load a pre-computed synchronization map.
+    quiet : bool, optional
+        Suppress all text output.
+    num_cores : int or None, optional
+        Number of CPU cores to use. None uses all available cores.
+
+    Raises
+    ------
+    ValueError
+        On invalid arguments or mixed input types.
+    FileNotFoundError
+        If an input or PTO file is missing.
+    RuntimeError
+        If processing fails.
+    ImportError
+        If required modules are not available.
+    """
+    global _quiet
+    _quiet = quiet
+
+    if num_cores is None:
+        try:
+            num_cores = len(os.sched_getaffinity(0))
+        except AttributeError:
+            num_cores = os.cpu_count() or 1
+    numba.set_num_threads(num_cores)
+
+    if isinstance(input_files, str):
+        input_files = [input_files]
+    input_files = list(input_files)
+
+    # Expand glob patterns, preserving order and removing duplicates.
+    expanded = []
+    seen = set()
+    for pattern in input_files:
+        matches = glob.glob(pattern)
+        if not matches:
+            matches = [pattern]
+        for f in matches:
+            if f not in seen:
+                seen.add(f)
+                expanded.append(f)
+    input_files = expanded
+
+    if not input_files:
+        raise ValueError("No input files specified.")
+
+    if pto_file is None:
+        if projection not in ('equirect', 'fisheye'):
+            raise ValueError("projection must be 'equirect' or 'fisheye'")
+        pto_file = generate_pto_from_lens_files(input_files, projection)
+        if pto_file is None:
+            raise RuntimeError("Failed to generate PTO file from lens.pto files.")
+        auto_generated_pto = pto_file
+    else:
+        auto_generated_pto = None
+
+    for f in [pto_file] + input_files:
+        if not os.path.exists(f):
+            raise FileNotFoundError(f"Input file not found: {f}")
+
+    is_image_input = all(f.lower().endswith(('.jpg', '.jpeg', '.png')) for f in input_files)
+    is_video_input = all(f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')) for f in input_files)
+
+    if not is_image_input and not is_video_input:
+        raise ValueError("Input files must all be of the same type (either all images or all videos).")
+
+    if padsides is None:
+        padsides_set = {'top', 'bottom', 'left', 'right'} if pad > 0 else set()
+    elif isinstance(padsides, str):
+        padsides_set = set(s.strip() for s in padsides.split(',') if s.strip())
+    else:
+        padsides_set = set(padsides)
+
+    if save_sync and load_sync:
+        raise ValueError("save_sync and load_sync cannot be used at the same time.")
+    if (save_sync or load_sync) and not sync:
+        raise ValueError("save_sync and load_sync require sync=True.")
+
+    if is_image_input:
+        reproject_images(
+            pto_file, input_files, output_file, pad, num_cores, padsides_set,
+            enhance, force_video_dims=force_video_dims, fisheye_mask=fisheye_mask
+        )
+    else:
+        if len(input_files) < 2 and sync:
+            sync = False
+        reproject_videos(
+            pto_file, input_files, output_file,
+            pad, num_cores, padsides_set, sync, model,
+            save_sync_file=save_sync, load_sync_file=load_sync, enhance=enhance,
+            fisheye_mask=fisheye_mask, max_frames=max_frames,
+            level_subsample=level_subsample
+        )
+
+    if auto_generated_pto and os.path.exists(auto_generated_pto):
+        try:
+            os.unlink(auto_generated_pto)
+        except Exception:
+            pass
 
 
 def extract_camera_number_from_path(path: str) -> int:
@@ -2086,6 +2243,8 @@ def main():
     
     parser.add_argument("-n", "--max-frames", type=int, default=0, metavar="N",
         help="Stop after encoding N frames (video only). Useful for quick tests.")
+    parser.add_argument("--level-subsample", type=int, default=1, metavar="N",
+        help="Recompute exposure correction only every N frames in video mode (default: 1). Higher values are faster.")
 
     sync_group = parser.add_argument_group('Video Synchronization Options')
     sync_group.add_argument("--sync", action='store_true', help="Synchronize video streams by their embedded timestamps before stitching.")
@@ -2123,6 +2282,8 @@ def main():
         _print("Error: --fisheye and --equirect are mutually exclusive.", file=sys.stderr); sys.exit(1)
     if not args.pto_file and not (args.fisheye or args.equirect):
         _print("Error: Either pto_file or --fisheye/--equirect must be specified.", file=sys.stderr); sys.exit(1)
+    if args.level_subsample < 1:
+        _print("Error: --level-subsample must be a positive integer.", file=sys.stderr); sys.exit(1)
 
     # If --fisheye or --equirect is specified, generate PTO file from lens.pto files
     auto_generated_pto = None
@@ -2174,7 +2335,8 @@ def main():
                 args.pto_file, args.input_files, args.output_file,
                 args.pad, num_cores, padsides, args.sync, args.model,
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance,
-                fisheye_mask=args.fisheye, max_frames=args.max_frames
+                fisheye_mask=args.fisheye, max_frames=args.max_frames,
+                level_subsample=args.level_subsample
             )
         else:
             _print("Error: Input files must all be of the same type (either all images or all videos).", file=sys.stderr)

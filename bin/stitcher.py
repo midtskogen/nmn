@@ -1301,7 +1301,699 @@ def _find_synchronized_frames(timestamps_per_video, sync_tolerance_sec):
             
     return synchronized_frame_groups
 
-def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1):
+
+# ---------------------------------------------------------------------------
+# Timelapse helpers
+# ---------------------------------------------------------------------------
+
+def _parse_timelapse_datetime(s):
+    """Parse a timelapse datetime string, returning a timezone-aware UTC datetime."""
+    if not s:
+        return None
+    s = s.strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.datetime.strptime(s, fmt)
+            return dt.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+    try:
+        dt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
+    except ValueError:
+        pass
+    raise ValueError(f"Could not parse timelapse datetime: '{s}'")
+
+
+def _parse_timelapse_duration(s):
+    """Parse a duration string like '6 hours 3 minutes 10 seconds' into seconds."""
+    if not s:
+        return None
+    s = s.strip().lower()
+    total_seconds = 0
+    patterns = [
+        (r'(\d+)\s*days?', 86400),
+        (r'(\d+)\s*hours?', 3600),
+        (r'(\d+)\s*minutes?', 60),
+        (r'(\d+)\s*seconds?', 1),
+    ]
+    found = False
+    for pattern, multiplier in patterns:
+        for match in re.finditer(pattern, s):
+            total_seconds += int(match.group(1)) * multiplier
+            found = True
+    if not found:
+        raise ValueError(f"Could not parse timelapse duration: '{s}'")
+    return total_seconds
+
+
+def _discover_timelapse_files(base_pattern, start_time, end_time, quality):
+    """Discover video files for each camera in the timelapse range.
+
+    Returns a list of lists: camera_files[cam_idx] = sorted list of
+    (file_path, file_start_time, file_end_time).
+    """
+    quality = str(quality).lower()
+    filename = "full_*.mp4" if quality == "hd" else "mini_*.mp4"
+
+    camera_dirs = sorted(glob.glob(base_pattern))
+    if not camera_dirs:
+        raise ValueError(f"No camera directories found for pattern: {base_pattern}")
+
+    camera_dirs = [d for d in camera_dirs if re.search(r'cam\d+$', os.path.basename(d))]
+    if not camera_dirs:
+        raise ValueError(f"No camN directories found for pattern: {base_pattern}")
+
+    camera_files = []
+    for cam_dir in camera_dirs:
+        files = []
+        for file_path in glob.glob(os.path.join(cam_dir, "*", "*", filename)):
+            parts = file_path.split(os.sep)
+            yyyymmdd = hh = mm = None
+            for p in parts:
+                if yyyymmdd is None and re.match(r'^\d{8}$', p):
+                    yyyymmdd = p
+                elif yyyymmdd is not None and hh is None and re.match(r'^\d{2}$', p):
+                    hh = p
+            fname = os.path.basename(file_path)
+            m = re.match(r'(?:mini|full)_(\d{2})\.mp4$', fname)
+            if m:
+                mm = m.group(1)
+
+            if not (yyyymmdd and hh and mm):
+                continue
+            try:
+                file_start = datetime.datetime.strptime(f"{yyyymmdd}{hh}{mm}", "%Y%m%d%H%M").replace(tzinfo=datetime.timezone.utc)
+            except ValueError:
+                continue
+            file_end = file_start + datetime.timedelta(minutes=1)
+
+            if file_end <= start_time or file_start >= end_time:
+                continue
+
+            files.append((file_path, file_start, file_end))
+
+        files.sort(key=lambda x: x[1])
+        camera_files.append(files)
+
+    return camera_files
+
+
+def _build_timelapse_timeline(files, model=None):
+    """Build a timeline of frame timestamps for a single camera.
+
+    Returns a sorted list of (timestamp, file_index, frame_index).
+    """
+    timeline = []
+    for file_idx, (file_path, _, _) in enumerate(files):
+        try:
+            with av.open(file_path) as container:
+                stream = container.streams.video[0]
+                time_base = stream.time_base
+
+                container_start = container.start_time
+                start_time_sec = container_start / av.time_base if container_start is not None else 0.0
+
+                if start_time_sec > 0:
+                    # Fast path: derive exact frame timestamps from packet PTS.
+                    _print(f"  Using container metadata for {file_path}")
+                    packet_ts = []
+                    for packet in container.demux(stream):
+                        if packet.pts is None:
+                            continue
+                        ts_seconds = packet.pts * time_base
+                        packet_ts.append((packet.pts, ts_seconds))
+                    packet_ts.sort(key=lambda x: x[0])
+                    for frame_idx, (_, ts_seconds) in enumerate(packet_ts):
+                        ts = datetime.datetime.fromtimestamp(float(ts_seconds), tz=datetime.timezone.utc)
+                        timeline.append((ts, file_idx, frame_idx))
+                else:
+                    # Fallback: OCR the first frame and assume constant frame rate.
+                    _print(f"  No container metadata for {file_path}, falling back to OCR on first frame.")
+                    frame_rate = stream.average_rate
+                    if frame_rate is None or float(frame_rate) == 0:
+                        frame_rate = 25.0
+                    else:
+                        frame_rate = float(frame_rate)
+                    try:
+                        from timestamp import get_timestamp
+                        frame = next(container.decode(stream))
+                        ts = get_timestamp(frame.to_image(), robust=False, model=model)
+                        if ts is None:
+                            ts = get_timestamp(frame.to_image(), robust=True, model=model)
+                        if ts is None:
+                            _print(f"  Warning: Could not extract timestamp from {file_path}. Skipping file.", file=sys.stderr)
+                            continue
+                        start_dt = ts.astimezone(datetime.timezone.utc)
+                        frame_count = stream.frames if stream.frames > 0 else int(frame_rate * 60)
+                        for frame_idx in range(frame_count):
+                            ts = start_dt + datetime.timedelta(seconds=frame_idx / frame_rate)
+                            timeline.append((ts, file_idx, frame_idx))
+                    except Exception as e:
+                        _print(f"  Warning: OCR failed for {file_path}: {e}. Skipping file.", file=sys.stderr)
+                        continue
+        except Exception as e:
+            _print(f"Warning: Could not process {file_path}: {e}", file=sys.stderr)
+
+    timeline.sort(key=lambda x: x[0])
+    return timeline
+
+
+def _find_best_timelapse_frame(timeline, target_time, tolerance=1.0):
+    """Find the frame in timeline closest to target_time within tolerance seconds.
+
+    Returns (file_index, frame_index) or None.
+    """
+    if not timeline:
+        return None
+
+    lo, hi = 0, len(timeline)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if timeline[mid][0] < target_time:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    best = None
+    best_diff = float('inf')
+    for idx in (lo - 1, lo, lo + 1):
+        if 0 <= idx < len(timeline):
+            ts, file_idx, frame_idx = timeline[idx]
+            diff = abs((ts - target_time).total_seconds())
+            if diff < best_diff:
+                best_diff = diff
+                best = (file_idx, frame_idx)
+
+    if best and best_diff <= tolerance:
+        return best
+    return None
+
+
+def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast"):
+    if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
+
+    num_images = len(camera_files)
+    if num_images == 0:
+        raise ValueError("No camera files provided for timelapse.")
+
+    _print("Building timelapse frame timelines...")
+    camera_timelines = []
+    for cam_idx, files in enumerate(camera_files):
+        timeline = _build_timelapse_timeline(files, model=model)
+        _print(f"  Camera {cam_idx + 1}: {len(timeline)} frames from {len(files)} files.")
+        camera_timelines.append(timeline)
+
+    if speed_factor is None or speed_factor <= 0:
+        raise ValueError("Timelapse speed factor must be positive.")
+    if output_fps is None or output_fps <= 0:
+        raise ValueError("Timelapse output framerate must be positive.")
+
+    step_seconds = speed_factor / output_fps
+    target_timestamps = []
+    t = start_time
+    while t <= end_time:
+        target_timestamps.append(t)
+        t += datetime.timedelta(seconds=step_seconds)
+
+    _print("Selecting synchronized frames for timelapse...")
+    selected_groups = []
+    skipped = 0
+    for target in target_timestamps:
+        group = []
+        missing = False
+        for timeline in camera_timelines:
+            best = _find_best_timelapse_frame(timeline, target, tolerance=1.0)
+            if best is None:
+                missing = True
+                break
+            group.append(best)
+        if missing:
+            skipped += 1
+            continue
+        selected_groups.append(group)
+
+    if skipped > 0:
+        _print(f"Skipped {skipped} output frames due to missing synchronized frames (within 1s tolerance).")
+
+    if not selected_groups:
+        raise ValueError("No synchronized frames found in timelapse range.")
+
+    if max_frames > 0 and len(selected_groups) > max_frames:
+        selected_groups = selected_groups[:max_frames]
+
+    _print(f"Selected {len(selected_groups)} output frames for timelapse.")
+
+    mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
+    final_w, final_h = global_options['final_w'], global_options['final_h']
+    if final_w > 16384:
+        raise ValueError(f"Output width {final_w} exceeds codec limits for H.264/libx264. PTO='{pto_file}'")
+    if len(mappings) != num_images:
+        raise ValueError(f"Number of cameras ({num_images}) does not match PTO ({len(mappings)}).")
+
+    _precompile_numba_functions()
+
+    # -----------------------------------------------------------------------
+    # Geometry precomputation (same as reproject_videos multi-video path)
+    # -----------------------------------------------------------------------
+    _print("Precomputing gap/crop geometry from weight maps...")
+    _tmp_weights = np.zeros((final_h, final_w), dtype=np.float32)
+    _tmp_blend_weights_y = []
+    _tmp_pad_t = pad if 'top' in padsides else 0
+    _tmp_pad_b = pad if 'bottom' in padsides else 0
+    _tmp_pad_l = pad if 'left' in padsides else 0
+    _tmp_pad_r = pad if 'right' in padsides else 0
+    for i in range(num_images):
+        sw_map, sh_map = mappings[i][4], mappings[i][5]
+        sw_padded = sw_map + _tmp_pad_l + _tmp_pad_r
+        sh_padded = sh_map + _tmp_pad_t + _tmp_pad_b
+        bw = create_blend_weight_map(sw_padded, sh_padded)
+        ts_x1, ts_y1, ts_x2, ts_y2 = _TIMESTAMP_BOX_HD if sh_map >= 900 else _TIMESTAMP_BOX_SD
+        bw[ts_y1 + _tmp_pad_t:ts_y2 + _tmp_pad_t, ts_x1 + _tmp_pad_l:ts_x2 + _tmp_pad_l] = 0
+        _tmp_blend_weights_y.append(bw)
+        map_y_idx, c01, c23 = mappings[i][0], mappings[i][1], mappings[i][2]
+        _tmp_reproj = np.zeros((final_h, final_w), dtype=np.float32)
+        reproject_float(bw.ravel(), final_w, final_h, bw.shape[1],
+                        map_y_idx.ravel(), c01.ravel(), c23.ravel(), _tmp_reproj.ravel())
+        _tmp_weights += _tmp_reproj
+    geo_gap = _tmp_weights < 1e-9
+    del _tmp_weights, _tmp_reproj
+
+    from scipy.ndimage import gaussian_filter, distance_transform_edt as _geo_edt
+    H_geo, W_geo = geo_gap.shape
+    S_geo = 8
+    feather_radius = max(1, round(20 * W_geo / 4096))
+
+    from scipy.ndimage import binary_erosion as _binary_erosion_cam
+    cam_bboxes = []
+    cam_masks = []
+    cam_inpaint = []
+    for i in range(num_images):
+        bw = _tmp_blend_weights_y[i]
+        _tmp_reproj_i = np.zeros((final_h, final_w), dtype=np.float32)
+        map_y_idx_i, c01_i, c23_i = mappings[i][0], mappings[i][1], mappings[i][2]
+        reproject_float(bw.ravel(), final_w, final_h, bw.shape[1],
+                        map_y_idx_i.ravel(), c01_i.ravel(), c23_i.ravel(), _tmp_reproj_i.ravel())
+        mask_i = _tmp_reproj_i > 1e-9
+        rows_i = np.any(mask_i, axis=1); cols_i = np.any(mask_i, axis=0)
+        if not rows_i.any():
+            cam_bboxes.append(None); cam_masks.append(None); cam_inpaint.append(None); continue
+        r0_i = int(np.argmax(rows_i))
+        r1_i = int(len(rows_i) - np.argmax(rows_i[::-1]))
+        c0_i = int(np.argmax(cols_i))
+        c1_i = int(len(cols_i) - np.argmax(cols_i[::-1]))
+        cam_bboxes.append((r0_i, r1_i, c0_i, c1_i))
+        eroded_full_i = _binary_erosion_cam(mask_i, iterations=2)
+        rows_e = np.any(eroded_full_i, axis=1); cols_e = np.any(eroded_full_i, axis=0)
+        if not rows_e.any():
+            eroded_i = np.zeros((r1_i - r0_i, c1_i - c0_i), dtype=bool)
+            cam_masks.append(eroded_i)
+            cam_inpaint.append(None)
+            continue
+        r0_i = int(np.argmax(rows_e))
+        r1_i = int(len(rows_e) - np.argmax(rows_e[::-1]))
+        c0_i = int(np.argmax(cols_e))
+        c1_i = int(len(cols_e) - np.argmax(cols_e[::-1]))
+        cam_bboxes[-1] = (r0_i, r1_i, c0_i, c1_i)
+        mask_crop_i = eroded_full_i[r0_i:r1_i, c0_i:c1_i]
+        cam_masks.append(mask_crop_i)
+        if not mask_crop_i.all():
+            H_i, W_i = mask_crop_i.shape; ds_i = 8
+            ph_i = ((H_i + ds_i - 1) // ds_i) * ds_i; pw_i = ((W_i + ds_i - 1) // ds_i) * ds_i
+            sp = np.zeros((ph_i, pw_i), dtype=bool)
+            sp[:H_i, :W_i] = mask_crop_i
+            sd = sp[::ds_i, ::ds_i]
+            ri_ds_i, ci_ds_i = _geo_edt(~sd, return_distances=False, return_indices=True)
+            ri_i = np.repeat(np.repeat(ri_ds_i * ds_i, ds_i, axis=0), ds_i, axis=1)[:H_i, :W_i]
+            ci_i = np.repeat(np.repeat(ci_ds_i * ds_i, ds_i, axis=0), ds_i, axis=1)[:H_i, :W_i]
+            cam_inpaint.append((ri_i, ci_i, ~mask_crop_i))
+        else:
+            cam_inpaint.append(None)
+    del _tmp_reproj_i
+
+    valid_bboxes = [b for b in cam_bboxes if b is not None]
+    geo_min_top = min(b[0] for b in valid_bboxes)
+    geo_min_left = min(b[2] for b in valid_bboxes)
+    geo_workwidth = max(b[3] - b[2] + b[2] - geo_min_left for b in valid_bboxes)
+    geo_workheight = max(b[1] - b[0] + b[0] - geo_min_top for b in valid_bboxes)
+    cam_tight_pos = []
+    for bbox in cam_bboxes:
+        if bbox is None:
+            cam_tight_pos.append(None)
+        else:
+            r0_i, r1_i, c0_i, c1_i = bbox
+            cam_tight_pos.append((r0_i - geo_min_top, c0_i - geo_min_left))
+
+    geo_crop_h = final_h
+    row_has_content = np.any(~geo_gap, axis=1)
+    if row_has_content.any():
+        geo_crop_h = int(len(row_has_content) - np.argmax(row_has_content[::-1]))
+        if geo_crop_h < final_h:
+            _print(f"  will crop canvas: {final_h} -> {geo_crop_h} rows")
+
+    out_h = _round_up_16(geo_crop_h)
+    out_w = _round_up_16(final_w)
+    if out_h != geo_crop_h:
+        _print(f"  will round height: {geo_crop_h} -> {out_h} rows")
+    if out_w != final_w:
+        _print(f"  will round width: {final_w} -> {out_w} columns")
+
+    if out_h > final_h or out_w > final_w:
+        _gap_w = np.zeros((out_h, out_w), dtype=bool)
+        _gap_w[:final_h, :final_w] = geo_gap
+        _gap_w[final_h:, :] = True
+        _gap_w[:, final_w:] = True
+        geo_gap = _gap_w
+    else:
+        geo_gap = geo_gap[:out_h, :out_w]
+    H_geo = out_h
+    W_geo = out_w
+    geo_sw = max(1, W_geo // S_geo)
+    geo_sh = max(1, H_geo // S_geo)
+    geo_sigma_s = 4
+    ph_g = ((H_geo + S_geo - 1) // S_geo) * S_geo
+    pw_g = ((W_geo + S_geo - 1) // S_geo) * S_geo
+    gap_pad_g = np.zeros((ph_g, pw_g), dtype=bool)
+    gap_pad_g[:H_geo, :W_geo] = geo_gap
+    gap_ds_g = gap_pad_g[::S_geo, ::S_geo]; del gap_pad_g
+    ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True); del gap_ds_g
+    geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
+    geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
+    geo_dist = _geo_edt(~geo_gap)
+    geo_blend_w = np.clip(geo_dist / feather_radius, 0.0, 1.0).astype(np.float32); del geo_dist
+    geo_n_gap = int(geo_gap.sum())
+    geo_gap_idx = np.where(geo_gap)
+    geo_ri_gap = geo_ri[geo_gap_idx]
+    geo_ci_gap = geo_ci[geo_gap_idx]
+    _print(f"  gap pixels: {geo_n_gap}, feather: {feather_radius}px")
+
+    if fisheye_mask:
+        _fy, _fx = out_h, out_w
+        _fcx, _fcy = _fx // 2, _fy // 2
+        _fr = min(_fcx, _fcy)
+        _fys, _fxs = np.ogrid[:_fy, :_fx]
+        geo_outside_y = (_fxs - _fcx) ** 2 + (_fys - _fcy) ** 2 > _fr * _fr
+        _fuvy, _fuvx = _fy // 2, _fx // 2
+        _fuvcx, _fuvcy = _fuvx // 2, _fuvy // 2
+        _fuvr = min(_fuvcx, _fuvcy)
+        _fuvys, _fuvxs = np.ogrid[:_fuvy, :_fuvx]
+        geo_outside_uv = (_fuvxs - _fuvcx) ** 2 + (_fuvys - _fcy) ** 2 > _fuvr * _fuvr
+    else:
+        geo_outside_y = geo_outside_uv = None
+
+    _geo_fill_u8 = [np.empty((H_geo, W_geo), dtype=np.uint8) for _ in range(3)] if geo_n_gap > 0 else None
+
+    # -----------------------------------------------------------------------
+    # Stitching pass with per-camera multi-file decoding
+    # -----------------------------------------------------------------------
+    _print("\nStarting timelapse stitching process...")
+
+    out_container = av.open(output_file, mode='w')
+    out_stream = out_container.add_stream("libx264", rate=output_fps)
+    out_stream.width, out_stream.height, out_stream.pix_fmt = out_w, out_h, 'yuv420p'
+    out_stream.options = {"preset": preset, "crf": str(crf)}
+
+    total_frames = len(selected_groups)
+    cached_seam_weights, target_leveling_params, previous_leveling_params = None, None, None
+    seam_cache_file = tempfile.mktemp(suffix='_seam.png') if multiblend is not None else None
+
+    frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
+    frame_u_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
+    frame_v_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
+    frame_weights_y = np.empty((num_images, final_h, final_w), dtype=np.float32)
+    frame_weights_uv = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.float32)
+    _canvas_r = np.empty((out_h, out_w), dtype=np.float32)
+    _canvas_g = np.empty((out_h, out_w), dtype=np.float32)
+    _canvas_b = np.empty((out_h, out_w), dtype=np.float32)
+
+    blend_weights_y = _tmp_blend_weights_y
+    pad_t = _tmp_pad_t; pad_b = _tmp_pad_b; pad_l = _tmp_pad_l; pad_r = _tmp_pad_r
+
+    def _yuv_crop_inpaint(i):
+        bbox = cam_bboxes[i]
+        if bbox is None:
+            return i, None
+        r0, r1, c0, c1 = bbox
+        ur0, ur1 = r0 // 2, (r1 + 1) // 2
+        uc0, uc1 = c0 // 2, (c1 + 1) // 2
+        y_crop_src = frame_y_planes[i][r0:r1, c0:c1]
+        u_crop_src = frame_u_planes[i][ur0:ur1, uc0:uc1]
+        v_crop_src = frame_v_planes[i][ur0:ur1, uc0:uc1]
+        r, g, b = yuv_to_rgb(y_crop_src, u_crop_src, v_crop_src)
+        h_bb, w_bb = r1 - r0, c1 - c0
+        r_crop = r[:h_bb, :w_bb].copy()
+        g_crop = g[:h_bb, :w_bb].copy()
+        b_crop = b[:h_bb, :w_bb].copy()
+        inpaint = cam_inpaint[i]
+        if inpaint is not None:
+            ri_i, ci_i, invalid_i = inpaint
+            r_crop[invalid_i] = r_crop[ri_i[invalid_i], ci_i[invalid_i]]
+            g_crop[invalid_i] = g_crop[ri_i[invalid_i], ci_i[invalid_i]]
+            b_crop[invalid_i] = b_crop[ri_i[invalid_i], ci_i[invalid_i]]
+        return i, (r_crop, g_crop, b_crop)
+
+    # Per-camera state for sequential file decoding
+    class _CameraDecoder:
+        __slots__ = ('files', 'container', 'stream', 'frame_iter', 'current_file_idx', 'current_frame_idx', 'last_frame', 'closed')
+        def __init__(self, files):
+            self.files = files
+            self.container = None
+            self.stream = None
+            self.frame_iter = None
+            self.current_file_idx = -1
+            self.current_frame_idx = -1
+            self.last_frame = None
+            self.closed = False
+
+        def _open_file(self, file_idx):
+            if self.container is not None:
+                try:
+                    self.container.close()
+                except Exception:
+                    pass
+            self.container = None
+            self.stream = None
+            self.frame_iter = None
+            self.last_frame = None
+            self.current_file_idx = -1
+            self.current_frame_idx = -1
+            if file_idx < 0 or file_idx >= len(self.files):
+                return False
+            file_path = self.files[file_idx][0]
+            try:
+                self.container = av.open(file_path)
+                self.stream = self.container.streams.video[0]
+                self.stream.thread_type = 'AUTO'
+                self.frame_iter = self.container.decode(self.stream)
+                self.current_file_idx = file_idx
+                self.current_frame_idx = -1
+                return True
+            except Exception as e:
+                _print(f"Warning: Could not open {file_path}: {e}", file=sys.stderr)
+                return False
+
+        def get_frame(self, file_idx, frame_idx):
+            if self.closed:
+                return None
+            if file_idx != self.current_file_idx:
+                if not self._open_file(file_idx):
+                    return None
+            if self.current_frame_idx == frame_idx and self.last_frame is not None:
+                return self.last_frame
+            if self.current_frame_idx > frame_idx:
+                # Cannot go backwards; should not happen with sorted targets
+                return None
+            try:
+                while self.current_frame_idx < frame_idx:
+                    self.last_frame = next(self.frame_iter)
+                    self.current_frame_idx += 1
+                # Now current_frame_idx == frame_idx, decode the next frame
+                self.last_frame = next(self.frame_iter)
+                self.current_frame_idx += 1
+                return self.last_frame
+            except StopIteration:
+                return None
+
+        def close(self):
+            self.closed = True
+            self.last_frame = None
+            if self.container is not None:
+                try:
+                    self.container.close()
+                except Exception:
+                    pass
+
+    camera_decoders = [_CameraDecoder(files) for files in camera_files]
+
+    try:
+        out_frame = av.VideoFrame(width=out_w, height=out_h, format='yuv420p')
+        if not out_frame.planes or not out_frame.planes[0]:
+            raise RuntimeError()
+    except Exception:
+        raise RuntimeError(
+            f"FATAL: Failed to allocate video frame buffer with dimensions {out_w}x{out_h}."
+        )
+
+    if geo_n_gap > 0:
+        def _gap_fill_channel(ch_f, buf_u8):
+            np.clip(ch_f, 0, 255, out=ch_f)
+            np.copyto(buf_u8, ch_f, casting='unsafe')
+            buf_u8[geo_gap_idx] = ch_f[geo_ri_gap, geo_ci_gap].astype(np.uint8)
+            if _cv2 is not None:
+                small = _cv2.resize(buf_u8, (geo_sw, geo_sh), interpolation=_cv2.INTER_AREA).astype(np.float32)
+            else:
+                from PIL import Image as _PIL2
+                small = np.array(_PIL2.fromarray(buf_u8).resize((geo_sw, geo_sh), _PIL2.BOX)).astype(np.float32)
+            blurred_u8 = gaussian_filter(small, sigma=geo_sigma_s).clip(0, 255).astype(np.uint8)
+            if _cv2 is not None:
+                full = _cv2.resize(blurred_u8, (W_geo, H_geo), interpolation=_cv2.INTER_LINEAR).astype(np.float32)
+            else:
+                from PIL import Image as _PIL2
+                full = np.array(_PIL2.fromarray(blurred_u8).resize((W_geo, H_geo), _PIL2.BILINEAR)).astype(np.float32)
+            result = ch_f * geo_blend_w + full * (1.0 - geo_blend_w)
+            np.clip(result, 0, 255, out=result)
+            return result.astype(np.uint8)
+
+    cached_exp_info = None
+    frame_count = 0
+
+    with ThreadPoolExecutor(max_workers=num_cores) as executor:
+        for group in selected_groups:
+            final_group_frames = [None] * num_images
+            for i, (file_idx, frame_idx) in enumerate(group):
+                frame = camera_decoders[i].get_frame(file_idx, frame_idx)
+                final_group_frames[i] = frame
+
+            if any(f is None for f in final_group_frames):
+                continue
+
+            frame_count += 1
+            if max_frames > 0 and frame_count > max_frames:
+                break
+
+            if not _quiet and total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
+                percent_done = (frame_count / total_frames) * 100
+                if sys.stderr.isatty():
+                    bar_length = 40; filled_len = int(round(bar_length * frame_count / float(total_frames)))
+                    bar = '█' * filled_len + '-' * (bar_length - filled_len)
+                    sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
+                else:
+                    _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
+
+            worker_args = [
+                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides),
+                 (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i]))
+                for i in range(num_images) if final_group_frames[i] is not None
+            ]
+            list(executor.map(worker_for_video_frame, worker_args))
+
+            images = []
+            for i in range(num_images):
+                _, rgb_crops = _yuv_crop_inpaint(i)
+                if rgb_crops is None:
+                    continue
+                r0, r1, c0, c1 = cam_bboxes[i]
+                tight_ypos, tight_xpos = cam_tight_pos[i]
+                images.append(multiblend.ImageInfo(
+                    filename="", bpp=8, width=c1 - c0, height=r1 - r0,
+                    xpos=tight_xpos, ypos=tight_ypos,
+                    channels=list(rgb_crops),
+                    mask=cam_masks[i],
+                ))
+
+            workwidth, workheight = geo_workwidth, geo_workheight
+            if frame_count == 1:
+                _print("Computing seams with multiblend (first frame)...")
+                levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
+                assignment, _ = multiblend.compute_seams(
+                    images=images,
+                    workwidth=workwidth,
+                    workheight=workheight,
+                    simple_seam=False,
+                    content_seam=False,
+                    verbosity=0,
+                    print_func=_print,
+                )
+                if seam_cache_file:
+                    try:
+                        multiblend._save_seams_png(seam_cache_file, assignment, workwidth, workheight, 0, _print)
+                    except Exception:
+                        seam_cache_file = None
+            else:
+                if seam_cache_file and os.path.exists(seam_cache_file):
+                    try:
+                        assignment = multiblend._load_seams_png(seam_cache_file, workwidth, workheight, 0, _print)
+                    except Exception:
+                        assignment = np.zeros((workheight, workwidth), dtype=np.uint8)
+
+            recompute_exposure = (frame_count - 1) % level_subsample == 0
+            blend_out_info = {}
+            rgb_blended = multiblend.blend(
+                images=images,
+                assignment=assignment,
+                workwidth=workwidth,
+                workheight=workheight,
+                levels=levels,
+                workbpp=8,
+                exposure_correct=True,
+                saturation_correct=False,
+                verbosity=0,
+                print_func=_print,
+                exposure_info=None if recompute_exposure else cached_exp_info,
+                out_info=blend_out_info,
+            )
+            if recompute_exposure and 'exposure' in blend_out_info:
+                cached_exp_info = blend_out_info['exposure']
+
+            _canvas_r.fill(0); _canvas_g.fill(0); _canvas_b.fill(0)
+            t, l = geo_min_top, geo_min_left
+            _canvas_r[t:t + workheight, l:l + workwidth] = rgb_blended[0]
+            _canvas_g[t:t + workheight, l:l + workwidth] = rgb_blended[1]
+            _canvas_b[t:t + workheight, l:l + workwidth] = rgb_blended[2]
+            canvas_r, canvas_g, canvas_b = _canvas_r, _canvas_g, _canvas_b
+
+            if geo_n_gap > 0:
+                futs = [executor.submit(_gap_fill_channel, ch, buf)
+                        for ch, buf in zip((canvas_r, canvas_g, canvas_b), _geo_fill_u8)]
+                canvas_rgb = [f.result() for f in futs]
+            else:
+                canvas_rgb = [np.clip(c, 0, 255).astype(np.uint8) for c in (canvas_r, canvas_g, canvas_b)]
+
+            y_final, u_final, v_final = rgb_to_yuv(canvas_rgb)
+
+            if fisheye_mask:
+                y_final[geo_outside_y] = 0
+                u_final[geo_outside_uv] = 128
+                v_final[geo_outside_uv] = 128
+
+            if enhance:
+                seed_y = int.from_bytes(os.urandom(4), 'little')
+                y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+                u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+
+            out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
+            out_frame.pts = frame_count - 1
+            for packet in out_stream.encode(out_frame):
+                out_container.mux(packet)
+
+    if not _quiet and total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
+
+    for packet in out_stream.encode(): out_container.mux(packet)
+    out_container.close()
+    for decoder in camera_decoders:
+        decoder.close()
+    if seam_cache_file and os.path.exists(seam_cache_file):
+        try:
+            os.unlink(seam_cache_file)
+        except Exception:
+            pass
+    _print(f"\n✅ Success! Timelapse video saved to {output_file}")
+
+
+def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast"):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -1336,7 +2028,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             out_container = av.open(output_file, mode='w')
             out_stream = out_container.add_stream("libx264", rate=in_stream.average_rate)
             out_stream.width, out_stream.height, out_stream.pix_fmt = dw, dh, 'yuv420p'
-            out_stream.options = {"preset": "ultrafast", "crf": "28"}
+            out_stream.options = {"preset": preset, "crf": str(crf)}
         except av.AVError as e:
             raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
         
@@ -1660,7 +2352,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         out_container = av.open(output_file, mode='w')
         out_stream = out_container.add_stream("libx264", rate=in_streams[0].average_rate)
         out_stream.width, out_stream.height, out_stream.pix_fmt = out_w, out_h, 'yuv420p'
-        out_stream.options = {"preset": "ultrafast", "crf": "28"}
+        out_stream.options = {"preset": preset, "crf": str(crf)}
     except av.AVError as e:
         raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
         
@@ -2309,7 +3001,7 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("pto_file", nargs='?', help="Path to the Hugin PTO project file. Required unless --fisheye or --equirect is specified.")
-    parser.add_argument("input_files", nargs='+', help="One or more input image or video files (must all be same type).")
+    parser.add_argument("input_files", nargs='*', help="One or more input image or video files (must all be same type). Required unless --timelapse is used.")
     parser.add_argument("output_file", help="Path for the output panoramic image or video.")
     parser.add_argument("--fisheye", action='store_true', help="Generate fisheye panorama (8192x8192). Automatically creates PTO from lens.pto files found two directories up from input files.")
     parser.add_argument("--equirect", action='store_true', help="Generate equirectangular panorama (3380x2240). Automatically creates PTO from lens.pto files found two directories up from input files.")
@@ -2323,12 +3015,26 @@ def main():
         help="Stop after encoding N frames (video only). Useful for quick tests.")
     parser.add_argument("--level-subsample", type=int, default=1, metavar="N",
         help="Recompute exposure correction only every N frames in video mode (default: 1). Higher values are faster.")
+    parser.add_argument("--crf", type=str, default="28", metavar="CRF",
+        help="libx264 CRF value for video output (default: 28). Lower = better quality.")
+    parser.add_argument("--preset", type=str, default="ultrafast", metavar="PRESET",
+        help="libx264 preset for video output (default: ultrafast).")
 
     sync_group = parser.add_argument_group('Video Synchronization Options')
     sync_group.add_argument("--sync", action='store_true', help="Synchronize video streams by their embedded timestamps before stitching.")
     sync_group.add_argument("--model", type=str, default=None, help="Specify the model for timestamp extraction.")
     sync_group.add_argument("--save-sync", type=str, default=None, help="Save the synchronization map to a JSON file (requires --sync).")
     sync_group.add_argument("--load-sync", type=str, default=None, help="Load a pre-computed synchronization map from a JSON file (requires --sync).")
+
+    timelapse_group = parser.add_argument_group('Timelapse Options')
+    timelapse_group.add_argument("--timelapse", action='store_true', help="Create a timelapse video instead of stitching a single input.")
+    timelapse_group.add_argument("--timelapse-start", type=str, default=None, help="Timelapse start time (e.g., '2026-06-22 00:00:00').")
+    timelapse_group.add_argument("--timelapse-end", type=str, default=None, help="Timelapse end time (e.g., '2026-06-22 06:30:10').")
+    timelapse_group.add_argument("--timelapse-duration", type=str, default=None, help="Timelapse duration as a human-readable string (e.g., '6 hours 3 minutes 10 seconds').")
+    timelapse_group.add_argument("--timelapse-speed", type=float, default=None, help="Timelapse speed-up factor (e.g., 60 for 60x).")
+    timelapse_group.add_argument("--timelapse-framerate", type=int, default=30, help="Output timelapse frame rate (default: 30).")
+    timelapse_group.add_argument("--timelapse-quality", type=str, default='sd', help="Source quality: 'sd'/'SD' for mini_mm.mp4 or 'hd'/'HD' for full_mm.mp4 (default: sd).")
+    timelapse_group.add_argument("--timelapse-pattern", type=str, default='/meteor/cam?', help="Glob pattern used to find camera directories (default: /meteor/cam?).")
     
     args = parser.parse_args()
 
@@ -2350,18 +3056,98 @@ def main():
         _print("Error: --save-sync and --load-sync cannot be used at the same time.", file=sys.stderr); sys.exit(1)
     if (args.save_sync or args.load_sync) and not args.sync:
         _print("Error: --save-sync and --load-sync require the --sync flag to be enabled.", file=sys.stderr); sys.exit(1)
-    if len(args.input_files) < 2:
-        if args.sync: _print("INFO: --sync option ignored for a single input file."); args.sync = False
-    if not args.input_files:
-        _print("Error: No input files specified.", file=sys.stderr); sys.exit(1)
+    if args.level_subsample < 1:
+        _print("Error: --level-subsample must be a positive integer.", file=sys.stderr); sys.exit(1)
 
     # Validate --fisheye and --equirect options
     if args.fisheye and args.equirect:
         _print("Error: --fisheye and --equirect are mutually exclusive.", file=sys.stderr); sys.exit(1)
+
+    # --- Timelapse mode ---
+    if args.timelapse:
+        if not args.timelapse_start:
+            _print("Error: --timelapse requires --timelapse-start.", file=sys.stderr); sys.exit(1)
+        if args.timelapse_speed is None or args.timelapse_speed <= 0:
+            _print("Error: --timelapse requires a positive --timelapse-speed.", file=sys.stderr); sys.exit(1)
+        if args.timelapse_end and args.timelapse_duration:
+            _print("Error: --timelapse-end and --timelapse-duration cannot be used together.", file=sys.stderr); sys.exit(1)
+        if not args.timelapse_end and not args.timelapse_duration:
+            _print("Error: --timelapse requires either --timelapse-end or --timelapse-duration.", file=sys.stderr); sys.exit(1)
+        quality = args.timelapse_quality.lower()
+        if quality not in ('sd', 'hd'):
+            _print("Error: --timelapse-quality must be 'sd' or 'hd'.", file=sys.stderr); sys.exit(1)
+        if not (args.fisheye or args.equirect):
+            _print("Error: --timelapse requires either --fisheye or --equirect to choose the projection.", file=sys.stderr); sys.exit(1)
+
+        try:
+            start_time = _parse_timelapse_datetime(args.timelapse_start)
+        except ValueError as e:
+            _print(f"Error: {e}", file=sys.stderr); sys.exit(1)
+
+        if args.timelapse_end:
+            try:
+                end_time = _parse_timelapse_datetime(args.timelapse_end)
+            except ValueError as e:
+                _print(f"Error: {e}", file=sys.stderr); sys.exit(1)
+        else:
+            try:
+                duration_seconds = _parse_timelapse_duration(args.timelapse_duration)
+            except ValueError as e:
+                _print(f"Error: {e}", file=sys.stderr); sys.exit(1)
+            end_time = start_time + datetime.timedelta(seconds=duration_seconds)
+
+        if end_time <= start_time:
+            _print("Error: Timelapse end time must be after start time.", file=sys.stderr); sys.exit(1)
+
+        _print(f"Discovering timelapse files for {start_time} -> {end_time} ({quality.upper()} quality)...")
+        camera_files = _discover_timelapse_files(args.timelapse_pattern, start_time, end_time, quality)
+        if not camera_files or not any(camera_files):
+            _print("Error: No video files found for timelapse range/pattern.", file=sys.stderr); sys.exit(1)
+        for i, files in enumerate(camera_files, start=1):
+            if not files:
+                _print(f"Error: Camera {i} has no video files in the timelapse range.", file=sys.stderr); sys.exit(1)
+
+        # Generate PTO from the first file of each camera.
+        projection = 'fisheye' if args.fisheye else 'equirect'
+        representative_files = [files[0][0] for files in camera_files]
+        auto_generated_pto = generate_pto_from_lens_files(representative_files, projection)
+        if auto_generated_pto is None:
+            _print("Error: Failed to generate PTO file from lens.pto files.", file=sys.stderr); sys.exit(1)
+        _print(f"Generated PTO file: {auto_generated_pto}")
+
+        try:
+            padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
+            reproject_timelapse(
+                auto_generated_pto, camera_files, args.output_file,
+                start_time, end_time, args.timelapse_speed, args.timelapse_framerate,
+                args.pad, num_cores, padsides, model=args.model,
+                enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
+                level_subsample=args.level_subsample, crf=args.crf, preset=args.preset
+            )
+        except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
+            _print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            _print(f"\n❌ An unexpected critical error occurred:\n{e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        finally:
+            if auto_generated_pto and os.path.exists(auto_generated_pto):
+                try:
+                    os.unlink(auto_generated_pto)
+                    _print(f"Cleaned up temporary PTO file: {auto_generated_pto}")
+                except Exception as e:
+                    _print(f"Warning: Failed to clean up temporary PTO file: {e}", file=sys.stderr)
+        return
+
+    # --- Non-timelapse validation ---
+    if len(args.input_files) < 2:
+        if args.sync: _print("INFO: --sync option ignored for a single input file."); args.sync = False
+    if not args.input_files:
+        _print("Error: No input files specified.", file=sys.stderr); sys.exit(1)
     if not args.pto_file and not (args.fisheye or args.equirect):
         _print("Error: Either pto_file or --fisheye/--equirect must be specified.", file=sys.stderr); sys.exit(1)
-    if args.level_subsample < 1:
-        _print("Error: --level-subsample must be a positive integer.", file=sys.stderr); sys.exit(1)
 
     # If --fisheye or --equirect is specified, generate PTO file from lens.pto files
     auto_generated_pto = None
@@ -2414,7 +3200,7 @@ def main():
                 args.pad, num_cores, padsides, args.sync, args.model,
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance,
                 fisheye_mask=args.fisheye, max_frames=args.max_frames,
-                level_subsample=args.level_subsample
+                level_subsample=args.level_subsample, crf=args.crf, preset=args.preset
             )
         else:
             _print("Error: Input files must all be of the same type (either all images or all videos).", file=sys.stderr)

@@ -991,6 +991,44 @@ class AS7Diagnostic:
             self.log_issue("PERMISSION_DENIED", {'check': f"API connectivity: {e}"}) # Could be network issue
 
 
+    def _probe_rtsp_stream(self, rtsp_url, max_attempts=2):
+        """Probe an RTSP stream with ffprobe, retrying on transient failure.
+
+        Returns (success: bool, reason: str|None).
+        """
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'v:0',
+            '-rtsp_transport', 'tcp',
+            '-timeout', '10000000',  # 10 seconds RTSP layer timeout
+            rtsp_url,
+        ]
+        last_reason = None
+        for attempt in range(max_attempts):
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=15)
+                return True, None
+            except subprocess.CalledProcessError as e:
+                last_reason = 'ffprobe failed'
+                # Retry on transient failures; ffprobe exit code can flap with network/camera load.
+                if attempt < max_attempts - 1:
+                    time.sleep(1.0)
+                    continue
+                return False, last_reason
+            except subprocess.TimeoutExpired:
+                last_reason = 'ffprobe timeout'
+                if attempt < max_attempts - 1:
+                    time.sleep(1.0)
+                    continue
+                return False, last_reason
+            except Exception as e:
+                last_reason = str(e)
+                if attempt < max_attempts - 1:
+                    time.sleep(1.0)
+                    continue
+                return False, last_reason
+        return False, last_reason or 'unknown'
+
     def check_camera_health(self):
         """Pings cameras and checks their live video streams using ffprobe."""
         print("\n--- Checking Camera Health ---")
@@ -1032,17 +1070,14 @@ class AS7Diagnostic:
             for stream_type, stream_id in [("HD", "0"), ("SD", "1")]:
                 uri = f"user={user}&password={password}&channel={channel}&stream={stream_id}.sdp"
                 rtsp_url = f"rtsp://{ip}:{port}/{uri}"
-                # Increased timeout for ffprobe, especially on initial connection
-                cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-rtsp_transport', 'tcp', '-timeout', '7000000', rtsp_url] # 7 seconds
-                try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=10) # Overall timeout
+                ok, reason = self._probe_rtsp_stream(rtsp_url)
+                if ok:
                     self.log_success(f"Camera '{cam_key}' {stream_type} stream is active.", indent=2)
-                except subprocess.CalledProcessError:
-                    self.log_issue("CAM_STREAM_DOWN", {'cam_key': cam_key, 'ip': ip, 'stream_type': stream_type}, indent=2)
-                except subprocess.TimeoutExpired:
-                     self.log_issue("CAM_STREAM_DOWN", {'cam_key': cam_key, 'ip': ip, 'stream_type': stream_type, 'reason': 'ffprobe timeout'}, indent=2)
-                except Exception as e:
-                     self.log_issue("PERMISSION_DENIED", {'check': f"running ffprobe for {cam_key} {stream_type}: {e}"}, indent=2)
+                else:
+                    context = {'cam_key': cam_key, 'ip': ip, 'stream_type': stream_type}
+                    if reason:
+                        context['reason'] = reason
+                    self.log_issue("CAM_STREAM_DOWN", context, indent=2)
 
 
     def check_calibration_files(self):

@@ -654,7 +654,16 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                                     logging.info(f"Worker {task_id} STITCH-DEBUG: launching background stitch for {t_key_s}, cams={sorted(ready_cams.keys())}")
                                     with open(stdout_path, 'w') as sf:
                                         sp = subprocess.Popen(cmd, stdout=sf, stderr=subprocess.PIPE)
-                                    stitch_jobs.append({'process': sp, 't_key': t_key_s, 't_iso': t_obj.isoformat(), 'stdout_path': stdout_path})
+                                    stitch_jobs.append({
+                                        'process': sp, 't_key': t_key_s, 't_iso': t_obj.isoformat(),
+                                        'stdout_path': stdout_path,
+                                        'station_code': station_code,
+                                        'base_name': base_name,
+                                        'res_suffix': res_suffix,
+                                        'do_fisheye': need_fisheye,
+                                        'do_equirect': need_equirect,
+                                        'reported': set(),
+                                    })
                                 else:
                                     logging.info(f"Worker {task_id} STITCH-DEBUG: all stitch outputs cached for {t_key_s}, skipping subprocess")
 
@@ -677,7 +686,23 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
 
             # Poll background stitch jobs
             remaining_stitch_jobs = []
+            _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
             for sjob in stitch_jobs:
+                # Check for outputs that are already on disk while the subprocess is still running.
+                for proj, flag in [('fisheye', sjob['do_fisheye']), ('equirect', sjob['do_equirect'])]:
+                    if flag and proj not in sjob['reported']:
+                        fname = f"{sjob['base_name']}_{sjob['res_suffix']}_{proj}.jpg"
+                        fpath = os.path.join(DOWNLOAD_DIR, fname)
+                        if os.path.exists(fpath):
+                            thumb_kwargs = {"task_id": task_id, "path": fpath, "file_type": 'image', "station_code": sjob['station_code'], "cam_num": _STITCH_CAM.get(proj, 0)}
+                            stitch_entry = {"url": f"download/{fname}", "name": fname, "utc_time_iso": sjob['t_iso'], "alternatives": []}
+                            if thumb := create_thumbnail(**thumb_kwargs): stitch_entry["thumb_url"] = f"download/{thumb}"
+                            results.setdefault(sjob['t_key'], []).append(stitch_entry)
+                            logging.info(f"Worker {task_id} STITCH-DEBUG: added early result {fname}")
+                            stitch_done += 1
+                            sjob['reported'].add(proj)
+                            blends_finished_this_cycle = True
+
                 if sjob['process'].poll() is not None:
                     blends_finished_this_cycle = True  # trigger a status update
                     rc = sjob['process'].returncode
@@ -686,15 +711,17 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                         try:
                             with open(sjob['stdout_path']) as sf:
                                 stitch_results = json.loads(sf.read().strip())
-                            _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
                             for key, info in stitch_results.items():
+                                if key in sjob['reported']:
+                                    continue
                                 if info and os.path.exists(info['path']):
-                                    thumb_kwargs = {"task_id": task_id, "path": info['path'], "file_type": 'image', "station_code": station_code, "cam_num": _STITCH_CAM.get(key, 0)}
+                                    thumb_kwargs = {"task_id": task_id, "path": info['path'], "file_type": 'image', "station_code": sjob['station_code'], "cam_num": _STITCH_CAM.get(key, 0)}
                                     stitch_entry = {"url": f"download/{info['name']}", "name": info['name'], "utc_time_iso": sjob['t_iso'], "alternatives": []}
                                     if thumb := create_thumbnail(**thumb_kwargs): stitch_entry["thumb_url"] = f"download/{thumb}"
                                     results.setdefault(sjob['t_key'], []).append(stitch_entry)
                                     logging.info(f"Worker {task_id} STITCH-DEBUG: added result {info['name']}")
                                     stitch_done += 1
+                                    sjob['reported'].add(key)
                         except Exception as e:
                             logging.error(f"Worker {task_id} STITCH-DEBUG: failed to read stitch output: {e}")
                             errors.append("error_internal")

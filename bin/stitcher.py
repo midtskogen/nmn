@@ -689,7 +689,7 @@ def _precompile_numba_functions():
 
     _print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False):
+def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
@@ -906,7 +906,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     # that will be discarded. Round both dimensions up to a multiple of 16
     # for image/video compatibility.
     new_h = final_h
-    if not fisheye_mask:
+    if not fisheye_mask and crop_to_content:
         row_has_content = np.any(~gap, axis=1)
         if row_has_content.any():
             last_row = int(len(row_has_content) - 1 - np.argmax(row_has_content[::-1]))
@@ -1920,7 +1920,8 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
            pad=0, padsides=None, enhance=False, fisheye_mask=False,
            force_video_dims=False, max_frames=0, level_subsample=1,
            sync=False, model=None, save_sync=None, load_sync=None,
-           quiet=False, num_cores=None):
+           quiet=False, num_cores=None, lens_files=None,
+           output_width=None, output_height=None, crop_to_content: bool = True):
     """Stitch images or videos into a panoramic image or video.
 
     This is the public API entry point for programs that import stitcher.py.
@@ -1964,6 +1965,20 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
         Suppress all text output.
     num_cores : int or None, optional
         Number of CPU cores to use. None uses all available cores.
+    lens_files : dict or None, optional
+        Mapping of camera number to lens.pto path. When provided, these
+        calibrations are used instead of discovering lens.pto files from the
+        input paths. Useful when the inputs are local copies that no longer
+        live under /meteor/cam*/.
+    output_width : int or None, optional
+        Force the generated PTO output canvas width. Defaults to the standard
+        size for the chosen projection.
+    output_height : int or None, optional
+        Force the generated PTO output canvas height.
+    crop_to_content : bool, optional
+        For images, crop the output canvas to the last row that has any image
+        content. When False, the full PTO canvas (including empty/gap rows) is
+        kept and gap-filled. Default is True.
 
     Raises
     ------
@@ -2009,7 +2024,11 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
     if pto_file is None:
         if projection not in ('equirect', 'fisheye'):
             raise ValueError("projection must be 'equirect' or 'fisheye'")
-        pto_file = generate_pto_from_lens_files(input_files, projection)
+        pto_file = generate_pto_from_lens_files(
+            input_files, projection,
+            lens_files=lens_files,
+            w=output_width, h=output_height
+        )
         if pto_file is None:
             raise RuntimeError("Failed to generate PTO file from lens.pto files.")
         auto_generated_pto = pto_file
@@ -2041,7 +2060,8 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
     if is_image_input:
         reproject_images(
             pto_file, input_files, output_file, pad, num_cores, padsides_set,
-            enhance, force_video_dims=force_video_dims, fisheye_mask=fisheye_mask
+            enhance, force_video_dims=force_video_dims, fisheye_mask=fisheye_mask,
+            crop_to_content=crop_to_content
         )
     else:
         if len(input_files) < 2 and sync:
@@ -2063,8 +2083,10 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
 
 def extract_camera_number_from_path(path: str) -> int:
     """Extract camera number from a path like /meteor/cam1/20260621/07/full_00.jpg -> 1"""
-    # Look for 'cam' followed by a number in the path
-    match = re.search(r'/cam(\d+)/', path)
+    # Look for 'cam' followed by a number in the path. Accept both the original
+    # directory layout (/cam1/) and downloaded filenames (cam1.jpg, _cam1.jpg).
+    # Use negative lookbehind/lookahead to ensure 'cam' is a standalone token.
+    match = re.search(r'(?<![A-Za-z0-9])cam(\d+)(?![A-Za-z0-9])', path)
     if match:
         return int(match.group(1))
     raise ValueError(f"Could not extract camera number from path: {path}")
@@ -2097,46 +2119,62 @@ def build_pto_header(w: int, h: int, projection: str) -> str:
             f'm g1 i0 m2 p0.00784314\n')
 
 
-def generate_pto_from_lens_files(input_files: list, projection: str) -> str:
+def generate_pto_from_lens_files(input_files: list, projection: str,
+                                 lens_files: dict = None,
+                                 w: int = None, h: int = None) -> str:
     """Generate a PTO file from lens.pto files found relative to input files.
     
     Args:
         input_files: List of input image file paths
         projection: 'fisheye' or 'equirect'
+        lens_files: Optional dict mapping camera number to lens.pto path. If
+            provided, these are used instead of searching relative to the inputs.
+        w: Optional output canvas width. Defaults to the standard size for the
+            projection.
+        h: Optional output canvas height.
     
     Returns:
         Path to the generated PTO file, or None on failure
     """
     # Define output dimensions based on projection
-    if projection == 'fisheye':
-        w, h = 4096, 4096
-    else:  # equirect
-        w, h = 4096, 2160
+    explicit_size = w is not None and h is not None
+    if w is None or h is None:
+        if projection == 'fisheye':
+            w, h = 4096, 4096
+        else:  # equirect
+            w, h = 4096, 2160
     
-    # Find lens.pto files for each input
-    lens_files = {}
+    # Find lens.pto files for each input if not supplied explicitly
     missing_lens = []
-    for img_path in input_files:
-        try:
-            cam_num = extract_camera_number_from_path(img_path)
-            lens_pto = find_lens_pto_for_image(img_path)
-            if lens_pto is None:
-                _print(f"Error: lens.pto not found for camera {cam_num} (image: {img_path})", file=sys.stderr)
-                missing_lens.append(cam_num)
+    if lens_files is None:
+        lens_files = {}
+        for img_path in input_files:
+            try:
+                cam_num = extract_camera_number_from_path(img_path)
+                lens_pto = find_lens_pto_for_image(img_path)
+                if lens_pto is None:
+                    _print(f"Error: lens.pto not found for camera {cam_num} (image: {img_path})", file=sys.stderr)
+                    missing_lens.append(cam_num)
+                    continue
+                lens_files[cam_num] = lens_pto
+            except ValueError as e:
+                _print(f"Error: {e}", file=sys.stderr)
+                missing_lens.append("unknown")
                 continue
-            lens_files[cam_num] = lens_pto
-        except ValueError as e:
-            _print(f"Error: {e}", file=sys.stderr)
-            missing_lens.append("unknown")
-            continue
     
-    if not lens_files:
-        _print("Error: No lens.pto files found for any input images", file=sys.stderr)
-        return None
-    
-    if missing_lens:
-        _print(f"Error: lens.pto files not found for cameras {missing_lens}. Cannot proceed without all calibration files.", file=sys.stderr)
-        return None
+        if not lens_files:
+            _print("Error: No lens.pto files found for any input images", file=sys.stderr)
+            return None
+        
+        if missing_lens:
+            _print(f"Error: lens.pto files not found for cameras {missing_lens}. Cannot proceed without all calibration files.", file=sys.stderr)
+            return None
+    else:
+        # Verify the explicitly supplied lens files exist.
+        missing = [cam for cam, path in lens_files.items() if not os.path.exists(path)]
+        if missing:
+            _print(f"Error: lens.pto files not found for cameras {missing}. Cannot proceed without all calibration files.", file=sys.stderr)
+            return None
     
     # Build PTO header
     header = build_pto_header(w, h, projection)
@@ -2204,8 +2242,9 @@ def generate_pto_from_lens_files(input_files: list, projection: str) -> str:
             _print(f"Warning: Could not read lens.pto for camera {cam_num}: {e}", file=sys.stderr)
             continue
 
-    # Scale output canvas proportionally if input is not the calibration size.
-    if actual_w is not None:
+    # Scale output canvas proportionally if input is not the calibration size and
+    # the caller did not request a fixed output size.
+    if not explicit_size and actual_w is not None:
         # Derive calibration w from first lens.pto found
         cal_w_ref = None
         for lens_pto in lens_files.values():
@@ -2234,9 +2273,11 @@ def generate_pto_from_lens_files(input_files: list, projection: str) -> str:
     # Write PTO file to a temporary location
     pto_content = "".join(lines)
     pto_fd, pto_path = tempfile.mkstemp(suffix='.pto', prefix='auto_')
+    fd_closed = False
     try:
         with os.fdopen(pto_fd, 'w') as f:
             f.write(pto_content)
+        fd_closed = True  # os.fdopen closes the descriptor on exit
         _print(f"Generated PTO file with {len(lines)} lines for {len(lens_files)} cameras")
 
         if projection == 'fisheye':
@@ -2248,7 +2289,11 @@ def generate_pto_from_lens_files(input_files: list, projection: str) -> str:
         return pto_path
     except Exception as e:
         _print(f"Error: Failed to write PTO file: {e}", file=sys.stderr)
-        os.close(pto_fd)
+        if not fd_closed:
+            try:
+                os.close(pto_fd)
+            except OSError:
+                pass
         return None
 
 

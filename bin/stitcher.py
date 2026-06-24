@@ -1103,51 +1103,74 @@ def _extract_timestamps_from_file(args):
     """
     Worker function for ThreadPoolExecutor. Extracts all timestamps from a single video file.
     This function is executed in a separate thread for each video file.
+
+    If the container has a non-zero start time (Unix timestamp), the timestamps
+    are derived directly from packet PTS values, which is much faster than decoding
+    every frame and reading burned-in timestamps. Otherwise it falls back to OCR.
     """
-    # Defer the import of the timestamp module until it's actually needed.
-    try:
-        from timestamp import get_timestamp
-    except ImportError:
-        # Re-raise the ImportError. The main thread will catch this exception
-        # from the ThreadPoolExecutor and handle the user message and exit.
-        raise
-        
     i, video_file, model = args
     # Ensure the absolute full path is printed for clarity.
     full_path = os.path.abspath(video_file)
     _print(f"\nAnalyzing timestamps for {full_path}...")
-    
+
     timestamps = []
-    frame_idx = 0
 
     try:
         with av.open(video_file) as container:
             stream = container.streams.video[0]
-            stream.thread_type = 'AUTO'
-            for frame in container.decode(stream):
-                ts = None
+            time_base = stream.time_base
+
+            # Check for a non-zero container start time (Unix timestamp in seconds).
+            container_start = container.start_time
+            start_time_sec = container_start / av.time_base if container_start is not None else 0.0
+
+            if start_time_sec > 0:
+                start_dt = datetime.datetime.fromtimestamp(start_time_sec, tz=datetime.timezone.utc)
+                _print(f"  Using container start time: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}.{start_dt.microsecond:06d}")
+                # Collect packet PTS values and derive absolute timestamps from them.
+                packet_ts = []
+                for packet in container.demux(stream):
+                    if packet.pts is None:
+                        continue
+                    ts_seconds = packet.pts * time_base
+                    packet_ts.append((packet.pts, ts_seconds))
+
+                # Sort by PTS so frame indices are in display order.
+                packet_ts.sort(key=lambda x: x[0])
+                for frame_idx, (_, ts_seconds) in enumerate(packet_ts):
+                    ts = datetime.datetime.fromtimestamp(float(ts_seconds), tz=datetime.timezone.utc)
+                    timestamps.append((frame_idx, ts))
+                _print(f"  Extracted {len(timestamps)} timestamps from container metadata.")
+            else:
+                # Fall back to reading burned-in timestamps from decoded frames.
                 try:
-                    ts = get_timestamp(frame.to_image(), robust=False, model=model)
-                    if ts is None:
-                        ts = get_timestamp(frame.to_image(), robust=True, model=model)
-                    # If we successfully get a timestamp, clear the last error.
+                    from timestamp import get_timestamp
+                except ImportError:
+                    # Re-raise the ImportError. The main thread will catch this exception
+                    # from the ThreadPoolExecutor and handle the user message and exit.
+                    raise
 
-                except (ValueError, TypeError) as e:
-                    # This block catches timestamp parsing errors from get_timestamp,
-                    # logs them, and allows processing to continue without crashing.
-                    error_msg = str(e)
-                    ts = None  # Set the timestamp to None for this frame.
+                stream.thread_type = 'AUTO'
+                frame_idx = 0
+                for frame in container.decode(stream):
+                    ts = None
+                    try:
+                        ts = get_timestamp(frame.to_image(), robust=False, model=model)
+                        if ts is None:
+                            ts = get_timestamp(frame.to_image(), robust=True, model=model)
+                    except (ValueError, TypeError):
+                        ts = None
 
-                if ts:
-                    ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
-                    progress_message = f"  -> Current Timestamp: {ts_str}".ljust(70)
-                    sys.stdout.write(f'\r{progress_message}')
-                    sys.stdout.flush()
+                    if ts:
+                        ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
+                        progress_message = f"  -> Current Timestamp: {ts_str}".ljust(70)
+                        sys.stdout.write(f'\r{progress_message}')
+                        sys.stdout.flush()
 
-                timestamps.append((frame_idx, ts))
-                frame_idx += 1
-        sys.stdout.write('\n')
-        sys.stdout.flush()
+                    timestamps.append((frame_idx, ts))
+                    frame_idx += 1
+                sys.stdout.write('\n')
+                sys.stdout.flush()
 
     except (av.Error, IndexError) as e:
         sys.stdout.write('\n')

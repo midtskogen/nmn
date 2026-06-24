@@ -551,11 +551,21 @@ def load_image_to_yuv(image_path, pad, padsides):
     pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
     pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
 
-    padded_y = np.pad(np.array(y, np.uint8), pad_y_width, mode='edge')
+    y_arr = np.array(y, np.uint8)
+    padded_y = np.pad(y_arr, pad_y_width, mode='edge')
     padded_u = np.pad(np.array(u_resized, np.uint8), pad_uv_width, mode='edge')
     padded_v = np.pad(np.array(v_resized, np.uint8), pad_uv_width, mode='edge')
 
     pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
+
+    if pad_t > 0 or pad_b > 0 or pad_l > 0 or pad_r > 0:
+        noise_level = estimate_noise(y_arr) / 4.0
+        blur_size = 96
+        padded_y = _blur_padded_area_numba(padded_y.astype(np.float32), pad_t, pad_b, pad_l, pad_r, blur_size, noise_level)
+        if pad_uv_t > 0 or pad_uv_b > 0 or pad_uv_l > 0 or pad_uv_r > 0:
+            blur_size_uv = blur_size // 2
+            padded_u = _blur_padded_area_numba(padded_u.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
+            padded_v = _blur_padded_area_numba(padded_v.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
 
     target_h_y = img_pil.height + pad_t + pad_b
     target_h_uv = img_pil.height // 2 + pad_uv_t + pad_uv_b
@@ -1054,7 +1064,7 @@ def worker_for_video_frame(args):
     pad_r = pad if 'right' in padsides else 0
 
     if pad_t > 0 or pad_b > 0 or pad_l > 0 or pad_r > 0:
-        noise_level = estimate_noise(py_src_orig)
+        noise_level = estimate_noise(py_src_orig) / 2.0
         pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
         pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
 
@@ -1062,7 +1072,7 @@ def worker_for_video_frame(args):
         pu_src_all = np.pad(pu_src_orig, pad_uv_width, mode='edge')
         pv_src_all = np.pad(pv_src_orig, pad_uv_width, mode='edge')
 
-        blur_size = max(pad_t, pad_b, pad_l, pad_r, 16)
+        blur_size = 96
         py_src_all = _blur_padded_area_numba(py_src_all.astype(np.float32), pad_t, pad_b, pad_l, pad_r, blur_size, noise_level)
 
         pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2

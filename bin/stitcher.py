@@ -2,6 +2,9 @@
 
 import sys
 import os
+import shutil
+import subprocess
+import threading
 import numpy as np
 import numba
 from numba import prange
@@ -13,8 +16,10 @@ import warnings
 import datetime
 import json
 import re
+import shlex
 import tempfile
 import glob
+import gc
 try:
     import cv2 as _cv2
 except ImportError:
@@ -1349,7 +1354,7 @@ def _parse_timelapse_duration(s):
     return total_seconds
 
 
-def _discover_timelapse_files(base_pattern, start_time, end_time, quality):
+def _discover_timelapse_files(base_pattern, start_time, end_time, quality, station=None):
     """Discover video files for each camera in the timelapse range.
 
     Returns a list of lists: camera_files[cam_idx] = sorted list of
@@ -1357,6 +1362,65 @@ def _discover_timelapse_files(base_pattern, start_time, end_time, quality):
     """
     quality = str(quality).lower()
     filename = "full_*.mp4" if quality == "hd" else "mini_*.mp4"
+
+    if station:
+        # Single SSH session: list specific hour directories in the time range.
+        hour_patterns = []
+        t = start_time.replace(minute=0, second=0, microsecond=0)
+        while t <= end_time:
+            ymd = t.strftime('%Y%m%d')
+            hh = t.strftime('%H')
+            hour_patterns.append(f"{base_pattern}/{ymd}/{hh}/{filename}")
+            t += datetime.timedelta(hours=1)
+        # Use compgen -G so the patterns are expanded on the remote host.
+        script = 'while IFS= read -r pat; do compgen -G "$pat" 2>/dev/null || true; done'
+        pattern_input = '\n'.join(hour_patterns) + '\n'
+        result = subprocess.run(
+            ['ssh', '-o', 'BatchMode=yes', station, 'bash', '-c', shlex.quote(script)],
+            input=pattern_input, capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            raise IOError(f"Failed to discover timelapse files on {station}: {result.stderr.strip()}")
+
+        camera_files_by_cam = {}
+        for line in result.stdout.splitlines():
+            file_path = line.strip()
+            if not file_path:
+                continue
+            cam_match = re.search(r'cam(\d+)', file_path)
+            if not cam_match:
+                continue
+            cam_num = int(cam_match.group(1))
+            parts = file_path.split('/')
+            yyyymmdd = hh = mm = None
+            for p in parts:
+                if yyyymmdd is None and re.match(r'^\d{8}$', p):
+                    yyyymmdd = p
+                elif yyyymmdd is not None and hh is None and re.match(r'^\d{2}$', p):
+                    hh = p
+            fname = os.path.basename(file_path)
+            m = re.match(r'(?:mini|full)_(\d{2})\.mp4$', fname)
+            if m:
+                mm = m.group(1)
+            if not (yyyymmdd and hh and mm):
+                continue
+            try:
+                file_start = datetime.datetime.strptime(f"{yyyymmdd}{hh}{mm}", "%Y%m%d%H%M").replace(tzinfo=datetime.timezone.utc)
+            except ValueError:
+                continue
+            file_end = file_start + datetime.timedelta(minutes=1)
+            if file_end <= start_time or file_start >= end_time:
+                continue
+            camera_files_by_cam.setdefault(cam_num, []).append((file_path, file_start, file_end))
+
+        if not camera_files_by_cam:
+            raise ValueError(f"No remote video files found for pattern: {base_pattern}")
+        sorted_camera_files = []
+        for cam_num in sorted(camera_files_by_cam.keys()):
+            files = camera_files_by_cam[cam_num]
+            files.sort(key=lambda x: x[1])
+            sorted_camera_files.append(files)
+        return sorted_camera_files
 
     camera_dirs = sorted(glob.glob(base_pattern))
     if not camera_dirs:
@@ -1461,6 +1525,104 @@ def _build_timelapse_timeline(files, model=None):
     return timeline
 
 
+def _collect_remote_lens_pto_paths(paths):
+    """Collect lens.pto paths from camera directories in the given remote paths."""
+    lens_paths = set()
+    for path in paths:
+        parts = path.split('/')
+        for i, p in enumerate(parts):
+            if re.match(r'cam\d+$', p):
+                lens_path = '/'.join(parts[:i+1]) + '/lens.pto'
+                lens_paths.add(lens_path)
+                break
+    return sorted(lens_paths)
+
+
+def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_prefix="Fetching"):
+    """Fetch remote files via a single tar-over-ssh session.
+
+    remote_paths must be absolute paths on the remote host. The remote
+    directory structure is preserved under local_dir. A progress bar
+    showing the number of transferred files is printed.
+    """
+    if not remote_paths:
+        return []
+    os.makedirs(local_dir, exist_ok=True)
+    total_files = len(remote_paths)
+    file_list = '\n'.join(remote_paths) + '\n'
+    ssh_cmd = ['ssh', '-o', 'BatchMode=yes', station, 'tar', '-cvhf', '-', '-T', '/dev/stdin']
+    tar_cmd = ['tar', '-xf', '-', '-C', local_dir]
+    ssh_proc = subprocess.Popen(ssh_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    ssh_proc.stdin.write(file_list.encode())
+    ssh_proc.stdin.close()
+    tar_proc = subprocess.Popen(tar_cmd, stdin=ssh_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    ssh_proc.stdout.close()
+
+    transferred = [0]
+    lock = threading.Lock()
+    stderr_lines = []
+    expected_basenames = set(os.path.basename(p) for p in remote_paths)
+    def _read_stderr():
+        try:
+            for raw_line in ssh_proc.stderr:
+                try:
+                    line = raw_line.decode().strip()
+                except UnicodeDecodeError:
+                    continue
+                stderr_lines.append(line)
+                if line and not line.startswith('tar:') and os.path.basename(line) in expected_basenames:
+                    with lock:
+                        transferred[0] += 1
+                        count = transferred[0]
+                    pct = min(count / total_files, 1.0)
+                    bar_len = 40
+                    filled = min(int(bar_len * pct), bar_len)
+                    bar = '[' + '#' * filled + '-' * (bar_len - filled) + ']'
+                    _print(f"\r{progress_prefix}: {bar} {count}/{total_files}", end='', flush=True)
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_read_stderr)
+    stderr_thread.start()
+    tar_err = tar_proc.communicate()[1]
+    ssh_proc.wait()
+    stderr_thread.join()
+
+    if ssh_proc.returncode != 0:
+        error_tail = ' | '.join(stderr_lines[-10:]) if stderr_lines else '(no stderr)'
+        raise IOError(f"SSH fetch failed from {station}: {error_tail}")
+    if tar_proc.returncode != 0:
+        raise IOError(f"Tar extraction failed: {tar_err.decode().strip()}")
+    # Ensure the final bar shows at least the total, but never exceeds the capped bar.
+    bar_len = 40
+    with lock:
+        final_count = min(transferred[0], total_files)
+    filled = bar_len
+    bar = '[' + '#' * filled + '-' * (bar_len - filled) + ']'
+    _print(f"\r{progress_prefix}: {bar} {final_count}/{total_files}", end='', flush=True)
+    _print()
+    return [os.path.join(local_dir, p.lstrip('/')) for p in remote_paths]
+
+
+def _expand_remote_input_patterns(station, patterns):
+    """Expand shell glob patterns on a remote host via a single ssh session.
+
+    Uses bash compgen -G so wildcards are expanded on the remote host, not locally.
+    """
+    if not patterns:
+        return []
+    # compgen -G expands a glob pattern safely and returns one match per line.
+    script = 'while IFS= read -r pat; do compgen -G "$pat" 2>/dev/null || true; done'
+    pattern_input = '\n'.join(patterns) + '\n'
+    result = subprocess.run(
+        ['ssh', '-o', 'BatchMode=yes', station, 'bash', '-c', shlex.quote(script)],
+        input=pattern_input, capture_output=True, text=True, timeout=60
+    )
+    if result.returncode != 0:
+        raise IOError(f"Failed to expand remote patterns on {station}: {result.stderr.strip()}")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def _find_best_timelapse_frame(timeline, target_time, tolerance=1.0):
     """Find the frame in timeline closest to target_time within tolerance seconds.
 
@@ -1521,11 +1683,12 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     _print("Selecting synchronized frames for timelapse...")
     selected_groups = []
     skipped = 0
+    tolerance = max(speed_factor / 25.0, 1.0)
     for target in target_timestamps:
         group = []
         missing = False
         for timeline in camera_timelines:
-            best = _find_best_timelapse_frame(timeline, target, tolerance=1.0)
+            best = _find_best_timelapse_frame(timeline, target, tolerance=tolerance)
             if best is None:
                 missing = True
                 break
@@ -1536,7 +1699,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         selected_groups.append(group)
 
     if skipped > 0:
-        _print(f"Skipped {skipped} output frames due to missing synchronized frames (within 1s tolerance).")
+        _print(f"Skipped {skipped} output frames due to missing synchronized frames (within {tolerance:.1f}s tolerance).")
 
     if not selected_groups:
         raise ValueError("No synchronized frames found in timelapse range.")
@@ -1867,6 +2030,8 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                 final_group_frames[i] = frame
 
             if any(f is None for f in final_group_frames):
+                del final_group_frames
+                gc.collect()
                 continue
 
             frame_count += 1
@@ -1978,6 +2143,12 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             out_frame.pts = frame_count - 1
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
+
+            # Explicitly release per-frame objects to prevent memory growth
+            del final_group_frames, worker_args, images, rgb_blended, canvas_rgb
+            del y_final, u_final, v_final
+            if frame_count % 10 == 0:
+                gc.collect()
 
     if not _quiet and total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
 
@@ -3019,6 +3190,8 @@ def main():
         help="libx264 CRF value for video output (default: 28). Lower = better quality.")
     parser.add_argument("--preset", type=str, default="ultrafast", metavar="PRESET",
         help="libx264 preset for video output (default: ultrafast).")
+    parser.add_argument("--station", type=str, default=None, metavar="HOST",
+        help="Fetch input files from a remote host via SSH. The paths are interpreted on the remote host; the output is written locally.")
 
     sync_group = parser.add_argument_group('Video Synchronization Options')
     sync_group.add_argument("--sync", action='store_true', help="Synchronize video streams by their embedded timestamps before stitching.")
@@ -3063,6 +3236,8 @@ def main():
     if args.fisheye and args.equirect:
         _print("Error: --fisheye and --equirect are mutually exclusive.", file=sys.stderr); sys.exit(1)
 
+    remote_temp_dir = None
+
     # --- Timelapse mode ---
     if args.timelapse:
         if not args.timelapse_start:
@@ -3100,12 +3275,24 @@ def main():
             _print("Error: Timelapse end time must be after start time.", file=sys.stderr); sys.exit(1)
 
         _print(f"Discovering timelapse files for {start_time} -> {end_time} ({quality.upper()} quality)...")
-        camera_files = _discover_timelapse_files(args.timelapse_pattern, start_time, end_time, quality)
+        camera_files = _discover_timelapse_files(args.timelapse_pattern, start_time, end_time, quality, station=args.station)
         if not camera_files or not any(camera_files):
             _print("Error: No video files found for timelapse range/pattern.", file=sys.stderr); sys.exit(1)
         for i, files in enumerate(camera_files, start=1):
             if not files:
                 _print(f"Error: Camera {i} has no video files in the timelapse range.", file=sys.stderr); sys.exit(1)
+
+        if args.station:
+            remote_temp_dir = tempfile.mkdtemp(prefix='stitcher_remote_')
+            _print(f"Fetching timelapse files from {args.station}...")
+            all_remote_files = [f for files in camera_files for f, _, _ in files]
+            lens_paths = _collect_remote_lens_pto_paths(all_remote_files)
+            _print(f"Discovered {len(all_remote_files)} remote timelapse files and {len(lens_paths)} lens.pto files")
+            _fetch_remote_files_over_ssh(args.station, all_remote_files + lens_paths, remote_temp_dir, progress_prefix="Fetching timelapse files")
+            camera_files = [
+                [(os.path.join(remote_temp_dir, f.lstrip('/')), start, end) for f, start, end in files]
+                for files in camera_files
+            ]
 
         # Generate PTO from the first file of each camera.
         projection = 'fisheye' if args.fisheye else 'equirect'
@@ -3139,11 +3326,30 @@ def main():
                     _print(f"Cleaned up temporary PTO file: {auto_generated_pto}")
                 except Exception as e:
                     _print(f"Warning: Failed to clean up temporary PTO file: {e}", file=sys.stderr)
+            if remote_temp_dir and os.path.exists(remote_temp_dir):
+                try:
+                    shutil.rmtree(remote_temp_dir)
+                    _print(f"Cleaned up remote temp directory: {remote_temp_dir}")
+                except Exception as e:
+                    _print(f"Warning: Failed to clean up remote temp directory: {e}", file=sys.stderr)
         return
 
     # --- Non-timelapse validation ---
     if len(args.input_files) < 2:
         if args.sync: _print("INFO: --sync option ignored for a single input file."); args.sync = False
+    if args.station:
+        if not args.input_files:
+            _print("Error: --station requires input file patterns to be specified.", file=sys.stderr); sys.exit(1)
+        remote_temp_dir = tempfile.mkdtemp(prefix='stitcher_remote_')
+        _print(f"Fetching input files from {args.station}...")
+        remote_input_files = _expand_remote_input_patterns(args.station, args.input_files)
+        if not remote_input_files:
+            _print("Error: No remote files matched the input patterns.", file=sys.stderr); sys.exit(1)
+        lens_paths = _collect_remote_lens_pto_paths(remote_input_files)
+        _print(f"Discovered {len(remote_input_files)} remote input files and {len(lens_paths)} lens.pto files")
+        all_remote_files = remote_input_files + lens_paths
+        local_paths = _fetch_remote_files_over_ssh(args.station, all_remote_files, remote_temp_dir, progress_prefix="Fetching input files")
+        args.input_files = local_paths[:len(remote_input_files)]
     if not args.input_files:
         _print("Error: No input files specified.", file=sys.stderr); sys.exit(1)
     if not args.pto_file and not (args.fisheye or args.equirect):
@@ -3221,6 +3427,12 @@ def main():
                 _print(f"Cleaned up temporary PTO file: {auto_generated_pto}")
             except Exception as e:
                 _print(f"Warning: Failed to clean up temporary PTO file: {e}", file=sys.stderr)
+        if remote_temp_dir and os.path.exists(remote_temp_dir):
+            try:
+                shutil.rmtree(remote_temp_dir)
+                _print(f"Cleaned up remote temp directory: {remote_temp_dir}")
+            except Exception as e:
+                _print(f"Warning: Failed to clean up remote temp directory: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

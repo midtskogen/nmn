@@ -1101,20 +1101,20 @@ def worker_for_video_frame(args):
     reproj_y.fill(0)
     reproj_u.fill(128)
     reproj_v.fill(128)
-    reproj_weights_y.fill(0)
-    reproj_weights_uv.fill(0)
+    if reproj_weights_y is not None:
+        reproj_weights_y.fill(0)
+        reproj_weights_uv.fill(0)
 
     reproject_y(py_src.ravel(), dw, dh, padded_sw_y, map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel())
     reproject_uv(pu_src.ravel(), pv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel())
-    reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
+    if reproj_weights_y is not None:
+        reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
+        h, w = dh, dw
+        reproj_weights_uv[:, :] = 0.25 * (reproj_weights_y[0:h:2, 0:w:2] +
+                                          reproj_weights_y[1:h:2, 0:w:2] +
+                                          reproj_weights_y[0:h:2, 1:w:2] +
+                                          reproj_weights_y[1:h:2, 1:w:2])
 
-    # Average the smooth luma weights down to the chroma resolution.
-    h, w = dh, dw
-    reproj_weights_uv[:, :] = 0.25 * (reproj_weights_y[0:h:2, 0:w:2] +
-                                      reproj_weights_y[1:h:2, 0:w:2] +
-                                      reproj_weights_y[0:h:2, 1:w:2] +
-                                      reproj_weights_y[1:h:2, 1:w:2])
-    
     return idx
 
 def _extract_timestamps_from_file(args):
@@ -1471,10 +1471,14 @@ def _discover_timelapse_files(base_pattern, start_time, end_time, quality, stati
 def _build_timelapse_timeline(files, model=None):
     """Build a timeline of frame timestamps for a single camera.
 
-    Returns a sorted list of (timestamp_unix, file_index, frame_index).
-    Timestamps are stored as Unix floats (seconds since epoch) to save memory.
+    Returns a tuple (ts_arr, file_arr, frame_arr) of numpy arrays sorted by
+    timestamp. Using numpy keeps memory compact (~24 bytes/frame vs ~150 bytes
+    for Python tuples) and lets the OS reclaim memory immediately after deletion.
     """
-    timeline = []
+    per_file_ts = []
+    per_file_file = []
+    per_file_frame = []
+
     for file_idx, (file_path, _, _) in enumerate(files):
         try:
             with av.open(file_path) as container:
@@ -1487,16 +1491,20 @@ def _build_timelapse_timeline(files, model=None):
                 if start_time_sec > 0:
                     # Fast path: derive exact frame timestamps from packet PTS.
                     _print(f"  Using container metadata for {file_path}")
-                    packet_ts = []
+                    raw_pts = []
                     for packet in container.demux(stream):
                         if packet.pts is None:
                             continue
-                        ts_seconds = packet.pts * time_base
-                        packet_ts.append((packet.pts, ts_seconds))
-                    packet_ts.sort(key=lambda x: x[0])
-                    for frame_idx, (_, ts_seconds) in enumerate(packet_ts):
-                        timeline.append((ts_seconds, file_idx, frame_idx))
-                    del packet_ts
+                        raw_pts.append(packet.pts)
+                    if not raw_pts:
+                        continue
+                    pts_arr = np.array(raw_pts, dtype=np.int64); del raw_pts
+                    order = np.argsort(pts_arr, kind='stable')
+                    n = len(pts_arr)
+                    per_file_ts.append(pts_arr[order] * float(time_base))
+                    per_file_file.append(np.full(n, file_idx, dtype=np.int32))
+                    per_file_frame.append(np.arange(n, dtype=np.int32))
+                    del pts_arr, order
                 else:
                     # Fallback: OCR the first frame and assume constant frame rate.
                     _print(f"  No container metadata for {file_path}, falling back to OCR on first frame.")
@@ -1514,20 +1522,26 @@ def _build_timelapse_timeline(files, model=None):
                         if ts is None:
                             _print(f"  Warning: Could not extract timestamp from {file_path}. Skipping file.", file=sys.stderr)
                             continue
-                        start_dt = ts.astimezone(datetime.timezone.utc)
-                        start_ts = start_dt.timestamp()
+                        start_ts = ts.astimezone(datetime.timezone.utc).timestamp()
                         frame_count = stream.frames if stream.frames > 0 else int(frame_rate * 60)
-                        for frame_idx in range(frame_count):
-                            ts = start_ts + frame_idx / frame_rate
-                            timeline.append((ts, file_idx, frame_idx))
+                        per_file_ts.append(start_ts + np.arange(frame_count, dtype=np.float64) / frame_rate)
+                        per_file_file.append(np.full(frame_count, file_idx, dtype=np.int32))
+                        per_file_frame.append(np.arange(frame_count, dtype=np.int32))
                     except Exception as e:
                         _print(f"  Warning: OCR failed for {file_path}: {e}. Skipping file.", file=sys.stderr)
                         continue
         except Exception as e:
             _print(f"Warning: Could not process {file_path}: {e}", file=sys.stderr)
 
-    timeline.sort(key=lambda x: x[0])
-    return timeline
+    if not per_file_ts:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+
+    ts_arr = np.concatenate(per_file_ts)
+    file_arr = np.concatenate(per_file_file)
+    frame_arr = np.concatenate(per_file_frame)
+
+    order = np.argsort(ts_arr, kind='stable')
+    return ts_arr[order], file_arr[order], frame_arr[order]
 
 
 def _collect_remote_lens_pto_paths(paths):
@@ -1631,32 +1645,26 @@ def _expand_remote_input_patterns(station, patterns):
 def _find_best_timelapse_frame(timeline, target_ts, tolerance=1.0):
     """Find the frame in timeline closest to target_ts within tolerance seconds.
 
-    timeline entries are (timestamp_unix, file_index, frame_index).
+    timeline is a tuple (ts_arr, file_arr, frame_arr) of sorted numpy arrays.
     target_ts is a Unix float timestamp.
     Returns (file_index, frame_index) or None.
     """
-    if not timeline:
+    ts_arr, file_arr, frame_arr = timeline
+    if len(ts_arr) == 0:
         return None
 
-    lo, hi = 0, len(timeline)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if timeline[mid][0] < target_ts:
-            lo = mid + 1
-        else:
-            hi = mid
+    lo = int(np.searchsorted(ts_arr, target_ts))
 
     best = None
     best_diff = float('inf')
     for idx in (lo - 1, lo, lo + 1):
-        if 0 <= idx < len(timeline):
-            ts, file_idx, frame_idx = timeline[idx]
-            diff = abs(ts - target_ts)
+        if 0 <= idx < len(ts_arr):
+            diff = abs(ts_arr[idx] - target_ts)
             if diff < best_diff:
                 best_diff = diff
-                best = (file_idx, frame_idx)
+                best = (int(file_arr[idx]), int(frame_arr[idx]))
 
-    if best and best_diff <= tolerance:
+    if best is not None and best_diff <= tolerance:
         return best
     return None
 
@@ -1672,7 +1680,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     camera_timelines = []
     for cam_idx, files in enumerate(camera_files):
         timeline = _build_timelapse_timeline(files, model=model)
-        _print(f"  Camera {cam_idx + 1}: {len(timeline)} frames from {len(files)} files.")
+        _print(f"  Camera {cam_idx + 1}: {len(timeline[0])} frames from {len(files)} files.")
         camera_timelines.append(timeline)
 
     if speed_factor is None or speed_factor <= 0:
@@ -1896,8 +1904,6 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     frame_u_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     frame_v_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
-    frame_weights_y = np.empty((num_images, final_h, final_w), dtype=np.float32)
-    frame_weights_uv = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.float32)
     _canvas_r = np.empty((out_h, out_w), dtype=np.float32)
     _canvas_g = np.empty((out_h, out_w), dtype=np.float32)
     _canvas_b = np.empty((out_h, out_w), dtype=np.float32)
@@ -2060,7 +2066,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
             worker_args = [
                 ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides),
-                 (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i]))
+                 (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
             list(executor.map(worker_for_video_frame, worker_args))
@@ -2551,12 +2557,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         total_frames = max_frames
 
     seam_cache_file = tempfile.mktemp(suffix='_seam.png') if multiblend is not None else None
-    
+
     frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     frame_u_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     frame_v_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
-    frame_weights_y = np.empty((num_images, final_h, final_w), dtype=np.float32)
-    frame_weights_uv = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.float32)
     # Preallocate canvas buffers — reused every frame with .fill().
     # Only out_h rows and out_w columns are needed; the final crop is already applied to geometry.
     _canvas_r = np.empty((out_h, out_w), dtype=np.float32)
@@ -2670,7 +2674,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
             worker_args = [
                 ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides),
-                 (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], frame_weights_y[i], frame_weights_uv[i]))
+                 (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
             list(executor.map(worker_for_video_frame, worker_args))

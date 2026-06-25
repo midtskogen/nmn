@@ -1871,7 +1871,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         _fuvcx, _fuvcy = _fuvx // 2, _fuvy // 2
         _fuvr = min(_fuvcx, _fuvcy)
         _fuvys, _fuvxs = np.ogrid[:_fuvy, :_fuvx]
-        geo_outside_uv = (_fuvxs - _fuvcx) ** 2 + (_fuvys - _fcy) ** 2 > _fuvr * _fuvr
+        geo_outside_uv = (_fuvxs - _fuvcx) ** 2 + (_fuvys - _fuvcy) ** 2 > _fuvr * _fuvr
     else:
         geo_outside_y = geo_outside_uv = None
 

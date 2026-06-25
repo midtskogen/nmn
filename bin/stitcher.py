@@ -713,8 +713,8 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         mapping = mappings[0]
         dw, dh = final_w, final_h
 
-        py, pu, pv, _, _ = load_image_to_yuv(input_path, pad, padsides)
-        map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
+        map_y_idx, c01, c23, map_uv_idx, sw_pto, sh_pto = mapping
+        py, pu, pv, _, _ = load_image_to_yuv(input_path, pad, padsides, target_w=sw_pto, target_h=sh_pto)
     
         y_final = np.zeros((dh, dw), dtype=np.uint8)
         u_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
@@ -1891,7 +1891,6 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     out_stream.options = {"preset": preset, "crf": str(crf)}
 
     total_frames = len(selected_groups)
-    cached_seam_weights, target_leveling_params, previous_leveling_params = None, None, None
     seam_cache_file = tempfile.mktemp(suffix='_seam.png') if multiblend is not None else None
 
     frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
@@ -2461,12 +2460,11 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
     # Bottom-crop row (equirect only — fisheye video not supported)
     geo_crop_h = final_h
-    if True:
-        row_has_content = np.any(~geo_gap, axis=1)
-        if row_has_content.any():
-            geo_crop_h = int(len(row_has_content) - np.argmax(row_has_content[::-1]))
-            if geo_crop_h < final_h:
-                _print(f"  will crop canvas: {final_h} -> {geo_crop_h} rows")
+    row_has_content = np.any(~geo_gap, axis=1)
+    if row_has_content.any():
+        geo_crop_h = int(len(row_has_content) - np.argmax(row_has_content[::-1]))
+        if geo_crop_h < final_h:
+            _print(f"  will crop canvas: {final_h} -> {geo_crop_h} rows")
 
     out_h = _round_up_16(geo_crop_h)  # actual encoded height
     out_w = _round_up_16(final_w)     # actual encoded width
@@ -2552,11 +2550,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     if max_frames > 0 and total_frames > max_frames:
         total_frames = max_frames
 
-    cached_seam_weights, target_leveling_params, previous_leveling_params = None, None, None
-    recalc_frame_number = 1
-    
-    # Seam caching for multiblend
-    import tempfile
     seam_cache_file = tempfile.mktemp(suffix='_seam.png') if multiblend is not None else None
     
     frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
@@ -2783,14 +2776,14 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     if not _quiet and total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
 
     for packet in out_stream.encode(): out_container.mux(packet)
-    out_container.close(); [c.close() for c in in_containers]
+    out_container.close()
+    for c in in_containers: c.close()
     _print(f"\n✅ Success! Panoramic video saved to {output_file}")
-    
-    # Clean up seam cache file
+
     if seam_cache_file and os.path.exists(seam_cache_file):
         try:
             os.unlink(seam_cache_file)
-        except:
+        except Exception:
             pass
 
 

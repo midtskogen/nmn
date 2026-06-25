@@ -1468,7 +1468,8 @@ def _discover_timelapse_files(base_pattern, start_time, end_time, quality, stati
 def _build_timelapse_timeline(files, model=None):
     """Build a timeline of frame timestamps for a single camera.
 
-    Returns a sorted list of (timestamp, file_index, frame_index).
+    Returns a sorted list of (timestamp_unix, file_index, frame_index).
+    Timestamps are stored as Unix floats (seconds since epoch) to save memory.
     """
     timeline = []
     for file_idx, (file_path, _, _) in enumerate(files):
@@ -1491,8 +1492,8 @@ def _build_timelapse_timeline(files, model=None):
                         packet_ts.append((packet.pts, ts_seconds))
                     packet_ts.sort(key=lambda x: x[0])
                     for frame_idx, (_, ts_seconds) in enumerate(packet_ts):
-                        ts = datetime.datetime.fromtimestamp(float(ts_seconds), tz=datetime.timezone.utc)
-                        timeline.append((ts, file_idx, frame_idx))
+                        timeline.append((ts_seconds, file_idx, frame_idx))
+                    del packet_ts
                 else:
                     # Fallback: OCR the first frame and assume constant frame rate.
                     _print(f"  No container metadata for {file_path}, falling back to OCR on first frame.")
@@ -1511,9 +1512,10 @@ def _build_timelapse_timeline(files, model=None):
                             _print(f"  Warning: Could not extract timestamp from {file_path}. Skipping file.", file=sys.stderr)
                             continue
                         start_dt = ts.astimezone(datetime.timezone.utc)
+                        start_ts = start_dt.timestamp()
                         frame_count = stream.frames if stream.frames > 0 else int(frame_rate * 60)
                         for frame_idx in range(frame_count):
-                            ts = start_dt + datetime.timedelta(seconds=frame_idx / frame_rate)
+                            ts = start_ts + frame_idx / frame_rate
                             timeline.append((ts, file_idx, frame_idx))
                     except Exception as e:
                         _print(f"  Warning: OCR failed for {file_path}: {e}. Skipping file.", file=sys.stderr)
@@ -1623,9 +1625,11 @@ def _expand_remote_input_patterns(station, patterns):
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _find_best_timelapse_frame(timeline, target_time, tolerance=1.0):
-    """Find the frame in timeline closest to target_time within tolerance seconds.
+def _find_best_timelapse_frame(timeline, target_ts, tolerance=1.0):
+    """Find the frame in timeline closest to target_ts within tolerance seconds.
 
+    timeline entries are (timestamp_unix, file_index, frame_index).
+    target_ts is a Unix float timestamp.
     Returns (file_index, frame_index) or None.
     """
     if not timeline:
@@ -1634,7 +1638,7 @@ def _find_best_timelapse_frame(timeline, target_time, tolerance=1.0):
     lo, hi = 0, len(timeline)
     while lo < hi:
         mid = (lo + hi) // 2
-        if timeline[mid][0] < target_time:
+        if timeline[mid][0] < target_ts:
             lo = mid + 1
         else:
             hi = mid
@@ -1644,7 +1648,7 @@ def _find_best_timelapse_frame(timeline, target_time, tolerance=1.0):
     for idx in (lo - 1, lo, lo + 1):
         if 0 <= idx < len(timeline):
             ts, file_idx, frame_idx = timeline[idx]
-            diff = abs((ts - target_time).total_seconds())
+            diff = abs(ts - target_ts)
             if diff < best_diff:
                 best_diff = diff
                 best = (file_idx, frame_idx)
@@ -1685,10 +1689,11 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     skipped = 0
     tolerance = max(speed_factor / 25.0, 1.0)
     for target in target_timestamps:
+        target_ts = target.timestamp()
         group = []
         missing = False
         for timeline in camera_timelines:
-            best = _find_best_timelapse_frame(timeline, target, tolerance=tolerance)
+            best = _find_best_timelapse_frame(timeline, target_ts, tolerance=tolerance)
             if best is None:
                 missing = True
                 break
@@ -1708,6 +1713,10 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         selected_groups = selected_groups[:max_frames]
 
     _print(f"Selected {len(selected_groups)} output frames for timelapse.")
+
+    # Free timeline data to save memory - no longer needed after frame selection
+    del camera_timelines
+    gc.collect()
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
@@ -2147,6 +2156,9 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             # Explicitly release per-frame objects to prevent memory growth
             del final_group_frames, worker_args, images, rgb_blended, canvas_rgb
             del y_final, u_final, v_final
+            # Clear decoder's last_frame to avoid holding large frame buffers
+            for decoder in camera_decoders:
+                decoder.last_frame = None
             if frame_count % 10 == 0:
                 gc.collect()
 

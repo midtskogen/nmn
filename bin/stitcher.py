@@ -526,7 +526,7 @@ def estimate_noise(image_plane):
     # Clamp the value to a reasonable range to avoid extreme results
     return np.clip(noise_std, 1.0, 10.0)
 
-def load_image_to_yuv(image_path, pad, padsides):
+def load_image_to_yuv(image_path, pad, padsides, target_w=None, target_h=None):
     # Add a compatibility check for different Pillow versions
     try:
         resample_filter = Image.Resampling.BICUBIC
@@ -540,7 +540,12 @@ def load_image_to_yuv(image_path, pad, padsides):
         raise FileNotFoundError(f"Input image not found at path: {image_path}")
     except Exception as e:
         raise IOError(f"Could not open or read image file '{image_path}'. Reason: {e}")
-        
+
+    # Resize to square-pixel display dimensions when source has non-square pixels
+    # (e.g. SD 704x576 stored for 1920x1080 FOV content, display width = 1024).
+    if target_w is not None and target_h is not None and (img_pil.width != target_w or img_pil.height != target_h):
+        img_pil = img_pil.resize((target_w, target_h), resample_filter)
+
     img_ycbcr = img_pil.convert("YCbCr")
     y, u, v = img_ycbcr.split()
     
@@ -610,7 +615,9 @@ def process_and_reproject_image(args):
     (input_path, dw, dh, mapping, pad, padsides), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y = out_buffers
 
-    py, pu, pv, sw_orig, sh_orig = load_image_to_yuv(input_path, pad, padsides)
+    map_y_idx, c01, c23, map_uv_idx, sw_pto, sh_pto = mapping
+    py, pu, pv, sw_orig, sh_orig = load_image_to_yuv(
+        input_path, pad, padsides, target_w=sw_pto, target_h=sh_pto)
 
     pad_t = pad if 'top' in padsides else 0
     pad_b = pad if 'bottom' in padsides else 0
@@ -635,8 +642,6 @@ def process_and_reproject_image(args):
     blend_weights_y[pad_t:pad_t + sh_orig, pad_l:pad_l + sw_orig] = inner_weights
     blend_weights_y[y1 + pad_t:y2 + pad_t, x1 + pad_l:x2 + pad_l] = 0
 
-    map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
-    
     # Initialize output buffers
     reproj_y.fill(0)
     reproj_u.fill(128)
@@ -742,10 +747,8 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         expected_h = mappings[i][5]
 
         if actual_w != expected_w or actual_h != expected_h:
-            raise ValueError(
-                f"Dimension mismatch for '{os.path.basename(input_path)}'.\n"
-                f"Image is {actual_w}x{actual_h}, but PTO file expects {expected_w}x{expected_h}."
-            )
+            _print(f"  Non-square pixels: '{os.path.basename(input_path)}' "
+                   f"is {actual_w}x{actual_h}, will be resampled to {expected_w}x{expected_h}")
 
     # Eagerly compile Numba functions before entering the thread pool
     _precompile_numba_functions()
@@ -3074,6 +3077,10 @@ def generate_pto_from_lens_files(input_files: list, projection: str,
         except Exception:
             continue
 
+    # Track the square-pixel display width (equals actual_w for square-pixel inputs,
+    # and equals cal_w * (actual_h/cal_h) for non-square SD inputs like 704x576).
+    display_w = actual_w
+
     # Build image lines from lens.pto files
     lines = [header]
     for cam_num in sorted(lens_files.keys()):
@@ -3096,7 +3103,20 @@ def generate_pto_from_lens_files(input_files: list, projection: str,
                                 if cal_w != actual_w or cal_h != actual_h:
                                     sx = actual_w / cal_w
                                     sy = actual_h / cal_h
-                                    stripped = re.sub(r'\bw\d+', f'w{actual_w}', stripped)
+                                    # Non-square pixels: SD content stored with a different aspect
+                                    # ratio than the calibration (e.g. 704x576 for 1920x1080 FOV).
+                                    # Use y-scale as reference and derive a square-pixel display
+                                    # width so reprojection geometry is correct. The pipeline
+                                    # resizes stored images to (display_w x actual_h) before reprojecting.
+                                    if abs(sx - sy) / max(sx, sy, 1e-9) > 0.005:
+                                        _dw = max(2, int(round(cal_w * sy)) & ~1)
+                                        _print(f"  Non-square pixels: stored {actual_w}x{actual_h}, "
+                                               f"display {_dw}x{actual_h} (PAR {sx/sy:.4f})")
+                                        sx = _dw / cal_w  # now equals sy: uniform scale
+                                        display_w = _dw
+                                    else:
+                                        display_w = actual_w
+                                    stripped = re.sub(r'\bw\d+', f'w{display_w}', stripped)
                                     stripped = re.sub(r'\bh\d+', f'h{actual_h}', stripped)
                                     # Scale principal point offsets d/e (pixels).
                                     # Match standalone 'd' and 'e' tokens (space-preceded, not part of longer param names).
@@ -3135,8 +3155,8 @@ def generate_pto_from_lens_files(input_files: list, projection: str,
                 pass
             if cal_w_ref:
                 break
-        if cal_w_ref and cal_w_ref != actual_w:
-            scale = actual_w / cal_w_ref
+        if cal_w_ref and cal_w_ref != display_w:
+            scale = display_w / cal_w_ref
             w = max(1, int(round(w * scale)))
             h = max(1, int(round(h * scale)))
             # Ensure even dimensions

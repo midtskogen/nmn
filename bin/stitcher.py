@@ -558,15 +558,14 @@ def load_image_to_yuv(image_path, pad, padsides, target_w=None, target_h=None):
     pad_l = pad if 'left' in padsides else 0
     pad_r = pad if 'right' in padsides else 0
 
+    pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
     pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
-    pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
+    pad_uv_width = ((pad_uv_t, pad_uv_b), (pad_uv_l, pad_uv_r))
 
     y_arr = np.array(y, np.uint8)
     padded_y = np.pad(y_arr, pad_y_width, mode='edge')
     padded_u = np.pad(np.array(u_resized, np.uint8), pad_uv_width, mode='edge')
     padded_v = np.pad(np.array(v_resized, np.uint8), pad_uv_width, mode='edge')
-
-    pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
 
     if pad_t > 0 or pad_b > 0 or pad_l > 0 or pad_r > 0:
         noise_level = estimate_noise(y_arr) / 4.0
@@ -1073,8 +1072,9 @@ def worker_for_video_frame(args):
 
     if pad_t > 0 or pad_b > 0 or pad_l > 0 or pad_r > 0:
         noise_level = estimate_noise(py_src_orig) / 2.0
+        pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
         pad_y_width = ((pad_t, pad_b), (pad_l, pad_r))
-        pad_uv_width = ((pad_t // 2, pad_b // 2), (pad_l // 2, pad_r // 2))
+        pad_uv_width = ((pad_uv_t, pad_uv_b), (pad_uv_l, pad_uv_r))
 
         py_src_all = np.pad(py_src_orig, pad_y_width, mode='edge')
         pu_src_all = np.pad(pu_src_orig, pad_uv_width, mode='edge')
@@ -1083,7 +1083,6 @@ def worker_for_video_frame(args):
         blur_size = 96
         py_src_all = _blur_padded_area_numba(py_src_all.astype(np.float32), pad_t, pad_b, pad_l, pad_r, blur_size, noise_level)
 
-        pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r = pad_t//2, pad_b//2, pad_l//2, pad_r//2
         blur_size_uv = blur_size // 2
         if pad_uv_t > 0 or pad_uv_b > 0 or pad_uv_l > 0 or pad_uv_r > 0:
             pu_src_all = _blur_padded_area_numba(pu_src_all.astype(np.float32), pad_uv_t, pad_uv_b, pad_uv_l, pad_uv_r, blur_size_uv, noise_level)
@@ -1490,7 +1489,7 @@ def _build_timelapse_timeline(files, model=None):
 
                 if start_time_sec > 0:
                     # Fast path: derive exact frame timestamps from packet PTS.
-                    _print(f"  Using container metadata for {file_path}")
+                    _print(f"  Using container metadata for {file_path}          ", end='\r', flush=True)
                     raw_pts = []
                     for packet in container.demux(stream):
                         if packet.pts is None:
@@ -1507,7 +1506,7 @@ def _build_timelapse_timeline(files, model=None):
                     del pts_arr, order
                 else:
                     # Fallback: OCR the first frame and assume constant frame rate.
-                    _print(f"  No container metadata for {file_path}, falling back to OCR on first frame.")
+                    _print(f"  No container metadata for {file_path}, falling back to OCR on first frame.          ", end='\r', flush=True)
                     frame_rate = stream.average_rate
                     if frame_rate is None or float(frame_rate) == 0:
                         frame_rate = 25.0
@@ -1669,7 +1668,67 @@ def _find_best_timelapse_frame(timeline, target_ts, tolerance=1.0):
     return None
 
 
-def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast"):
+def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
+    """Overlay an ISO-format timestamp in the lower-left corner of a YUV420 frame.
+
+    Renders white text on a dark background. Modifies the planes in-place.
+    Format: YYYY-MM-DD hh:mm:ss.ff  (UTC, ff = fractional seconds, 2 digits)
+    """
+    from PIL import Image as _PilImg, ImageDraw as _PilDraw, ImageFont as _PilFont
+
+    H, W = y_plane.shape
+    dt = datetime.datetime.fromtimestamp(unix_ts, tz=datetime.timezone.utc)
+    ff = int((unix_ts % 1) * 100)
+    text = dt.strftime(f"%Y-%m-%d %H:%M:%S.{ff:02d}")
+
+    font_size = max(14, W // 128)
+    font = None
+    for _path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+    ):
+        try:
+            font = _PilFont.truetype(_path, font_size)
+            break
+        except Exception:
+            pass
+    if font is None:
+        try:
+            font = _PilFont.load_default(size=font_size)
+        except TypeError:
+            font = _PilFont.load_default()
+
+    tmp = _PilImg.new('L', (W, H), 0)
+    draw = _PilDraw.Draw(tmp)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    margin = max(8, H // 108)
+    pad_box = max(4, font_size // 8)
+    tx, ty = margin, H - th - margin
+    bx1, by1 = tx - pad_box, ty - pad_box
+    bx2, by2 = tx + tw + pad_box, ty + th + pad_box
+
+    draw.rectangle([bx1, by1, bx2, by2], fill=24)
+    draw.text((tx, ty), text, fill=235, font=font)
+
+    ry1, ry2 = max(0, by1), min(H, by2)
+    rx1, rx2 = max(0, bx1), min(W, bx2)
+    if ry1 >= ry2 or rx1 >= rx2:
+        return
+
+    tmp_region = np.array(tmp)[ry1:ry2, rx1:rx2]
+    drawn = tmp_region > 0
+    y_plane[ry1:ry2, rx1:rx2][drawn] = tmp_region[drawn]
+
+    uy1, ux1 = ry1 // 2, rx1 // 2
+    uy2, ux2 = (ry2 + 1) // 2, (rx2 + 1) // 2
+    u_plane[uy1:uy2, ux1:ux2] = 128
+    v_plane[uy1:uy2, ux1:ux2] = 128
+
+
+def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     num_images = len(camera_files)
@@ -1697,6 +1756,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
     _print("Selecting synchronized frames for timelapse...")
     selected_groups = []
+    selected_timestamps = []
     skipped = 0
     tolerance = max(speed_factor / 25.0, 1.0)
     for target in target_timestamps:
@@ -1713,6 +1773,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             skipped += 1
             continue
         selected_groups.append(group)
+        selected_timestamps.append(target_ts)
 
     if skipped > 0:
         _print(f"Skipped {skipped} output frames due to missing synchronized frames (within {tolerance:.1f}s tolerance).")
@@ -1722,6 +1783,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
     if max_frames > 0 and len(selected_groups) > max_frames:
         selected_groups = selected_groups[:max_frames]
+        selected_timestamps = selected_timestamps[:max_frames]
 
     _print(f"Selected {len(selected_groups)} output frames for timelapse.")
 
@@ -2040,7 +2102,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     frame_count = 0
 
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
-        for group in selected_groups:
+        for loop_idx, (group, group_ts) in enumerate(zip(selected_groups, selected_timestamps), 1):
             final_group_frames = [None] * num_images
             for i, (file_idx, frame_idx) in enumerate(group):
                 frame = camera_decoders[i].get_frame(file_idx, frame_idx)
@@ -2055,10 +2117,10 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             if max_frames > 0 and frame_count > max_frames:
                 break
 
-            if not _quiet and total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
-                percent_done = (frame_count / total_frames) * 100
+            if not _quiet and total_frames > 0 and (loop_idx % 5 == 0 or loop_idx == total_frames):
+                percent_done = (loop_idx / total_frames) * 100
                 if sys.stderr.isatty():
-                    bar_length = 40; filled_len = int(round(bar_length * frame_count / float(total_frames)))
+                    bar_length = 40; filled_len = int(round(bar_length * loop_idx / float(total_frames)))
                     bar = '█' * filled_len + '-' * (bar_length - filled_len)
                     sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
                 else:
@@ -2156,6 +2218,9 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                 u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
                 v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
+            if timestamp:
+                _draw_timestamp_yuv(y_final, u_final, v_final, group_ts)
+
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             out_frame.pts = frame_count - 1
             for packet in out_stream.encode(out_frame):
@@ -2184,7 +2249,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     _print(f"\n✅ Success! Timelapse video saved to {output_file}")
 
 
-def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast"):
+def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -2638,7 +2703,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         current_frame_indices = [-1] * num_images
         
-        for group in loop_iterator:
+        for loop_idx, group in enumerate(loop_iterator, 1):
             final_group_frames = [None] * num_images
             if use_sync:
                 target_indices = group
@@ -2664,10 +2729,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             frame_count += 1
             if max_frames > 0 and frame_count > max_frames: break
             
-            if not _quiet and total_frames > 0 and (frame_count % 5 == 0 or frame_count == total_frames):
-                percent_done = (frame_count / total_frames) * 100
+            if not _quiet and total_frames > 0 and (loop_idx % 5 == 0 or loop_idx == total_frames):
+                percent_done = (loop_idx / total_frames) * 100
                 if sys.stderr.isatty():
-                    bar_length = 40; filled_len = int(round(bar_length*frame_count/float(total_frames)))
+                    bar_length = 40; filled_len = int(round(bar_length*loop_idx/float(total_frames)))
                     bar = '█'*filled_len + '-'*(bar_length - filled_len)
                     sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
                 else: _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
@@ -2769,7 +2834,14 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
                 u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
                 v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-            
+
+            if timestamp:
+                f0 = final_group_frames[0]
+                ct = in_containers[0].start_time
+                if f0 is not None and f0.pts is not None and ct is not None and ct > 0:
+                    _draw_timestamp_yuv(y_final, u_final, v_final,
+                                        ct / 1_000_000 + float(f0.pts) * float(in_streams[0].time_base))
+
             # --- Update and encode the single, reused output frame ---
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
             # Set the Presentation Time Stamp (PTS)
@@ -2796,7 +2868,8 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
            force_video_dims=False, max_frames=0, level_subsample=1,
            sync=False, model=None, save_sync=None, load_sync=None,
            quiet=False, num_cores=None, lens_files=None,
-           output_width=None, output_height=None, crop_to_content: bool = True):
+           output_width=None, output_height=None, crop_to_content: bool = True,
+           timestamp: bool = False):
     """Stitch images or videos into a panoramic image or video.
 
     This is the public API entry point for programs that import stitcher.py.
@@ -2854,6 +2927,9 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
         For images, crop the output canvas to the last row that has any image
         content. When False, the full PTO canvas (including empty/gap rows) is
         kept and gap-filled. Default is True.
+    timestamp : bool, optional
+        Overlay a UTC timestamp (YYYY-MM-DD hh:mm:ss.ff) in the lower-left
+        corner of each video frame. Has no effect for still-image output.
 
     Raises
     ------
@@ -2946,7 +3022,7 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
             pad, num_cores, padsides_set, sync, model,
             save_sync_file=save_sync, load_sync_file=load_sync, enhance=enhance,
             fisheye_mask=fisheye_mask, max_frames=max_frames,
-            level_subsample=level_subsample
+            level_subsample=level_subsample, timestamp=timestamp
         )
 
     if auto_generated_pto and os.path.exists(auto_generated_pto):
@@ -3206,6 +3282,7 @@ def main():
     parser.add_argument("--fisheye", action='store_true', help="Generate fisheye panorama (8192x8192). Automatically creates PTO from lens.pto files found two directories up from input files.")
     parser.add_argument("--equirect", action='store_true', help="Generate equirectangular panorama (3380x2240). Automatically creates PTO from lens.pto files found two directories up from input files.")
     parser.add_argument("--enhance", action='store_true', help="Apply an adaptive enhancement filter to reduce noise and artifacts.")
+    parser.add_argument("--timestamp", action='store_true', help="Overlay a UTC timestamp (YYYY-MM-DD hh:mm:ss.ff) in the lower-left corner of each video frame.")
     parser.add_argument("--force-video-dims", action='store_true', help="Force codec-safe output dimensions (video rules) even when input files are images.")
     parser.add_argument("--quiet", action='store_true', help="Suppress all text output.")
     parser.add_argument("--pad", type=int, default=0, help="Pixels to pad source images before reprojection (extends edges with blurred content).")
@@ -3338,7 +3415,8 @@ def main():
                 start_time, end_time, args.timelapse_speed, args.timelapse_framerate,
                 args.pad, num_cores, padsides, model=args.model,
                 enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
-                level_subsample=args.level_subsample, crf=args.crf, preset=args.preset
+                level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
+                timestamp=args.timestamp
             )
         except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
             _print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
@@ -3435,7 +3513,8 @@ def main():
                 args.pad, num_cores, padsides, args.sync, args.model,
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance,
                 fisheye_mask=args.fisheye, max_frames=args.max_frames,
-                level_subsample=args.level_subsample, crf=args.crf, preset=args.preset
+                level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
+                timestamp=args.timestamp
             )
         else:
             _print("Error: Input files must all be of the same type (either all images or all videos).", file=sys.stderr)

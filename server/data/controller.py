@@ -38,6 +38,7 @@ MAX_FILE_SIZE_FOR_THUMBNAIL_MB = 200
 FILE_TYPE_LIMITS = {'lowres': 300, 'hires': 100, 'image': 300, 'image_lowres': 600, 'image_long': 100, 'image_lowres_long': 300}
 AVG_FILE_SIZES_MB = {'lowres': 2, 'hires': 15, 'image': 1, 'image_lowres': 0.2, 'image_long': 1, 'image_lowres_long': 0.2}
 STITCH_SCRIPT = os.path.join(BASE_DIR, 'stitch.py')
+STACK_SCRIPT = os.path.join(BASE_DIR, 'stack.py')
 TOTAL_QUOTA_LIMIT_MB = 2048 
 PER_SITE_QUOTA_LIMIT_MB = 1024 
 
@@ -350,11 +351,11 @@ class FileProcessor:
 
                 final_source_video = video_filepath if os.path.exists(video_filepath) else (hevc_filepath if os.path.exists(hevc_filepath) else None)
                 if final_source_video:
-                    stack_script = os.path.join(BASE_DIR, 'stack.py')
-                    if os.path.exists(stack_script):
-                        command = [sys.executable, stack_script, final_source_video, "-o", self.output_filepath]
+                    if os.path.exists(STACK_SCRIPT):
+                        command = [sys.executable, STACK_SCRIPT, final_source_video, "-o", self.output_filepath]
                         subprocess.run(command, check=True, capture_output=True, text=True, timeout=600)
                     else:
+                        logging.error(f"Stack script not found at {STACK_SCRIPT}")
                         return None
                 else:
                     return None

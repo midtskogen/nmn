@@ -28,6 +28,21 @@ let urlCheckInFlight = 0;
 const urlCheckQueue = [];
 const URL_CHECK_CONCURRENCY = 4;
 
+// History API for back button handling
+let modalHistoryState = null;
+
+// Handle browser back button to close modals
+window.addEventListener('popstate', (event) => {
+    const modalBackdrop = document.getElementById('video-modal-backdrop');
+    if (modalBackdrop) {
+        // A modal is open, close it instead of navigating
+        modalBackdrop.remove();
+        // Don't push a new state, just let the history revert
+        event.preventDefault();
+        event.stopPropagation();
+    }
+});
+
 function processUrlCheckQueue() {
     while (urlCheckInFlight < URL_CHECK_CONCURRENCY && urlCheckQueue.length > 0) {
         const { run } = urlCheckQueue.shift();
@@ -913,6 +928,9 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
 
+    // Push history state for back button handling
+    history.pushState({ modalOpen: true }, '');
+
     // Load grid overlay - fetch JSON metadata first, then set image src
     if (videoTimestamp && stationId && cameraNum) {
         const gridApiUrl = `index.php?action=fetch_archive_grid&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(videoTimestamp)}`;
@@ -1248,7 +1266,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         videoWrapper.removeEventListener('wheel', onWheel);
         videoWrapper.removeEventListener('mousedown', onMouseDown);
-        document.getElementById('video-modal-backdrop')?.remove();
+        history.back();
     });
 
     // Focus modal for keyboard events
@@ -1456,6 +1474,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
 
+    // Push history state for back button handling
+    history.pushState({ modalOpen: true }, '');
+
     // Pan/Zoom
     let scale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
@@ -1576,7 +1597,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         imageWrapper.removeEventListener('wheel', onWheel);
         imageWrapper.removeEventListener('mousedown', onMouseDown);
-        document.getElementById('video-modal-backdrop')?.remove();
+        history.back();
     });
 
     modalBackdrop.setAttribute('tabindex', '0');
@@ -1849,6 +1870,9 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     modalContent.append(modalTitle, statusEl, videoContainer, controlsContainer, liveFilterControls, closeButton);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
+
+    // Push history state for back button handling
+    history.pushState({ modalOpen: true }, '');
     
     // --- Overlay Sizing to Match Video Display Area ---
     const updateOverlaySizing = () => {

@@ -109,32 +109,42 @@ function initializeApp() {
     // Set up all event listeners for user interaction.
     initEventListeners();
     // Fetch all the initial data needed to render the application.
-    api.fetchInitialData()
-        .then(data => {
-            stationsData = data.stations;
-            cameraFovs = data.fovs;
-            lightningData = data.lightning;
-            meteorCountsByStation = data.meteorCounts || null;
-
-            mapHandler.setMeteorData(data.meteors);
-            mapHandler.setMeteorCounts(data.meteorCounts);
-            mapHandler.setLightningData(data.lightning);
-
+    // Fetch stations first to show markers quickly, then fetch remaining data in parallel
+    fetch('index.php?action=get_stations')
+        .then(r => r.json())
+        .then(stations => {
+            stationsData = stations;
+            // Add station markers immediately without waiting for other data
             Object.entries(stationsData).forEach(([stationId, station]) => {
-         
                 station.station.id = stationId;
                 const baseIcon = getBaseIconForStation(stationId);
                 mapHandler.addStationMarker(stationId, station, handleStationClick, baseIcon);
             });
+            // Fetch remaining data in parallel
+            return Promise.all([
+                fetch('index.php?action=get_camera_fovs').then(r => r.json()),
+                fetch('index.php?action=get_meteor_data').then(r => r.json()),
+                fetch('index.php?action=get_kp_data').then(r => r.json()),
+                fetch('index.php?action=get_lightning_data').then(r => r.json())
+            ]);
+        })
+        .then(([fovs, meteors, kpData, lightning]) => {
+            cameraFovs = fovs;
+            lightningData = lightning;
+            const meteorTracks = Array.isArray(meteors) ? meteors : (meteors && Array.isArray(meteors.tracks) ? meteors.tracks : []);
+            meteorCountsByStation = (!Array.isArray(meteors) && meteors && typeof meteors.counts === 'object') ? meteors.counts : null;
 
-            if (data.kpData && !data.kpData.error) {
-                const formattedKpData = formatKpData(data.kpData);
+            mapHandler.setMeteorData(meteorTracks);
+            mapHandler.setMeteorCounts(meteorCountsByStation);
+            mapHandler.setLightningData(lightning);
+
+            if (kpData && !kpData.error) {
+                const formattedKpData = formatKpData(kpData);
                 const chartCtx = document.getElementById('aurora-chart').getContext('2d');
-       
                 chartHandler.plotAuroraChart(chartCtx, formattedKpData, handleChartBarClick);
             }
 
-            uiManager.displayLightningStrikes(data.lightning, stationsData, cameraFovs, false, handleLightningSelect, 'time', 'time');
+            uiManager.displayLightningStrikes(lightning, stationsData, cameraFovs, false, handleLightningSelect, 'time', 'time');
             mapHandler.displayLightningStrikes(false, handleLightningSelect);
             handleMapMoveEnd();
             uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);

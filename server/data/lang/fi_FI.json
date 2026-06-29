@@ -98,6 +98,7 @@
     "no_visible_passes": "Näkyviä ylityksiä ei löytynyt.",
     "no_visible_aircraft": "Näkyviä lentokoneita ei löytynyt ajanjaksolta.",
     "no_lightning_strikes": "Salamaniskuja ei löytynyt.",
+    "sun_altitude": "Aurinko",
     "no_meteors_found": "Meteoreita ei löytynyt.",
     "unknown_time": "Tuntematon aika",
     "meteor_report_link": "Raportti",

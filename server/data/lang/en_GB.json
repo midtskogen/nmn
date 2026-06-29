@@ -98,6 +98,7 @@
     "no_visible_passes": "No visible passes found.",
     "no_visible_aircraft": "No visible aircraft found in the period.",
     "no_lightning_strikes": "No lightning strikes found.",
+    "sun_altitude": "Sun",
     "no_meteors_found": "No meteors found.",
     "meteor_report_link": "Report",
     "modal_waiting_for_video": "Waiting for video...",

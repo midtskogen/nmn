@@ -1,5 +1,5 @@
 import { createEl, isHevcSupported } from './utils.js';
-import { getSunTimes, calculateBearing, destinationPoint } from './calculations.js';
+import { getSunTimes, getSunAltitude, calculateBearing, destinationPoint } from './calculations.js';
 import * as api from './api.js';
 import { airlineCodes } from './airline_codes.js';
 // --- Module-scoped variables ---
@@ -19,6 +19,7 @@ let streamStatusPoller = null; // Interval ID for polling the stream's status.
 let onFullscreenChange = null; // Holds the fullscreen change event handler.
 let lastModalDimensions = null; // Stores dimensions for smooth prev/next navigation.
 let currentMediaList = []; // Global list of all media items for navigation - updated dynamically.
+let previewStationsData = null; // Station data for preview modals
 
 let meteorReportExistenceCache = new Map();
 let meteorListRenderToken = 0;
@@ -33,6 +34,79 @@ function processUrlCheckQueue() {
         urlCheckInFlight++;
         run().finally(() => { urlCheckInFlight--; processUrlCheckQueue(); });
     }
+}
+
+/**
+ * Parses a filename and builds an enhanced title with station info, coordinates, elevation, sun altitude, and ISO timestamp.
+ * Filename formats:
+ * - Regular: stationCode_camN_YYYYMMDD_HHMM_type.ext
+ * - Stitched: stationCode_YYYYMMDD_HHMM_resolution_projection.ext (no camN)
+ * @param {string} filename - The filename to parse
+ * @returns {string} The enhanced title
+ */
+function buildEnhancedPreviewTitle(filename) {
+    if (!previewStationsData) return filename;
+
+    // Remove extension first
+    const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
+
+    // Parse filename: stationCode_[camN_]YYYYMMDD_HHMM_[resolution_]projection
+    const parts = nameWithoutExt.split('_');
+    if (parts.length < 3) return filename;
+
+    const stationCode = parts[0];
+
+    // Find date and time parts - they should be 8-digit and 4-digit respectively
+    let dateStr = null;
+    let timeStr = null;
+
+    for (let i = 1; i < parts.length; i++) {
+        const part = parts[i];
+        // Check for YYYYMMDD format (8 digits)
+        if (/^\d{8}$/.test(part)) {
+            dateStr = part;
+        }
+        // Check for HHMM format (4 digits)
+        else if (/^\d{4}$/.test(part)) {
+            timeStr = part;
+        }
+    }
+
+    // Validate date and time strings
+    if (!dateStr || !timeStr) {
+        return filename;
+    }
+
+    // Build ISO timestamp
+    const isoTimestamp = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}T${timeStr.slice(0, 2)}:${timeStr.slice(2, 4)}:00Z`;
+
+    // Find station data
+    const stationId = Object.keys(previewStationsData).find(id => previewStationsData[id].station?.code === stationCode);
+    if (!stationId) return `${filename} | ${isoTimestamp}`;
+
+    const stationInfo = previewStationsData[stationId].station;
+    const astronomy = previewStationsData[stationId].astronomy;
+    const displayName = stationInfo?.display_name || (stationInfo?.name ? stationInfo.name.charAt(0).toUpperCase() + stationInfo.name.slice(1) : stationCode);
+
+    // Calculate sun altitude at the timestamp
+    let sunAltText = '';
+    if (astronomy && astronomy.latitude && astronomy.longitude) {
+        const timestampDate = new Date(isoTimestamp);
+        const sunAlt = getSunAltitude(timestampDate, astronomy.latitude, astronomy.longitude);
+        sunAltText = ` | ${t('sun_altitude', 'Sun')}: ${sunAlt.toFixed(1)}°`;
+    }
+
+    // Build title with coordinates, elevation, sun altitude, and ISO timestamp
+    let titleText = `${displayName}`;
+    if (astronomy) {
+        const lat = `${astronomy.latitude.toFixed(3)}N`;
+        const lon = `${astronomy.longitude.toFixed(3)}E`;
+        const elev = astronomy.elevation ? `${astronomy.elevation}m` : '';
+        titleText += ` (${lat}, ${lon}${elev ? `, ${elev}` : ''}${sunAltText})`;
+    }
+    titleText += ` | ${isoTimestamp}`;
+
+    return titleText;
 }
 
 async function checkUrlExists(url) {
@@ -599,9 +673,12 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         setTimeout(() => { modalContent.style.transition = ''; }, 50);
     }
 
+    // Build enhanced title from filename
+    const enhancedTitle = buildEnhancedPreviewTitle(title);
+
     // Header with title and close button
     const header = createEl('div', { className: 'preview-header' });
-    header.appendChild(createEl('h3', { textContent: title, className: 'preview-title' }));
+    header.appendChild(createEl('h3', { textContent: enhancedTitle, className: 'preview-title' }));
     const closeButton = createEl('button', { className: 'preview-close-btn', textContent: '×' });
     header.appendChild(closeButton);
 
@@ -1203,9 +1280,12 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         setTimeout(() => { modalContent.style.transition = ''; }, 50);
     }
 
+    // Build enhanced title from filename
+    const enhancedTitle = buildEnhancedPreviewTitle(title);
+
     // Header
     const header = createEl('div', { className: 'preview-header' });
-    header.appendChild(createEl('h3', { textContent: title, className: 'preview-title' }));
+    header.appendChild(createEl('h3', { textContent: enhancedTitle, className: 'preview-title' }));
     const closeButton = createEl('button', { className: 'preview-close-btn', textContent: '×' });
     header.appendChild(closeButton);
 
@@ -1509,7 +1589,12 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
  * @param {object} dom - The DOM element cache.
  * @param {boolean} hevcSupported - Whether the user's browser supports HEVC.
  */
-export function displayResults(resultData, dom, hevcSupported) {
+export function displayResults(resultData, dom, hevcSupported, stationsData = null) {
+    // Store stations data for preview modals
+    if (stationsData) {
+        previewStationsData = stationsData;
+    }
+
     dom.resultsLog.innerHTML = '';
     const stationResults = resultData.files || {};
     
@@ -1594,8 +1679,8 @@ export function displayResults(resultData, dom, hevcSupported) {
                     const getShortName = (filename) => {
                         if (filename.includes('_image_long_stacked.jpg')) return 'bhL';
                         if (filename.includes('_image_lowres_long_stacked.jpg')) return 'blL';
-                        if (filename.includes('_hires_fisheye.jpg')) return 'be';
-                        if (filename.includes('_lowres_fisheye.jpg')) return 'be';
+                        if (filename.includes('_hires_fisheye.jpg')) return 'fe';
+                        if (filename.includes('_lowres_fisheye.jpg')) return 'fe';
                         if (filename.includes('_hires_equirect.jpg')) return 'eq';
                         if (filename.includes('_lowres_equirect.jpg')) return 'eq';
                         const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
@@ -1680,12 +1765,29 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
         hideVideoModal();
     }
     activeStreamTaskId = streamTaskId;
-    
+
     const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
     const modalContent = createEl('div', { id: 'video-modal-content' });
     const stationInfo = stationsData?.[stationId]?.station;
+    const astronomy = stationsData?.[stationId]?.astronomy;
     const displayName = stationInfo?.display_name || (stationInfo?.name ? stationInfo.name.charAt(0).toUpperCase() + stationInfo.name.slice(1) : stationId);
-    const modalTitle = createEl('h3', { id: 'video-modal-title', textContent: `${displayName} – ${cameraNum}` });
+
+    // Calculate sun altitude on the fly
+    let sunAltText = '';
+    if (astronomy && astronomy.latitude && astronomy.longitude) {
+        const sunAlt = getSunAltitude(new Date(), astronomy.latitude, astronomy.longitude);
+        sunAltText = ` | ${t('sun_altitude', 'Sun')}: ${sunAlt.toFixed(1)}°`;
+    }
+
+    // Build title with coordinates, elevation, and sun altitude
+    let titleText = `${displayName} – ${cameraNum}`;
+    if (astronomy) {
+        const lat = `${astronomy.latitude.toFixed(3)}N`;
+        const lon = `${astronomy.longitude.toFixed(3)}E`;
+        const elev = astronomy.elevation ? `${astronomy.elevation}m` : '';
+        titleText += ` (${lat}, ${lon}${elev ? `, ${elev}` : ''}${sunAltText})`;
+    }
+    const modalTitle = createEl('h3', { id: 'video-modal-title', textContent: titleText });
     const videoContainer = createEl('div', { id: 'video-container', style: { aspectRatio: resolution === 'lowres' ? '800 / 448' : '1920 / 1080' } });
     const videoEl = createEl('video', { id: 'live-video', muted: true, autoplay: true, playsinline: true });
     const gridOverlay = createEl('img', { id: 'grid-overlay-image' });

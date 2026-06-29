@@ -538,11 +538,11 @@ passData.passes : aircraftData.crossings;
             onProgress: (data) => {
                 dom.progressBarInner.style.width = `${Math.round(data.step)}%`;
                 dom.progressText.textContent = uiManager.translateMessage(data.message);
-                uiManager.displayResults(data, dom, isHevcSupported());
+                uiManager.displayResults(data, dom, isHevcSupported(), stationsData);
             },
             onComplete: (data) => {
- 
-                uiManager.displayResults(data, dom, isHevcSupported());
+
+                uiManager.displayResults(data, dom, isHevcSupported(), stationsData);
                 uiManager.setUIState('cooldown');
                 if (currentTaskId) {
                     api.cleanupTask(currentTaskId);

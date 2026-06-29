@@ -98,6 +98,7 @@
     "no_visible_passes": "Ingen synlige passeringer funnet.",
     "no_visible_aircraft": "Ingen synlige fly funnet i perioden.",
     "no_lightning_strikes": "Ingen lynnedslag funnet.",
+    "sun_altitude": "Sola",
     "no_meteors_found": "Ingen meteorer funnet.",
     "meteor_report_link": "Rapport",
     "modal_waiting_for_video": "Venter på video...",

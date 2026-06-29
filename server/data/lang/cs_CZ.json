@@ -98,6 +98,7 @@
     "no_visible_passes": "Nebyly nalezeny žádné viditelné přelety.",
     "no_visible_aircraft": "V daném období nebyla nalezena žádná viditelná letadla.",
     "no_lightning_strikes": "Nebyly nalezeny žádné blesky.",
+    "sun_altitude": "Slunce",
     "no_meteors_found": "Nebyly nalezeny žádné meteory.",
     "meteor_report_link": "Zpráva",
     "modal_waiting_for_video": "Čekání na video...",

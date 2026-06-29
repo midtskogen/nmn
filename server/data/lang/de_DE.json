@@ -98,6 +98,7 @@
     "no_visible_passes": "Keine sichtbaren Durchgänge gefunden.",
     "no_visible_aircraft": "Keine sichtbaren Flugzeuge im Zeitraum gefunden.",
     "no_lightning_strikes": "Keine Blitzeinschläge gefunden.",
+    "sun_altitude": "Sonne",
     "no_meteors_found": "Keine Meteore gefunden.",
     "unknown_time": "Unbekannte Zeit",
     "meteor_report_link": "Bericht",

@@ -991,7 +991,7 @@ class AS7Diagnostic:
             self.log_issue("PERMISSION_DENIED", {'check': f"API connectivity: {e}"}) # Could be network issue
 
 
-    def _probe_rtsp_stream(self, rtsp_url, max_attempts=2):
+    def _probe_rtsp_stream(self, rtsp_url, max_attempts=4):
         """Probe an RTSP stream with ffprobe, retrying on transient failure.
 
         Returns (success: bool, reason: str|None).
@@ -1012,19 +1012,19 @@ class AS7Diagnostic:
                 last_reason = 'ffprobe failed'
                 # Retry on transient failures; ffprobe exit code can flap with network/camera load.
                 if attempt < max_attempts - 1:
-                    time.sleep(1.0)
+                    time.sleep(10.0)
                     continue
                 return False, last_reason
             except subprocess.TimeoutExpired:
                 last_reason = 'ffprobe timeout'
                 if attempt < max_attempts - 1:
-                    time.sleep(1.0)
+                    time.sleep(10.0)
                     continue
                 return False, last_reason
             except Exception as e:
                 last_reason = str(e)
                 if attempt < max_attempts - 1:
-                    time.sleep(1.0)
+                    time.sleep(10.0)
                     continue
                 return False, last_reason
         return False, last_reason or 'unknown'

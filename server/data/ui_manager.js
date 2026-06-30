@@ -1458,7 +1458,22 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
 
-    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, saturationWrapper);
+    // Enhance filter slider
+    const enhanceWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    const enhanceLabel = createEl('label', { textContent: t('filter', 'Filter'), htmlFor: 'enhance-slider', className: 'preview-filter-label' });
+    const enhanceSlider = createEl('input', {
+        type: 'range',
+        min: '0',
+        max: '64',
+        step: '1',
+        value: '0',
+        className: 'preview-slider',
+        id: 'enhance-slider',
+        title: 'Enhance filter threshold (0 = off, 64 = max)'
+    });
+    enhanceWrapper.append(enhanceLabel, enhanceSlider);
+
+    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, saturationWrapper, enhanceWrapper);
     if (checkboxesWrapper.hasChildNodes()) filterControls.append(checkboxesWrapper);
 
     function updateFilters() {
@@ -1467,7 +1482,56 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     brightnessSlider.addEventListener('input', updateFilters);
     contrastSlider.addEventListener('input', updateFilters);
     saturationSlider.addEventListener('input', updateFilters);
-    resetFiltersBtn.addEventListener('click', () => { brightnessSlider.value = 1; contrastSlider.value = 1; saturationSlider.value = 1; updateFilters(); });
+    resetFiltersBtn.addEventListener('click', () => { brightnessSlider.value = 1; contrastSlider.value = 1; saturationSlider.value = 1; enhanceSlider.value = 0; updateFilters(); resetEnhance(); });
+
+    // Enhance filter handler
+    let originalImageData = null;
+    let enhanceTimeout = null;
+
+    async function applyEnhanceFilter(threshold) {
+        if (threshold == 0) {
+            // Reset to original image
+            if (originalImageData) {
+                img.src = originalImageData;
+            }
+            return;
+        }
+
+        try {
+            const response = await fetch(`index.php?action=enhance_filter&image=${encodeURIComponent(imageUrl)}&threshold=${threshold}`);
+            const data = await response.json();
+            if (data.image) {
+                img.src = `data:image/jpeg;base64,${data.image}`;
+            } else {
+                // Empty response means use original
+                if (originalImageData) {
+                    img.src = originalImageData;
+                }
+            }
+        } catch (error) {
+            console.error('Error applying enhance filter:', error);
+        }
+    }
+
+    function resetEnhance() {
+        if (originalImageData) {
+            img.src = originalImageData;
+        }
+    }
+
+    // Store original image when loaded
+    img.addEventListener('load', () => {
+        if (!originalImageData) {
+            originalImageData = imageUrl;
+        }
+    });
+
+    // Debounced enhance filter application
+    enhanceSlider.addEventListener('input', () => {
+        const threshold = parseInt(enhanceSlider.value);
+        if (enhanceTimeout) clearTimeout(enhanceTimeout);
+        enhanceTimeout = setTimeout(() => applyEnhanceFilter(threshold), 300);
+    });
 
     // Assemble modal
     modalContent.append(header, imageWrapper, controls, filterControls);

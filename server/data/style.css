@@ -1402,7 +1402,7 @@ button:hover:not(:disabled) {
 }
 
 .preview-slider {
-    width: 150px;
+    width: 120px;
     cursor: pointer;
 }
 

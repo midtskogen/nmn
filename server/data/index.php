@@ -464,6 +464,24 @@ switch ($action) {
         echo shell_exec($command);
         break;
 
+    case 'enhance_filter':
+        header('Content-Type: application/json');
+        $image = $_GET['image'] ?? null;
+        $threshold = $_GET['threshold'] ?? '0';
+
+        if (!$image || !ctype_digit($threshold)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid or missing parameters']);
+            exit;
+        }
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' enhance_filter '
+            . escapeshellarg($image) . ' '
+            . escapeshellarg($threshold);
+
+        echo shell_exec($command);
+        break;
+
     case 'download':
         $lock_files = glob($LOCK_DIR . '/master_task_*.lock');
         if (count($lock_files) >= $MAX_CONCURRENT_REQUESTS) {

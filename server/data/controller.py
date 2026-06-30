@@ -13,6 +13,8 @@ import re
 import signal
 from datetime import datetime, timedelta, timezone
 from PIL import Image
+import numpy as np
+import numba
 
 # --- Configuration (Defined first to avoid circular dependency issues) ---
 # NMN_DATA_DIR is set by index.php (the entry point) so all subprocesses
@@ -52,8 +54,8 @@ logging.basicConfig(level=logging.INFO,
 def internal_probe_codec(filepath):
     try:
         command = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0", 
-            "-show_entries", "stream=codec_name", 
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
             "-of", "default=noprint_wrappers=1:nokey=1", filepath
         ]
         result = subprocess.run(command, capture_output=True, text=True, timeout=10)
@@ -62,6 +64,136 @@ def internal_probe_codec(filepath):
     except Exception:
         pass
     return 'unknown'
+
+# --- Enhance Filter Functions ---
+@numba.jit(nopython=True, cache=True, parallel=True)
+def _jit_enhance_filter_core(plane: np.ndarray, t: int, log2sizex: int, log2sizey: int) -> np.ndarray:
+    height, width = plane.shape
+    tmp_h = np.zeros(plane.shape, dtype=np.int16)
+    final_f = np.zeros(plane.shape, dtype=np.int16)
+    shiftx, shifty = 6 - log2sizex, 6 - log2sizey
+    indices = np.array([-31, -23, -14, -5, 5, 14, 23, 31], dtype=np.int32)
+    indices_x, indices_y = indices // (1 << shiftx), indices // (1 << shifty)
+
+    for i in numba.prange(height):
+        for j in range(width):
+            center_val, h_sum = plane[i, j], 0
+            for l in indices_x:
+                sample_j = max(0, min(width - 1, j + l))
+                sample_val = plane[i, sample_j]
+                h_sum += center_val if abs(int(sample_val) - int(center_val)) > t else sample_val
+            tmp_h[i, j] = h_sum
+
+    for i in numba.prange(height):
+        for j in range(width):
+            center_val_h, v_sum = tmp_h[i, j], 0
+            for l in indices_y:
+                sample_i = max(0, min(height - 1, i + l))
+                sample_val_h = tmp_h[sample_i, j]
+                v_sum += center_val_h if abs(int(sample_val_h) - int(center_val_h)) > t * 4 else sample_val_h
+            final_f[i, j] = v_sum
+    return final_f
+
+@numba.jit(nopython=True, cache=True, parallel=True)
+def _jit_enhance_filter_core_rgb(image: np.ndarray, t: int, log2sizex: int, log2sizey: int) -> np.ndarray:
+    """Single-pass RGB filter for better performance."""
+    height, width, channels = image.shape
+    tmp_h = np.zeros(image.shape, dtype=np.int16)
+    final_f = np.zeros(image.shape, dtype=np.int16)
+    shiftx, shifty = 6 - log2sizex, 6 - log2sizey
+    indices = np.array([-31, -23, -14, -5, 5, 14, 23, 31], dtype=np.int32)
+    indices_x, indices_y = indices // (1 << shiftx), indices // (1 << shifty)
+
+    # Horizontal pass
+    for i in numba.prange(height):
+        for j in range(width):
+            for c in range(channels):
+                center_val, h_sum = image[i, j, c], 0
+                for l in indices_x:
+                    sample_j = max(0, min(width - 1, j + l))
+                    sample_val = image[i, sample_j, c]
+                    h_sum += center_val if abs(int(sample_val) - int(center_val)) > t else sample_val
+                tmp_h[i, j, c] = h_sum
+
+    # Vertical pass
+    for i in numba.prange(height):
+        for j in range(width):
+            for c in range(channels):
+                center_val_h, v_sum = tmp_h[i, j, c], 0
+                for l in indices_y:
+                    sample_i = max(0, min(height - 1, i + l))
+                    sample_val_h = tmp_h[sample_i, j, c]
+                    v_sum += center_val_h if abs(int(sample_val_h) - int(center_val_h)) > t * 4 else sample_val_h
+                final_f[i, j, c] = v_sum
+    return final_f
+
+def enhance_filter(plane: np.ndarray, t: int, log2sizex: int, log2sizey: int,
+                   dither: int, seed: int,
+                   num_workers: int = None) -> np.ndarray:
+    if num_workers is None: num_workers = os.cpu_count() or 1
+    numba.set_num_threads(num_workers)
+    log2sizex, log2sizey = np.clip(log2sizex, 3, 6), np.clip(log2sizey, 3, 6)
+
+    # Use RGB version for 3D arrays, single-channel for 2D
+    if len(plane.shape) == 3:
+        final_f = _jit_enhance_filter_core_rgb(plane, t, log2sizex, log2sizey)
+    else:
+        final_f = _jit_enhance_filter_core(plane, t, log2sizex, log2sizey)
+
+    c_dither = np.clip(dither, 2, 11) - 2
+    dmask = (1 << c_dither) - 1
+    doffset = (1 << (c_dither - 1)) - 8 if c_dither > 0 else -8
+    if dmask > 0 and seed != 0:
+        rng = np.random.default_rng(seed)
+        noise = rng.integers(0, dmask + 1, size=plane.shape, dtype=np.int16)
+        final_f += noise + doffset
+    else:
+        final_f += doffset
+    final_f //= (1 << 6)
+    return np.clip(final_f, 0, 255).astype(np.uint8)
+
+def apply_enhance_filter(image_path: str, threshold: int) -> str:
+    """Apply enhance filter to an image and return base64 encoded result."""
+    # Convert URL path to file system path
+    # The image_path is expected to be like "download/some_file.jpg"
+    # We need to convert it to an absolute path relative to BASE_DIR
+    if image_path.startswith('download/'):
+        image_path = os.path.join(BASE_DIR, image_path)
+    elif not os.path.isabs(image_path):
+        image_path = os.path.join(BASE_DIR, image_path)
+
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+
+    if threshold == 0:
+        # No filter, return empty string to indicate original should be used
+        return ""
+
+    try:
+        img = Image.open(image_path)
+        img_array = np.array(img)
+
+        # Convert to grayscale if needed, or process each channel
+        if len(img_array.shape) == 2:
+            # Grayscale
+            enhanced = enhance_filter(img_array, t=threshold, log2sizex=6, log2sizey=6, dither=1, seed=np.random.randint(0, 2**32))
+            result_img = Image.fromarray(enhanced)
+        elif len(img_array.shape) == 3:
+            # RGB - single-pass filter
+            enhanced = enhance_filter(img_array, t=threshold, log2sizex=6, log2sizey=6, dither=1, seed=np.random.randint(0, 2**32))
+            result_img = Image.fromarray(enhanced)
+        else:
+            raise ValueError("Unsupported image format")
+
+        # Convert to base64
+        import base64
+        from io import BytesIO
+        buffer = BytesIO()
+        result_img.save(buffer, format='JPEG')
+        return base64.b64encode(buffer.getvalue()).decode('utf-8')
+    except Exception as e:
+        logging.error(f"Error applying enhance filter: {e}")
+        raise
 
 # --- Imports with Error Catching ---
 try:
@@ -997,6 +1129,7 @@ def main():
                 sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
             "fetch_archive_annotation": lambda: print(json.dumps(get_archive_annotation_overlay(
                 sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
+            "enhance_filter": lambda: print(json.dumps({"image": apply_enhance_filter(sys.argv[2], int(sys.argv[3]))})),
             "download": lambda: main_download_coordinator(sys.argv[2], sys.argv[3], sys.argv[4]),
             "_internal_download_station": lambda: download_for_single_station(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]),
             "_internal_start_stream": handle_start_stream,

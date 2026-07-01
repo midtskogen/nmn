@@ -59,8 +59,17 @@ function processUrlCheckQueue() {
  * @param {string} filename - The filename to parse
  * @returns {string} The enhanced title
  */
-function buildEnhancedPreviewTitle(filename) {
+function buildEnhancedPreviewTitle(filename, url = null) {
     if (!previewStationsData) return filename;
+
+    // If filename is a short display name (like eqh, fel, eqll, fell, etc.), extract actual filename from URL
+    if (url && /^(eq|fe)[hl]{0,2}$/.test(filename)) {
+        const urlParts = url.split('/');
+        const actualFilename = urlParts[urlParts.length - 1];
+        if (actualFilename && actualFilename !== filename) {
+            filename = actualFilename;
+        }
+    }
 
     // Remove extension first
     const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
@@ -689,7 +698,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     }
 
     // Build enhanced title from filename
-    const enhancedTitle = buildEnhancedPreviewTitle(title);
+    const enhancedTitle = buildEnhancedPreviewTitle(title, videoUrl);
 
     // Header with title and close button
     const header = createEl('div', { className: 'preview-header' });
@@ -1299,7 +1308,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     }
 
     // Build enhanced title from filename
-    const enhancedTitle = buildEnhancedPreviewTitle(title);
+    const enhancedTitle = buildEnhancedPreviewTitle(title, imageUrl);
 
     // Header
     const header = createEl('div', { className: 'preview-header' });

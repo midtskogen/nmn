@@ -760,9 +760,18 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                                         if os.path.exists(fpath):
                                             stitch_hit[proj] = {'path': fpath, 'name': fname}
                                 _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
+
+                                def get_stitch_display_name(proj, is_hires, is_long):
+                                    """Generate display name for stitch output based on projection, resolution, and exposure."""
+                                    prefix = 'eq' if proj == 'equirect' else 'fe'
+                                    res = 'h' if is_hires else 'l'
+                                    long = 'l' if is_long else ''
+                                    return f"{prefix}{res}{long}"
+
                                 for proj, info in stitch_hit.items():
                                     thumb_kwargs = {"task_id": task_id, "path": info['path'], "file_type": 'image', "station_code": station_code, "cam_num": _STITCH_CAM.get(proj, 0)}
-                                    stitch_entry = {"url": f"download/{info['name']}", "name": info['name'], "utc_time_iso": t_obj.isoformat(), "alternatives": []}
+                                    display_name = get_stitch_display_name(proj, is_hires, is_long)
+                                    stitch_entry = {"url": f"download/{info['name']}", "name": display_name, "utc_time_iso": t_obj.isoformat(), "alternatives": []}
                                     if thumb := create_thumbnail(**thumb_kwargs): stitch_entry["thumb_url"] = f"download/{thumb}"
                                     results.setdefault(t_key_s, []).append(stitch_entry)
                                 stitch_done += len(stitch_hit)
@@ -820,7 +829,19 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             # Poll background stitch jobs
             remaining_stitch_jobs = []
             _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
+
+            def get_stitch_display_name(proj, is_hires, is_long):
+                """Generate display name for stitch output based on projection, resolution, and exposure."""
+                prefix = 'eq' if proj == 'equirect' else 'fe'
+                res = 'h' if is_hires else 'l'
+                long = 'l' if is_long else ''
+                return f"{prefix}{res}{long}"
+
             for sjob in stitch_jobs:
+                # Parse res_suffix to determine is_hires and is_long
+                is_hires = 'hires' in sjob['res_suffix']
+                is_long = 'long' in sjob['res_suffix']
+
                 # Check for outputs that are already on disk while the subprocess is still running.
                 for proj, flag in [('fisheye', sjob['do_fisheye']), ('equirect', sjob['do_equirect'])]:
                     if flag and proj not in sjob['reported']:
@@ -828,7 +849,8 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                         fpath = os.path.join(DOWNLOAD_DIR, fname)
                         if os.path.exists(fpath):
                             thumb_kwargs = {"task_id": task_id, "path": fpath, "file_type": 'image', "station_code": sjob['station_code'], "cam_num": _STITCH_CAM.get(proj, 0)}
-                            stitch_entry = {"url": f"download/{fname}", "name": fname, "utc_time_iso": sjob['t_iso'], "alternatives": []}
+                            display_name = get_stitch_display_name(proj, is_hires, is_long)
+                            stitch_entry = {"url": f"download/{fname}", "name": display_name, "utc_time_iso": sjob['t_iso'], "alternatives": []}
                             if thumb := create_thumbnail(**thumb_kwargs): stitch_entry["thumb_url"] = f"download/{thumb}"
                             results.setdefault(sjob['t_key'], []).append(stitch_entry)
                             logging.info(f"Worker {task_id} STITCH-DEBUG: added early result {fname}")
@@ -849,7 +871,8 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                                     continue
                                 if info and os.path.exists(info['path']):
                                     thumb_kwargs = {"task_id": task_id, "path": info['path'], "file_type": 'image', "station_code": sjob['station_code'], "cam_num": _STITCH_CAM.get(key, 0)}
-                                    stitch_entry = {"url": f"download/{info['name']}", "name": info['name'], "utc_time_iso": sjob['t_iso'], "alternatives": []}
+                                    display_name = get_stitch_display_name(key, is_hires, is_long)
+                                    stitch_entry = {"url": f"download/{info['name']}", "name": display_name, "utc_time_iso": sjob['t_iso'], "alternatives": []}
                                     if thumb := create_thumbnail(**thumb_kwargs): stitch_entry["thumb_url"] = f"download/{thumb}"
                                     results.setdefault(sjob['t_key'], []).append(stitch_entry)
                                     logging.info(f"Worker {task_id} STITCH-DEBUG: added result {info['name']}")

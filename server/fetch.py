@@ -270,7 +270,7 @@ class Config:
 
 
 # --- Internationalization (i18n) Setup ---
-SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi']
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'fi', 'lv']
 DEFAULT_LANG = 'nb'
 _LOC_DIR_CANDIDATES = [
     Config.BIN_DIR / 'loc',
@@ -642,8 +642,9 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
         table1 += "</table>"
         
         # Use comma as decimal separator for languages other than English
+        # Only replace '.' between digits to avoid clobbering label text (e.g. R.A., Dekl.)
         if lang != 'en':
-            table1 = table1.replace('.', ',')
+            table1 = re.sub(r'(?<=\d)\.(?=\d)', ',', table1)
         
         f.write('<table><tr><td valign=top>\n')
         f.write(table1)
@@ -663,7 +664,7 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
 </table>
 """
             if lang != 'en':
-                table2 = table2.replace('.', ',')
+                table2 = re.sub(r'(?<=\d)\.(?=\d)', ',', table2)
             f.write(table2)
     
         f.write('</td></tr></table>')
@@ -1460,6 +1461,18 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 'placename': placename,
                 'first_run': not any(p.name.endswith('map.jpg') for p in event_dir.glob('*.jpg'))
             }
+
+            # Write plot_data caches for future per-language tools
+            import pickle as _pickle
+            for _cache_path, _obj in [
+                (event_dir / '_metrack_plot_data.pkl', (metrack_info, metrack_plot_data)),
+                (event_dir / '_fbspd_plot_data.pkl',   (fbspd_results, fbspd_plot_data)),
+            ]:
+                try:
+                    with _cache_path.open('wb') as _f:
+                        _pickle.dump(_obj, _f)
+                except Exception as _e:
+                    logging.warning(f"Could not write plot_data cache {_cache_path.name}: {_e}")
 
             logging.info("Core analysis successful.")
 

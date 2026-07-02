@@ -41,7 +41,7 @@ function get_user_ip() {
  * @return string The determined and validated language code.
  */
 function get_language($default_lang) {
-    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI'];
+    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI', 'lv_LV'];
 
     // Priority 1: Check for an existing language cookie.
     if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
@@ -71,7 +71,7 @@ function get_language($default_lang) {
         'SE' => 'nb_NO', // Sweden
         'DK' => 'nb_NO', // Denmark
         'FI' => 'fi_FI', // Finland
-        
+
         // English-speaking countries
         'GB' => 'en_GB', // United Kingdom
         'US' => 'en_GB', // United States
@@ -88,6 +88,9 @@ function get_language($default_lang) {
         // Czech & Slovak
         'CZ' => 'cs_CZ', // Czech Republic
         'SK' => 'cs_CZ', // Slovakia
+
+        // Latvian
+        'LV' => 'lv_LV', // Latvia
     ];
 
     $user_ip = get_user_ip();

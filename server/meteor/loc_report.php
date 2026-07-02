@@ -28,7 +28,7 @@ function get_user_ip() {
  * @return string The determined and validated language code (e.g., 'en_GB').
  */
 function get_language($default_lang) {
-    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ'];
+    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'lv_LV'];
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs)) {
         return $_GET['lang'];
     }
@@ -56,6 +56,7 @@ function get_language($default_lang) {
         'GB' => 'en_GB', 'US' => 'en_GB', 'CA' => 'en_GB', 'AU' => 'en_GB', 'NZ' => 'en_GB', 'IE' => 'en_GB',
         'DE' => 'de_DE', 'AT' => 'de_DE', 'CH' => 'de_DE',
         'CZ' => 'cs_CZ', 'SK' => 'cs_CZ',
+        'LV' => 'lv_LV',
     ];
     $user_ip = get_user_ip();
     $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
@@ -215,6 +216,7 @@ table img {
         <a href="?lang=en_GB" title="English">🇬🇧</a>
         <a href="?lang=de_DE" title="Deutsch">🇩🇪</a>
         <a href="?lang=cs_CZ" title="Čeština">🇨🇿</a>
+        <a href="?lang=lv_LV" title="Latviešu">🇱🇻</a>
     </div>
 
     <h1>
@@ -236,6 +238,23 @@ table img {
             } else {
                 $title_str = htmlspecialchars($t['meteor'] ?? 'Meteor') . ', ' . htmlspecialchars($t['location'] ?? 'poloha') . ': ' . htmlspecialchars($location);
             }
+        } elseif ($lang_short === 'lv') {
+            $declensions_path = $LANG_DIR . '/lv_declensions.json';
+            $declined_location = null;
+            if (file_exists($declensions_path)) {
+                $declensions = json_decode(file_get_contents($declensions_path), true);
+                if (isset($declensions[$location])) {
+                    $declined_location = $declensions[$location];
+                }
+            }
+            if ($declined_location === null) {
+                $last = mb_strtolower(mb_substr($location, -1, 1, 'UTF-8'), 'UTF-8');
+                if ($last === 'a') $declined_location = mb_substr($location, 0, -1, 'UTF-8') . 'as';
+                elseif ($last === 'e') $declined_location = $location . 's';
+                elseif (in_array($last, ['i','o','u','ø','å','æ','ā','ē','ī','ū'])) $declined_location = $location;
+                else $declined_location = $location . 'a';
+            }
+            $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteors virs') . ' ' . htmlspecialchars($declined_location);
         } else {
             $title_str = htmlspecialchars($t['meteor_over'] ?? 'Meteor over') . ' ' . htmlspecialchars($location);
         }

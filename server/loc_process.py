@@ -64,7 +64,7 @@ class Settings:
     CLASSIFICATION_THRESHOLD_AMS = 0.05
 
 # --- Internationalization (i18n) Setup ---
-SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs']
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'lv']
 DEFAULT_LANG = 'nb'
 LOC_DIR = Path(__file__).parent / 'loc'
 

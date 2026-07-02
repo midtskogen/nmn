@@ -238,6 +238,7 @@ HTML_TEMPLATE = """
             <span data-lang="de_DE" title="Deutsch">🇩🇪</span>
             <span data-lang="cs_CZ" title="Čeština">🇨🇿</span>
             <span data-lang="fi_FI" title="Suomi">🇫🇮</span>
+            <span data-lang="lv_LV" title="Latviešu">🇱🇻</span>
         </div>
         <h1>__{{page_title}}__</h1>
     </header>

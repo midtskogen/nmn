@@ -14,7 +14,7 @@ function s4_get_user_ip() {
     return $_SERVER['REMOTE_ADDR'] ?? 'unknown_ip';
 }
 function s4_get_language($default_lang) {
-    $supported = ['nb_NO','en_GB','de_DE','cs_CZ','fi_FI'];
+    $supported = ['nb_NO','en_GB','de_DE','cs_CZ','fi_FI','lv_LV'];
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported)) return $_GET['lang'];
     if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported)) return $_COOKIE['lang'];
     if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
@@ -34,7 +34,7 @@ function s4_get_language($default_lang) {
     }
     $cmap = ['NO'=>'nb_NO','SE'=>'nb_NO','DK'=>'nb_NO','GB'=>'en_GB','US'=>'en_GB',
              'CA'=>'en_GB','AU'=>'en_GB','DE'=>'de_DE','AT'=>'de_DE','CH'=>'de_DE',
-             'CZ'=>'cs_CZ','SK'=>'cs_CZ','FI'=>'fi_FI'];
+             'CZ'=>'cs_CZ','SK'=>'cs_CZ','FI'=>'fi_FI','LV'=>'lv_LV'];
     $ip = s4_get_user_ip();
     $gj = @file_get_contents("http://ip-api.com/json/{$ip}?fields=countryCode,status");
     if ($gj) { $g=json_decode($gj); if ($g&&$g->status==='success'&&isset($cmap[$g->countryCode])) return $cmap[$g->countryCode]; }
@@ -155,6 +155,17 @@ function s4_title($location, $lang_short, $t, $LANG_DIR) {
         if (file_exists($dp)){$d=json_decode(file_get_contents($dp),true);if(isset($d[$location]))$dec=$d[$location];}
         if ($dec===null){$last=substr($location,-1);$dec=in_array(mb_strtolower($last,'UTF-8'),['a','e','i','o','u','y','ä','ö'])?$location.'n':$location.'in';}
         return htmlspecialchars(($t['meteor_over']??'Meteor').' '.$dec.' yllä');
+    } elseif ($lang_short==='lv') {
+        $dec=null; $dp=$LANG_DIR.'/lv_declensions.json';
+        if (file_exists($dp)){$d=json_decode(file_get_contents($dp),true);if(isset($d[$location]))$dec=$d[$location];}
+        if ($dec===null) {
+            $last=mb_strtolower(mb_substr($location,-1,1,'UTF-8'),'UTF-8');
+            if ($last==='a') $dec=mb_substr($location,0,-1,'UTF-8').'as';
+            elseif ($last==='e') $dec=$location.'s';
+            elseif (in_array($last,['i','o','u','ø','å','æ','ā','ē','ī','ū'])) $dec=$location;
+            else $dec=$location.'a';
+        }
+        return htmlspecialchars(($t['meteor_over']??'Meteors virs').' '.$dec);
     } else {
         return htmlspecialchars(($t['meteor_over']??'Meteor over').' '.$location);
     }
@@ -365,6 +376,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
     <a href="?lang=de_DE" title="Deutsch">🇩🇪</a>
     <a href="?lang=cs_CZ" title="Čeština">🇨🇿</a>
     <a href="?lang=fi_FI" title="Suomi">🇫🇮</a>
+    <a href="?lang=lv_LV" title="Latviešu">🇱🇻</a>
   </div>
 
   <h1 class="page-title">

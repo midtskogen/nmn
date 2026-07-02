@@ -1128,11 +1128,13 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         best_fit_error_this_run = float('inf')
         
         for i in range(options['ransac_iterations']):
-            while True:
+            for _retry in range(num_stations * num_stations + 10):
                 sample_indices = random.sample(range(num_stations), 2)
                 loc1 = (raw_data['latitudes'][sample_indices[0]], raw_data['longitudes'][sample_indices[0]])
                 loc2 = (raw_data['latitudes'][sample_indices[1]], raw_data['longitudes'][sample_indices[1]])
                 if loc1 != loc2: break
+            else:
+                continue  # all observations from same location — skip this RANSAC iteration
             
             candidate_start, candidate_end, _, _, _ = fit_track(_create_subset_obs_data(obs_data, sample_indices), optimize=False)
             if candidate_start is None: continue

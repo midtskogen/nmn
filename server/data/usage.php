@@ -353,6 +353,7 @@ $total_ips          = count($all_ips);
   <?php if ($access_summary): ?><li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-access"><?= t('usage_tab_actions', $lang) ?></button></li><?php endif; ?>
   <li class="nav-item ms-auto"><button class="nav-link" onclick="document.cookie='lang=nb_NO;path=/;max-age=31536000';location.reload()" title="Norsk">🇳🇴</button></li>
   <li class="nav-item"><button class="nav-link" onclick="document.cookie='lang=en_GB;path=/;max-age=31536000';location.reload()" title="English">🇬🇧</button></li>
+  <li class="nav-item"><button class="nav-link" onclick="document.cookie='lang=lv_LV;path=/;max-age=31536000';location.reload()" title="Latviešu">🇱🇻</button></li>
 </ul>
 
 <div class="tab-content">

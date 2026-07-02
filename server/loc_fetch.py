@@ -74,7 +74,7 @@ class Config:
     SVG_ORBIT_DPI = 100
 
 # --- Internationalization (i18n) Setup ---
-SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs']
+SUPPORTED_LANGS = ['nb', 'en', 'de', 'cs', 'lv']
 DEFAULT_LANG = 'nb'
 LOC_DIR = Config.BIN_DIR / 'loc'
 

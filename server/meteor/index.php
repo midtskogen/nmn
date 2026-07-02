@@ -91,7 +91,7 @@ $translations = [
         'about_table_header' => 'Tietoja taulukosta:',
         'about_table_li1' => '<strong>Harmaa merkintä:</strong> Vain yhden aseman tallentamat tapahtumat. Tarkkaa lentorataa ei voida määrittää, ja kyseessä voi olla virheellinen havainto (lentokone, lintu tms.).',
         'about_table_li2' => '<strong>Punainen merkintä:</strong> Meteorit, joiden lento on päättynyt alle 40 km korkeuteen ja jotka <i>ovat saattaneet</i> pudota meteoriitteina.',
-        'about_table_li3' => 'Tapahtuman täydellinen käsittely voi viedä aikaa, jopa useita tunteja tai pidempäänkin, jos manuaalinen käsittely on tarpeen.',
+        'about_table_li3' => 'Tapahtuman täydellinen käsittely voi viedä aikaa, jopa useita tunteja tai pidemmäänkin, jos manuaalinen käsittely on tarpeen.',
         // *** KORRIGERT LINJE FOR FINSKE TIDSZONER ***
         'about_table_li4' => 'Kaikki ajat ovat <strong>UTC</strong>-aikaa. Lisää kaksi tuntia Suomen normaaliaikaan (EET) ja kolme tuntia kesäaikaan (EEST). Klikkaamalla aikaleimaa näet yksityiskohtaisen raportin.',
         'your_observations_header' => 'Omat havaintosi:',
@@ -104,6 +104,26 @@ $translations = [
         'archive_for_year' => 'Havainnot vuodelta %d',
         'archive_part1' => '(tammi-kesäkuu)',
         'archive_part2' => '(heinä-joulukuu)',
+    ],
+    'lv_LV' => [
+        'page_title' => 'Meteoru novērojumi',
+        'main_header' => 'Jaunākie reģistrējumi',
+        'intro_p1' => 'Šī lapa rāda reāllaika reģistrējumus no kameru tīkla. Tīklu galvenokārt finansē <a href="http://sparebankstiftelsendnb.no">Sparebankstiftelsen DNB</a>.',
+        'about_table_header' => 'Par tabulu:',
+        'about_table_li1' => '<strong>Pelēka iezīmēšana:</strong> Notikumi, kas reģistrēti tikai vienā stacijā. Precīzu trajektoriju nevar noteikt, un tie var būt viltus reģistrējumi (lidmašīnas, putni utt.).',
+        'about_table_li2' => '<strong>Sarkana iezīmēšana:</strong> Meteori, kas novēroti zemāk par 40 km augstumu un <i>iespējams</i> nokritušas kā meteorīti.',
+        'about_table_li3' => 'Notikuma pilnīgai apstrādei var būt nepieciešams laiks – līdz pat dažām stundām vai ilgāk, ja nepieciešama manuāla apstrāde.',
+        'about_table_li4' => 'Visi laiki ir <strong>UTC</strong>. Pievienojiet vienu stundu Centrāleiropas standarta laikam (CET) un divas stundas vasaras laikam (CEST). Noklikšķiniet uz laika zīmes, lai skatītu sīkāku ziņojumu.',
+        'your_observations_header' => 'Jūsu novērojumi:',
+        'your_observations_p1' => 'Ja esat redzējuši spilgtu meteoru, kas ir uzskaitīts šeit, varat to ziņot, izmantojot mūsu <a href="/obs.php">veidlapu</a>. Jauni novērojumi var palīdzēt iegūt precīzākus rezultātus.',
+        'general_info_header' => 'Vispārīga informācija par meteoriem:',
+        'general_info_p1' => 'Lielākā daļa meteoru sadeg augstu atmosfērā. Tikai daži (Norvēģijā aptuveni 10 reizes gadā) sasniedz zemi kā meteorīti. Lielākā daļa no tiem paliek nepamanīti dienas gaismas vai mākoņainības dēļ.',
+        'important_notice_p1' => '<strong>Svarīgi:</strong> Ziņojumi tiek ģenerēti automātiski un to precizitāte var atšķirties. Tie neuzrāda iespējamās meteorītu kritiena zonas, jo tas prasa manuālu pārbaudi un meteoroloģiskos datus.',
+        'camera_image_alt' => 'Meteoru kameras ilustrācija',
+        'archive_header' => 'Arhīvs',
+        'archive_for_year' => 'Reģistrējumi par %d. gadu',
+        'archive_part1' => '(janvāris līdz jūnijs)',
+        'archive_part2' => '(jūlijs līdz decembris)',
     ],
 ];
 
@@ -134,7 +154,7 @@ function get_user_ip() {
  */
 function get_language($default_lang) {
     // *** ADDED 'fi_FI' ***
-    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI'];
+    $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI', 'lv_LV'];
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs)) {
         return $_GET['lang'];
     }
@@ -162,6 +182,7 @@ function get_language($default_lang) {
         'GB' => 'en_GB', 'US' => 'en_GB', 'CA' => 'en_GB', 'AU' => 'en_GB', 'NZ' => 'en_GB', 'IE' => 'en_GB',
         'DE' => 'de_DE', 'AT' => 'de_DE', 'CH' => 'de_DE',
         'CZ' => 'cs_CZ', 'SK' => 'cs_CZ',
+        'LV' => 'lv_LV',
         'FI' => 'fi_FI', // *** ADDED 'fi_FI' ***
     ];
     $user_ip = get_user_ip();
@@ -297,7 +318,8 @@ $lang_short = substr($lang_code, 0, 2);
             <a href="?lang=en_GB" title="English">🇬🇧</a>
             <a href="?lang=de_DE" title="Deutsch">🇩🇪</a>
             <a href="?lang=cs_CZ" title="Čeština">🇨🇿</a>
-            <a href="?lang=fi_FI" title="Suomi">🇫🇮</a> <?php // *** ADDED FINNISH FLAG *** ?>
+            <a href="?lang=fi_FI" title="Suomi">🇫🇮</a>
+            <a href="?lang=lv_LV" title="Latviešu">🇱🇻</a>
         </div>
     </div>
 

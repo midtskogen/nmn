@@ -143,6 +143,31 @@ $translations = [
         'hidden_plural' => 'piilotettua', // *** KORRIGERT HER ***
         'month_names' => ["01" => "Tammikuu", "02" => "Helmikuu", "03" => "Maaliskuu", "04" => "Huhtikuu", "05" => "Toukokuu", "06" => "Kesäkuu", "07" => "Heinäkuu", "08" => "Elokuu", "09" => "Syyskuu", "10" => "Lokakuu", "11" => "Marraskuu", "12" => "Joulukuu"],
     ],
+    'lv_LV' => [
+        'lang_short' => 'lv',
+        'lang_name' => 'Latviešu',
+        'archive_title_for_year' => 'Novērojumi par %d. gadu',
+        'archive_part1_title' => '(janvāris – jūnijs)',
+        'archive_part2_title' => '(jūlijs – decembris)',
+        'archive_back_link_text' => 'Atpakaļ uz jaunākajiem ierakstiem',
+        'filter_events_header' => 'Filtrēt notikumus',
+        'filter_show_all' => 'Rādīt visus',
+        'filter_multi_station' => 'Vairāku staciju notikumi',
+        'filter_candidates' => 'Meteorītu kandidāti',
+        'filter_perseids' => 'Persejīdi',
+        'filter_southern_taurids' => 'Dienvidu Taurīdi',
+        'filter_northern_taurids' => 'Ziemeļu Taurīdi',
+        'filter_leonids' => 'Leonīdi',
+        'filter_geminids' => 'Geminīdi',
+        'display_options_header' => 'Attēlošanas iestatījumi',
+        'display_no_images' => 'Bez attēliem',
+        'display_unprocessed' => 'Rādīt neapstrādātus attēlus',
+        'display_processed' => 'Rādīt apstrādātus attēlus',
+        'last_6_months' => 'Pēdējie 6 mēneši',
+        'hidden_singular' => 'paslēpts',
+        'hidden_plural' => 'paslēpti',
+        'month_names' => ["01" => "Janvāris", "02" => "Februāris", "03" => "Marts", "04" => "Aprīlis", "05" => "Maijs", "06" => "Jūnijs", "07" => "Jūlijs", "08" => "Augusts", "09" => "Septembris", "10" => "Oktobris", "11" => "Novembris", "12" => "Decembris"],
+    ],
 ];
 
 // --- Function Definitions ---
@@ -296,9 +321,9 @@ function generateMonthContent($dates, $t) {
             if (file_exists($tablesFile)) {
                 $tablesContent = file_get_contents($tablesFile);
                 $endAltitude = null; $entrySpeed = null; $startAltitude = null;
-                if (preg_match('/(Start height|Starthøgde|Anfangshöhe|Počáteční výška|Alkukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $startAltitude = (float)str_replace(',', '.', $m[2]);
-                if (preg_match('/(End height|Slutthøgde|Endhöhe|Konečná výška|Loppukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $endAltitude = (float)str_replace(',', '.', $m[2]);
-                if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupní rychlost|Tulonopeus):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tablesContent, $m)) $entrySpeed = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(Start height|Starthøgde|Anfangsh\u00f6he|Po\u010d\u00e1te\u010dn\u00ed v\u00fd\u0161ka|Alkukorkeus|S\u0101kuma augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $startAltitude = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(End height|Slutth\u00f8gde|Endh\u00f6he|Kone\u010dn\u00e1 v\u00fd\u0161ka|Loppukorkeus|Beigu augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $endAltitude = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupn\u00ed rychlost|Tulonopeus|Ieejas \u0101trums):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tablesContent, $m)) $entrySpeed = (float)str_replace(',', '.', $m[2]);
                 if ($startAltitude !== null && $endAltitude !== null && $entrySpeed !== null &&
                     $startAltitude > 40 && $startAltitude < 120 &&
                     $endAltitude > 10 && $endAltitude < 40 &&
@@ -307,8 +332,8 @@ function generateMonthContent($dates, $t) {
                 }
                 if (stripos($tablesContent, 'Perseid') !== false) $showerType = 'perseider';
                 elseif (stripos($tablesContent, 'taurid') !== false) {
-                    if (stripos($tablesContent, 'Sørlige') !== false || stripos($tablesContent, 'Southern') !== false || stripos($tablesContent, 'Südliche') !== false || stripos($tablesContent, 'Jižní') !== false || stripos($tablesContent, 'Eteläiset') !== false) $showerType = 'sorlige-taurider';
-                    elseif (stripos($tablesContent, 'Nordlige') !== false || stripos($tablesContent, 'Northern') !== false || stripos($tablesContent, 'Nördliche') !== false || stripos($tablesContent, 'Severní') !== false || stripos($tablesContent, 'Pohjoiset') !== false) $showerType = 'nordlige-taurider';
+                    if (stripos($tablesContent, 'Sørlige') !== false || stripos($tablesContent, 'Southern') !== false || stripos($tablesContent, 'Südliche') !== false || stripos($tablesContent, 'Jižní') !== false || stripos($tablesContent, 'Eteläiset') !== false || stripos($tablesContent, 'Dienvidu') !== false) $showerType = 'sorlige-taurider';
+                    elseif (stripos($tablesContent, 'Nordlige') !== false || stripos($tablesContent, 'Northern') !== false || stripos($tablesContent, 'Nördliche') !== false || stripos($tablesContent, 'Severní') !== false || stripos($tablesContent, 'Pohjoiset') !== false || stripos($tablesContent, 'Ziemeļu') !== false) $showerType = 'nordlige-taurider';
                 }
                 elseif (stripos($tablesContent, 'Leonid') !== false) $showerType = 'leonider';
                 elseif (stripos($tablesContent, 'Geminid') !== false) $showerType = 'geminider';
@@ -698,7 +723,7 @@ function generateArchivePageHeader($targetYear, $part, $t) {
     
     $langSwitcherHTML = '<div class="language-switcher">';
     // *** ADDED 'fi_FI' ***
-    $flags = ['nb_NO' => '🇳🇴', 'en_GB' => '🇬🇧', 'de_DE' => '🇩🇪', 'cs_CZ' => '🇨🇿', 'fi_FI' => '🇫🇮'];
+    $flags = ['nb_NO' => '🇳🇴', 'en_GB' => '🇬🇧', 'de_DE' => '🇩🇪', 'cs_CZ' => '🇨🇿', 'fi_FI' => '🇫🇮', 'lv_LV' => '🇱🇻'];
     foreach ($translations as $lang_code => $lang_t) {
         $lang_short = $lang_t['lang_short'];
         $archiveFileName = "{$targetYear}_{$lang_short}_{$part}.html";

@@ -1702,10 +1702,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         prevBtn.addEventListener('click', () => {
             if (mediaIndex > 0) {
                 const prevItem = currentMediaList[mediaIndex - 1];
-                // Capture current dimensions for smooth transition
                 const rect = modalContent.getBoundingClientRect();
                 lastModalDimensions = { width: rect.width, height: rect.height };
-                closeButton.click();
+                closeModal(true);
                 if (prevItem.isVideo) {
                     showVideoPreview(prevItem.url, prevItem.name, currentMediaList, mediaIndex - 1, lastModalDimensions);
                 } else {
@@ -1716,10 +1715,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         nextBtn.addEventListener('click', () => {
             if (mediaIndex < currentMediaList.length - 1) {
                 const nextItem = currentMediaList[mediaIndex + 1];
-                // Capture current dimensions for smooth transition
                 const rect = modalContent.getBoundingClientRect();
                 lastModalDimensions = { width: rect.width, height: rect.height };
-                closeButton.click();
+                closeModal(true);
                 if (nextItem.isVideo) {
                     showVideoPreview(nextItem.url, nextItem.name, currentMediaList, mediaIndex + 1, lastModalDimensions);
                 } else {
@@ -1744,13 +1742,15 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     });
 
     // Close
-    closeButton.addEventListener('click', () => {
+    const closeModal = (skipHistory = false) => {
         ro.disconnect();
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         imageWrapper.removeEventListener('wheel', onWheel);
         imageWrapper.removeEventListener('mousedown', onMouseDown);
-        history.back();
-    });
+        modalBackdrop.remove();
+        if (!skipHistory) history.back();
+    };
+    closeButton.addEventListener('click', () => closeModal(false));
 
     modalBackdrop.setAttribute('tabindex', '0');
     setTimeout(() => modalBackdrop.focus(), 100);

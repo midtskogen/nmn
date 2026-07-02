@@ -698,7 +698,7 @@ def _precompile_numba_functions():
 
     _print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True):
+def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
@@ -1003,6 +1003,10 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     del gap
 
     y_final, u_final, v_final = rgb_to_yuv(rgb_channels)
+
+    if abs(saturation - 1.0) > 0.001:
+        u_final = np.clip((u_final.astype(np.float32) - 128.0) * saturation + 128.0, 0, 255).astype(np.uint8)
+        v_final = np.clip((v_final.astype(np.float32) - 128.0) * saturation + 128.0, 0, 255).astype(np.uint8)
 
     if enhance:
         _print("Applying enhancement filter...")
@@ -1728,7 +1732,7 @@ def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
     v_plane[uy1:uy2, ux1:ux2] = 128
 
 
-def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False):
+def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     num_images = len(camera_files)
@@ -1926,6 +1930,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True); del gap_ds_g
     geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
     geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
+    _print(f"  computing full-res EDT on {W_geo}x{H_geo} canvas...")
     geo_dist = _geo_edt(~geo_gap)
     geo_blend_w = np.clip(geo_dist / feather_radius, 0.0, 1.0).astype(np.float32); del geo_dist
     geo_n_gap = int(geo_gap.sum())
@@ -1933,6 +1938,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     geo_ri_gap = geo_ri[geo_gap_idx]
     geo_ci_gap = geo_ci[geo_gap_idx]
     _print(f"  gap pixels: {geo_n_gap}, feather: {feather_radius}px")
+    _print("  geometry precomputation complete.")
 
     if fisheye_mask:
         _fy, _fx = out_h, out_w
@@ -2207,6 +2213,10 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
             y_final, u_final, v_final = rgb_to_yuv(canvas_rgb)
 
+            if abs(saturation - 1.0) > 0.001:
+                u_final = np.clip((u_final.astype(np.float32) - 128.0) * saturation + 128.0, 0, 255).astype(np.uint8)
+                v_final = np.clip((v_final.astype(np.float32) - 128.0) * saturation + 128.0, 0, 255).astype(np.uint8)
+
             if fisheye_mask:
                 y_final[geo_outside_y] = 0
                 u_final[geo_outside_uv] = 128
@@ -2249,7 +2259,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     _print(f"\n✅ Success! Timelapse video saved to {output_file}")
 
 
-def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False):
+def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -2570,6 +2580,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
     geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
     # Feather weights from full-res EDT
+    _print(f"  computing full-res EDT on {W_geo}x{H_geo} canvas...")
     geo_dist = _geo_edt(~geo_gap)
     geo_blend_w = np.clip(geo_dist / feather_radius, 0.0, 1.0).astype(np.float32); del geo_dist
     geo_n_gap = int(geo_gap.sum())
@@ -2578,6 +2589,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     geo_ri_gap = geo_ri[geo_gap_idx]  # shape (geo_n_gap,)
     geo_ci_gap = geo_ci[geo_gap_idx]  # shape (geo_n_gap,)
     _print(f"  gap pixels: {geo_n_gap}, feather: {feather_radius}px")
+    _print("  geometry precomputation complete.")
 
     # Precompute fisheye circular mask (constant geometry)
     if fisheye_mask:
@@ -2822,6 +2834,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 canvas_rgb = [np.clip(c, 0, 255).astype(np.uint8) for c in (canvas_r, canvas_g, canvas_b)]
 
             y_final, u_final, v_final = rgb_to_yuv(canvas_rgb)
+
+            if abs(saturation - 1.0) > 0.001:
+                u_final = np.clip((u_final.astype(np.float32) - 128.0) * saturation + 128.0, 0, 255).astype(np.uint8)
+                v_final = np.clip((v_final.astype(np.float32) - 128.0) * saturation + 128.0, 0, 255).astype(np.uint8)
 
             # Apply fisheye circular mask
             if fisheye_mask:
@@ -3265,12 +3281,1250 @@ def generate_pto_from_lens_files(input_files: list, projection: str,
         return None
 
 
+def launch_gui():
+    """Launch the stitcher GUI. Called when no CLI arguments are provided."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox, scrolledtext
+    except ImportError:
+        print("Error: tkinter is not available. Install python3-tk to use the GUI.", file=sys.stderr)
+        sys.exit(1)
+
+    root = tk.Tk()
+    root.title("Stitcher")
+    root.resizable(True, True)
+    root.minsize(820, 940)
+
+    def _lock_geometry():
+        """Pin the window size after initial layout so content changes don't resize it."""
+        root.update_idletasks()
+        w = max(root.winfo_width(),  820)
+        h = max(root.winfo_height(), 940)
+        root.geometry(f"{w}x{h}")
+
+    root.after(100, _lock_geometry)
+
+    # ── Shared state ─────────────────────────────────────────────────────────
+    running      = threading.Event()
+    cancel_proc  = [None]
+    _run_start   = [None]   # wall-clock start for ETA
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    def lbl(parent, text, col, row, **kw):
+        ttk.Label(parent, text=text).grid(column=col, row=row, sticky="w", padx=5, pady=3, **kw)
+
+    def ent(parent, var, col, row, width=28, **kw):
+        e = ttk.Entry(parent, textvariable=var, width=width)
+        e.grid(column=col, row=row, sticky="ew", padx=5, pady=3, **kw)
+        return e
+
+    def browseopen(var, multiple=False, filetypes=None):
+        ft = filetypes or [("All files", "*.*")]
+        if multiple:
+            paths = filedialog.askopenfilenames(filetypes=ft)
+            if paths:
+                var.set(" ".join(f'"{p}"' if " " in p else p for p in paths))
+        else:
+            p = filedialog.askopenfilename(filetypes=ft)
+            if p: var.set(p)
+
+    def browsesave(var, filetypes=None):
+        ft = filetypes or [("All files", "*.*")]
+        p = filedialog.asksaveasfilename(filetypes=ft, defaultextension=ft[0][1].lstrip("*"))
+        if p: var.set(p)
+
+    def datetime_entry(parent, var, col, row, hint="YYYY-MM-DD HH:MM:SS"):
+        """Entry with placeholder hint shown in gray when empty."""
+        e = ttk.Entry(parent, textvariable=var, width=22)
+        e.grid(column=col, row=row, sticky="w", padx=5, pady=3)
+        ttk.Label(parent, text=hint, foreground="#888", font=("", 8)).grid(
+            column=col+1, row=row, sticky="w", padx=2)
+        return e
+
+    # ── Load cameras.json ─────────────────────────────────────────────────────
+    _cameras_json = os.path.join(os.path.dirname(__file__), '..', 'server', 'data', 'cameras.json')
+    _station_map = {}   # display label → {"id": amsXXX, "ssh": amsXXX}
+    try:
+        import json as _json
+        with open(_cameras_json) as _f:
+            _cam_data = _json.load(_f)
+        for _ams_id, _cfg in sorted(_cam_data.items()):
+            _st = _cfg.get("station", {})
+            _name = (_st.get("display_name") or _st.get("name") or _ams_id).capitalize()
+            _code = _st.get("code", "")
+            _label = f"{_name}  [{_code}]  ({_ams_id})" if _code else f"{_name}  ({_ams_id})"
+            _station_map[_label] = _ams_id
+    except Exception:
+        pass   # cameras.json missing or malformed — fall back to free-text entry
+
+    # ── Notebook ──────────────────────────────────────────────────────────────
+    nb_frame = tk.Frame(root)
+    nb_frame.pack(fill="both", expand=True, padx=8, pady=(8,4))
+    nb_frame.pack_propagate(False)  # prevent content from resizing this frame/window
+    nb = ttk.Notebook(nb_frame)
+    nb.pack(fill="both", expand=True)
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 1 – Timelapse  (primary tab, shown first)
+    # ═══════════════════════════════════════════════════════════════
+    tab_tl = ttk.Frame(nb)
+    nb.add(tab_tl, text="  Timelapse  ")
+    tab_tl.columnconfigure(1, weight=1)
+    r = 0
+
+    # ── State vars ──
+    tl_station_var  = tk.StringVar()   # holds the SSH host actually passed to --station
+    tl_station_label_var = tk.StringVar()  # holds the dropdown display label
+    tl_proj_var     = tk.StringVar(value="fisheye")
+    tl_quality_var  = tk.StringVar(value="sd")
+    # Start datetime components — default to last midnight UTC
+    _now = datetime.datetime.now(datetime.timezone.utc)
+    _midnight = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tl_sy = tk.IntVar(value=_midnight.year)
+    tl_sm = tk.IntVar(value=_midnight.month)
+    tl_sd = tk.IntVar(value=_midnight.day)
+    tl_sh = tk.IntVar(value=0)
+    tl_smin = tk.IntVar(value=0)
+    # End datetime components
+    tl_ey = tk.IntVar(value=_midnight.year)
+    tl_em = tk.IntVar(value=_midnight.month)
+    tl_ed = tk.IntVar(value=_midnight.day)
+    tl_eh = tk.IntVar(value=1)
+    tl_emin = tk.IntVar(value=0)
+    # Duration
+    tl_dur_h_var    = tk.IntVar(value=1)
+    tl_dur_m_var    = tk.IntVar(value=0)
+    tl_use_end_var  = tk.BooleanVar(value=False)   # True=use end datetime, False=use duration
+    tl_speed_var    = tk.StringVar(value="60")
+    tl_fps_var      = tk.IntVar(value=30)
+    tl_pattern_var  = tk.StringVar(value="/meteor/cam?")
+    tl_output_var   = tk.StringVar()
+    tl_enhance_var  = tk.BooleanVar()
+    tl_timestamp_var= tk.BooleanVar()
+    tl_crf_var      = tk.StringVar(value="28")
+    tl_preset_var   = tk.StringVar(value="ultrafast")
+    tl_saturation_var = tk.DoubleVar(value=1.0)
+    tl_pto_var      = tk.StringVar()
+
+    # Helper: read the 6 spinboxes as "YYYY-MM-DD HH:MM:00"
+    def _tl_start_str():
+        return f"{tl_sy.get():04d}-{tl_sm.get():02d}-{tl_sd.get():02d} {tl_sh.get():02d}:{tl_smin.get():02d}:00"
+    def _tl_end_str():
+        return f"{tl_ey.get():04d}-{tl_em.get():02d}-{tl_ed.get():02d} {tl_eh.get():02d}:{tl_emin.get():02d}:00"
+
+    # Helper: build a compact datetime spinbox row (year/month/day  hour:min)
+    def _dt_spinboxes(parent, y_v, mo_v, d_v, h_v, min_v):
+        """Pack date+time spinboxes into parent frame.
+        Increment/decrement propagate carry/borrow across the full datetime.
+        Returns the frame."""
+        f = ttk.Frame(parent)
+
+        def _read_dt():
+            try:
+                return datetime.datetime(y_v.get(), mo_v.get(), d_v.get(),
+                                         h_v.get(), min_v.get(), 0,
+                                         tzinfo=datetime.timezone.utc)
+            except ValueError:
+                return None
+
+        def _write_dt(dt):
+            y_v.set(dt.year); mo_v.set(dt.month); d_v.set(dt.day)
+            h_v.set(dt.hour); min_v.set(dt.minute)
+
+        def _dt_spinbox(field, delta, fmt, width):
+            """field: 'year'|'month'|'day'|'hour'|'minute'
+               delta: timedelta (or relativedelta for month/year) magnitude."""
+            str_var = tk.StringVar()
+            _busy = [False]
+
+            def _refresh(*_):
+                if _busy[0]: return
+                _busy[0] = True
+                try:
+                    val = {'year': y_v, 'month': mo_v, 'day': d_v,
+                           'hour': h_v, 'minute': min_v}[field].get()
+                    str_var.set(fmt.format(val))
+                finally:
+                    _busy[0] = False
+
+            # Keep display in sync when any IntVar changes
+            for iv in (y_v, mo_v, d_v, h_v, min_v):
+                iv.trace_add("write", _refresh)
+            _refresh()
+
+            def _apply_manual(*_):
+                if _busy[0]: return
+                _busy[0] = True
+                try:
+                    raw = str_var.get().lstrip("0") or "0"
+                    new_val = int(raw)
+                    dt = _read_dt()
+                    if dt is None:
+                        return
+                    try:
+                        new_dt = dt.replace(**{field: new_val})
+                        _write_dt(new_dt)
+                    except (ValueError, OverflowError):
+                        pass  # invalid manual entry — leave as-is
+                    finally:
+                        val = {'year': y_v, 'month': mo_v, 'day': d_v,
+                               'hour': h_v, 'minute': min_v}[field].get()
+                        str_var.set(fmt.format(val))
+                except (ValueError, tk.TclError):
+                    pass
+                finally:
+                    _busy[0] = False
+
+            str_var.trace_add("write", _apply_manual)
+
+            sb = ttk.Spinbox(f, textvariable=str_var, width=width,
+                             from_=0, to=9999, wrap=True)
+
+            def _increment(event):
+                dt = _read_dt()
+                if dt is None: return
+                try:
+                    if field == 'minute':
+                        _write_dt(dt + datetime.timedelta(minutes=1))
+                    elif field == 'hour':
+                        _write_dt(dt + datetime.timedelta(hours=1))
+                    elif field == 'day':
+                        _write_dt(dt + datetime.timedelta(days=1))
+                    elif field == 'month':
+                        # roll month forward, carry into year
+                        y, m = dt.year, dt.month + 1
+                        if m > 12: y, m = y + 1, 1
+                        import calendar as _cal
+                        d = min(dt.day, _cal.monthrange(y, m)[1])
+                        _write_dt(dt.replace(year=y, month=m, day=d))
+                    elif field == 'year':
+                        _write_dt(dt.replace(year=dt.year + 1))
+                except (ValueError, OverflowError):
+                    pass
+                return "break"
+
+            def _decrement(event):
+                dt = _read_dt()
+                if dt is None: return
+                try:
+                    if field == 'minute':
+                        _write_dt(dt - datetime.timedelta(minutes=1))
+                    elif field == 'hour':
+                        _write_dt(dt - datetime.timedelta(hours=1))
+                    elif field == 'day':
+                        _write_dt(dt - datetime.timedelta(days=1))
+                    elif field == 'month':
+                        y, m = dt.year, dt.month - 1
+                        if m < 1: y, m = y - 1, 12
+                        import calendar as _cal
+                        d = min(dt.day, _cal.monthrange(y, m)[1])
+                        _write_dt(dt.replace(year=y, month=m, day=d))
+                    elif field == 'year':
+                        _write_dt(dt.replace(year=dt.year - 1))
+                except (ValueError, OverflowError):
+                    pass
+                return "break"
+
+            sb.bind("<<Increment>>", _increment)
+            sb.bind("<<Decrement>>", _decrement)
+            return sb
+
+        _dt_spinbox('year',   None, "{:04d}", 5).pack(side="left")
+        ttk.Label(f, text="-").pack(side="left")
+        _dt_spinbox('month',  None, "{:02d}", 3).pack(side="left")
+        ttk.Label(f, text="-").pack(side="left")
+        _dt_spinbox('day',    None, "{:02d}", 3).pack(side="left")
+        ttk.Label(f, text="  ").pack(side="left")
+        _dt_spinbox('hour',   None, "{:02d}", 3).pack(side="left")
+        ttk.Label(f, text=":").pack(side="left")
+        _dt_spinbox('minute', None, "{:02d}", 3).pack(side="left")
+        ttk.Label(f, text=" UTC", foreground="#888", font=("", 8)).pack(side="left", padx=2)
+        return f
+
+    # ── Station ──
+    ttk.Label(tab_tl, text="Station", font=("", 10, "bold")).grid(
+        column=0, row=r, columnspan=4, sticky="w", padx=5, pady=(10,2)); r+=1
+
+    lbl(tab_tl, "Station:", 0, r)
+    _station_labels = list(_station_map.keys())
+    if _station_labels:
+        # Dropdown from cameras.json
+        station_combo = ttk.Combobox(tab_tl, textvariable=tl_station_label_var,
+                                     values=_station_labels, state="readonly", width=42)
+        station_combo.grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=3)
+        if _station_labels:
+            station_combo.current(0)
+        def _on_station_select(*_):
+            lbl_sel = tl_station_label_var.get()
+            tl_station_var.set(_station_map.get(lbl_sel, ""))
+        tl_station_label_var.trace_add("write", _on_station_select)
+        _on_station_select()
+    else:
+        # Fallback: plain text entry
+        ent(tab_tl, tl_station_var, 1, r, width=30)
+        ttk.Label(tab_tl, text="SSH hostname", foreground="#888", font=("",8)).grid(
+            column=2, row=r, sticky="w", padx=4)
+    r+=1
+
+    lbl(tab_tl, "Camera pattern:", 0, r)
+    ent(tab_tl, tl_pattern_var, 1, r, width=22)
+    ttk.Label(tab_tl, text="glob, e.g. /meteor/cam?", foreground="#888", font=("",8)).grid(
+        column=2, row=r, sticky="w", padx=4); r+=1
+
+    ttk.Separator(tab_tl, orient="horizontal").grid(
+        column=0, row=r, columnspan=4, sticky="ew", pady=6); r+=1
+
+    # ── Time range ──
+    ttk.Label(tab_tl, text="Time range (UTC)", font=("", 10, "bold")).grid(
+        column=0, row=r, columnspan=4, sticky="w", padx=5, pady=(0,2)); r+=1
+
+    lbl(tab_tl, "Start:", 0, r)
+    _dt_spinboxes(tab_tl, tl_sy, tl_sm, tl_sd, tl_sh, tl_smin).grid(
+        column=1, row=r, columnspan=3, sticky="w", padx=5, pady=3); r+=1
+
+    # End / Duration toggle
+    end_toggle_frame = ttk.Frame(tab_tl)
+    end_toggle_frame.grid(column=0, row=r, columnspan=4, sticky="w", padx=5, pady=3); r+=1
+    ttk.Radiobutton(end_toggle_frame, text="Duration:", variable=tl_use_end_var, value=False).pack(side="left")
+    dur_sb_frame = ttk.Frame(end_toggle_frame)
+    dur_sb_frame.pack(side="left", padx=4)
+    ttk.Spinbox(dur_sb_frame, textvariable=tl_dur_h_var, from_=0, to=999, width=5).pack(side="left")
+    ttk.Label(dur_sb_frame, text=" h ").pack(side="left")
+    ttk.Spinbox(dur_sb_frame, textvariable=tl_dur_m_var, from_=0, to=59, width=4).pack(side="left")
+    ttk.Label(dur_sb_frame, text=" min").pack(side="left")
+    ttk.Label(end_toggle_frame, text="     ").pack(side="left")
+    ttk.Radiobutton(end_toggle_frame, text="End time:", variable=tl_use_end_var, value=True).pack(side="left")
+    end_dt_frame = _dt_spinboxes(end_toggle_frame, tl_ey, tl_em, tl_ed, tl_eh, tl_emin)
+    end_dt_frame.pack(side="left", padx=4)
+
+    def _update_end_state(*_):
+        use = tl_use_end_var.get()
+        for w in end_dt_frame.winfo_children():
+            try: w.config(state="normal" if use else "disabled")
+            except Exception: pass
+        for w in dur_sb_frame.winfo_children():
+            try: w.config(state="disabled" if use else "normal")
+            except Exception: pass
+    tl_use_end_var.trace_add("write", _update_end_state)
+    _update_end_state()
+
+    ttk.Separator(tab_tl, orient="horizontal").grid(
+        column=0, row=r, columnspan=4, sticky="ew", pady=6); r+=1
+
+    # ── Output settings ──
+    ttk.Label(tab_tl, text="Output", font=("", 10, "bold")).grid(
+        column=0, row=r, columnspan=4, sticky="w", padx=5, pady=(0,2)); r+=1
+
+    lbl(tab_tl, "Projection:", 0, r)
+    pf = ttk.Frame(tab_tl)
+    pf.grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=3)
+    ttk.Radiobutton(pf, text="Fisheye", variable=tl_proj_var, value="fisheye").pack(side="left", padx=6)
+    ttk.Radiobutton(pf, text="Equirectangular", variable=tl_proj_var, value="equirect").pack(side="left", padx=6)
+    r+=1
+
+    tl_pto_lbl = lbl(tab_tl, "Custom PTO:", 0, r)
+    tl_pto_ent = ent(tab_tl, tl_pto_var, 1, r, width=30)
+    tl_pto_btn = ttk.Button(tab_tl, text="Browse…",
+        command=lambda: browseopen(tl_pto_var, filetypes=[("PTO","*.pto"),("All","*.*")]))
+    tl_pto_btn.grid(column=2, row=r, padx=5, pady=3)
+    ttk.Label(tab_tl, text="override auto-generated PTO", foreground="#888", font=("",8)).grid(
+        column=3, row=r, sticky="w", padx=4)
+    r+=1
+
+    lbl(tab_tl, "Source quality:", 0, r)
+    qf = ttk.Frame(tab_tl)
+    qf.grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=3)
+    ttk.Radiobutton(qf, text="SD  (mini_mm.mp4)", variable=tl_quality_var, value="sd").pack(side="left", padx=6)
+    ttk.Radiobutton(qf, text="HD  (full_mm.mp4)",  variable=tl_quality_var, value="hd").pack(side="left", padx=6)
+    r+=1
+
+    lbl(tab_tl, "Speed-up factor:", 0, r)
+    sf = ttk.Frame(tab_tl)
+    sf.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+    ttk.Spinbox(sf, textvariable=tl_speed_var, values=[10,30,60,120,300,600,3600], width=7).pack(side="left")
+    ttk.Label(sf, text="× realtime").pack(side="left", padx=4)
+    r+=1
+
+    lbl(tab_tl, "Frame rate:", 0, r)
+    ff = ttk.Frame(tab_tl)
+    ff.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+    ttk.Spinbox(ff, textvariable=tl_fps_var, from_=1, to=120, width=5).pack(side="left")
+    ttk.Label(ff, text=" fps").pack(side="left", padx=4)
+    r+=1
+
+    lbl(tab_tl, "Output file (.mp4):", 0, r)
+    ent(tab_tl, tl_output_var, 1, r, width=30)
+    ttk.Button(tab_tl, text="Browse…",
+        command=lambda: browsesave(tl_output_var, [("MP4 video","*.mp4"),("All","*.*")])).grid(
+        column=2, row=r, padx=5, pady=3); r+=1
+
+    ttk.Checkbutton(tab_tl, text="Enhance (noise reduction)", variable=tl_enhance_var).grid(
+        column=1, row=r, sticky="w", padx=5); r+=1
+    ttk.Checkbutton(tab_tl, text="Overlay UTC timestamp on output", variable=tl_timestamp_var).grid(
+        column=1, row=r, sticky="w", padx=5); r+=1
+
+    lbl(tab_tl, "CRF (quality):", 0, r)
+    _tl_crf_frame = ttk.Frame(tab_tl)
+    _tl_crf_frame.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+    ttk.Spinbox(_tl_crf_frame, textvariable=tl_crf_var, from_=0, to=51, width=5).pack(side="left")
+    ttk.Label(_tl_crf_frame, text=" (0=lossless, 28=default, 51=worst)", foreground="#888", font=("",8)).pack(side="left")
+    r+=1
+
+    lbl(tab_tl, "Preset:", 0, r)
+    ttk.Combobox(tab_tl, textvariable=tl_preset_var, width=14,
+        values=["ultrafast","superfast","veryfast","faster","fast","medium","slow","veryslow"]).grid(
+        column=1, row=r, sticky="w", padx=5, pady=3); r+=1
+
+    lbl(tab_tl, "Saturation:", 0, r)
+    _tl_sat_frame = ttk.Frame(tab_tl)
+    _tl_sat_frame.grid(column=1, row=r, columnspan=2, sticky="ew", padx=5, pady=3)
+    _tl_sat_lbl = ttk.Label(_tl_sat_frame, text="1.0", width=4)
+    _tl_sat_lbl.pack(side="right")
+    def _tl_sat_update(val):
+        _tl_sat_lbl.config(text=f"{float(val):.1f}")
+    tk.Scale(_tl_sat_frame, variable=tl_saturation_var, from_=0.0, to=3.0, resolution=0.1,
+             orient="horizontal", showvalue=False, command=_tl_sat_update).pack(side="left", fill="x", expand=True)
+    r+=1
+
+    # ── Auto-update timelapse output filename when projection changes ──
+    _TL_DEFAULTS = {"fisheye": "fisheye.mp4", "equirect": "equirect.mp4"}
+    def _tl_proj_changed(*_):
+        cur = tl_output_var.get()
+        if cur in _TL_DEFAULTS.values() or cur == "":
+            tl_output_var.set(_TL_DEFAULTS.get(tl_proj_var.get(), "fisheye.mp4"))
+    tl_proj_var.trace_add("write", _tl_proj_changed)
+    _tl_proj_changed()   # set initial default
+
+    # ── Preview pane ─────────────────────────────────────────────────────────
+    # Separator + label row
+    ttk.Separator(tab_tl, orient="horizontal").grid(
+        column=0, row=r, columnspan=4, sticky="ew", pady=(8, 2)); r += 1
+    preview_hdr_var = tk.StringVar(value="Preview  (auto-updates)")
+    ttk.Label(tab_tl, textvariable=preview_hdr_var, font=("", 9, "bold"),
+              foreground="#555").grid(column=0, row=r, columnspan=4, sticky="w", padx=5); r += 1
+
+    # Canvas that holds the two stitched thumbnails side by side
+    tab_tl.rowconfigure(r, weight=1)
+    preview_canvas = tk.Canvas(tab_tl, bg="#111", height=220, cursor="watch")
+    preview_canvas.grid(column=0, row=r, columnspan=4, sticky="nsew", padx=5, pady=(2, 5))
+    preview_canvas.config(cursor="")
+
+    # Internal state
+    _prev_img_refs  = [None, None]   # keep PhotoImage refs alive
+    _prev_job       = [None]         # after() debounce handle
+    _prev_thread    = [None]         # running background thread
+    _prev_tmpdir    = [None]         # current temp dir (cleaned on next fetch)
+    _prev_cancel    = [threading.Event()]   # set to abort in-flight fetch
+    # Per-frame cache: (station, pattern, proj, dt) -> PIL image
+    _prev_cache     = {}   # key: ('start'|'end', station, pattern, proj, dt_iso) -> PIL image
+
+    def _preview_draw(pil_start, pil_end, label_start, label_end):
+        """Draw two thumbnails side-by-side on the canvas. Called from main thread."""
+        cw = preview_canvas.winfo_width()  or 700
+        ch = preview_canvas.winfo_height() or 220
+        preview_canvas.delete("all")
+        gap = 6
+        tw = (cw - gap * 3) // 2
+        th = ch - 20   # leave room for label
+
+        def _fit(img, w, h):
+            iw, ih = img.size
+            scale = min(w / iw, h / ih)
+            return img.resize((int(iw * scale), int(ih * scale)),
+                               resample=getattr(__import__("PIL.Image", fromlist=["Image"]).Image,
+                                               "LANCZOS", 1))
+
+        from PIL import Image as _PILImage, ImageTk as _PILImageTk, ImageEnhance as _PILEnhance
+
+        _sat = tl_saturation_var.get()
+
+        imgs = []
+        for i, (pil, lbl_txt, x0) in enumerate([
+                (pil_start, label_start, gap),
+                (pil_end,   label_end,   gap * 2 + tw)]):
+            thumb = _fit(pil, tw, th)
+            if abs(_sat - 1.0) > 0.01:
+                thumb = _PILEnhance.Color(thumb).enhance(_sat)
+            photo = _PILImageTk.PhotoImage(thumb)
+            _prev_img_refs[i] = photo
+            y0 = (ch - 20 - thumb.height) // 2
+            preview_canvas.create_image(x0, y0, anchor="nw", image=photo)
+            preview_canvas.create_text(x0 + tw // 2, ch - 10, text=lbl_txt,
+                                        fill="#aaa", font=("", 8))
+
+    def _preview_status(msg):
+        root.after(0, preview_hdr_var.set, f"Preview  —  {msg}")
+
+    def _fetch_and_stitch(start_dt, end_dt, station, pattern, proj, cancel_ev):
+        """Background thread: fetch images and stitch previews."""
+        import tempfile as _tmp
+        tmp = _tmp.mkdtemp(prefix="stitcher_prev_")
+
+        # Clean up previous temp dir
+        old = _prev_tmpdir[0]
+        _prev_tmpdir[0] = tmp
+        if old and os.path.isdir(old):
+            try: shutil.rmtree(old)
+            except Exception: pass
+
+        try:
+            base = pattern.rstrip("/")
+
+            def _img_glob_for_dt(dt):
+                """Return glob for mini_MM.jpg (SD) — preview always uses SD regardless of quality setting."""
+                return f"{base}/{dt.strftime('%Y%m%d')}/{dt.strftime('%H')}/mini_{dt.strftime('%M')}.jpg"
+
+            def _pto_glob():
+                """Glob for lens.pto inside each camN directory."""
+                return f"{base}/lens.pto"   # e.g. /meteor/cam?/lens.pto  (? already in base pattern)
+
+            start_glob = _img_glob_for_dt(start_dt)
+            end_glob   = _img_glob_for_dt(end_dt)
+            pto_glob   = _pto_glob()
+
+            if cancel_ev.is_set(): return
+
+            _preview_status("Fetching images…")
+
+            def _local(rp):
+                return os.path.join(tmp, rp.lstrip("/"))
+
+            def _dedup_by_cam(paths):
+                """One image per camera dir (camN), keeping the first match."""
+                seen = {}
+                for p in sorted(paths):
+                    m = re.search(r'cam(\d+)', p)
+                    key = m.group(1) if m else p
+                    if key not in seen:
+                        seen[key] = p
+                return list(seen.values())
+
+            if station:
+                # Expand globs remotely (images + lens.pto files)
+                script = (
+                    f'compgen -G {shlex.quote(start_glob)} 2>/dev/null || true\n'
+                    f'compgen -G {shlex.quote(end_glob)}   2>/dev/null || true\n'
+                    f'compgen -G {shlex.quote(pto_glob)}   2>/dev/null || true\n'
+                )
+                r = subprocess.run(
+                    ["ssh", "-o", "BatchMode=yes", station, "bash", "-c", shlex.quote(script)],
+                    capture_output=True, text=True, timeout=30
+                )
+                remote_files = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+                if not any(f.endswith(".jpg") for f in remote_files):
+                    _preview_status("No images found for this time range.")
+                    return
+                if cancel_ev.is_set(): return
+                # Fetch via tar-over-ssh
+                file_list = "\n".join(remote_files) + "\n"
+                ssh_proc = subprocess.Popen(
+                    ["ssh", "-o", "BatchMode=yes", station, "tar", "-chf", "-", "-T", "/dev/stdin"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                tar_proc = subprocess.Popen(
+                    ["tar", "-xf", "-", "-C", tmp],
+                    stdin=ssh_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                ssh_proc.stdout.close()
+                ssh_proc.stdin.write(file_list.encode()); ssh_proc.stdin.close()
+                tar_proc.communicate(timeout=60)
+                ssh_proc.wait(timeout=10)
+
+                start_bn = f"mini_{start_dt.strftime('%M')}.jpg"
+                end_bn   = f"mini_{end_dt.strftime('%M')}.jpg"
+                all_fetched = []
+                for dirpath, _, fnames in os.walk(tmp):
+                    for fn in fnames:
+                        if fn.endswith(".jpg"):
+                            all_fetched.append(os.path.join(dirpath, fn))
+                start_imgs = _dedup_by_cam(
+                    f for f in all_fetched
+                    if os.path.basename(f) == start_bn
+                    and f"/{start_dt.strftime('%Y%m%d')}/{start_dt.strftime('%H')}/" in f)
+                end_imgs = _dedup_by_cam(
+                    f for f in all_fetched
+                    if os.path.basename(f) == end_bn
+                    and f"/{end_dt.strftime('%Y%m%d')}/{end_dt.strftime('%H')}/" in f)
+            else:
+                # Local: glob images and also find lens.pto files
+                start_imgs = _dedup_by_cam(glob.glob(start_glob))
+                end_imgs   = _dedup_by_cam(glob.glob(end_glob))
+                # lens.pto files are already on disk — no need to copy them
+
+            if cancel_ev.is_set(): return
+
+            # Canvas thumbnail size: half the panel width per image
+            _cw = max(preview_canvas.winfo_width() or 700, 400)
+            _thumb_w = (_cw - 18) // 2   # ~half panel, matches _preview_draw gap logic
+            _thumb_h = int(_thumb_w * 9 / 16)  # 16:9 aspect for preview
+
+            # Target source width for preview — small enough to make LUT/blend fast
+            _PREV_SRC_W = 320
+
+            def _downscale_img(src):
+                """Resize src to _PREV_SRC_W wide, preserving the relative path inside
+                tmp so find_lens_pto_for_image can walk up two levels to lens.pto."""
+                from PIL import Image as _I
+                try:
+                    with _I.open(src) as im:
+                        ow, oh = im.size
+                        if ow <= _PREV_SRC_W:
+                            return src  # already small enough
+                        scale = _PREV_SRC_W / ow
+                        nw, nh = _PREV_SRC_W, max(1, int(oh * scale))
+                        small = im.resize((nw, nh), resample=_I.LANCZOS)
+                        if src.startswith(tmp):
+                            # Remote fetch: overwrite in-place (safe, tmp is ours)
+                            dst = src
+                        else:
+                            # Local source: mirror directory structure under tmp
+                            rel = os.path.relpath(src, "/")
+                            dst = os.path.join(tmp, rel)
+                            os.makedirs(os.path.dirname(dst), exist_ok=True)
+                            # Also copy lens.pto so the subprocess can find it
+                            lens = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(src))), "lens.pto")
+                            if os.path.isfile(lens):
+                                lens_dst = os.path.join(tmp, os.path.relpath(lens, "/"))
+                                os.makedirs(os.path.dirname(lens_dst), exist_ok=True)
+                                import shutil as _sh
+                                if not os.path.exists(lens_dst):
+                                    _sh.copy2(lens, lens_dst)
+                        small.save(dst, "JPEG", quality=85)
+                        return dst
+                except Exception as e:
+                    print(f"[preview] downscale failed for {src}: {e}", file=sys.stderr)
+                    return src
+
+            _stitch_errors = []
+            def _stitch_to_jpg(imgs, out_name, cache_key):
+                # Return cached PIL image if inputs haven't changed
+                if cache_key in _prev_cache:
+                    return _prev_cache[cache_key]
+                if not imgs:
+                    _stitch_errors.append(f"{out_name}: no images found")
+                    return None
+                # Downscale source images so the stitcher LUT is tiny
+                scaled_imgs = [_downscale_img(p) for p in imgs]
+                out = os.path.join(tmp, out_name)
+                flag = "--fisheye" if proj == "fisheye" else "--equirect"
+                cmd = [sys.executable, __file__, flag] + scaled_imgs + [out]
+                try:
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if not os.path.isfile(out):
+                        err = (res.stderr or res.stdout or "").strip()
+                        snippet = " | ".join(err.splitlines()[-3:]) if err else "(no output)"
+                        msg = f"[preview] {out_name}: {snippet}"
+                        _stitch_errors.append(msg)
+                        print(f"\n--- preview stitch failed: {out_name} ---", file=sys.stderr)
+                        print(f"cmd: {' '.join(cmd)}", file=sys.stderr)
+                        print(err or "(no output)", file=sys.stderr)
+                        return None
+                    return out  # caller loads from disk and caches
+                except subprocess.TimeoutExpired:
+                    msg = f"[preview] {out_name}: timed out"
+                    _stitch_errors.append(msg)
+                    print(msg, file=sys.stderr)
+                    return None
+                except Exception as e:
+                    msg = f"[preview] {out_name}: {e}"
+                    _stitch_errors.append(msg)
+                    print(msg, file=sys.stderr)
+                    return None
+
+            from PIL import Image as _PILImage
+            placeholder_w, placeholder_h = 400, 225
+            _ctx = (station, pattern, proj)  # shared context key parts
+            _key_s = ('start', *_ctx, start_dt.isoformat())
+            _key_e = ('end',   *_ctx, end_dt.isoformat())
+
+            def _load_or_placeholder(path):
+                if path and os.path.isfile(path):
+                    try:
+                        return _PILImage.open(path).copy()
+                    except Exception:
+                        pass
+                return _PILImage.new("RGB", (placeholder_w, placeholder_h), (40, 40, 40))
+
+            need_start = _key_s not in _prev_cache
+            need_end   = _key_e not in _prev_cache
+
+            if need_start or need_end:
+                parts = []
+                if need_start: parts.append("start")
+                if need_end:   parts.append("end")
+                _preview_status(f"Stitching {' & '.join(parts)} frame…")
+                if cancel_ev.is_set(): return
+
+            def _do_start():
+                if not need_start:
+                    return _prev_cache[_key_s]
+                out = _stitch_to_jpg(start_imgs, "preview_start.jpg", _key_s)
+                pil = _load_or_placeholder(out)
+                if out and os.path.isfile(out):
+                    _prev_cache[_key_s] = pil
+                return pil
+
+            def _do_end():
+                if not need_end:
+                    return _prev_cache[_key_e]
+                out = _stitch_to_jpg(end_imgs, "preview_end.jpg", _key_e)
+                pil = _load_or_placeholder(out)
+                if out and os.path.isfile(out):
+                    _prev_cache[_key_e] = pil
+                return pil
+
+            with ThreadPoolExecutor(max_workers=2) as _pool:
+                _fut_s = _pool.submit(_do_start)
+                _fut_e = _pool.submit(_do_end)
+                pil_s = _fut_s.result()
+                pil_e = _fut_e.result()
+
+            # Evict cache beyond 10 entries
+            while len(_prev_cache) > 10:
+                _prev_cache.pop(next(iter(_prev_cache)))
+
+            if cancel_ev.is_set(): return
+
+            lbl_s = f"Start  {start_dt.strftime('%Y-%m-%d %H:%M')} UTC"
+            lbl_e = f"End    {end_dt.strftime('%Y-%m-%d %H:%M')} UTC"
+
+            root.after(0, _preview_draw, pil_s, pil_e, lbl_s, lbl_e)
+            if _stitch_errors:
+                first = _stitch_errors[0][:80]
+                more = f"  (+{len(_stitch_errors)-1} more)" if len(_stitch_errors) > 1 else ""
+                _preview_status(f"Stitch error: {first}{more}")
+            else:
+                _preview_status(f"Preview updated  ({start_dt.strftime('%H:%M')} – {end_dt.strftime('%H:%M')} UTC)")
+
+        except Exception as exc:
+            if not cancel_ev.is_set():
+                import traceback as _tb
+                _preview_status(f"Preview error: {exc}")
+                print(f"\n[preview] unhandled error: {exc}", file=sys.stderr)
+                _tb.print_exc(file=sys.stderr)
+
+    def _schedule_preview(*_):
+        """Debounce: cancel any pending fetch and schedule a new one in 700ms."""
+        if _prev_job[0]:
+            root.after_cancel(_prev_job[0])
+        _prev_cancel[0].set()                    # abort in-flight thread
+        _prev_cancel[0] = threading.Event()      # fresh cancel token
+
+        def _launch():
+            _prev_job[0] = None
+            # Compute start/end datetimes
+            try:
+                start_dt = datetime.datetime(
+                    tl_sy.get(), tl_sm.get(), tl_sd.get(),
+                    tl_sh.get(), tl_smin.get(), 0,
+                    tzinfo=datetime.timezone.utc)
+                if tl_use_end_var.get():
+                    end_dt = datetime.datetime(
+                        tl_ey.get(), tl_em.get(), tl_ed.get(),
+                        tl_eh.get(), tl_emin.get(), 0,
+                        tzinfo=datetime.timezone.utc)
+                else:
+                    h, m = tl_dur_h_var.get(), tl_dur_m_var.get()
+                    end_dt = start_dt + datetime.timedelta(hours=h, minutes=m)
+            except (ValueError, tk.TclError):
+                return
+
+            station = tl_station_var.get().strip()
+            pattern = tl_pattern_var.get().strip()
+            proj    = tl_proj_var.get()
+            cancel_ev = _prev_cancel[0]
+
+            _preview_status("Fetching…")
+            t = threading.Thread(
+                target=_fetch_and_stitch,
+                args=(start_dt, end_dt, station, pattern, proj, cancel_ev),
+                daemon=True
+            )
+            _prev_thread[0] = t
+            t.start()
+
+        _prev_job[0] = root.after(700, _launch)
+
+    # Wire preview refresh to all relevant vars
+    for _v in (tl_sy, tl_sm, tl_sd, tl_sh, tl_smin,
+               tl_ey, tl_em, tl_ed, tl_eh, tl_emin,
+               tl_use_end_var, tl_dur_h_var, tl_dur_m_var,
+               tl_station_var, tl_pattern_var, tl_proj_var,
+               tl_saturation_var):
+        _v.trace_add("write", _schedule_preview)
+    # Also redraw when canvas is resized
+    preview_canvas.bind("<Configure>", _schedule_preview)
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 2 – Stitch single image / video
+    # ═══════════════════════════════════════════════════════════════
+    tab_stitch = ttk.Frame(nb)
+    nb.add(tab_stitch, text="  Stitch Image / Video  ")
+    tab_stitch.columnconfigure(1, weight=1)
+    r = 0
+
+    st_mode_var    = tk.StringVar(value="image")   # image | video
+    st_proj_var    = tk.StringVar(value="fisheye")  # fisheye | equirect | custom
+    st_pto_var     = tk.StringVar()
+    st_inputs_var  = tk.StringVar()
+    st_output_var  = tk.StringVar()
+    st_station_var = tk.StringVar()
+    st_enhance_var = tk.BooleanVar()
+    st_ts_var      = tk.BooleanVar()
+    st_sync_var    = tk.BooleanVar()
+    st_model_var   = tk.StringVar()
+    st_crf_var     = tk.StringVar(value="28")
+    st_preset_var  = tk.StringVar(value="ultrafast")
+    st_maxfr_var   = tk.IntVar(value=0)
+    st_saturation_var = tk.DoubleVar(value=1.0)
+    # Single input timestamp
+    _st_now = datetime.datetime.now(datetime.timezone.utc)
+    st_dy = tk.IntVar(value=_st_now.year)
+    st_dm = tk.IntVar(value=_st_now.month)
+    st_dd = tk.IntVar(value=_st_now.day)
+    st_dh = tk.IntVar(value=_st_now.hour)
+    st_dmin = tk.IntVar(value=_st_now.minute)
+
+    ttk.Label(tab_stitch, text="Mode", font=("",10,"bold")).grid(
+        column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(10,2)); r+=1
+    mf2 = ttk.Frame(tab_stitch)
+    mf2.grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=3)
+    ttk.Radiobutton(mf2, text="Stitch Images", variable=st_mode_var, value="image").pack(side="left", padx=6)
+    ttk.Radiobutton(mf2, text="Stitch Video",  variable=st_mode_var, value="video").pack(side="left", padx=6)
+    r+=1
+
+    ttk.Separator(tab_stitch, orient="horizontal").grid(
+        column=0, row=r, columnspan=3, sticky="ew", pady=5); r+=1
+
+    ttk.Label(tab_stitch, text="Projection", font=("",10,"bold")).grid(
+        column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0,2)); r+=1
+    pf2 = ttk.Frame(tab_stitch)
+    pf2.grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=3)
+    ttk.Radiobutton(pf2, text="Fisheye", variable=st_proj_var, value="fisheye").pack(side="left", padx=6)
+    ttk.Radiobutton(pf2, text="Equirectangular", variable=st_proj_var, value="equirect").pack(side="left", padx=6)
+    ttk.Radiobutton(pf2, text="Custom PTO", variable=st_proj_var, value="custom").pack(side="left", padx=6)
+    r+=1
+
+    pto_lbl2 = ttk.Label(tab_stitch, text="PTO file:")
+    pto_lbl2.grid(column=0, row=r, sticky="w", padx=5, pady=3)
+    pto_ent2 = ent(tab_stitch, st_pto_var, 1, r)
+    pto_btn2 = ttk.Button(tab_stitch, text="Browse…",
+        command=lambda: browseopen(st_pto_var, filetypes=[("PTO","*.pto"),("All","*.*")]))
+    pto_btn2.grid(column=2, row=r, padx=5, pady=3); r+=1
+
+    _ST_DEFAULTS = {
+        ("image", "fisheye"):  "fisheye.jpg",
+        ("image", "equirect"): "equirect.jpg",
+        ("image", "custom"):   "custom.jpg",
+        ("video", "fisheye"):  "fisheye.mp4",
+        ("video", "equirect"): "equirect.mp4",
+        ("video", "custom"):   "custom.mp4",
+    }
+    def _st_default_output(*_):
+        cur = st_output_var.get()
+        if cur in _ST_DEFAULTS.values() or cur == "":
+            st_output_var.set(_ST_DEFAULTS.get((st_mode_var.get(), st_proj_var.get()), "fisheye.jpg"))
+    def _on_proj2(*_):
+        s = "normal" if st_proj_var.get() == "custom" else "disabled"
+        pto_ent2.config(state=s); pto_btn2.config(state=s)
+        _st_default_output()
+    st_proj_var.trace_add("write", _on_proj2); _on_proj2()
+    st_mode_var.trace_add("write", _st_default_output)
+    _st_default_output()   # set initial default
+
+    ttk.Separator(tab_stitch, orient="horizontal").grid(
+        column=0, row=r, columnspan=3, sticky="ew", pady=5); r+=1
+
+    lbl(tab_stitch, "Input files:", 0, r)
+    ent(tab_stitch, st_inputs_var, 1, r)
+    ttk.Button(tab_stitch, text="Browse…",
+        command=lambda: browseopen(st_inputs_var, multiple=True,
+            filetypes=[("Images/Videos","*.jpg *.jpeg *.png *.mp4 *.mov *.avi *.mkv"),("All","*.*")])).grid(
+        column=2, row=r, padx=5, pady=3); r+=1
+
+    lbl(tab_stitch, "Output file:", 0, r)
+    ent(tab_stitch, st_output_var, 1, r)
+    ttk.Button(tab_stitch, text="Browse…",
+        command=lambda: browsesave(st_output_var,
+            [("JPEG","*.jpg"),("MP4","*.mp4"),("All","*.*")])).grid(
+        column=2, row=r, padx=5, pady=3); r+=1
+
+    lbl(tab_stitch, "Remote station:", 0, r)
+    ent(tab_stitch, st_station_var, 1, r, width=22)
+    ttk.Label(tab_stitch, text="SSH hostname (optional)", foreground="#888", font=("",8)).grid(
+        column=2, row=r, sticky="w", padx=4); r+=1
+
+    ttk.Separator(tab_stitch, orient="horizontal").grid(
+        column=0, row=r, columnspan=3, sticky="ew", pady=5); r+=1
+
+    ttk.Checkbutton(tab_stitch, text="Enhance (noise reduction)", variable=st_enhance_var).grid(
+        column=1, row=r, sticky="w", padx=5); r+=1
+    ttk.Checkbutton(tab_stitch, text="Overlay UTC timestamp", variable=st_ts_var).grid(
+        column=1, row=r, sticky="w", padx=5); r+=1
+    ttk.Checkbutton(tab_stitch, text="Synchronize video streams (--sync)", variable=st_sync_var).grid(
+        column=1, row=r, sticky="w", padx=5); r+=1
+
+    # Load model names from timestamp.py if available
+    _ts_model_path = os.path.join(os.path.dirname(__file__), 'timestamp.py')
+    _sync_models = []
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("_timestamp_mod", _ts_model_path)
+        _ts_mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_ts_mod)
+        _sync_models = list(_ts_mod.FONT_DATABASE.keys())
+    except Exception:
+        _sync_models = ["IP8172", "IP9171", "IP8151", "IP816A",
+                        "IMX291SD", "IMX291HD", "IMX307SD",
+                        "IMX307HD_24x36", "IMX307HD_16x24"]
+    _sync_model_values = ["(auto-detect)"] + _sync_models
+
+    lbl(tab_stitch, "Sync model:", 0, r)
+    _sync_combo = ttk.Combobox(tab_stitch, textvariable=st_model_var,
+                               values=_sync_model_values, state="readonly", width=22)
+    _sync_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+    _sync_combo.current(0)
+    def _on_sync_model(*_):
+        v = st_model_var.get()
+        if v == "(auto-detect)":
+            st_model_var.set("")
+    st_model_var.trace_add("write", _on_sync_model)
+    r += 1
+    lbl(tab_stitch, "CRF (quality):", 0, r)
+    _st_crf_frame = ttk.Frame(tab_stitch)
+    _st_crf_frame.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+    ttk.Spinbox(_st_crf_frame, textvariable=st_crf_var, from_=0, to=51, width=5).pack(side="left")
+    ttk.Label(_st_crf_frame, text=" (0=lossless, 28=default, 51=worst)", foreground="#888", font=("",8)).pack(side="left")
+    r+=1
+    lbl(tab_stitch, "Preset:", 0, r)
+    ttk.Combobox(tab_stitch, textvariable=st_preset_var, width=14,
+        values=["ultrafast","superfast","veryfast","faster","fast","medium","slow","veryslow"]).grid(
+        column=1, row=r, sticky="w", padx=5, pady=3); r+=1
+    lbl(tab_stitch, "Saturation:", 0, r)
+    _st_sat_frame = ttk.Frame(tab_stitch)
+    _st_sat_frame.grid(column=1, row=r, columnspan=2, sticky="ew", padx=5, pady=3)
+    _st_sat_lbl = ttk.Label(_st_sat_frame, text="1.0", width=4)
+    _st_sat_lbl.pack(side="right")
+    def _st_sat_update(val):
+        _st_sat_lbl.config(text=f"{float(val):.1f}")
+    tk.Scale(_st_sat_frame, variable=st_saturation_var, from_=0.0, to=3.0, resolution=0.1,
+             orient="horizontal", showvalue=False, command=_st_sat_update).pack(side="left", fill="x", expand=True)
+    r+=1
+    lbl(tab_stitch, "Input timestamp:", 0, r)
+    _dt_spinboxes(tab_stitch, st_dy, st_dm, st_dd, st_dh, st_dmin).grid(
+        column=1, row=r, columnspan=2, sticky="w", padx=5, pady=3); r+=1
+    lbl(tab_stitch, "Max frames (0=all):", 0, r)
+    ttk.Spinbox(tab_stitch, textvariable=st_maxfr_var, from_=0, to=999999, width=8).grid(
+        column=1, row=r, sticky="w", padx=5, pady=3); r+=1
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 3 – Log
+    # ═══════════════════════════════════════════════════════════════
+    tab_log = ttk.Frame(nb)
+    nb.add(tab_log, text="  Log  ")
+    tab_log.rowconfigure(0, weight=1)
+    tab_log.columnconfigure(0, weight=1)
+    log_text = scrolledtext.ScrolledText(tab_log, state="disabled", wrap="word",
+                                         font=("Courier", 9), bg="#1e1e1e", fg="#d4d4d4",
+                                         insertbackground="white")
+    log_text.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    _last_was_cr = [False]
+
+    def log(msg):
+        log_text.config(state="normal")
+        if msg.startswith("\r"):
+            if _last_was_cr[0]:
+                # Replace the previous progress line in-place
+                log_text.delete("end-2l", "end-1c")
+            log_text.insert("end", msg.lstrip("\r") + "\n")
+            _last_was_cr[0] = True
+        else:
+            log_text.insert("end", msg + "\n")
+            _last_was_cr[0] = False
+        log_text.see("end")
+        log_text.config(state="disabled")
+
+    # ── Progress bar + status bar ─────────────────────────────────────────────
+    progress_frame = ttk.Frame(root)
+    progress_frame.pack(fill="x", padx=8, pady=(0,2))
+    progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate", maximum=100)
+    progress_bar.pack(fill="x", side="top", pady=(0,2))
+    status_var = tk.StringVar(value="Ready")
+    ttk.Label(progress_frame, textvariable=status_var, anchor="w", font=("",9)).pack(fill="x", side="top")
+
+    def set_progress(pct, msg=""):
+        progress_bar["value"] = pct
+        if msg:
+            status_var.set(msg)
+
+    # ── Bottom button bar ─────────────────────────────────────────────────────
+    btn_frame = ttk.Frame(root)
+    btn_frame.pack(fill="x", padx=8, pady=(2, 8))
+
+    run_btn = [None]
+
+    def _build_argv_timelapse():
+        argv = []
+        proj = tl_proj_var.get()
+        argv.append("--fisheye" if proj == "fisheye" else "--equirect")
+        argv.append("--timelapse")
+        argv += ["--timelapse-start", _tl_start_str()]
+        if tl_use_end_var.get():
+            argv += ["--timelapse-end", _tl_end_str()]
+        else:
+            h, m = tl_dur_h_var.get(), tl_dur_m_var.get()
+            if h == 0 and m == 0:
+                raise ValueError("Specify a non-zero duration or switch to End time.")
+            dur = []
+            if h: dur.append(f"{h} hours")
+            if m: dur.append(f"{m} minutes")
+            argv += ["--timelapse-duration", " ".join(dur)]
+        argv += ["--timelapse-speed", tl_speed_var.get().strip()]
+        argv += ["--timelapse-framerate", str(tl_fps_var.get())]
+        argv += ["--timelapse-quality", tl_quality_var.get()]
+        if tl_pattern_var.get().strip():
+            argv += ["--timelapse-pattern", tl_pattern_var.get().strip()]
+        if tl_station_var.get().strip():
+            argv += ["--station", tl_station_var.get().strip()]
+        if tl_pto_var.get().strip():
+            argv += ["--pto", tl_pto_var.get().strip()]
+        if tl_enhance_var.get():   argv.append("--enhance")
+        if tl_timestamp_var.get(): argv.append("--timestamp")
+        if tl_crf_var.get().strip() != "28":
+            argv += ["--crf", tl_crf_var.get().strip()]
+        if tl_preset_var.get().strip() != "ultrafast":
+            argv += ["--preset", tl_preset_var.get().strip()]
+        sat = tl_saturation_var.get()
+        if abs(sat - 1.0) > 0.01:
+            argv += ["--saturation", f"{sat:.2f}"]
+        out = tl_output_var.get().strip()
+        if not out:
+            raise ValueError("Output file is required.")
+        argv.append(out)
+        return argv
+
+    def _build_argv_stitch():
+        argv = []
+        proj = st_proj_var.get()
+        if proj == "fisheye":   argv.append("--fisheye")
+        elif proj == "equirect": argv.append("--equirect")
+        if st_enhance_var.get():  argv.append("--enhance")
+        if st_ts_var.get():       argv.append("--timestamp")
+        if st_sync_var.get():
+            argv.append("--sync")
+            if st_model_var.get().strip():
+                argv += ["--model", st_model_var.get().strip()]
+        if st_maxfr_var.get() > 0:
+            argv += ["-n", str(st_maxfr_var.get())]
+        if st_crf_var.get().strip() != "28":
+            argv += ["--crf", st_crf_var.get().strip()]
+        if st_preset_var.get().strip() != "ultrafast":
+            argv += ["--preset", st_preset_var.get().strip()]
+        sat = st_saturation_var.get()
+        if abs(sat - 1.0) > 0.01:
+            argv += ["--saturation", f"{sat:.2f}"]
+        argv += ["--input-datetime",
+                 f"{st_dy.get():04d}-{st_dm.get():02d}-{st_dd.get():02d} "
+                 f"{st_dh.get():02d}:{st_dmin.get():02d}:00"]
+        if st_station_var.get().strip():
+            argv += ["--station", st_station_var.get().strip()]
+        if proj == "custom":
+            pto = st_pto_var.get().strip()
+            if not pto: raise ValueError("PTO file is required for custom projection.")
+            argv.append(pto)
+        raw = st_inputs_var.get().strip()
+        if not raw: raise ValueError("Input files are required.")
+        argv += shlex.split(raw)
+        out = st_output_var.get().strip()
+        if not out: raise ValueError("Output file is required.")
+        argv.append(out)
+        return argv
+
+    def _run(argv):
+        """Spawn stitcher subprocess and stream output. Runs in a daemon thread."""
+        nb.select(tab_log)
+        log("─" * 60)
+        log("$ " + " ".join([os.path.basename(sys.executable), __file__] + argv))
+        log("─" * 60)
+        running.set()
+        run_btn[0].config(state="disabled", text="⏳  Running…")
+        root.after(0, set_progress, 0, "Starting…")
+        _run_start[0] = __import__("time").time()
+
+        def worker():
+            cmd = [sys.executable, "-u", __file__] + argv
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    # Binary mode so \r is never eaten by Python's text decoder
+                )
+                cancel_proc[0] = proc
+
+                def drain(stream, is_err):
+                    buf = b""
+                    while True:
+                        chunk = stream.read(256)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        # Split on \n and \r, preserving which delimiter was used
+                        while True:
+                            ni = buf.find(b'\n')
+                            ri = buf.find(b'\r')
+                            if ni == -1 and ri == -1:
+                                break
+                            if ri != -1 and (ni == -1 or ri < ni):
+                                # \r-terminated: in-place overwrite signal
+                                raw = buf[:ri]
+                                buf = buf[ri+1:]
+                                line = '\r' + raw.decode('utf-8', errors='replace').strip()
+                            else:
+                                raw = buf[:ni]
+                                buf = buf[ni+1:]
+                                line = raw.decode('utf-8', errors='replace').rstrip('\r')
+                            if not line.strip('\r'):
+                                continue
+                            if is_err and line.lstrip('\r').startswith("PROGRESS:"):
+                                try:
+                                    pct = float(line.lstrip('\r').split(":", 1)[1])
+                                    elapsed = __import__("time").time() - _run_start[0]
+                                    if pct > 0:
+                                        eta_s = elapsed / (pct / 100) - elapsed
+                                        eta_str = f"ETA {int(eta_s//60)}m {int(eta_s%60):02d}s"
+                                    else:
+                                        eta_str = "ETA …"
+                                    msg = f"Stitching… {pct:.1f}%  |  {eta_str}"
+                                    root.after(0, set_progress, pct, msg)
+                                except ValueError:
+                                    pass
+                            else:
+                                root.after(0, log, line)
+
+                t_out = threading.Thread(target=drain, args=(proc.stdout, False), daemon=True)
+                t_err = threading.Thread(target=drain, args=(proc.stderr, True),  daemon=True)
+                t_out.start(); t_err.start()
+                t_out.join(); t_err.join()
+                proc.wait()
+                if proc.returncode == 0:
+                    root.after(0, set_progress, 100, "Done.")
+                    root.after(0, log, "\n✅  Done.")
+                else:
+                    root.after(0, set_progress, 0, f"Failed (exit {proc.returncode}).")
+                    root.after(0, log, f"\n❌  Exited with code {proc.returncode}.")
+            except Exception as e:
+                root.after(0, log, f"❌  Failed to start: {e}")
+                root.after(0, set_progress, 0, "Error.")
+            finally:
+                cancel_proc[0] = None
+                running.clear()
+                root.after(0, lambda: run_btn[0].config(state="normal", text="▶  Run"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_current():
+        if running.is_set():
+            return
+        tab_idx = nb.index(nb.select())
+        try:
+            if tab_idx == 0:    # Timelapse tab
+                argv = _build_argv_timelapse()
+            elif tab_idx == 1:  # Stitch tab
+                argv = _build_argv_stitch()
+            else:
+                messagebox.showinfo("Info", "Switch to the Timelapse or Stitch tab first.")
+                return
+        except ValueError as e:
+            messagebox.showerror("Missing input", str(e))
+            return
+        _run(argv)
+
+    def cancel_current():
+        proc = cancel_proc[0]
+        if proc:
+            import signal as _signal
+            try:
+                proc.send_signal(_signal.SIGINT)   # raises KeyboardInterrupt in subprocess → triggers finally cleanup
+            except OSError:
+                proc.terminate()
+            log("⚠  Cancelling — waiting for cleanup…")
+            set_progress(0, "Cancelling…")
+            def _wait_then_kill():
+                try:
+                    proc.wait(timeout=15)
+                except Exception:
+                    proc.kill()
+                root.after(0, log, "⚠  Cancelled.")
+                root.after(0, set_progress, 0, "Cancelled.")
+            threading.Thread(target=_wait_then_kill, daemon=True).start()
+
+    def quit_app():
+        if running.is_set():
+            if not messagebox.askyesno("Quit", "A job is still running.\nCancel it and quit?",
+                                       icon="warning", default="no"):
+                return
+            cancel_current()
+        else:
+            if not messagebox.askyesno("Quit", "Quit Stitcher?", default="yes"):
+                return
+        root.destroy()
+
+    run_btn[0] = ttk.Button(btn_frame, text="▶  Run", command=run_current)
+    run_btn[0].pack(side="left", padx=4)
+    ttk.Button(btn_frame, text="✕  Cancel", command=cancel_current).pack(side="left", padx=4)
+    ttk.Button(btn_frame, text="Quit", command=quit_app).pack(side="right", padx=4)
+
+    root.protocol("WM_DELETE_WINDOW", quit_app)
+
+    # Live command preview
+    cmd_preview_var = tk.StringVar(value="")
+    ttk.Label(btn_frame, textvariable=cmd_preview_var, foreground="#777",
+              font=("Courier", 8), wraplength=550, justify="left").pack(side="left", padx=10)
+
+    def _update_preview(*_):
+        try:
+            idx = nb.index(nb.select())
+            if idx == 0:
+                argv = _build_argv_timelapse()
+            elif idx == 1:
+                argv = _build_argv_stitch()
+            else:
+                cmd_preview_var.set(""); return
+            preview = "stitcher.py " + " ".join(argv)
+            cmd_preview_var.set(preview[:180] + ("…" if len(preview) > 180 else ""))
+        except Exception:
+            cmd_preview_var.set("")
+
+    for v in (tl_station_var, tl_station_label_var, tl_proj_var, tl_quality_var,
+              tl_sy, tl_sm, tl_sd, tl_sh, tl_smin,
+              tl_ey, tl_em, tl_ed, tl_eh, tl_emin,
+              tl_use_end_var, tl_dur_h_var, tl_dur_m_var,
+              tl_speed_var, tl_fps_var, tl_pattern_var,
+              tl_output_var, tl_enhance_var, tl_timestamp_var,
+              tl_crf_var, tl_preset_var, tl_saturation_var, tl_pto_var,
+              st_mode_var, st_proj_var, st_pto_var, st_inputs_var, st_output_var,
+              st_station_var, st_enhance_var, st_ts_var, st_sync_var, st_model_var,
+              st_crf_var, st_preset_var, st_maxfr_var,
+              st_saturation_var, st_dy, st_dm, st_dd, st_dh, st_dmin):
+        v.trace_add("write", _update_preview)
+    nb.bind("<<NotebookTabChanged>>", _update_preview)
+
+    root.mainloop()
+
+
 def main():
     try:
         num_cores = len(os.sched_getaffinity(0))
     except AttributeError:
         num_cores = os.cpu_count() or 1
     numba.set_num_threads(num_cores)
+
+    # Launch GUI when called with no arguments or with --gui
+    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] == '--gui'):
+        launch_gui()
+        return
 
     parser = argparse.ArgumentParser(
         description="Reproject and stitch images or videos into a panorama based on a Hugin .pto file.",
@@ -3292,10 +4546,16 @@ def main():
         help="Stop after encoding N frames (video only). Useful for quick tests.")
     parser.add_argument("--level-subsample", type=int, default=1, metavar="N",
         help="Recompute exposure correction only every N frames in video mode (default: 1). Higher values are faster.")
+    parser.add_argument("--output-width", type=int, default=None, metavar="W",
+        help="Force the output canvas width (pixels). Scales the PTO canvas proportionally.")
+    parser.add_argument("--output-height", type=int, default=None, metavar="H",
+        help="Force the output canvas height (pixels). Scales the PTO canvas proportionally.")
     parser.add_argument("--crf", type=str, default="28", metavar="CRF",
         help="libx264 CRF value for video output (default: 28). Lower = better quality.")
     parser.add_argument("--preset", type=str, default="ultrafast", metavar="PRESET",
         help="libx264 preset for video output (default: ultrafast).")
+    parser.add_argument("--saturation", type=float, default=1.0, metavar="S",
+        help="Chroma saturation multiplier applied to the output (default: 1.0 = unchanged, >1 = more vivid).")
     parser.add_argument("--station", type=str, default=None, metavar="HOST",
         help="Fetch input files from a remote host via SSH. The paths are interpreted on the remote host; the output is written locally.")
 
@@ -3314,7 +4574,12 @@ def main():
     timelapse_group.add_argument("--timelapse-framerate", type=int, default=30, help="Output timelapse frame rate (default: 30).")
     timelapse_group.add_argument("--timelapse-quality", type=str, default='sd', help="Source quality: 'sd'/'SD' for mini_mm.mp4 or 'hd'/'HD' for full_mm.mp4 (default: sd).")
     timelapse_group.add_argument("--timelapse-pattern", type=str, default='/meteor/cam?', help="Glob pattern used to find camera directories (default: /meteor/cam?).")
-    
+    timelapse_group.add_argument("--pto", type=str, default=None, metavar="FILE",
+        help="Override the auto-generated PTO file for timelapse (use a custom lens calibration).")
+
+    parser.add_argument("--input-datetime", type=str, default=None, metavar="DT",
+        help="Hint: UTC datetime of the input frames (YYYY-MM-DD HH:MM:SS). Informational only.")
+
     args = parser.parse_args()
 
     global _quiet
@@ -3343,6 +4608,7 @@ def main():
         _print("Error: --fisheye and --equirect are mutually exclusive.", file=sys.stderr); sys.exit(1)
 
     remote_temp_dir = None
+    _output_file_written = [False]   # set True only on successful completion
 
     # --- Timelapse mode ---
     if args.timelapse:
@@ -3403,10 +4669,14 @@ def main():
         # Generate PTO from the first file of each camera.
         projection = 'fisheye' if args.fisheye else 'equirect'
         representative_files = [files[0][0] for files in camera_files]
-        auto_generated_pto = generate_pto_from_lens_files(representative_files, projection)
-        if auto_generated_pto is None:
-            _print("Error: Failed to generate PTO file from lens.pto files.", file=sys.stderr); sys.exit(1)
-        _print(f"Generated PTO file: {auto_generated_pto}")
+        if args.pto:
+            auto_generated_pto = args.pto
+            _print(f"Using custom PTO file: {auto_generated_pto}")
+        else:
+            auto_generated_pto = generate_pto_from_lens_files(representative_files, projection)
+            if auto_generated_pto is None:
+                _print("Error: Failed to generate PTO file from lens.pto files.", file=sys.stderr); sys.exit(1)
+            _print(f"Generated PTO file: {auto_generated_pto}")
 
         try:
             padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
@@ -3416,8 +4686,9 @@ def main():
                 args.pad, num_cores, padsides, model=args.model,
                 enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
                 level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
-                timestamp=args.timestamp
+                timestamp=args.timestamp, saturation=args.saturation
             )
+            _output_file_written[0] = True
         except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
             _print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
             sys.exit(1)
@@ -3427,6 +4698,12 @@ def main():
             traceback.print_exc()
             sys.exit(1)
         finally:
+            if not _output_file_written[0] and args.output_file and os.path.exists(args.output_file):
+                try:
+                    os.unlink(args.output_file)
+                    _print(f"Cleaned up partial output file: {args.output_file}", file=sys.stderr)
+                except Exception:
+                    pass
             if auto_generated_pto and os.path.exists(auto_generated_pto):
                 try:
                     os.unlink(auto_generated_pto)
@@ -3488,7 +4765,8 @@ def main():
         args.input_files = unique_input_files
         _print(f"Expanded input files to {len(args.input_files)} files")
         
-        pto_file = generate_pto_from_lens_files(args.input_files, projection)
+        pto_file = generate_pto_from_lens_files(args.input_files, projection,
+            w=args.output_width, h=args.output_height)
         if pto_file is None:
             _print("Error: Failed to generate PTO file from lens.pto files.", file=sys.stderr); sys.exit(1)
         args.pto_file = pto_file
@@ -3506,7 +4784,7 @@ def main():
     try:
         padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
         if is_image_input:
-            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye)
+            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation)
         elif is_video_input:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file,
@@ -3514,11 +4792,12 @@ def main():
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance,
                 fisheye_mask=args.fisheye, max_frames=args.max_frames,
                 level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
-                timestamp=args.timestamp
+                timestamp=args.timestamp, saturation=args.saturation
             )
         else:
             _print("Error: Input files must all be of the same type (either all images or all videos).", file=sys.stderr)
             sys.exit(1)
+        _output_file_written[0] = True
     except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
         _print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
         sys.exit(1)
@@ -3528,6 +4807,12 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     finally:
+        if not _output_file_written[0] and args.output_file and os.path.exists(args.output_file):
+            try:
+                os.unlink(args.output_file)
+                _print(f"Cleaned up partial output file: {args.output_file}", file=sys.stderr)
+            except Exception:
+                pass
         # Clean up auto-generated PTO file
         if auto_generated_pto and os.path.exists(auto_generated_pto):
             try:

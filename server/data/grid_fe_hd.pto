@@ -1,0 +1,8 @@
+# Stitched fisheye panorama grid PTO — HD (5120x5120)
+# Zenith at centre; South at 6 o'clock (bottom).
+# PTO convention: yaw=0 is South, so r=180 rotates South to the bottom.
+# Use with: drawgrid.py --panorama grid_fe_hd.pto grid_fe_hd.png
+p f3 w5120 h5120 v190 r90 E0 R0 n"TIFF_m c:LZW"
+
+i w5120 h5120 f3 v190 y0 p0 r0 a0 b0 c0 d0 e0 g0 t0 n"stitch_hires_fisheye.jpg"
+

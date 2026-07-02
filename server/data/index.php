@@ -427,6 +427,24 @@ switch ($action) {
         echo shell_exec($command);
         break;
 
+    case 'fetch_stitch_grid':
+        header('Content-Type: application/json');
+        $projection = $_GET['projection'] ?? null;  // 'eq' or 'fe'
+        $resolution  = $_GET['resolution']  ?? null;  // 'hires' or 'lowres'
+        if (!in_array($projection, ['eq', 'fe'], true) || !in_array($resolution, ['hires', 'lowres'], true)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid parameters']);
+            exit;
+        }
+        $grid_file = "grid_{$projection}_hd.png";
+        $grid_path = __DIR__ . '/' . $grid_file;
+        if (file_exists($grid_path)) {
+            echo json_encode(['success' => true, 'grid_url' => $grid_file]);
+        } else {
+            echo json_encode(['success' => false, 'error' => 'grid_not_found']);
+        }
+        break;
+
     case 'fetch_archive_grid':
         header('Content-Type: application/json');
         $station_id = $_GET['station_id'] ?? null;

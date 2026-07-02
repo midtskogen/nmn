@@ -1145,7 +1145,8 @@ def main():
                 d = d[k]
             return d[0] if isinstance(d, list) and len(d) == 1 else d
 
-        parts = args.get.split('.')
+        get_key = args.get.split('=')[0]  # strip accidental =value suffix
+        parts = get_key.split('.')
         if len(parts) < 2:
             sys.exit("Error: key must have at least 2 components: MainGroup.Subgroup[.Field...]")
         subgroup = '.'.join(parts[:2])
@@ -1160,10 +1161,10 @@ def main():
                 if not cam.login(): print(f"Error: Could not log in to {ip}. Skipping."); continue
                 current = cam.get_info(subgroup)
                 value = nested_get(current, field_keys) if field_keys else current
-                print(f"  {args.get} = ", end='')
+                print(f"  {get_key} = ", end='')
                 pprint(value)
             except (KeyError, IndexError, TypeError) as e:
-                print(f"  Error: could not find key '{args.get}' in subgroup '{subgroup}': {e}")
+                print(f"  Error: could not find key '{get_key}' in subgroup '{subgroup}': {e}")
             except Exception as e:
                 print(f"  Unexpected error with camera {ip}: {e}")
             finally:

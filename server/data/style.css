@@ -1291,9 +1291,9 @@ button:hover:not(:disabled) {
     background: #000;
 }
 
-.preview-video-wrapper:fullscreen .preview-video,
-.preview-video-wrapper:-webkit-full-screen .preview-video,
-.preview-video-wrapper:-moz-full-screen .preview-video,
+.preview-video-wrapper:fullscreen video.preview-video,
+.preview-video-wrapper:-webkit-full-screen video.preview-video,
+.preview-video-wrapper:-moz-full-screen video.preview-video,
 .preview-video-wrapper:fullscreen #grid-overlay-image,
 .preview-video-wrapper:-webkit-full-screen #grid-overlay-image,
 .preview-video-wrapper:-moz-full-screen #grid-overlay-image,
@@ -1305,6 +1305,17 @@ button:hover:not(:disabled) {
     max-height: none !important;
 }
 
+/* Image preview fullscreen: let object-fit:contain preserve aspect ratio */
+.preview-video-wrapper:fullscreen img.preview-video,
+.preview-video-wrapper:-webkit-full-screen img.preview-video,
+.preview-video-wrapper:-moz-full-screen img.preview-video {
+    width: auto !important;
+    height: 100% !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    object-fit: contain !important;
+}
+
 .preview-video {
     width: 100%;
     max-height: 60vh;
@@ -1312,11 +1323,12 @@ button:hover:not(:disabled) {
     display: block;
 }
 
-/* Image preview - same styling as video for consistency */
+/* Image preview */
 .preview-video-wrapper img.preview-video {
     width: 100%;
     max-height: 60vh;
     min-height: 300px;
+    display: block;
     object-fit: contain;
 }
 

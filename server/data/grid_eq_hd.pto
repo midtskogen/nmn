@@ -1,0 +1,7 @@
+# Stitched equirectangular panorama grid PTO — HD (5120x3392)
+# South is at the horizontal centre; horizon at the vertical centre.
+# Use with: drawgrid.py --panorama grid_eq_hd.pto grid_eq_hd.png
+p f2 w5120 h3392 v360 E0 R0 n"TIFF_m c:LZW"
+
+i w5120 h1840 f3 v360 y0 p0 r0 a0 b0 c0 d0 e0 g0 t0 n"stitch_hires_equirect.jpg"
+

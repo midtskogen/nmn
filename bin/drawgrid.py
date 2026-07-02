@@ -103,6 +103,10 @@ def main():
     parser.add_argument("--base-image", dest='base_image', help='Load an existing PNG and draw annotations on top (skip grid generation)', type=str)
     parser.add_argument("--annotations-only", dest='annotations_only', help='Only draw star annotations on a transparent canvas (no grid)', action="store_true")
     parser.add_argument("--nopos", dest='nopos', help='Omit [az, alt] / [ra, dec] position from star labels', action="store_true")
+    parser.add_argument("--panorama", dest='panorama', action="store_true",
+                        help='Treat image as the stitched panorama output (bypass i-line transform). '
+                             'Uses the p-line projection (f2=equirect, f3=fisheye) directly. '
+                             'p-line r= rotates the panorama (e.g. r=180 puts South at bottom for fisheye).')
 
     parser.add_argument(action='store', dest='infile', help='input .pto file')
     parser.add_argument(action='store', dest='outfile', help='output grid file (default "grid.png")', default="grid.png", nargs='?')
@@ -113,14 +117,55 @@ def main():
     global_opts, images_data = pto_data
     img0_data = images_data[args.image]
 
+    # p-line rotation angle (panorama-level roll, used in --panorama mode)
+    _pano_r_deg = float(global_opts.get('r', 0.0))
+    _pano_proj_f = int(global_opts.get('f', 2))
+
+    def _apply_pano_rotation(px, py, pano_w, pano_h, r_deg):
+        """Rotate a panorama pixel around the canvas centre by r_deg."""
+        if r_deg == 0.0:
+            return px, py
+        cx, cy = pano_w / 2.0, pano_h / 2.0
+        r_rad = math.radians(r_deg)
+        cos_r, sin_r = math.cos(r_rad), math.sin(r_rad)
+        dx, dy = px - cx, py - cy
+        return dx * cos_r - dy * sin_r + cx, dx * sin_r + dy * cos_r + cy
+
     def map_img_to_sph_unrotated(x, y):
         """Maps image pixel coordinates to un-rotated panorama spherical coordinates."""
+        pano_w, pano_h = global_opts['w'], global_opts['h']
+
+        if args.panorama:
+            # Image IS the panorama — pixel maps directly to pano coordinate,
+            # but undo p-line rotation first.
+            px, py = _apply_pano_rotation(x, y, pano_w, pano_h, -_pano_r_deg)
+            if _pano_proj_f == 2:  # equirectangular
+                yaw_rad = (px / pano_w - 0.5) * 2.0 * math.pi
+                pitch_rad = -(py / pano_h - 0.5) * math.pi
+                return math.degrees(yaw_rad), math.degrees(pitch_rad)
+            elif _pano_proj_f == 3:  # fisheye equidistant
+                hfov_rad = math.radians(float(global_opts.get('v', 190)))
+                focal = (pano_w / 2.0) / (hfov_rad / 2.0)
+                x_n = px - pano_w / 2.0
+                y_n = -(py - pano_h / 2.0)
+                r_pix = math.sqrt(x_n ** 2 + y_n ** 2)
+                theta = r_pix / focal  # angle from zenith (PTO fisheye: centre=forward)
+                if theta > math.pi:
+                    return None
+                phi = math.atan2(y_n, x_n)
+                # theta=0 → looking forward (South in pto convention = alt=0, yaw=0)
+                # We interpret: yaw = phi direction, pitch = 90-theta from forward
+                # In pto: forward is yaw=0, alt=0 (horizon South); zenith is pitch=+90
+                alt_deg = 90.0 - math.degrees(theta)
+                az_deg = math.degrees(phi)
+                return az_deg, alt_deg
+            return None
+
         pano_coords = pto_mapper.map_image_to_pano(pto_data, args.image, x, y)
         if not pano_coords:
             return None
         
         pano_x, pano_y = pano_coords
-        pano_w, pano_h = global_opts['w'], global_opts['h']
         
         # Assuming equirectangular panorama projection
         yaw_rad = (pano_x / pano_w - 0.5) * 2.0 * math.pi
@@ -133,10 +178,36 @@ def main():
 
     def map_sph_to_img_unrotated(az, alt):
         """Maps un-rotated panorama spherical coordinates to image pixel coordinates."""
+        pano_w, pano_h = global_opts['w'], global_opts['h']
+
+        if args.panorama:
+            if _pano_proj_f == 2:  # equirectangular
+                # Normalise South-based az to -180..+180 so East/West wrap correctly
+                az_norm = (az + 180.0) % 360.0 - 180.0
+                yaw_rad = math.radians(az_norm)
+                pitch_rad = math.radians(alt)
+                px = (yaw_rad / (2.0 * math.pi) + 0.5) * pano_w
+                py = (-pitch_rad / math.pi + 0.5) * pano_h
+            elif _pano_proj_f == 3:  # fisheye equidistant
+                hfov_rad = math.radians(float(global_opts.get('v', 190)))
+                focal = (pano_w / 2.0) / (hfov_rad / 2.0)
+                theta = math.radians(90.0 - alt)  # angle from zenith
+                if theta > math.pi:
+                    return None
+                phi = math.radians(az)
+                r_pix = focal * theta
+                x_n = r_pix * math.cos(phi)
+                y_n = r_pix * math.sin(phi)
+                px = x_n + pano_w / 2.0
+                py = -y_n + pano_h / 2.0
+            else:
+                return None
+            # Apply p-line rotation
+            px, py = _apply_pano_rotation(px, py, pano_w, pano_h, _pano_r_deg)
+            return px, py
+
         yaw_rad = math.radians(az)
         pitch_rad = math.radians(alt)
-
-        pano_w, pano_h = global_opts['w'], global_opts['h']
 
         # Assuming equirectangular panorama projection
         pano_x = (yaw_rad / (2.0 * math.pi) + 0.5) * pano_w
@@ -423,12 +494,14 @@ def main():
     small_list = []
     big_list = []
 
+    eq_pano = args.panorama and _pano_proj_f == 2
+
     base_grey_step = 1.0
-    drawline(minaz, maxaz, base_grey_step, minalt, maxalt, 2, False, small_list, thinning=60)
+    drawline(minaz, maxaz, base_grey_step, minalt, maxalt, 2, False, small_list, thinning=100 if eq_pano else 60)
     drawline(minalt, maxalt, 1, minaz, maxaz, 1, True, small_list)
 
     base_yellow_az_step = 15 if args.radec else 10
-    drawline(minaz, maxaz - 1, base_yellow_az_step, minalt, maxalt, 1, False, big_list)
+    drawline(minaz, maxaz - 1, base_yellow_az_step, minalt, maxalt, 1, False, big_list, thinning=100 if eq_pano else 80)
     drawline(minalt, maxalt, 10, minaz, maxaz, 1, True, big_list)
 
     if not args.radec and abs(minalt) <= 10:

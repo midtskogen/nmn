@@ -1318,17 +1318,11 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Image wrapper with pan/zoom
     const imageWrapper = createEl('div', { className: 'preview-video-wrapper' });
-    const img = createEl('img', {
-        src: imageUrl,
-        className: 'preview-video',
-        style: { display: 'block', width: '100%', height: 'auto', objectFit: 'contain' }
-    });
+    const img = createEl('img', { src: imageUrl, className: 'preview-video' });
 
-    // Grid and annotation overlays (hidden by default)
-    const gridOverlay = createEl('img', { className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 10 } });
-    const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 11 } });
-    gridOverlay.style.opacity = '0';
-    annotationOverlay.style.opacity = '0';
+    // Overlays: positioned to exactly match img's rendered position/size within wrapper
+    const gridOverlay = createEl('img', { className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 10, opacity: '0' } });
+    const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 11, opacity: '0' } });
 
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
     imageWrapper.append(img, gridOverlay, annotationOverlay, loadingIndicator);
@@ -1404,10 +1398,35 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Parse station and camera from image filename (e.g., "GAU_cam1_20260429_2056_image.jpg")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_(\d{8})_(\d{4})/);
+    // Detect stitched panorama filenames (e.g. "GAU_20260429_2056_hires_equirect.jpg")
+    // Match against imageUrl since title may be a short display name like 'eqh'
+    const stitchMatch = imageUrl.match(/_(hires|lowres)_(equirect|fisheye)\.jpg(?:[?#].*)?$/i);
     let gridToggleContainer = null, annotationToggleContainer = null;
     let gridCheckbox = null, annotationCheckbox = null;
 
-    if (filenameMatch) {
+    if (stitchMatch) {
+        const resolution = stitchMatch[1].toLowerCase();   // 'hires' or 'lowres'
+        const projection = stitchMatch[2].toLowerCase() === 'equirect' ? 'eq' : 'fe';
+
+        gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        gridCheckbox = createEl('input', { type: 'checkbox', id: 'img-grid-overlay-toggle', disabled: true });
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+
+        fetch(`index.php?action=fetch_stitch_grid&projection=${projection}&resolution=${resolution}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.success && data.grid_url) {
+                    gridOverlay.src = data.grid_url;
+                    gridToggleContainer.style.opacity = '1';
+                    gridCheckbox.disabled = false;
+                }
+            })
+            .catch(() => {});
+
+        gridCheckbox.addEventListener('change', () => {
+            gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0';
+        });
+    } else if (filenameMatch) {
         const stationId = filenameMatch[1];
         const cameraNum = filenameMatch[2];
         const dateStr = filenameMatch[3];
@@ -1550,6 +1569,34 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     // Push history state for back button handling
     history.pushState({ modalOpen: true }, '');
 
+    // Sync overlays to the actual rendered image area inside the img element
+    // (object-fit:contain means the rendered area may be smaller than offsetWidth/Height)
+    const syncOverlays = () => {
+        const ew = img.offsetWidth, eh = img.offsetHeight;
+        const nw = img.naturalWidth || ew, nh = img.naturalHeight || eh;
+        const imgAspect = nw / nh, boxAspect = ew / eh;
+        let rw, rh, rl, rt;
+        if (imgAspect > boxAspect) {
+            rw = ew; rh = ew / imgAspect;
+            rl = img.offsetLeft; rt = img.offsetTop + (eh - rh) / 2;
+        } else {
+            rh = eh; rw = eh * imgAspect;
+            rt = img.offsetTop; rl = img.offsetLeft + (ew - rw) / 2;
+        }
+        [gridOverlay, annotationOverlay].forEach(ov => {
+            ov.style.left   = rl + 'px';
+            ov.style.top    = rt + 'px';
+            ov.style.width  = rw + 'px';
+            ov.style.height = rh + 'px';
+            ov.style.transformOrigin = (rw / 2) + 'px ' + (rh / 2) + 'px';
+        });
+        // img transformOrigin is relative to img's own top-left (offsetLeft/Top)
+        img.style.transformOrigin = (rl - img.offsetLeft + rw / 2) + 'px ' + (rt - img.offsetTop + rh / 2) + 'px';
+    };
+    img.addEventListener('load', syncOverlays);
+    const ro = new ResizeObserver(syncOverlays);
+    ro.observe(imageWrapper);
+
     // Pan/Zoom
     let scale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
@@ -1557,7 +1604,6 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
         img.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
-    img.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = 'center center';
 
     const onWheel = e => {
         e.preventDefault();
@@ -1606,17 +1652,49 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     });
     const onFullscreenChange = () => {
         if (!document.fullscreenElement) { scale = 1; panX = 0; panY = 0; updateTransform(); }
+        // Re-sync after layout settles (fullscreen changes img rendered size)
+        setTimeout(syncOverlays, 50);
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
         annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
 
-    // Download
+    // Download — composite active overlays onto the image at full resolution
     downloadBtn.addEventListener('click', () => {
-        const link = document.createElement('a');
-        link.href = imageUrl;
-        link.download = title;
-        link.click();
+        const hasGrid = gridCheckbox?.checked && gridOverlay.src && gridOverlay.complete;
+        const hasAnnotation = annotationCheckbox?.checked && annotationOverlay.src && annotationOverlay.complete;
+        if (!hasGrid && !hasAnnotation) {
+            const link = document.createElement('a');
+            link.href = imageUrl;
+            link.download = title;
+            link.click();
+            return;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.filter = img.style.filter || 'none';
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        ctx.filter = 'none';
+        if (hasGrid) {
+            ctx.globalAlpha = 0.6;
+            ctx.drawImage(gridOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+        if (hasAnnotation) {
+            ctx.globalAlpha = 0.6;
+            ctx.drawImage(annotationOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+        canvas.toBlob(blob => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = title.replace(/\.[^.]+$/, '') + '_overlay.jpg';
+            link.click();
+            URL.revokeObjectURL(url);
+        }, 'image/jpeg', 0.92);
     });
 
     // Navigation button handlers - use currentMediaList for dynamic bounds checking
@@ -1667,6 +1745,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Close
     closeButton.addEventListener('click', () => {
+        ro.disconnect();
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         imageWrapper.removeEventListener('wheel', onWheel);
         imageWrapper.removeEventListener('mousedown', onMouseDown);

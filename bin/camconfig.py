@@ -293,6 +293,16 @@ def main():
     mode_group.add_argument("--gui", action="store_true", help="Launch the Tkinter graphical user interface.")
     mode_group.add_argument("--dump", action="store_true", help="Dump all settings from the camera(s) to the console.")
     mode_group.add_argument("--web", action="store_true", help="Launch the web server interface.")
+    mode_group.add_argument("--set", metavar="KEY=VALUE", type=str,
+                            help=("CLI MODE: Set a single parameter using a dotted path.\n"
+                                  "The first two components identify the subgroup to read/write.\n"
+                                  "Example: --set Camera.Param.ExposureParam.LeastTime=0x00000019\n"
+                                  "         --set Camera.Param.GainParam.Gain=25"))
+    mode_group.add_argument("--get", metavar="KEY", type=str,
+                            help=("CLI MODE: Get a single parameter using a dotted path.\n"
+                                  "The first two components identify the subgroup to read.\n"
+                                  "Example: --get Camera.Param.ExposureParam.LeastTime\n"
+                                  "         --get Camera.Param.GainParam"))
     
     args = parser.parse_args()
     
@@ -1127,7 +1137,90 @@ def main():
         controller = CameraController(ips)
         run_flask_app(controller, port=args.port)
 
-    else: # CLI mode
+    elif args.get:
+        def nested_get(d, keys):
+            """Get d[keys[0]][keys[1]]..., traversing lists by taking index 0."""
+            for k in keys:
+                d = d[0] if isinstance(d, list) else d
+                d = d[k]
+            return d[0] if isinstance(d, list) and len(d) == 1 else d
+
+        parts = args.get.split('.')
+        if len(parts) < 2:
+            sys.exit("Error: key must have at least 2 components: MainGroup.Subgroup[.Field...]")
+        subgroup = '.'.join(parts[:2])
+        field_keys = parts[2:]
+
+        print(f"Targeting cameras: {ips}")
+        for ip in ips:
+            cam = None
+            try:
+                print(f"\nConnecting to {ip}...")
+                cam = DVRIPCam(ip, user='admin', password='')
+                if not cam.login(): print(f"Error: Could not log in to {ip}. Skipping."); continue
+                current = cam.get_info(subgroup)
+                value = nested_get(current, field_keys) if field_keys else current
+                print(f"  {args.get} = ", end='')
+                pprint(value)
+            except (KeyError, IndexError, TypeError) as e:
+                print(f"  Error: could not find key '{args.get}' in subgroup '{subgroup}': {e}")
+            except Exception as e:
+                print(f"  Unexpected error with camera {ip}: {e}")
+            finally:
+                if cam: cam.close(); print(f"Connection to {ip} closed.")
+
+    elif args.set:
+        def nested_set(d, keys, value):
+            """Set d[keys[0]][keys[1]]... = value, traversing lists by taking index 0."""
+            for k in keys[:-1]:
+                d = d[0] if isinstance(d, list) else d
+                d = d[k]
+            d = d[0] if isinstance(d, list) else d
+            original = d[keys[-1]]
+            # Coerce value to the same type as the original
+            if isinstance(original, bool):
+                d[keys[-1]] = value.lower() in ('1', 'true', 'yes')
+            elif isinstance(original, int):
+                d[keys[-1]] = int(value, 0)  # supports 0x hex
+            elif isinstance(original, float):
+                d[keys[-1]] = float(value)
+            else:
+                d[keys[-1]] = value  # keep as string (e.g. hex strings like '0x00000019')
+            return original  # return old value for display
+
+        if '=' not in args.set:
+            sys.exit("Error: --set requires KEY=VALUE format, e.g. Camera.Param.ExposureParam.LeastTime=0x00000019")
+        dotted_key, new_value = args.set.split('=', 1)
+        parts = dotted_key.split('.')
+        if len(parts) < 3:
+            sys.exit("Error: key must have at least 3 components: MainGroup.Subgroup.Field")
+        subgroup = '.'.join(parts[:2])   # e.g. 'Camera.Param'
+        field_keys = parts[2:]           # e.g. ['ExposureParam', 'LeastTime']
+
+        print(f"Targeting cameras: {ips}")
+        for ip in ips:
+            cam = None
+            try:
+                print(f"\nConnecting to {ip}...")
+                cam = DVRIPCam(ip, user='admin', password='')
+                if not cam.login(): print(f"Error: Could not log in to {ip}. Skipping."); continue
+                current = cam.get_info(subgroup)
+                old_val = nested_set(current, field_keys, new_value)
+                cam.set_info(subgroup, current)
+                print(f"  {dotted_key}: {old_val!r} -> {new_value!r}")
+                if not args.noreboot:
+                    print(f"  Rebooting {ip}...")
+                    cam.reboot()
+                else:
+                    print("  Skipping reboot (--noreboot).")
+            except (KeyError, IndexError, TypeError) as e:
+                print(f"  Error: could not find key '{dotted_key}' in subgroup '{subgroup}': {e}")
+            except Exception as e:
+                print(f"  Unexpected error with camera {ip}: {e}")
+            finally:
+                if cam: cam.close(); print(f"Connection to {ip} closed.")
+
+    else: # CLI mode (configure_camera)
         if args.gop < 1: sys.exit("Error: --gop must be an integer of at least 1.")
         if args.bitrate <= 0: sys.exit("Error: --bitrate must be a positive integer.")
         print(f"Targeting cameras: {ips}")

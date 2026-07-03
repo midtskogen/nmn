@@ -175,6 +175,49 @@ def rgb_to_yuv(rgb_channels):
 # --- Numba JIT-compiled Core Functions ---
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
+def _build_vignette_gain(width, height, k1, k2, k3):
+    """Build a per-pixel multiplicative gain LUT to undo radial vignetting.
+
+    Model:  brightness(r) = 1 + k1*r^2 + k2*r^4 + k3*r^6
+    where r is distance from centre normalised so that the corner = 1.
+    Gain = 1 / brightness(r), clamped to [1, 4] to avoid blowup.
+
+    Typical usage: k1 < 0 (darkening toward edges).  E.g. k1=-0.5, k2=0, k3=0
+    gives ~33 % brightening at the corners.
+    """
+    gain = np.empty((height, width), dtype=np.float32)
+    cx = width  * 0.5
+    cy = height * 0.5
+    # Work with r² directly — avoids a sqrt per pixel
+    inv_r2max = 1.0 / max(cx * cx + cy * cy, 1.0)
+    for y in prange(height):
+        dy = y - cy
+        dy2 = dy * dy
+        for x in range(width):
+            dx = x - cx
+            r2 = (dx * dx + dy2) * inv_r2max          # normalised r²
+            r4 = r2 * r2
+            v = 1.0 + k1 * r2 + k2 * r4 + k3 * (r4 * r2)
+            g = 1.0 / v if v > 0.25 else 4.0   # clamp gain ≤ 4
+            if g < 1.0:
+                g = 1.0   # never darken
+            gain[y, x] = g
+    return gain
+
+
+@numba.njit(parallel=True, fastmath=True, cache=True)
+def _apply_vignette_y(py, gain):
+    """Multiply Y plane (uint8) by per-pixel gain in-place, clipping to 255."""
+    h, w = py.shape
+    for y in prange(h):
+        for x in range(w):
+            v = py[y, x] * gain[y, x]
+            if v > 255.0:
+                v = 255.0
+            py[y, x] = np.uint8(v)
+
+
+@numba.njit(parallel=True, fastmath=True, cache=True)
 def create_blend_weight_map(width, height):
     weights = np.empty((height, width), dtype=np.float32)
     norm = min(width, height) / 2.0
@@ -612,12 +655,20 @@ _TIMESTAMP_BOX_SD = (0,  430, 155,  448)   # for height < 900
 
 def process_and_reproject_image(args):
     """Worker function to reproject a single image, writing to pre-allocated buffers."""
-    (input_path, dw, dh, mapping, pad, padsides), out_buffers = args
+    (input_path, dw, dh, mapping, pad, padsides, devignette), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y = out_buffers
 
     map_y_idx, c01, c23, map_uv_idx, sw_pto, sh_pto = mapping
     py, pu, pv, sw_orig, sh_orig = load_image_to_yuv(
         input_path, pad, padsides, target_w=sw_pto, target_h=sh_pto)
+
+    if devignette is not None:
+        k1, k2, k3 = devignette
+        gain = _build_vignette_gain(sw_orig, sh_orig, k1, k2, k3)
+        # Apply to original region only (not padding)
+        pad_t_ = pad if 'top' in padsides else 0
+        pad_l_ = pad if 'left' in padsides else 0
+        _apply_vignette_y(py[pad_t_:pad_t_ + sh_orig, pad_l_:pad_l_ + sw_orig], gain)
 
     pad_t = pad if 'top' in padsides else 0
     pad_b = pad if 'bottom' in padsides else 0
@@ -700,7 +751,7 @@ def _precompile_numba_functions():
 
     _print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0):
+def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0, devignette=None):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
@@ -715,8 +766,15 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         dw, dh = final_w, final_h
 
         map_y_idx, c01, c23, map_uv_idx, sw_pto, sh_pto = mapping
-        py, pu, pv, _, _ = load_image_to_yuv(input_path, pad, padsides, target_w=sw_pto, target_h=sh_pto)
-    
+        py, pu, pv, sw_orig, sh_orig = load_image_to_yuv(input_path, pad, padsides, target_w=sw_pto, target_h=sh_pto)
+
+        if devignette is not None:
+            k1, k2, k3 = devignette
+            gain = _build_vignette_gain(sw_orig, sh_orig, k1, k2, k3)
+            pad_t_ = pad if 'top' in padsides else 0
+            pad_l_ = pad if 'left' in padsides else 0
+            _apply_vignette_y(py[pad_t_:pad_t_ + sh_orig, pad_l_:pad_l_ + sw_orig], gain)
+
         y_final = np.zeros((dh, dw), dtype=np.uint8)
         u_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
         v_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
@@ -824,7 +882,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
             mapping = mappings[i]
             mappings[i] = None
             process_and_reproject_image(
-                ((input_files[i], final_w, final_h, mapping, pad, padsides),
+                ((input_files[i], final_w, final_h, mapping, pad, padsides, devignette),
                  (_buf_y, _buf_u, _buf_v, _buf_w))
             )
 
@@ -1042,7 +1100,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
 
 def worker_for_video_frame(args):
     """Worker function for video frames, writing to pre-allocated buffers."""
-    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, padsides), out_buffers = args
+    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, padsides, devignette_gain), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y, reproj_weights_uv = out_buffers
 
     if frame is None: return None
@@ -1050,7 +1108,7 @@ def worker_for_video_frame(args):
 
     sw_orig, sh_orig = frame.width, frame.height
     
-    # Handle Y-plane stride (copy to make writable for timestamp erasure)
+    # Handle Y-plane stride (copy to make writable)
     py_buffer = np.asarray(frame.planes[0])
     py_stride = py_buffer.size // sh_orig
     py_src_orig = py_buffer.reshape(sh_orig, py_stride)[:, :sw_orig].copy()
@@ -1064,7 +1122,10 @@ def worker_for_video_frame(args):
     pv_buffer = np.asarray(frame.planes[2])
     pv_stride = pv_buffer.size // (sh_orig // 2)
     pv_src_orig = pv_buffer.reshape(sh_orig // 2, pv_stride)[:, :sw_orig // 2].copy()
-    
+
+    if devignette_gain is not None:
+        _apply_vignette_y(py_src_orig, devignette_gain)
+
     # No pixel erasure for timestamp — rely on zeroed blend weights to exclude
     # the timestamp region. This avoids black-pixel bleed from bilinear interpolation.
 
@@ -1731,7 +1792,7 @@ def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
     v_plane[uy1:uy2, ux1:ux2] = 128
 
 
-def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0):
+def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     num_images = len(camera_files)
@@ -1802,6 +1863,15 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         raise ValueError(f"Number of cameras ({num_images}) does not match PTO ({len(mappings)}).")
 
     _precompile_numba_functions()
+
+    # Build per-camera vignette gain LUTs (once — same resolution for all frames)
+    _vignette_gains = [None] * num_images
+    if devignette is not None:
+        k1, k2, k3 = devignette
+        for i in range(num_images):
+            sw_map, sh_map = mappings[i][4], mappings[i][5]
+            _vignette_gains[i] = _build_vignette_gain(sw_map, sh_map, k1, k2, k3)
+        _print(f"  built {num_images} vignette gain LUTs")
 
     # -----------------------------------------------------------------------
     # Geometry precomputation (same as reproject_videos multi-video path)
@@ -2148,7 +2218,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                     _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
             worker_args = [
-                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides),
+                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i]),
                  (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
@@ -2274,7 +2344,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     _print(f"\n✅ Success! Timelapse video saved to {output_file}")
 
 
-def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0):
+def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None):
     if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -2285,6 +2355,15 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     if len(input_files) != num_images: raise ValueError("Number of videos does not match PTO.")
     
     _precompile_numba_functions()
+
+    # Build per-camera vignette gain LUTs (once — same resolution for all frames)
+    _vignette_gains = [None] * num_images
+    if devignette is not None:
+        k1, k2, k3 = devignette
+        for i in range(num_images):
+            sw_map, sh_map = mappings[i][4], mappings[i][5]
+            _vignette_gains[i] = _build_vignette_gain(sw_map, sh_map, k1, k2, k3)
+        _print(f"  built {num_images} vignette gain LUTs")
 
     # --- Start of Single-Video Optimization ---
     if num_images == 1:
@@ -2344,12 +2423,17 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             (np.zeros((dh, dw), dtype=np.uint8), np.full((dh//2, dw//2), 128, dtype=np.uint8), np.full((dh//2, dw//2), 128, dtype=np.uint8)),
         ]
 
+        _sv_vgain = _vignette_gains[0]  # single-video: camera 0
+
         def _reproject_frame(frame, y_out, u_out, v_out):
             if frame.format.name != "yuv420p":
                 frame = frame.reformat(format="yuv420p")
             sw_f, sh_f = frame.width, frame.height
             py_buf = np.asarray(frame.planes[0])
             py_s = py_buf.reshape(sh_f, py_buf.size // sh_f)[:, :sw_f]
+            if _sv_vgain is not None:
+                py_s = py_s.copy()
+                _apply_vignette_y(py_s, _sv_vgain)
             pu_buf = np.asarray(frame.planes[1])
             pu_s = pu_buf.reshape(sh_f // 2, pu_buf.size // (sh_f // 2))[:, :sw_f // 2]
             pv_buf = np.asarray(frame.planes[2])
@@ -2781,7 +2865,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 else: _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
             worker_args = [
-                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides),
+                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i]),
                  (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
@@ -2916,7 +3000,7 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
            sync=False, model=None, save_sync=None, load_sync=None,
            quiet=False, num_cores=None, lens_files=None,
            output_width=None, output_height=None, crop_to_content: bool = True,
-           timestamp: bool = False):
+           timestamp: bool = False, devignette=(-0.20, 0.0, 0.0)):
     """Stitch images or videos into a panoramic image or video.
 
     This is the public API entry point for programs that import stitcher.py.
@@ -2977,6 +3061,10 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
     timestamp : bool, optional
         Overlay a UTC timestamp (YYYY-MM-DD hh:mm:ss.ff) in the lower-left
         corner of each video frame. Has no effect for still-image output.
+    devignette : tuple[float, float, float] or None, optional
+        Radial vignetting correction coefficients (k1, k2, k3) for the model
+        brightness(r) = 1 + k1*r² + k2*r⁴ + k3*r⁶ where r is normalised to the corner.
+        Default is (-0.20, 0.0, 0.0). Set to (0.0, 0.0, 0.0) or None to disable.
 
     Raises
     ------
@@ -3059,7 +3147,7 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
         reproject_images(
             pto_file, input_files, output_file, pad, num_cores, padsides_set,
             enhance, force_video_dims=force_video_dims, fisheye_mask=fisheye_mask,
-            crop_to_content=crop_to_content
+            crop_to_content=crop_to_content, devignette=devignette
         )
     else:
         if len(input_files) < 2 and sync:
@@ -3069,7 +3157,8 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
             pad, num_cores, padsides_set, sync, model,
             save_sync_file=save_sync, load_sync_file=load_sync, enhance=enhance,
             fisheye_mask=fisheye_mask, max_frames=max_frames,
-            level_subsample=level_subsample, timestamp=timestamp
+            level_subsample=level_subsample, timestamp=timestamp,
+            devignette=devignette
         )
 
     if auto_generated_pto and os.path.exists(auto_generated_pto):
@@ -3722,6 +3811,20 @@ def launch_gui():
              orient="horizontal", showvalue=False, command=_tl_sat_update).pack(side="left", fill="x", expand=True)
     r+=1
 
+    tl_devignette_var = tk.DoubleVar(value=-0.20)
+    lbl(tab_tl, "Devignette:", 0, r)
+    _tl_dv_frame = ttk.Frame(tab_tl)
+    _tl_dv_frame.grid(column=1, row=r, columnspan=2, sticky="ew", padx=5, pady=3)
+    _tl_dv_lbl = ttk.Label(_tl_dv_frame, text="-0.20", width=5)
+    _tl_dv_lbl.pack(side="right")
+    def _tl_dv_update(val):
+        _tl_dv_lbl.config(text=f"{float(val):.2f}")
+    tk.Scale(_tl_dv_frame, variable=tl_devignette_var, from_=0.0, to=-0.5, resolution=0.01,
+             orient="horizontal", showvalue=False, command=_tl_dv_update).pack(side="left", fill="x", expand=True)
+    ttk.Label(tab_tl, text="0=off, negative=correct falloff", foreground="#888", font=("",8)).grid(
+        column=3, row=r, sticky="w", padx=4)
+    r+=1
+
     # ── Auto-update timelapse output filename when projection changes ──
     _TL_DEFAULTS = {"fisheye": "fisheye.mp4", "equirect": "equirect.mp4"}
     def _tl_proj_changed(*_):
@@ -3908,7 +4011,11 @@ def launch_gui():
                 scaled_imgs = list(imgs)
                 out = os.path.join(tmp, out_name)
                 flag = "--fisheye" if proj == "fisheye" else "--equirect"
-                cmd = [sys.executable, __file__, flag] + scaled_imgs + [out]
+                cmd = [sys.executable, __file__, flag]
+                _dv = tl_devignette_var.get()
+                if abs(_dv) > 0.001:
+                    cmd += ["--devignette", f"{_dv:.2f}"]
+                cmd += scaled_imgs + [out]
                 try:
                     res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                     if not os.path.isfile(out):
@@ -3934,7 +4041,7 @@ def launch_gui():
 
             from PIL import Image as _PILImage
             placeholder_w, placeholder_h = 400, 225
-            _ctx = (station, pattern, proj)  # shared context key parts
+            _ctx = (station, pattern, proj, round(tl_devignette_var.get(), 2))
             _key_s = ('start', *_ctx, start_dt.isoformat())
             _key_e = ('end',   *_ctx, end_dt.isoformat())
 
@@ -4051,7 +4158,7 @@ def launch_gui():
                tl_ey, tl_em, tl_ed, tl_eh, tl_emin,
                tl_use_end_var, tl_dur_h_var, tl_dur_m_var,
                tl_station_var, tl_pattern_var, tl_proj_var,
-               tl_saturation_var):
+               tl_saturation_var, tl_devignette_var):
         _v.trace_add("write", _schedule_preview)
     # Also redraw when canvas is resized
     preview_canvas.bind("<Configure>", _schedule_preview)
@@ -4264,6 +4371,18 @@ def launch_gui():
              orient="horizontal", showvalue=False, command=_st_sat_update).pack(side="left", fill="x", expand=True)
     r+=1
 
+    st_devignette_var = tk.DoubleVar(value=-0.20)
+    lbl(tab_stitch, "Devignette:", 0, r)
+    _st_dv_frame = ttk.Frame(tab_stitch)
+    _st_dv_frame.grid(column=1, row=r, columnspan=2, sticky="ew", padx=5, pady=3)
+    _st_dv_lbl = ttk.Label(_st_dv_frame, text="-0.20", width=5)
+    _st_dv_lbl.pack(side="right")
+    def _st_dv_update(val):
+        _st_dv_lbl.config(text=f"{float(val):.2f}")
+    tk.Scale(_st_dv_frame, variable=st_devignette_var, from_=0.0, to=-0.5, resolution=0.01,
+             orient="horizontal", showvalue=False, command=_st_dv_update).pack(side="left", fill="x", expand=True)
+    r+=1
+
     lbl(tab_stitch, "Timestamp (UTC):", 0, r)
     _dt_spinboxes(tab_stitch, st_dy, st_dm, st_dd, st_dh, st_dmin).grid(
         column=1, row=r, columnspan=2, sticky="w", padx=5, pady=3); r+=1
@@ -4424,7 +4543,11 @@ def launch_gui():
 
             out = os.path.join(tmp, "preview_stitch.jpg")
             flag = "--fisheye" if proj == "fisheye" else "--equirect"
-            cmd = [sys.executable, __file__, flag] + scaled_imgs + [out]
+            cmd = [sys.executable, __file__, flag]
+            _dv = st_devignette_var.get()
+            if abs(_dv) > 0.001:
+                cmd += ["--devignette", f"{_dv:.2f}"]
+            cmd += scaled_imgs + [out]
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             except subprocess.TimeoutExpired:
@@ -4483,7 +4606,7 @@ def launch_gui():
 
     for _v in (st_dy, st_dm, st_dd, st_dh, st_dmin,
                st_station_var, st_cam_pattern_var, st_proj_var,
-               st_saturation_var):
+               st_saturation_var, st_devignette_var):
         _v.trace_add("write", _st_schedule_preview)
     # Trigger initial preview with default station
     _st_schedule_preview()
@@ -4583,6 +4706,9 @@ def launch_gui():
         sat = tl_saturation_var.get()
         if abs(sat - 1.0) > 0.01:
             argv += ["--saturation", f"{sat:.2f}"]
+        dv = tl_devignette_var.get()
+        if abs(dv) > 0.001:
+            argv += ["--devignette", f"{dv:.2f}"]
         out = tl_output_var.get().strip()
         if not out:
             raise ValueError("Output file is required.")
@@ -4609,6 +4735,9 @@ def launch_gui():
         sat = st_saturation_var.get()
         if abs(sat - 1.0) > 0.01:
             argv += ["--saturation", f"{sat:.2f}"]
+        dv = st_devignette_var.get()
+        if abs(dv) > 0.001:
+            argv += ["--devignette", f"{dv:.2f}"]
         station = st_station_var.get().strip()
         if station:
             argv += ["--station", station]
@@ -4887,6 +5016,11 @@ def main():
         help="libx264 preset for video output (default: ultrafast).")
     parser.add_argument("--saturation", type=float, default=1.0, metavar="S",
         help="Chroma saturation multiplier applied to the output (default: 1.0 = unchanged, >1 = more vivid).")
+    parser.add_argument("--devignette", type=str, default="-0.20", metavar="K1[,K2,K3]",
+        help="Radial vignetting correction. Polynomial coefficients k1[,k2,k3] for the model "
+             "brightness(r) = 1 + k1*r² + k2*r⁴ + k3*r⁶ where r is normalised to the corner. "
+             "Default: -0.20. Set to 0 to disable. "
+             "Typical: --devignette=-0.5 (brightens corners ~33%%). Omitted coefficients default to 0.")
     parser.add_argument("--station", type=str, default=None, metavar="HOST",
         help="Fetch input files from a remote host via SSH. The paths are interpreted on the remote host; the output is written locally.")
 
@@ -4937,6 +5071,23 @@ def main():
     # Validate --fisheye and --equirect options
     if args.fisheye and args.equirect:
         _print("Error: --fisheye and --equirect are mutually exclusive.", file=sys.stderr); sys.exit(1)
+
+    # Parse --devignette coefficients
+    devignette = None
+    if args.devignette:
+        try:
+            parts = [float(x.strip()) for x in args.devignette.split(',')]
+            k1 = parts[0] if len(parts) > 0 else 0.0
+            k2 = parts[1] if len(parts) > 1 else 0.0
+            k3 = parts[2] if len(parts) > 2 else 0.0
+            if abs(k1) > 1e-9 or abs(k2) > 1e-9 or abs(k3) > 1e-9:
+                devignette = (k1, k2, k3)
+                _print(f"INFO: Devignetting enabled — k1={k1}, k2={k2}, k3={k3}")
+            else:
+                _print("INFO: Devignetting disabled (all coefficients zero)")
+        except ValueError:
+            _print("Error: --devignette must be comma-separated floats, e.g. --devignette=-0.5", file=sys.stderr)
+            sys.exit(1)
 
     remote_temp_dir = None
     _output_file_written = [False]   # set True only on successful completion
@@ -5017,7 +5168,8 @@ def main():
                 args.pad, num_cores, padsides, model=args.model,
                 enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
                 level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
-                timestamp=args.timestamp, saturation=args.saturation
+                timestamp=args.timestamp, saturation=args.saturation,
+                devignette=devignette
             )
             _output_file_written[0] = True
         except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
@@ -5150,7 +5302,7 @@ def main():
     try:
         padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
         if is_image_output:
-            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation)
+            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation, devignette=devignette)
         elif is_video_output:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file,
@@ -5158,7 +5310,8 @@ def main():
                 save_sync_file=args.save_sync, load_sync_file=args.load_sync, enhance=args.enhance,
                 fisheye_mask=args.fisheye, max_frames=args.max_frames,
                 level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
-                timestamp=args.timestamp, saturation=args.saturation
+                timestamp=args.timestamp, saturation=args.saturation,
+                devignette=devignette
             )
         else:
             _print("Error: Output file must have a supported extension (.jpg/.jpeg/.png for images, .mp4/.mov/.avi/.mkv for videos).", file=sys.stderr)

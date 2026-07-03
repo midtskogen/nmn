@@ -65,6 +65,7 @@ except ImportError as e:
 
 try:
     import av
+    av.logging.set_level(av.logging.ERROR)  # suppress "deprecated pixel format" warnings
 except ImportError:
     print("Warning: 'PyAV' library not found. Video processing functionality will be unavailable.", file=sys.stderr)
     av = None
@@ -624,12 +625,13 @@ def process_and_reproject_image(args):
     pad_r = pad if 'right' in padsides else 0
 
     x1, y1, x2, y2 = _TIMESTAMP_BOX_HD if sh_orig >= 900 else _TIMESTAMP_BOX_SD
-    # Shift into padded image space
-    py_y1, py_y2 = y1 + pad_t, y2 + pad_t
-    py_x1, py_x2 = x1 + pad_l, x2 + pad_l
-    py[py_y1:py_y2, py_x1:py_x2] = 0
-    pu[py_y1//2:py_y2//2, py_x1//2:py_x2//2] = 128
-    pv[py_y1//2:py_y2//2, py_x1//2:py_x2//2] = 128
+    # Expand by margin to cover bilinear interpolation bleed during reprojection
+    _ts_m = 3
+    ex1 = max(0, x1 - _ts_m)
+    ey1 = max(0, y1 - _ts_m)
+    ex2 = min(sw_orig, x2 + _ts_m)
+    ey2 = min(sh_orig, y2 + _ts_m)
+    # No pixel erasure — rely on zeroed blend weights to exclude timestamp region
 
     sw_padded, sh_padded = sw_orig + pad_l + pad_r, sh_orig + pad_t + pad_b
 
@@ -639,7 +641,7 @@ def process_and_reproject_image(args):
     inner_weights = create_blend_weight_map(sw_orig, sh_orig)
     blend_weights_y = np.zeros((sh_padded, sw_padded), dtype=np.float32)
     blend_weights_y[pad_t:pad_t + sh_orig, pad_l:pad_l + sw_orig] = inner_weights
-    blend_weights_y[y1 + pad_t:y2 + pad_t, x1 + pad_l:x2 + pad_l] = 0
+    blend_weights_y[ey1 + pad_t:ey2 + pad_t, ex1 + pad_l:ex2 + pad_l] = 0
 
     # Initialize output buffers
     reproj_y.fill(0)
@@ -1044,7 +1046,7 @@ def worker_for_video_frame(args):
     reproj_y, reproj_u, reproj_v, reproj_weights_y, reproj_weights_uv = out_buffers
 
     if frame is None: return None
-    if frame.format.name not in ("yuv420p", "yuvj420p"): frame = frame.reformat(format="yuv420p")
+    if frame.format.name != "yuv420p": frame = frame.reformat(format="yuv420p")
 
     sw_orig, sh_orig = frame.width, frame.height
     
@@ -1063,11 +1065,8 @@ def worker_for_video_frame(args):
     pv_stride = pv_buffer.size // (sh_orig // 2)
     pv_src_orig = pv_buffer.reshape(sh_orig // 2, pv_stride)[:, :sw_orig // 2].copy()
     
-    # Erase timestamp overlay (applied to all cameras, same as image path)
-    x1, y1, x2, y2 = _TIMESTAMP_BOX_HD if sh_orig >= 900 else _TIMESTAMP_BOX_SD
-    py_src_orig[y1:y2, x1:x2] = 0
-    pu_src_orig[y1//2:y2//2, x1//2:x2//2] = 128
-    pv_src_orig[y1//2:y2//2, x1//2:x2//2] = 128
+    # No pixel erasure for timestamp — rely on zeroed blend weights to exclude
+    # the timestamp region. This avoids black-pixel bleed from bilinear interpolation.
 
     pad_t = pad if 'top' in padsides else 0
     pad_b = pad if 'bottom' in padsides else 0
@@ -1820,7 +1819,9 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         sh_padded = sh_map + _tmp_pad_t + _tmp_pad_b
         bw = create_blend_weight_map(sw_padded, sh_padded)
         ts_x1, ts_y1, ts_x2, ts_y2 = _TIMESTAMP_BOX_HD if sh_map >= 900 else _TIMESTAMP_BOX_SD
-        bw[ts_y1 + _tmp_pad_t:ts_y2 + _tmp_pad_t, ts_x1 + _tmp_pad_l:ts_x2 + _tmp_pad_l] = 0
+        _ts_m = 3  # margin matching worker_for_video_frame expansion
+        bw[max(0, ts_y1 - _ts_m) + _tmp_pad_t:min(sh_map, ts_y2 + _ts_m) + _tmp_pad_t,
+           max(0, ts_x1 - _ts_m) + _tmp_pad_l:min(sw_map, ts_x2 + _ts_m) + _tmp_pad_l] = 0
         _tmp_blend_weights_y.append(bw)
         map_y_idx, c01, c23 = mappings[i][0], mappings[i][1], mappings[i][2]
         _tmp_reproj = np.zeros((final_h, final_w), dtype=np.float32)
@@ -1894,6 +1895,20 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         else:
             r0_i, r1_i, c0_i, c1_i = bbox
             cam_tight_pos.append((r0_i - geo_min_top, c0_i - geo_min_left))
+
+    # Mark pixels outside the multiblend work rectangle as gaps — the eroded
+    # bounding boxes may exclude edge rows/columns that still have non-zero
+    # weight (from uneroded maps), leaving them unfilled (dark) otherwise.
+    _work_b = geo_min_top + geo_workheight
+    _work_r = geo_min_left + geo_workwidth
+    if geo_min_top > 0:
+        geo_gap[:geo_min_top, :] = True
+    if _work_b < final_h:
+        geo_gap[_work_b:, :] = True
+    if geo_min_left > 0:
+        geo_gap[:, :geo_min_left] = True
+    if _work_r < final_w:
+        geo_gap[:, _work_r:] = True
 
     geo_crop_h = final_h
     row_has_content = np.any(~geo_gap, axis=1)
@@ -2330,7 +2345,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         ]
 
         def _reproject_frame(frame, y_out, u_out, v_out):
-            if frame.format.name not in ("yuv420p", "yuvj420p"):
+            if frame.format.name != "yuv420p":
                 frame = frame.reformat(format="yuv420p")
             sw_f, sh_f = frame.width, frame.height
             py_buf = np.asarray(frame.planes[0])
@@ -2455,7 +2470,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         bw = create_blend_weight_map(sw_padded, sh_padded)
         # Zero timestamp box in weight map so those pixels never win seams
         ts_x1, ts_y1, ts_x2, ts_y2 = _TIMESTAMP_BOX_HD if sh_map >= 900 else _TIMESTAMP_BOX_SD
-        bw[ts_y1 + _tmp_pad_t:ts_y2 + _tmp_pad_t, ts_x1 + _tmp_pad_l:ts_x2 + _tmp_pad_l] = 0
+        _ts_m = 3  # margin matching worker_for_video_frame expansion
+        bw[max(0, ts_y1 - _ts_m) + _tmp_pad_t:min(sh_map, ts_y2 + _ts_m) + _tmp_pad_t,
+           max(0, ts_x1 - _ts_m) + _tmp_pad_l:min(sw_map, ts_x2 + _ts_m) + _tmp_pad_l] = 0
         _tmp_blend_weights_y.append(bw)
         # Reproject blend-weight map to canvas to accumulate coverage
         map_y_idx, c01, c23 = mappings[i][0], mappings[i][1], mappings[i][2]
@@ -2538,6 +2555,20 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         else:
             r0_i, r1_i, c0_i, c1_i = bbox
             cam_tight_pos.append((r0_i - geo_min_top, c0_i - geo_min_left))
+
+    # Mark pixels outside the multiblend work rectangle as gaps — the eroded
+    # bounding boxes may exclude edge rows/columns that still have non-zero
+    # weight (from uneroded maps), leaving them unfilled (dark) otherwise.
+    _work_b = geo_min_top + geo_workheight
+    _work_r = geo_min_left + geo_workwidth
+    if geo_min_top > 0:
+        geo_gap[:geo_min_top, :] = True
+    if _work_b < final_h:
+        geo_gap[_work_b:, :] = True
+    if geo_min_left > 0:
+        geo_gap[:, :geo_min_left] = True
+    if _work_r < final_w:
+        geo_gap[:, _work_r:] = True
 
     # Bottom-crop row (equirect only — fisheye video not supported)
     geo_crop_h = final_h
@@ -3296,7 +3327,11 @@ def launch_gui():
     root.minsize(820, 940)
 
     def _lock_geometry():
-        """Pin the window size after initial layout so content changes don't resize it."""
+        """Cycle all tabs so widgets get mapped, then pin the window size."""
+        for i in range(nb.index("end")):
+            nb.select(i)
+            root.update_idletasks()
+        nb.select(0)
         root.update_idletasks()
         w = max(root.winfo_width(),  820)
         h = max(root.winfo_height(), 940)
@@ -3333,13 +3368,6 @@ def launch_gui():
         p = filedialog.asksaveasfilename(filetypes=ft, defaultextension=ft[0][1].lstrip("*"))
         if p: var.set(p)
 
-    def datetime_entry(parent, var, col, row, hint="YYYY-MM-DD HH:MM:SS"):
-        """Entry with placeholder hint shown in gray when empty."""
-        e = ttk.Entry(parent, textvariable=var, width=22)
-        e.grid(column=col, row=row, sticky="w", padx=5, pady=3)
-        ttk.Label(parent, text=hint, foreground="#888", font=("", 8)).grid(
-            column=col+1, row=row, sticky="w", padx=2)
-        return e
 
     # ── Load cameras.json ─────────────────────────────────────────────────────
     _cameras_json = os.path.join(os.path.dirname(__file__), '..', 'server', 'data', 'cameras.json')
@@ -3456,7 +3484,7 @@ def launch_gui():
                 if _busy[0]: return
                 _busy[0] = True
                 try:
-                    raw = str_var.get().lstrip("0") or "0"
+                    raw = str_var.get().strip().lstrip("0") or "0"
                     new_val = int(raw)
                     dt = _read_dt()
                     if dt is None:
@@ -3475,10 +3503,18 @@ def launch_gui():
                 finally:
                     _busy[0] = False
 
-            str_var.trace_add("write", _apply_manual)
-
             sb = ttk.Spinbox(f, textvariable=str_var, width=width,
                              from_=0, to=9999, wrap=True)
+
+            # Select-all on focus so user can just type to overwrite
+            def _on_focus_in(event, _sb=sb):
+                _sb.selection_range(0, "end")
+                _sb.icursor("end")
+            sb.bind("<FocusIn>", _on_focus_in)
+
+            # Apply manual edits only on FocusOut or Return (not every keystroke)
+            sb.bind("<FocusOut>", lambda e: _apply_manual())
+            sb.bind("<Return>", lambda e: _apply_manual())
 
             def _increment(event):
                 dt = _read_dt()
@@ -3858,42 +3894,8 @@ def launch_gui():
             _thumb_w = (_cw - 18) // 2   # ~half panel, matches _preview_draw gap logic
             _thumb_h = int(_thumb_w * 9 / 16)  # 16:9 aspect for preview
 
-            # Target source width for preview — small enough to make LUT/blend fast
-            _PREV_SRC_W = 320
-
-            def _downscale_img(src):
-                """Resize src to _PREV_SRC_W wide, preserving the relative path inside
-                tmp so find_lens_pto_for_image can walk up two levels to lens.pto."""
-                from PIL import Image as _I
-                try:
-                    with _I.open(src) as im:
-                        ow, oh = im.size
-                        if ow <= _PREV_SRC_W:
-                            return src  # already small enough
-                        scale = _PREV_SRC_W / ow
-                        nw, nh = _PREV_SRC_W, max(1, int(oh * scale))
-                        small = im.resize((nw, nh), resample=_I.LANCZOS)
-                        if src.startswith(tmp):
-                            # Remote fetch: overwrite in-place (safe, tmp is ours)
-                            dst = src
-                        else:
-                            # Local source: mirror directory structure under tmp
-                            rel = os.path.relpath(src, "/")
-                            dst = os.path.join(tmp, rel)
-                            os.makedirs(os.path.dirname(dst), exist_ok=True)
-                            # Also copy lens.pto so the subprocess can find it
-                            lens = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(src))), "lens.pto")
-                            if os.path.isfile(lens):
-                                lens_dst = os.path.join(tmp, os.path.relpath(lens, "/"))
-                                os.makedirs(os.path.dirname(lens_dst), exist_ok=True)
-                                import shutil as _sh
-                                if not os.path.exists(lens_dst):
-                                    _sh.copy2(lens, lens_dst)
-                        small.save(dst, "JPEG", quality=85)
-                        return dst
-                except Exception as e:
-                    print(f"[preview] downscale failed for {src}: {e}", file=sys.stderr)
-                    return src
+            # No downscaling — SD mini images are already small (~640px)
+            # and downscaling breaks timestamp erasure box coordinates
 
             _stitch_errors = []
             def _stitch_to_jpg(imgs, out_name, cache_key):
@@ -3903,8 +3905,7 @@ def launch_gui():
                 if not imgs:
                     _stitch_errors.append(f"{out_name}: no images found")
                     return None
-                # Downscale source images so the stitcher LUT is tiny
-                scaled_imgs = [_downscale_img(p) for p in imgs]
+                scaled_imgs = list(imgs)
                 out = os.path.join(tmp, out_name)
                 flag = "--fisheye" if proj == "fisheye" else "--equirect"
                 cmd = [sys.executable, __file__, flag] + scaled_imgs + [out]
@@ -4063,12 +4064,15 @@ def launch_gui():
     tab_stitch.columnconfigure(1, weight=1)
     r = 0
 
-    st_mode_var    = tk.StringVar(value="image")   # image | video
+    st_mode_var    = tk.StringVar(value="video")   # image | video
     st_proj_var    = tk.StringVar(value="fisheye")  # fisheye | equirect | custom
     st_pto_var     = tk.StringVar()
     st_inputs_var  = tk.StringVar()
     st_output_var  = tk.StringVar()
-    st_station_var = tk.StringVar()
+    st_station_var = tk.StringVar()        # SSH hostname passed to --station
+    st_station_label_var = tk.StringVar()  # dropdown display label
+    st_cam_pattern_var = tk.StringVar(value=tl_pattern_var.get())  # e.g. /meteor/cam?
+    st_file_type_var = tk.StringVar(value="full")  # full | mini | image
     st_enhance_var = tk.BooleanVar()
     st_ts_var      = tk.BooleanVar()
     st_sync_var    = tk.BooleanVar()
@@ -4077,13 +4081,12 @@ def launch_gui():
     st_preset_var  = tk.StringVar(value="ultrafast")
     st_maxfr_var   = tk.IntVar(value=0)
     st_saturation_var = tk.DoubleVar(value=1.0)
-    # Single input timestamp
-    _st_now = datetime.datetime.now(datetime.timezone.utc)
-    st_dy = tk.IntVar(value=_st_now.year)
-    st_dm = tk.IntVar(value=_st_now.month)
-    st_dd = tk.IntVar(value=_st_now.day)
-    st_dh = tk.IntVar(value=_st_now.hour)
-    st_dmin = tk.IntVar(value=_st_now.minute)
+    # Single input timestamp — default to last midnight UTC
+    st_dy = tk.IntVar(value=_midnight.year)
+    st_dm = tk.IntVar(value=_midnight.month)
+    st_dd = tk.IntVar(value=_midnight.day)
+    st_dh = tk.IntVar(value=0)
+    st_dmin = tk.IntVar(value=0)
 
     ttk.Label(tab_stitch, text="Mode", font=("",10,"bold")).grid(
         column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(10,2)); r+=1
@@ -4135,12 +4138,54 @@ def launch_gui():
     ttk.Separator(tab_stitch, orient="horizontal").grid(
         column=0, row=r, columnspan=3, sticky="ew", pady=5); r+=1
 
-    lbl(tab_stitch, "Input files:", 0, r)
-    ent(tab_stitch, st_inputs_var, 1, r)
-    ttk.Button(tab_stitch, text="Browse…",
+    ttk.Label(tab_stitch, text="Source", font=("",10,"bold")).grid(
+        column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0,2)); r+=1
+
+    lbl(tab_stitch, "Station:", 0, r)
+    _st_station_labels = list(_station_map.keys())
+    if _st_station_labels:
+        st_station_combo = ttk.Combobox(tab_stitch, textvariable=st_station_label_var,
+                                        values=_st_station_labels, state="readonly", width=42)
+        st_station_combo.grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=3)
+        st_station_combo.current(0)
+        def _on_st_station_select(*_):
+            st_station_var.set(_station_map.get(st_station_label_var.get(), ""))
+        st_station_label_var.trace_add("write", _on_st_station_select)
+        _on_st_station_select()
+    else:
+        ent(tab_stitch, st_station_var, 1, r, width=30)
+        ttk.Label(tab_stitch, text="SSH hostname", foreground="#888", font=("",8)).grid(
+            column=2, row=r, sticky="w", padx=4)
+    r+=1
+
+    lbl(tab_stitch, "Camera pattern:", 0, r)
+    ent(tab_stitch, st_cam_pattern_var, 1, r, width=22)
+    ttk.Label(tab_stitch, text="glob, e.g. /meteor/cam?", foreground="#888", font=("",8)).grid(
+        column=2, row=r, sticky="w", padx=4); r+=1
+
+    lbl(tab_stitch, "File type:", 0, r)
+    ttk.Combobox(tab_stitch, textvariable=st_file_type_var, width=10,
+        values=["full", "mini", "image"], state="readonly").grid(
+        column=1, row=r, sticky="w", padx=5, pady=3)
+    ttk.Label(tab_stitch, text="full=full_mm.mp4, mini=mini_mm.mp4, image=*.jpg", foreground="#888", font=("",8)).grid(
+        column=2, row=r, sticky="w", padx=4); r+=1
+
+    # Local files row — shown only when no station is selected
+    _st_local_lbl_widget = ttk.Label(tab_stitch, text="Local input files:")
+    _st_local_lbl_widget.grid(column=0, row=r, sticky="w", padx=5, pady=3)
+    _st_local_ent = ent(tab_stitch, st_inputs_var, 1, r)
+    _st_local_btn = ttk.Button(tab_stitch, text="Browse…",
         command=lambda: browseopen(st_inputs_var, multiple=True,
-            filetypes=[("Images/Videos","*.jpg *.jpeg *.png *.mp4 *.mov *.avi *.mkv"),("All","*.*")])).grid(
-        column=2, row=r, padx=5, pady=3); r+=1
+            filetypes=[("Images/Videos","*.jpg *.jpeg *.png *.mp4 *.mov *.avi *.mkv"),("All","*.*")]))
+    _st_local_btn.grid(column=2, row=r, padx=5, pady=3); r+=1
+
+    def _refresh_st_source_rows(*_):
+        has_station = bool(st_station_var.get().strip())
+        for w in (_st_local_lbl_widget, _st_local_ent, _st_local_btn):
+            w.grid_remove() if has_station else w.grid()
+
+    st_station_var.trace_add("write", _refresh_st_source_rows)
+    _refresh_st_source_rows()
 
     lbl(tab_stitch, "Output file:", 0, r)
     ent(tab_stitch, st_output_var, 1, r)
@@ -4149,11 +4194,6 @@ def launch_gui():
             [("JPEG","*.jpg"),("MP4","*.mp4"),("All","*.*")])).grid(
         column=2, row=r, padx=5, pady=3); r+=1
 
-    lbl(tab_stitch, "Remote station:", 0, r)
-    ent(tab_stitch, st_station_var, 1, r, width=22)
-    ttk.Label(tab_stitch, text="SSH hostname (optional)", foreground="#888", font=("",8)).grid(
-        column=2, row=r, sticky="w", padx=4); r+=1
-
     ttk.Separator(tab_stitch, orient="horizontal").grid(
         column=0, row=r, columnspan=3, sticky="ew", pady=5); r+=1
 
@@ -4161,8 +4201,10 @@ def launch_gui():
         column=1, row=r, sticky="w", padx=5); r+=1
     ttk.Checkbutton(tab_stitch, text="Overlay UTC timestamp", variable=st_ts_var).grid(
         column=1, row=r, sticky="w", padx=5); r+=1
-    ttk.Checkbutton(tab_stitch, text="Synchronize video streams (--sync)", variable=st_sync_var).grid(
-        column=1, row=r, sticky="w", padx=5); r+=1
+
+    # Video-only options (hidden for image mode)
+    _st_sync_chk = ttk.Checkbutton(tab_stitch, text="Synchronize video streams (--sync)", variable=st_sync_var)
+    _st_sync_chk.grid(column=1, row=r, sticky="w", padx=5); r+=1
 
     # Load model names from timestamp.py if available
     _ts_model_path = os.path.join(os.path.dirname(__file__), 'timestamp.py')
@@ -4179,7 +4221,8 @@ def launch_gui():
                         "IMX307HD_24x36", "IMX307HD_16x24"]
     _sync_model_values = ["(auto-detect)"] + _sync_models
 
-    lbl(tab_stitch, "Sync model:", 0, r)
+    _sync_lbl_w = ttk.Label(tab_stitch, text="Sync model:")
+    _sync_lbl_w.grid(column=0, row=r, sticky="w", padx=5, pady=3)
     _sync_combo = ttk.Combobox(tab_stitch, textvariable=st_model_var,
                                values=_sync_model_values, state="readonly", width=22)
     _sync_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3)
@@ -4190,16 +4233,26 @@ def launch_gui():
             st_model_var.set("")
     st_model_var.trace_add("write", _on_sync_model)
     r += 1
-    lbl(tab_stitch, "CRF (quality):", 0, r)
+
+    _st_crf_lbl = ttk.Label(tab_stitch, text="CRF (quality):")
+    _st_crf_lbl.grid(column=0, row=r, sticky="w", padx=5, pady=3)
     _st_crf_frame = ttk.Frame(tab_stitch)
     _st_crf_frame.grid(column=1, row=r, sticky="w", padx=5, pady=3)
     ttk.Spinbox(_st_crf_frame, textvariable=st_crf_var, from_=0, to=51, width=5).pack(side="left")
     ttk.Label(_st_crf_frame, text=" (0=lossless, 28=default, 51=worst)", foreground="#888", font=("",8)).pack(side="left")
     r+=1
-    lbl(tab_stitch, "Preset:", 0, r)
-    ttk.Combobox(tab_stitch, textvariable=st_preset_var, width=14,
-        values=["ultrafast","superfast","veryfast","faster","fast","medium","slow","veryslow"]).grid(
-        column=1, row=r, sticky="w", padx=5, pady=3); r+=1
+
+    _st_preset_lbl = ttk.Label(tab_stitch, text="Preset:")
+    _st_preset_lbl.grid(column=0, row=r, sticky="w", padx=5, pady=3)
+    _st_preset_combo = ttk.Combobox(tab_stitch, textvariable=st_preset_var, width=14,
+        values=["ultrafast","superfast","veryfast","faster","fast","medium","slow","veryslow"])
+    _st_preset_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r+=1
+
+    _st_maxfr_lbl = ttk.Label(tab_stitch, text="Max frames (0=all):")
+    _st_maxfr_lbl.grid(column=0, row=r, sticky="w", padx=5, pady=3)
+    _st_maxfr_sb = ttk.Spinbox(tab_stitch, textvariable=st_maxfr_var, from_=0, to=999999, width=8)
+    _st_maxfr_sb.grid(column=1, row=r, sticky="w", padx=5, pady=3); r+=1
+
     lbl(tab_stitch, "Saturation:", 0, r)
     _st_sat_frame = ttk.Frame(tab_stitch)
     _st_sat_frame.grid(column=1, row=r, columnspan=2, sticky="ew", padx=5, pady=3)
@@ -4210,12 +4263,230 @@ def launch_gui():
     tk.Scale(_st_sat_frame, variable=st_saturation_var, from_=0.0, to=3.0, resolution=0.1,
              orient="horizontal", showvalue=False, command=_st_sat_update).pack(side="left", fill="x", expand=True)
     r+=1
-    lbl(tab_stitch, "Input timestamp:", 0, r)
+
+    lbl(tab_stitch, "Timestamp (UTC):", 0, r)
     _dt_spinboxes(tab_stitch, st_dy, st_dm, st_dd, st_dh, st_dmin).grid(
         column=1, row=r, columnspan=2, sticky="w", padx=5, pady=3); r+=1
-    lbl(tab_stitch, "Max frames (0=all):", 0, r)
-    ttk.Spinbox(tab_stitch, textvariable=st_maxfr_var, from_=0, to=999999, width=8).grid(
-        column=1, row=r, sticky="w", padx=5, pady=3); r+=1
+
+    # ── Video-only visibility control ──
+    _st_video_widgets = [_st_sync_chk, _sync_lbl_w, _sync_combo,
+                         _st_crf_lbl, _st_crf_frame,
+                         _st_preset_lbl, _st_preset_combo,
+                         _st_maxfr_lbl, _st_maxfr_sb]
+
+    def _st_update_video_opts(*_):
+        is_video = st_mode_var.get() == "video"
+        st = "!disabled" if is_video else "disabled"
+        for w in _st_video_widgets:
+            try:
+                w.state([st])
+            except AttributeError:
+                w.configure(state="normal" if is_video else "disabled")
+        # Sync model: only enabled when video AND sync is checked
+        sync_st = "!disabled" if (is_video and st_sync_var.get()) else "disabled"
+        try:
+            _sync_lbl_w.state([sync_st]); _sync_combo.state([sync_st])
+        except AttributeError:
+            s = "normal" if (is_video and st_sync_var.get()) else "disabled"
+            _sync_lbl_w.configure(state=s); _sync_combo.configure(state=s)
+
+    st_mode_var.trace_add("write", _st_update_video_opts)
+    st_sync_var.trace_add("write", _st_update_video_opts)
+    _st_update_video_opts()
+
+    # ── Stitch Preview ──────────────────────────────────────────────────────
+    ttk.Separator(tab_stitch, orient="horizontal").grid(
+        column=0, row=r, columnspan=3, sticky="ew", pady=(8, 2)); r += 1
+    st_preview_hdr_var = tk.StringVar(value="Preview  (auto-updates)")
+    ttk.Label(tab_stitch, textvariable=st_preview_hdr_var, font=("", 9, "bold"),
+              foreground="#555").grid(column=0, row=r, columnspan=3, sticky="w", padx=5); r += 1
+
+    tab_stitch.rowconfigure(r, weight=1)
+    st_preview_canvas = tk.Canvas(tab_stitch, bg="#111", height=220)
+    st_preview_canvas.grid(column=0, row=r, columnspan=3, sticky="nsew", padx=5, pady=(2, 5))
+
+    _st_prev_img_ref = [None]
+    _st_prev_job     = [None]
+    _st_prev_thread  = [None]
+    _st_prev_tmpdir  = [None]
+    _st_prev_cancel  = [threading.Event()]
+    _st_prev_cache   = {}
+
+    def _st_preview_draw(pil_img, label_txt):
+        cw = st_preview_canvas.winfo_width()
+        if cw < 10:  # tab not yet displayed
+            cw = max(root.winfo_width() - 30, 400)
+        ch = st_preview_canvas.winfo_height()
+        if ch < 10:
+            ch = 220
+        st_preview_canvas.delete("all")
+        from PIL import Image as _PILImage, ImageTk as _PILImageTk, ImageEnhance as _PILEnhance
+        iw, ih = pil_img.size
+        if iw < 1 or ih < 1:
+            return
+        tw, th = max(cw - 12, 1), max(ch - 20, 1)
+        scale = min(tw / iw, th / ih)
+        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+        thumb = pil_img.resize((nw, nh), resample=getattr(_PILImage, "LANCZOS", 1))
+        _sat = st_saturation_var.get()
+        if abs(_sat - 1.0) > 0.01:
+            thumb = _PILEnhance.Color(thumb).enhance(_sat)
+        photo = _PILImageTk.PhotoImage(thumb)
+        _st_prev_img_ref[0] = photo
+        x0 = (cw - thumb.width) // 2
+        y0 = (ch - 20 - thumb.height) // 2
+        st_preview_canvas.create_image(x0, y0, anchor="nw", image=photo)
+        st_preview_canvas.create_text(cw // 2, ch - 10, text=label_txt,
+                                       fill="#aaa", font=("", 8))
+
+    def _st_preview_status(msg):
+        root.after(0, st_preview_hdr_var.set, f"Preview  —  {msg}")
+
+    def _st_fetch_and_stitch(dt, station, pattern, proj, cancel_ev):
+        import tempfile as _tmp
+        tmp = _tmp.mkdtemp(prefix="stitcher_stprev_")
+        old = _st_prev_tmpdir[0]
+        _st_prev_tmpdir[0] = tmp
+        if old and os.path.isdir(old):
+            try: shutil.rmtree(old)
+            except Exception: pass
+
+        try:
+            base = pattern.rstrip("/")
+            img_glob = f"{base}/{dt.strftime('%Y%m%d')}/{dt.strftime('%H')}/mini_{dt.strftime('%M')}.jpg"
+            pto_glob = f"{base}/lens.pto"
+
+            if cancel_ev.is_set(): return
+            _st_preview_status("Fetching images…")
+
+            def _dedup_by_cam(paths):
+                seen = {}
+                for p in sorted(paths):
+                    m = re.search(r'cam(\d+)', p)
+                    key = m.group(1) if m else p
+                    if key not in seen:
+                        seen[key] = p
+                return list(seen.values())
+
+            if station:
+                script = (
+                    f'compgen -G {shlex.quote(img_glob)} 2>/dev/null || true\n'
+                    f'compgen -G {shlex.quote(pto_glob)} 2>/dev/null || true\n'
+                )
+                r_result = subprocess.run(
+                    ["ssh", "-o", "BatchMode=yes", station, "bash", "-c", shlex.quote(script)],
+                    capture_output=True, text=True, timeout=30
+                )
+                remote_files = [l.strip() for l in r_result.stdout.splitlines() if l.strip()]
+                if not any(f.endswith(".jpg") for f in remote_files):
+                    _st_preview_status("No images found for this timestamp.")
+                    return
+                if cancel_ev.is_set(): return
+                file_list = "\n".join(remote_files) + "\n"
+                ssh_proc = subprocess.Popen(
+                    ["ssh", "-o", "BatchMode=yes", station, "tar", "-chf", "-", "-T", "/dev/stdin"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                tar_proc = subprocess.Popen(
+                    ["tar", "-xf", "-", "-C", tmp],
+                    stdin=ssh_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                ssh_proc.stdout.close()
+                ssh_proc.stdin.write(file_list.encode()); ssh_proc.stdin.close()
+                tar_proc.communicate(timeout=60)
+                ssh_proc.wait(timeout=10)
+
+                bn = f"mini_{dt.strftime('%M')}.jpg"
+                all_fetched = []
+                for dirpath, _, fnames in os.walk(tmp):
+                    for fn in fnames:
+                        if fn.endswith(".jpg"):
+                            all_fetched.append(os.path.join(dirpath, fn))
+                imgs = _dedup_by_cam(
+                    f for f in all_fetched
+                    if os.path.basename(f) == bn
+                    and f"/{dt.strftime('%Y%m%d')}/{dt.strftime('%H')}/" in f)
+            else:
+                imgs = _dedup_by_cam(glob.glob(img_glob))
+
+            if cancel_ev.is_set(): return
+            if not imgs:
+                _st_preview_status("No images found for this timestamp.")
+                return
+
+            _st_preview_status("Stitching preview…")
+
+            # No downscaling — SD mini images are already small (~640px)
+            # and downscaling breaks timestamp erasure box coordinates
+            scaled_imgs = list(imgs)
+
+            if cancel_ev.is_set(): return
+
+            out = os.path.join(tmp, "preview_stitch.jpg")
+            flag = "--fisheye" if proj == "fisheye" else "--equirect"
+            cmd = [sys.executable, __file__, flag] + scaled_imgs + [out]
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                _st_preview_status("Preview stitch timed out.")
+                return
+
+            if not os.path.isfile(out):
+                err = (res.stderr or res.stdout or "").strip()
+                snippet = " | ".join(err.splitlines()[-2:]) if err else "(no output)"
+                _st_preview_status(f"Stitch error: {snippet[:80]}")
+                return
+
+            from PIL import Image as _I
+            pil = _I.open(out).copy()
+            lbl_txt = f"{dt.strftime('%Y-%m-%d %H:%M')} UTC  —  {proj}"
+            root.after(0, _st_preview_draw, pil, lbl_txt)
+            _st_preview_status(f"Preview updated  ({dt.strftime('%Y-%m-%d %H:%M')} UTC)")
+
+        except Exception as exc:
+            if not cancel_ev.is_set():
+                _st_preview_status(f"Preview error: {exc}")
+                import traceback as _tb
+                _tb.print_exc(file=sys.stderr)
+
+    def _st_schedule_preview(*_):
+        if _st_prev_job[0]:
+            root.after_cancel(_st_prev_job[0])
+        _st_prev_cancel[0].set()
+        _st_prev_cancel[0] = threading.Event()
+
+        def _launch():
+            _st_prev_job[0] = None
+            try:
+                dt = datetime.datetime(
+                    st_dy.get(), st_dm.get(), st_dd.get(),
+                    st_dh.get(), st_dmin.get(), 0,
+                    tzinfo=datetime.timezone.utc)
+            except (ValueError, tk.TclError):
+                return
+            station = st_station_var.get().strip()
+            pattern = st_cam_pattern_var.get().strip()
+            proj    = st_proj_var.get()
+            if proj == "custom":
+                proj = "fisheye"  # preview always uses fisheye or equirect
+            cancel_ev = _st_prev_cancel[0]
+            _st_preview_status("Fetching…")
+            t = threading.Thread(
+                target=_st_fetch_and_stitch,
+                args=(dt, station, pattern, proj, cancel_ev),
+                daemon=True
+            )
+            _st_prev_thread[0] = t
+            t.start()
+
+        _st_prev_job[0] = root.after(700, _launch)
+
+    for _v in (st_dy, st_dm, st_dd, st_dh, st_dmin,
+               st_station_var, st_cam_pattern_var, st_proj_var,
+               st_saturation_var):
+        _v.trace_add("write", _st_schedule_preview)
+    # Trigger initial preview with default station
+    _st_schedule_preview()
 
     # ═══════════════════════════════════════════════════════════════
     # TAB 3 – Log
@@ -4263,6 +4534,17 @@ def launch_gui():
     btn_frame.pack(fill="x", padx=8, pady=(2, 8))
 
     run_btn = [None]
+    open_btn = [None]
+    _last_output = [None]   # path to last successfully produced output file
+
+    def _open_output():
+        path = _last_output[0]
+        if path and os.path.isfile(path):
+            try:
+                subprocess.Popen(["xdg-open", path],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                log(f"Could not open file: {e}")
 
     def _build_argv_timelapse():
         argv = []
@@ -4280,10 +4562,13 @@ def launch_gui():
             if h: dur.append(f"{h} hours")
             if m: dur.append(f"{m} minutes")
             argv += ["--timelapse-duration", " ".join(dur)]
-        argv += ["--timelapse-speed", tl_speed_var.get().strip()]
-        argv += ["--timelapse-framerate", str(tl_fps_var.get())]
-        argv += ["--timelapse-quality", tl_quality_var.get()]
-        if tl_pattern_var.get().strip():
+        if tl_speed_var.get().strip() != "60":
+            argv += ["--timelapse-speed", tl_speed_var.get().strip()]
+        if tl_fps_var.get() != 30:
+            argv += ["--timelapse-framerate", str(tl_fps_var.get())]
+        if tl_quality_var.get() != "sd":
+            argv += ["--timelapse-quality", tl_quality_var.get()]
+        if tl_pattern_var.get().strip() and tl_pattern_var.get().strip() != "/meteor/cam?":
             argv += ["--timelapse-pattern", tl_pattern_var.get().strip()]
         if tl_station_var.get().strip():
             argv += ["--station", tl_station_var.get().strip()]
@@ -4324,18 +4609,35 @@ def launch_gui():
         sat = st_saturation_var.get()
         if abs(sat - 1.0) > 0.01:
             argv += ["--saturation", f"{sat:.2f}"]
-        argv += ["--input-datetime",
-                 f"{st_dy.get():04d}-{st_dm.get():02d}-{st_dd.get():02d} "
-                 f"{st_dh.get():02d}:{st_dmin.get():02d}:00"]
-        if st_station_var.get().strip():
-            argv += ["--station", st_station_var.get().strip()]
+        station = st_station_var.get().strip()
+        if station:
+            argv += ["--station", station]
+            cam_pat = st_cam_pattern_var.get().strip()
+            file_type = st_file_type_var.get().strip()
+            if not cam_pat: raise ValueError("Camera pattern is required.")
+            if not file_type: raise ValueError("File type is required.")
+            # Build datetime-structured path: /meteor/cam?/YYYYMMDD/HH/full_MM.mp4
+            y, m, d, h, min_ = st_dy.get(), st_dm.get(), st_dd.get(), st_dh.get(), st_dmin.get()
+            date_dir = f"{y:04d}{m:02d}{d:02d}"
+            hour_dir = f"{h:02d}"
+            if file_type == "full":
+                file_pat = f"full_{min_:02d}.mp4"
+            elif file_type == "mini":
+                file_pat = f"mini_{min_:02d}.mp4"
+            else:  # image
+                file_pat = "*.jpg"
+            argv.append(f"{cam_pat}/{date_dir}/{hour_dir}/{file_pat}")
+        else:
+            argv += ["--input-datetime",
+                     f"{st_dy.get():04d}-{st_dm.get():02d}-{st_dd.get():02d} "
+                     f"{st_dh.get():02d}:{st_dmin.get():02d}:00"]
+            raw = st_inputs_var.get().strip()
+            if not raw: raise ValueError("Input files are required.")
+            argv += shlex.split(raw)
         if proj == "custom":
             pto = st_pto_var.get().strip()
             if not pto: raise ValueError("PTO file is required for custom projection.")
             argv.append(pto)
-        raw = st_inputs_var.get().strip()
-        if not raw: raise ValueError("Input files are required.")
-        argv += shlex.split(raw)
         out = st_output_var.get().strip()
         if not out: raise ValueError("Output file is required.")
         argv.append(out)
@@ -4411,6 +4713,8 @@ def launch_gui():
                 if proc.returncode == 0:
                     root.after(0, set_progress, 100, "Done.")
                     root.after(0, log, "\n✅  Done.")
+                    if _last_output[0] and os.path.isfile(_last_output[0]):
+                        root.after(0, lambda: open_btn[0].config(state="normal"))
                 else:
                     root.after(0, set_progress, 0, f"Failed (exit {proc.returncode}).")
                     root.after(0, log, f"\n❌  Exited with code {proc.returncode}.")
@@ -4427,12 +4731,15 @@ def launch_gui():
     def run_current():
         if running.is_set():
             return
+        open_btn[0].config(state="disabled")
         tab_idx = nb.index(nb.select())
         try:
             if tab_idx == 0:    # Timelapse tab
                 argv = _build_argv_timelapse()
+                _last_output[0] = os.path.abspath(tl_output_var.get().strip())
             elif tab_idx == 1:  # Stitch tab
                 argv = _build_argv_stitch()
+                _last_output[0] = os.path.abspath(st_output_var.get().strip())
             else:
                 messagebox.showinfo("Info", "Switch to the Timelapse or Stitch tab first.")
                 return
@@ -4474,27 +4781,50 @@ def launch_gui():
     run_btn[0] = ttk.Button(btn_frame, text="▶  Run", command=run_current)
     run_btn[0].pack(side="left", padx=4)
     ttk.Button(btn_frame, text="✕  Cancel", command=cancel_current).pack(side="left", padx=4)
+    open_btn[0] = ttk.Button(btn_frame, text="📂  Open", command=_open_output, state="disabled")
+    open_btn[0].pack(side="left", padx=4)
     ttk.Button(btn_frame, text="Quit", command=quit_app).pack(side="right", padx=4)
 
     root.protocol("WM_DELETE_WINDOW", quit_app)
 
-    # Live command preview
+    # Live command preview — full-width frame below buttons
+    cmd_frame = ttk.Frame(root)
+    cmd_frame.pack(fill="x", padx=8, pady=(0, 4))
     cmd_preview_var = tk.StringVar(value="")
-    ttk.Label(btn_frame, textvariable=cmd_preview_var, foreground="#777",
-              font=("Courier", 8), wraplength=550, justify="left").pack(side="left", padx=10)
+    ttk.Label(cmd_frame, textvariable=cmd_preview_var, foreground="#000",
+              font=("Courier", 8), wraplength=780, justify="left", anchor="w").pack(
+        side="left", fill="x", expand=True)
+
+    def _copy_cmd():
+        txt = cmd_preview_var.get()
+        if txt:
+            root.clipboard_clear()
+            root.clipboard_append(txt)
+            # Also set PRIMARY selection for middle-click paste on X11
+            try:
+                root.selection_clear()
+                root.selection_handle(lambda offset, length: txt[int(offset):int(offset)+int(length)])
+                root.selection_own()
+            except Exception:
+                pass
+    ttk.Button(cmd_frame, text="Copy", width=5, command=_copy_cmd).pack(side="right", padx=(4, 0))
 
     def _update_preview(*_):
         try:
             idx = nb.index(nb.select())
-            if idx == 0:
-                argv = _build_argv_timelapse()
-            elif idx == 1:
-                argv = _build_argv_stitch()
-            else:
-                cmd_preview_var.set(""); return
-            preview = "stitcher.py " + " ".join(argv)
-            cmd_preview_var.set(preview[:180] + ("…" if len(preview) > 180 else ""))
         except Exception:
+            return
+        if idx in (0, 1):
+            if not cmd_frame.winfo_ismapped():
+                cmd_frame.pack(fill="x", padx=8, pady=(0, 4))
+            try:
+                argv = _build_argv_timelapse() if idx == 0 else _build_argv_stitch()
+                cmd_preview_var.set(__file__ + " " + " ".join(
+                    f'"{a}"' if " " in a else a for a in argv))
+            except Exception:
+                cmd_preview_var.set("")
+        else:
+            cmd_frame.pack_forget()
             cmd_preview_var.set("")
 
     for v in (tl_station_var, tl_station_label_var, tl_proj_var, tl_quality_var,
@@ -4507,7 +4837,8 @@ def launch_gui():
               st_mode_var, st_proj_var, st_pto_var, st_inputs_var, st_output_var,
               st_station_var, st_enhance_var, st_ts_var, st_sync_var, st_model_var,
               st_crf_var, st_preset_var, st_maxfr_var,
-              st_saturation_var, st_dy, st_dm, st_dd, st_dh, st_dmin):
+              st_saturation_var, st_dy, st_dm, st_dd, st_dh, st_dmin,
+              st_station_label_var, st_cam_pattern_var, st_file_type_var):
         v.trace_add("write", _update_preview)
     nb.bind("<<NotebookTabChanged>>", _update_preview)
 
@@ -4731,6 +5062,11 @@ def main():
             _print("Error: No remote files matched the input patterns.", file=sys.stderr); sys.exit(1)
         lens_paths = _collect_remote_lens_pto_paths(remote_input_files)
         _print(f"Discovered {len(remote_input_files)} remote input files and {len(lens_paths)} lens.pto files")
+        # Sort remote input files by camera number to match PTO file order
+        try:
+            remote_input_files = sorted(remote_input_files, key=lambda f: extract_camera_number_from_path(f))
+        except ValueError:
+            pass
         all_remote_files = remote_input_files + lens_paths
         local_paths = _fetch_remote_files_over_ssh(args.station, all_remote_files, remote_temp_dir, progress_prefix="Fetching input files")
         args.input_files = local_paths[:len(remote_input_files)]
@@ -4763,6 +5099,12 @@ def main():
                 unique_input_files.append(f)
         
         args.input_files = unique_input_files
+        # Sort input files by camera number to match PTO file order
+        try:
+            args.input_files = sorted(args.input_files, key=lambda f: extract_camera_number_from_path(f))
+        except ValueError:
+            # If any file doesn't have a camera number, keep original order
+            pass
         _print(f"Expanded input files to {len(args.input_files)} files")
         
         pto_file = generate_pto_from_lens_files(args.input_files, projection,
@@ -4777,15 +5119,39 @@ def main():
         if not os.path.exists(f):
             _print(f"Error: Input file not found: {f}", file=sys.stderr); sys.exit(1)
 
-    is_image_input = all(f.lower().endswith(('.jpg', '.jpeg', '.png')) for f in args.input_files)
-    is_video_input = all(f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')) for f in args.input_files)
-    
+    is_image_output = args.output_file.lower().endswith(('.jpg', '.jpeg', '.png'))
+    is_video_output = args.output_file.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))
+
+    # If output is image but inputs are videos, extract first frame from each video
+    _temp_frame_files = []
+    if is_image_output and any(f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')) for f in args.input_files):
+        if av is None:
+            _print("Error: PyAV is required to extract frames from videos for image output.", file=sys.stderr); sys.exit(1)
+        _print("Extracting first frame from video inputs...")
+        for vid_path in args.input_files:
+            if vid_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
+                import tempfile as _tf
+                temp_frame = _tf.NamedTemporaryFile(suffix='.jpg', delete=False)
+                temp_frame.close()
+                _temp_frame_files.append(temp_frame.name)
+                try:
+                    container = av.open(vid_path)
+                    frame = container.decode(video=0).__next__()
+                    if frame.format.name != "rgb24":
+                        frame = frame.reformat(format="rgb24")
+                    frame.to_image().save(temp_frame.name, quality=95)
+                    container.close()
+                except Exception as e:
+                    _print(f"Error extracting frame from {vid_path}: {e}", file=sys.stderr); sys.exit(1)
+        # Replace video paths with extracted frame paths
+        args.input_files = [_temp_frame_files[i] if args.input_files[i].lower().endswith(('.mp4', '.mov', '.avi', '.mkv')) else args.input_files[i] for i in range(len(args.input_files))]
+
     # --- Main Execution with Global Error Handling ---
     try:
         padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
-        if is_image_input:
+        if is_image_output:
             reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation)
-        elif is_video_input:
+        elif is_video_output:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file,
                 args.pad, num_cores, padsides, args.sync, args.model,
@@ -4795,7 +5161,7 @@ def main():
                 timestamp=args.timestamp, saturation=args.saturation
             )
         else:
-            _print("Error: Input files must all be of the same type (either all images or all videos).", file=sys.stderr)
+            _print("Error: Output file must have a supported extension (.jpg/.jpeg/.png for images, .mp4/.mov/.avi/.mkv for videos).", file=sys.stderr)
             sys.exit(1)
         _output_file_written[0] = True
     except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
@@ -4820,6 +5186,13 @@ def main():
                 _print(f"Cleaned up temporary PTO file: {auto_generated_pto}")
             except Exception as e:
                 _print(f"Warning: Failed to clean up temporary PTO file: {e}", file=sys.stderr)
+        # Clean up temporary extracted frame files
+        for tf in _temp_frame_files:
+            if os.path.exists(tf):
+                try:
+                    os.unlink(tf)
+                except Exception:
+                    pass
         if remote_temp_dir and os.path.exists(remote_temp_dir):
             try:
                 shutil.rmtree(remote_temp_dir)

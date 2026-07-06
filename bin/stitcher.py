@@ -380,11 +380,15 @@ def _blur_padded_area_numba(plane, pad_t, pad_b, pad_l, pad_r, blur_kernel_size,
 
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def reproject_y(py, dw, dh, sw, map_y_idx, c01, c23, out_y):
-    for yi in prange(dh):
+def reproject_y(py, dw, dh, sw, map_y_idx, c01, c23, out_y, fisheye_mask=None, crop_h=None):
+    dh_limit = dh if crop_h is None else min(dh, crop_h)
+    for yi in prange(dh_limit):
         base_out = yi * dw
         base_map = yi * dw
         for xi in range(dw):
+            if fisheye_mask is not None and fisheye_mask[base_out + xi]:
+                out_y[base_out + xi] = 0
+                continue
             idx = map_y_idx[base_map + xi]
             if idx < 0: continue
             weights01, weights23 = c01[base_map + xi], c23[base_map + xi]
@@ -393,11 +397,15 @@ def reproject_y(py, dw, dh, sw, map_y_idx, c01, c23, out_y):
             out_y[base_out + xi] = interpolated_value
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def reproject_float(p_float_src, dw, dh, sw, map_y_idx, c01, c23, out_float):
-    for yi in prange(dh):
+def reproject_float(p_float_src, dw, dh, sw, map_y_idx, c01, c23, out_float, fisheye_mask=None, crop_h=None):
+    dh_limit = dh if crop_h is None else min(dh, crop_h)
+    for yi in prange(dh_limit):
         base_out = yi * dw
         base_map = yi * dw
         for xi in range(dw):
+            if fisheye_mask is not None and fisheye_mask[base_out + xi]:
+                out_float[base_out + xi] = 0.0
+                continue
             idx = map_y_idx[base_map + xi]
             if idx < 0: continue
             weights01, weights23 = c01[base_map + xi], c23[base_map + xi]
@@ -406,11 +414,16 @@ def reproject_float(p_float_src, dw, dh, sw, map_y_idx, c01, c23, out_float):
             out_float[base_out + xi] = interpolated_value
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def reproject_uv(pu, pv, dw, dh, map_uv_idx, out_u, out_v):
+def reproject_uv(pu, pv, dw, dh, map_uv_idx, out_u, out_v, fisheye_mask=None, crop_h=None):
     half_w, half_h = dw // 2, dh // 2
-    for y_uv in prange(half_h):
+    half_h_limit = half_h if crop_h is None else min(half_h, (crop_h + 1) // 2)
+    for y_uv in prange(half_h_limit):
         base_uv = y_uv * half_w
         for x_uv in range(half_w):
+            if fisheye_mask is not None and fisheye_mask[base_uv + x_uv]:
+                out_u[base_uv + x_uv] = 128
+                out_v[base_uv + x_uv] = 128
+                continue
             coffset = map_uv_idx[base_uv + x_uv]
             if coffset >= 0:
                 out_u[base_uv + x_uv], out_v[base_uv + x_uv] = pu[coffset], pv[coffset]
@@ -655,7 +668,7 @@ _TIMESTAMP_BOX_SD = (0,  430, 155,  448)   # for height < 900
 
 def process_and_reproject_image(args):
     """Worker function to reproject a single image, writing to pre-allocated buffers."""
-    (input_path, dw, dh, mapping, pad, padsides, devignette), out_buffers = args
+    (input_path, dw, dh, mapping, pad, padsides, devignette, fisheye_mask), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y = out_buffers
 
     map_y_idx, c01, c23, map_uv_idx, sw_pto, sh_pto = mapping
@@ -701,9 +714,9 @@ def process_and_reproject_image(args):
     reproj_weights_y.fill(0)
 
     # Reproject into shared buffers
-    reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel())
-    reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel())
-    reproject_float(blend_weights_y.ravel(), dw, dh, blend_weights_y.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
+    reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None)
+    reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel(), fisheye_mask[1].ravel() if fisheye_mask is not None else None)
+    reproject_float(blend_weights_y.ravel(), dw, dh, blend_weights_y.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None)
 
 
 def _round_up_16(x: int) -> int:
@@ -739,9 +752,9 @@ def _precompile_numba_functions():
     # Call each function once to compile it
     _ = create_blend_weight_map(dw, dh)
     _ = _blur_padded_area_numba(np.zeros((32, 32), dtype=np.float32), 8, 8, 8, 8, 16, 4.0)
-    reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y)
-    reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v)
-    reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float)
+    reproject_y(p_y, dw, dh, sw_src, map_y_idx, c01, c23, out_y, fisheye_mask=None, crop_h=None)
+    reproject_uv(p_uv, p_uv, dw, dh, map_uv_idx, out_u, out_v, fisheye_mask=None, crop_h=None)
+    reproject_float(p_float, dw, dh, sw_src, map_y_idx, c01, c23, out_float, fisheye_mask=None, crop_h=None)
     _yuv420_to_rgb_kernel(p_y, p_uv, p_uv,
         np.zeros(dw*dh,dtype=np.uint8), np.zeros(dw*dh,dtype=np.uint8), np.zeros(dw*dh,dtype=np.uint8),
         dh, dw, dw//2)
@@ -779,8 +792,22 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         u_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
         v_final = np.full((dh // 2, dw // 2), 128, dtype=np.uint8)
 
-        reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel())
-        reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel())
+        # Precompute fisheye mask for single-image path
+        if fisheye_mask:
+            cx, cy = dw // 2, dh // 2
+            r = min(cx, cy)
+            ys, xs = np.ogrid[:dh, :dw]
+            outside_y = (xs - cx) ** 2 + (ys - cy) ** 2 > r * r
+            h_uv, w_uv = dh // 2, dw // 2
+            cx_uv, cy_uv = w_uv // 2, h_uv // 2
+            r_uv = min(cx_uv, cy_uv)
+            ys_uv, xs_uv = np.ogrid[:h_uv, :w_uv]
+            outside_uv = (xs_uv - cx_uv) ** 2 + (ys_uv - cy_uv) ** 2 > r_uv * r_uv
+        else:
+            outside_y = outside_uv = None
+
+        reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel(), outside_y.ravel() if outside_y is not None else None)
+        reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel(), outside_uv.ravel() if outside_uv is not None else None)
 
         if enhance:
             _print("Applying enhancement filter...")
@@ -811,6 +838,20 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
 
     # Eagerly compile Numba functions before entering the thread pool
     _precompile_numba_functions()
+
+    # Precompute fisheye mask for multi-image path
+    if fisheye_mask:
+        cx, cy = final_w // 2, final_h // 2
+        r = min(cx, cy)
+        ys, xs = np.ogrid[:final_h, :final_w]
+        outside_y = (xs - cx) ** 2 + (ys - cy) ** 2 > r * r
+        h_uv, w_uv = final_h // 2, final_w // 2
+        cx_uv, cy_uv = w_uv // 2, h_uv // 2
+        r_uv = min(cx_uv, cy_uv)
+        ys_uv, xs_uv = np.ogrid[:h_uv, :w_uv]
+        outside_uv = (xs_uv - cx_uv) ** 2 + (ys_uv - cy_uv) ** 2 > r_uv * r_uv
+    else:
+        outside_y = outside_uv = None
 
     _print("Reprojecting source images...")
 
@@ -882,7 +923,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
             mapping = mappings[i]
             mappings[i] = None
             process_and_reproject_image(
-                ((input_files[i], final_w, final_h, mapping, pad, padsides, devignette),
+                ((input_files[i], final_w, final_h, mapping, pad, padsides, devignette, (outside_y, outside_uv) if outside_y is not None else None),
                  (_buf_y, _buf_u, _buf_v, _buf_w))
             )
 
@@ -1100,7 +1141,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
 
 def worker_for_video_frame(args):
     """Worker function for video frames, writing to pre-allocated buffers."""
-    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, padsides, devignette_gain), out_buffers = args
+    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, padsides, devignette_gain, fisheye_mask, crop_h), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y, reproj_weights_uv = out_buffers
 
     if frame is None: return None
@@ -1168,10 +1209,10 @@ def worker_for_video_frame(args):
         reproj_weights_y.fill(0)
         reproj_weights_uv.fill(0)
 
-    reproject_y(py_src.ravel(), dw, dh, padded_sw_y, map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel())
-    reproject_uv(pu_src.ravel(), pv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel())
+    reproject_y(py_src.ravel(), dw, dh, padded_sw_y, map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, crop_h)
+    reproject_uv(pu_src.ravel(), pv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel(), fisheye_mask[1].ravel() if fisheye_mask is not None else None, crop_h)
     if reproj_weights_y is not None:
-        reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel())
+        reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, crop_h)
         h, w = dh, dw
         reproj_weights_uv[:, :] = 0.25 * (reproj_weights_y[0:h:2, 0:w:2] +
                                           reproj_weights_y[1:h:2, 0:w:2] +
@@ -1873,6 +1914,21 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             _vignette_gains[i] = _build_vignette_gain(sw_map, sh_map, k1, k2, k3)
         _print(f"  built {num_images} vignette gain LUTs")
 
+    # Initialize fisheye mask geometry (needed for geometry precomputation)
+    if fisheye_mask:
+        _fy, _fx = final_h, final_w
+        _fcx, _fcy = _fx // 2, _fy // 2
+        _fr = min(_fcx, _fcy)
+        _fys, _fxs = np.ogrid[:_fy, :_fx]
+        geo_outside_y = (_fxs - _fcx) ** 2 + (_fys - _fcy) ** 2 > _fr * _fr
+        _fuvy, _fuvx = _fy // 2, _fx // 2
+        _fuvcx, _fuvcy = _fuvx // 2, _fuvy // 2
+        _fuvr = min(_fuvcx, _fuvcy)
+        _fuvys, _fuvxs = np.ogrid[:_fuvy, :_fuvx]
+        geo_outside_uv = (_fuvxs - _fuvcx) ** 2 + (_fuvys - _fuvcy) ** 2 > _fuvr * _fuvr
+    else:
+        geo_outside_y = geo_outside_uv = None
+
     # -----------------------------------------------------------------------
     # Geometry precomputation (same as reproject_videos multi-video path)
     # -----------------------------------------------------------------------
@@ -1896,7 +1952,8 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         map_y_idx, c01, c23 = mappings[i][0], mappings[i][1], mappings[i][2]
         _tmp_reproj = np.zeros((final_h, final_w), dtype=np.float32)
         reproject_float(bw.ravel(), final_w, final_h, bw.shape[1],
-                        map_y_idx.ravel(), c01.ravel(), c23.ravel(), _tmp_reproj.ravel())
+                        map_y_idx.ravel(), c01.ravel(), c23.ravel(), _tmp_reproj.ravel(),
+                        geo_outside_y.ravel() if geo_outside_y is not None else None)
         _tmp_weights += _tmp_reproj
     geo_gap = _tmp_weights < 1e-9
     del _tmp_weights, _tmp_reproj
@@ -2024,20 +2081,6 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     geo_ci_gap = geo_ci[geo_gap_idx]
     _print(f"  gap pixels: {geo_n_gap}, feather: {feather_radius}px")
     _print("  geometry precomputation complete.")
-
-    if fisheye_mask:
-        _fy, _fx = out_h, out_w
-        _fcx, _fcy = _fx // 2, _fy // 2
-        _fr = min(_fcx, _fcy)
-        _fys, _fxs = np.ogrid[:_fy, :_fx]
-        geo_outside_y = (_fxs - _fcx) ** 2 + (_fys - _fcy) ** 2 > _fr * _fr
-        _fuvy, _fuvx = _fy // 2, _fx // 2
-        _fuvcx, _fuvcy = _fuvx // 2, _fuvy // 2
-        _fuvr = min(_fuvcx, _fuvcy)
-        _fuvys, _fuvxs = np.ogrid[:_fuvy, :_fuvx]
-        geo_outside_uv = (_fuvxs - _fuvcx) ** 2 + (_fuvys - _fuvcy) ** 2 > _fuvr * _fuvr
-    else:
-        geo_outside_y = geo_outside_uv = None
 
     _geo_fill_u8 = [np.empty((H_geo, W_geo), dtype=np.uint8) for _ in range(3)] if geo_n_gap > 0 else None
 
@@ -2218,7 +2261,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                     _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
             worker_args = [
-                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i]),
+                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h),
                  (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
@@ -2303,15 +2346,43 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                 v_final = np.clip((v_final.astype(np.float32) - 128.0) * saturation + 128.0, 0, 255).astype(np.uint8)
 
             if fisheye_mask:
-                y_final[geo_outside_y] = 0
-                u_final[geo_outside_uv] = 128
-                v_final[geo_outside_uv] = 128
+                # Resize mask to output dimensions (may be rounded up from final_h/final_w)
+                if out_h != final_h or out_w != final_w:
+                    from scipy.ndimage import zoom
+                    zoom_y = out_h / final_h
+                    zoom_w = out_w / final_w
+                    outside_y_resized = zoom(geo_outside_y, (zoom_y, zoom_w), order=0, mode='nearest').astype(bool)
+                    # UV is already half resolution, so use same zoom factors to get to out_h/2, out_w/2
+                    outside_uv_resized = zoom(geo_outside_uv, (zoom_y, zoom_w), order=0, mode='nearest').astype(bool)
+                else:
+                    outside_y_resized = geo_outside_y
+                    outside_uv_resized = geo_outside_uv
+                y_final[outside_y_resized] = 0
+                u_final[outside_uv_resized] = 128
+                v_final[outside_uv_resized] = 128
 
             if enhance:
                 seed_y = int.from_bytes(os.urandom(4), 'little')
                 y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
                 u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
                 v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+
+            # Apply fisheye circular mask
+            if fisheye_mask:
+                # Resize mask to output dimensions (may be rounded up from final_h/final_w)
+                if out_h != final_h or out_w != final_w:
+                    from scipy.ndimage import zoom
+                    zoom_y = out_h / final_h
+                    zoom_w = out_w / final_w
+                    outside_y_resized = zoom(geo_outside_y, (zoom_y, zoom_w), order=0, mode='nearest').astype(bool)
+                    # UV is already half resolution, so use same zoom factors to get to out_h/2, out_w/2
+                    outside_uv_resized = zoom(geo_outside_uv, (zoom_y, zoom_w), order=0, mode='nearest').astype(bool)
+                else:
+                    outside_y_resized = geo_outside_y
+                    outside_uv_resized = geo_outside_uv
+                y_final[outside_y_resized] = 0
+                u_final[outside_uv_resized] = 128
+                v_final[outside_uv_resized] = 128
 
             if timestamp:
                 _draw_timestamp_yuv(y_final, u_final, v_final, group_ts)
@@ -2391,7 +2462,21 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             out_stream.options = {"preset": preset, "crf": str(crf)}
         except av.AVError as e:
             raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
-        
+
+        # Precompute fisheye mask for single-video path
+        if fisheye_mask:
+            cx, cy = dw // 2, dh // 2
+            r = min(cx, cy)
+            ys, xs = np.ogrid[:dh, :dw]
+            outside_y = (xs - cx) ** 2 + (ys - cy) ** 2 > r * r
+            h_uv, w_uv = dh // 2, dw // 2
+            cx_uv, cy_uv = w_uv // 2, h_uv // 2
+            r_uv = min(cx_uv, cy_uv)
+            ys_uv, xs_uv = np.ogrid[:h_uv, :w_uv]
+            outside_uv = (xs_uv - cx_uv) ** 2 + (ys_uv - cy_uv) ** 2 > r_uv * r_uv
+        else:
+            outside_y = outside_uv = None
+
         map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
         frame_count = 0
 
@@ -2442,8 +2527,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 py_s = np.pad(py_s, pad_y_width, mode='edge')
                 pu_s = np.pad(pu_s, pad_uv_width, mode='edge')
                 pv_s = np.pad(pv_s, pad_uv_width, mode='edge')
-            reproject_y(py_s.ravel(), dw, dh, py_s.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_out.ravel())
-            reproject_uv(pu_s.ravel(), pv_s.ravel(), dw, dh, map_uv_idx.ravel(), u_out.ravel(), v_out.ravel())
+            reproject_y(py_s.ravel(), dw, dh, py_s.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_out.ravel(), outside_y.ravel() if outside_y is not None else None, dh)
+            reproject_uv(pu_s.ravel(), pv_s.ravel(), dw, dh, map_uv_idx.ravel(), u_out.ravel(), v_out.ravel(), outside_uv.ravel() if outside_uv is not None else None, dh)
             return y_out, u_out, v_out
 
         def _encode_yuv(y, u, v, pts):
@@ -2566,6 +2651,21 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         _tmp_weights += _tmp_reproj
     geo_gap = _tmp_weights < 1e-9
     del _tmp_weights, _tmp_reproj
+
+    # Precompute fisheye circular mask (constant geometry)
+    if fisheye_mask:
+        _fy, _fx = final_h, final_w
+        _fcx, _fcy = _fx // 2, _fy // 2
+        _fr = min(_fcx, _fcy)
+        _fys, _fxs = np.ogrid[:_fy, :_fx]
+        geo_outside_y = (_fxs - _fcx) ** 2 + (_fys - _fcy) ** 2 > _fr * _fr
+        _fuvy, _fuvx = _fy // 2, _fx // 2
+        _fuvcx, _fuvcy = _fuvx // 2, _fuvy // 2
+        _fuvr = min(_fuvcx, _fuvcy)
+        _fuvys, _fuvxs = np.ogrid[:_fuvy, :_fuvx]
+        geo_outside_uv = (_fuvxs - _fuvcx) ** 2 + (_fuvys - _fuvcy) ** 2 > _fuvr * _fuvr
+    else:
+        geo_outside_y = geo_outside_uv = None
 
     from scipy.ndimage import gaussian_filter, distance_transform_edt as _geo_edt
     H_geo, W_geo = geo_gap.shape
@@ -2708,7 +2808,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
     # Precompute fisheye circular mask (constant geometry)
     if fisheye_mask:
-        _fy, _fx = out_h, out_w
+        _fy, _fx = final_h, final_w
         _fcx, _fcy = _fx // 2, _fy // 2
         _fr = min(_fcx, _fcy)
         _fys, _fxs = np.ogrid[:_fy, :_fx]
@@ -2865,7 +2965,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 else: _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
             worker_args = [
-                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i]),
+                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h),
                  (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
@@ -2956,9 +3056,20 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
             # Apply fisheye circular mask
             if fisheye_mask:
-                y_final[geo_outside_y] = 0
-                u_final[geo_outside_uv] = 128
-                v_final[geo_outside_uv] = 128
+                # Resize mask to output dimensions (may be rounded up from final_h/final_w)
+                if out_h != final_h or out_w != final_w:
+                    from scipy.ndimage import zoom
+                    zoom_y = out_h / final_h
+                    zoom_w = out_w / final_w
+                    outside_y_resized = zoom(geo_outside_y, (zoom_y, zoom_w), order=0, mode='nearest').astype(bool)
+                    # UV is already half resolution, so use same zoom factors to get to out_h/2, out_w/2
+                    outside_uv_resized = zoom(geo_outside_uv, (zoom_y, zoom_w), order=0, mode='nearest').astype(bool)
+                else:
+                    outside_y_resized = geo_outside_y
+                    outside_uv_resized = geo_outside_uv
+                y_final[outside_y_resized] = 0
+                u_final[outside_uv_resized] = 128
+                v_final[outside_uv_resized] = 128
 
             if enhance:
                 seed_y = int.from_bytes(os.urandom(4), 'little')

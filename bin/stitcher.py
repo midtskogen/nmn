@@ -1815,30 +1815,36 @@ def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
     tmp = _PilImg.new('L', (W, H), 0)
     draw = _PilDraw.Draw(tmp)
     bbox = draw.textbbox((0, 0), text, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tw = bbox[2] - bbox[0]
+    text_bottom = bbox[3]
 
     margin = max(8, H // 108)
     pad_box = max(4, font_size // 8)
-    tx, ty = margin, H - th - margin
-    bx1, by1 = tx - pad_box, ty - pad_box
-    bx2, by2 = tx + tw + pad_box, ty + th + pad_box
-
-    draw.rectangle([bx1, by1, bx2, by2], fill=24)
-    draw.text((tx, ty), text, fill=235, font=font)
+    pad_bottom = pad_box + max(2, font_size // 6)
+    tx, ty = margin, H - text_bottom - margin - pad_bottom
+    bx1, by1 = tx - pad_box + bbox[0], ty - pad_box + bbox[1]
+    bx2, by2 = tx + tw + pad_box, ty + text_bottom + pad_bottom
 
     ry1, ry2 = max(0, by1), min(H, by2)
     rx1, rx2 = max(0, bx1), min(W, bx2)
     if ry1 >= ry2 or rx1 >= rx2:
         return
 
+    # Semitransparent dark background (blend existing luma toward black)
+    bg_alpha = 0.55
+    y_plane[ry1:ry2, rx1:rx2] = (y_plane[ry1:ry2, rx1:rx2].astype(np.float32) * (1.0 - bg_alpha)).astype(np.uint8)
+
+    draw.text((tx, ty), text, fill=235, font=font)
     tmp_region = np.array(tmp)[ry1:ry2, rx1:rx2]
     drawn = tmp_region > 0
     y_plane[ry1:ry2, rx1:rx2][drawn] = tmp_region[drawn]
 
     uy1, ux1 = ry1 // 2, rx1 // 2
     uy2, ux2 = (ry2 + 1) // 2, (rx2 + 1) // 2
-    u_plane[uy1:uy2, ux1:ux2] = 128
-    v_plane[uy1:uy2, ux1:ux2] = 128
+    u_bg = u_plane[uy1:uy2, ux1:ux2].astype(np.float32)
+    v_bg = v_plane[uy1:uy2, ux1:ux2].astype(np.float32)
+    u_plane[uy1:uy2, ux1:ux2] = (u_bg * (1.0 - bg_alpha) + 128.0 * bg_alpha).astype(np.uint8)
+    v_plane[uy1:uy2, ux1:ux2] = (v_bg * (1.0 - bg_alpha) + 128.0 * bg_alpha).astype(np.uint8)
 
 
 def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None):

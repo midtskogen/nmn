@@ -6,8 +6,17 @@
 #   * * * * * /home/steinar/norskmeteornettverk.no/nmn/bin/stitch_latest.sh
 
 set -euo pipefail
-exec 9>/tmp/stitch_latest.lock
-flock -n 9 || exit 0
+
+PIDFILE=/tmp/stitch_latest.pid
+if [ -f "$PIDFILE" ]; then
+    OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        exit 0
+    fi
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+
 exec >>/tmp/stitch_latest.log 2>&1
 echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 

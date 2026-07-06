@@ -6,6 +6,8 @@
 #   * * * * * /home/steinar/norskmeteornettverk.no/nmn/bin/stitch_latest.sh
 
 set -euo pipefail
+exec >>/tmp/stitch_latest.log 2>&1
+echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 
 STITCHER=/home/meteor/nmn/bin/stitcher.py
 OUTDIR=/meteor
@@ -40,16 +42,18 @@ find_latest() {
         done
 
         if [ "$ALL_EXIST" = true ]; then
-            FOUND_TS="${YYYYMMDD:0:4}-${YYYYMMDD:4:2}-${YYYYMMDD:6:2} ${HH}:${MM}:00"
-            echo "${FILES[@]}"
+            echo "${YYYYMMDD:0:4}-${YYYYMMDD:4:2}-${YYYYMMDD:6:2}T${HH}:${MM}:00 ${FILES[@]}"
             return 0
         fi
     done
     return 1
 }
 
-FOUND=$(find_latest) || { echo "No complete set of images found" >&2; exit 1; }
-read -ra INPUT_FILES <<< "$FOUND"
+FOUND=$(find_latest) || { echo "No complete set of images found"; exit 1; }
+read -ra PARTS <<< "$FOUND"
+FOUND_TS="${PARTS[0]}"
+INPUT_FILES=("${PARTS[@]:1}")
+echo "Using inputs from $FOUND_TS: ${INPUT_FILES[*]}"
 
 # Stitch equirect
 TMP_EQ=$(mktemp "${OUTDIR}/equirect.XXXXXX.jpg")

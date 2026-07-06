@@ -1,0 +1,71 @@
+#!/bin/bash
+# stitch_latest.sh — Cron job to stitch the latest full_MM.jpg from all 7 cameras
+# into /meteor/equirect.jpg and /meteor/fisheye.jpg (atomic replacement).
+#
+# Typical crontab entry (every minute):
+#   * * * * * /home/steinar/norskmeteornettverk.no/nmn/bin/stitch_latest.sh
+
+set -euo pipefail
+
+STITCHER=/home/steinar/norskmeteornettverk.no/nmn/bin/stitcher.py
+OUTDIR=/meteor
+NCAMS=7
+CAMS=$(seq 1 $NCAMS)
+
+# Try recent minutes (current-2 down to current-5) to find the latest
+# minute where all 7 cameras have a fully-written full_MM.jpg.
+NOW_EPOCH=$(date -u +%s)
+
+find_latest() {
+    for OFFSET in 2 3 4 5; do
+        TARGET_EPOCH=$((NOW_EPOCH - OFFSET * 60))
+        YYYYMMDD=$(date -u -d @$TARGET_EPOCH +%Y%m%d)
+        HH=$(date -u -d @$TARGET_EPOCH +%H)
+        MM=$(date -u -d @$TARGET_EPOCH +%M)
+
+        ALL_EXIST=true
+        FILES=()
+        for CAM in $CAMS; do
+            F="/meteor/cam${CAM}/${YYYYMMDD}/${HH}/full_${MM}.jpg"
+            if [ ! -f "$F" ]; then
+                ALL_EXIST=false
+                break
+            fi
+            # Check no process has the file open (still being written)
+            if fuser "$F" >/dev/null 2>&1; then
+                ALL_EXIST=false
+                break
+            fi
+            FILES+=("$F")
+        done
+
+        if [ "$ALL_EXIST" = true ]; then
+            echo "${FILES[@]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+FOUND=$(find_latest) || { echo "No complete set of images found" >&2; exit 1; }
+read -ra INPUT_FILES <<< "$FOUND"
+
+# Stitch equirect
+TMP_EQ=$(mktemp "${OUTDIR}/equirect.XXXXXX.jpg")
+if "$STITCHER" --equirect --quiet --devignette -0.20 "${INPUT_FILES[@]}" "$TMP_EQ"; then
+    mv -f "$TMP_EQ" "${OUTDIR}/equirect.jpg"
+else
+    rm -f "$TMP_EQ"
+    echo "Equirect stitch failed" >&2
+    exit 1
+fi
+
+# Stitch fisheye
+TMP_FE=$(mktemp "${OUTDIR}/fisheye.XXXXXX.jpg")
+if "$STITCHER" --fisheye --quiet --devignette -0.20 "${INPUT_FILES[@]}" "$TMP_FE"; then
+    mv -f "$TMP_FE" "${OUTDIR}/fisheye.jpg"
+else
+    rm -f "$TMP_FE"
+    echo "Fisheye stitch failed" >&2
+    exit 1
+fi

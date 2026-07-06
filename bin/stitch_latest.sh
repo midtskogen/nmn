@@ -6,6 +6,7 @@
 #   * * * * * /home/steinar/norskmeteornettverk.no/nmn/bin/stitch_latest.sh
 
 set -euo pipefail
+sleep 10
 exec >>/tmp/stitch_latest.log 2>&1
 echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 
@@ -76,3 +77,16 @@ else
     echo "Fisheye stitch failed" >&2
     exit 1
 fi
+
+# Archive copies in cam8 (equirect) and cam9 (fisheye)
+# FOUND_TS is "YYYY-MM-DD HH:MM:SS"
+ARCH_YYYYMMDD="${FOUND_TS:0:4}${FOUND_TS:5:2}${FOUND_TS:8:2}"
+ARCH_HH=${FOUND_TS:11:2}
+ARCH_MM=${FOUND_TS:14:2}
+
+mkdir -p "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}"
+mkdir -p "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}"
+cp "${OUTDIR}/equirect.jpg" "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"
+cp "${OUTDIR}/fisheye.jpg" "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"
+touch -d "$FOUND_TS" "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"
+touch -d "$FOUND_TS" "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"

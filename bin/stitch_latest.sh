@@ -6,7 +6,8 @@
 #   * * * * * /home/steinar/norskmeteornettverk.no/nmn/bin/stitch_latest.sh
 
 set -euo pipefail
-sleep 10
+exec 9>/tmp/stitch_latest.lock
+flock -n 9 || exit 0
 exec >>/tmp/stitch_latest.log 2>&1
 echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 

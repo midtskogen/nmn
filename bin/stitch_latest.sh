@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-STITCHER=/home/steinar/norskmeteornettverk.no/nmn/bin/stitcher.py
+STITCHER=/home/meteor/nmn/bin/stitcher.py
 OUTDIR=/meteor
 NCAMS=7
 CAMS=$(seq 1 $NCAMS)

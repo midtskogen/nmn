@@ -40,6 +40,7 @@ find_latest() {
         done
 
         if [ "$ALL_EXIST" = true ]; then
+            FOUND_TS="${YYYYMMDD:0:4}-${YYYYMMDD:4:2}-${YYYYMMDD:6:2} ${HH}:${MM}:00"
             echo "${FILES[@]}"
             return 0
         fi
@@ -54,6 +55,7 @@ read -ra INPUT_FILES <<< "$FOUND"
 TMP_EQ=$(mktemp "${OUTDIR}/equirect.XXXXXX.jpg")
 if "$STITCHER" --equirect --quiet --devignette -0.20 "${INPUT_FILES[@]}" "$TMP_EQ"; then
     mv -f "$TMP_EQ" "${OUTDIR}/equirect.jpg"
+    touch -d "$FOUND_TS" "${OUTDIR}/equirect.jpg"
 else
     rm -f "$TMP_EQ"
     echo "Equirect stitch failed" >&2
@@ -64,6 +66,7 @@ fi
 TMP_FE=$(mktemp "${OUTDIR}/fisheye.XXXXXX.jpg")
 if "$STITCHER" --fisheye --quiet --devignette -0.20 "${INPUT_FILES[@]}" "$TMP_FE"; then
     mv -f "$TMP_FE" "${OUTDIR}/fisheye.jpg"
+    touch -d "$FOUND_TS" "${OUTDIR}/fisheye.jpg"
 else
     rm -f "$TMP_FE"
     echo "Fisheye stitch failed" >&2

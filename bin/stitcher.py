@@ -764,7 +764,7 @@ def _precompile_numba_functions():
 
     _print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0, devignette=None):
+def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0, devignette=None, input_datetime: str = None):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
@@ -815,6 +815,10 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
             y_final = enhance_filter(y_final, t=12, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
             u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
             v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+
+        if input_datetime is not None:
+            _ts = datetime.datetime.strptime(input_datetime, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+            _draw_timestamp_yuv(y_final, u_final, v_final, _ts)
 
         save_image_yuv420(y_final, u_final, v_final, output_file)
         _print(f"✅ Success! Panoramic image saved to {output_file}")
@@ -1134,6 +1138,10 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         u_final[outside_uv] = 128
         v_final[outside_uv] = 128
         _print("Applied fisheye circular mask to YUV planes.")
+
+    if input_datetime is not None:
+        _ts = datetime.datetime.strptime(input_datetime, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+        _draw_timestamp_yuv(y_final, u_final, v_final, _ts)
 
     _print("Saving final image...")
     save_image_yuv420(y_final, u_final, v_final, output_file)
@@ -5413,7 +5421,7 @@ def main():
     try:
         padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
         if is_image_output:
-            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation, devignette=devignette)
+            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation, devignette=devignette, input_datetime=args.input_datetime)
         elif is_video_output:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file,

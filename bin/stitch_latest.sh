@@ -42,7 +42,7 @@ find_latest() {
         done
 
         if [ "$ALL_EXIST" = true ]; then
-            echo "${YYYYMMDD:0:4}-${YYYYMMDD:4:2}-${YYYYMMDD:6:2}T${HH}:${MM}:00 ${FILES[@]}"
+            echo "${YYYYMMDD:0:4}-${YYYYMMDD:4:2}-${YYYYMMDD:6:2}_${HH}:${MM}:00 ${FILES[@]}"
             return 0
         fi
     done
@@ -51,13 +51,13 @@ find_latest() {
 
 FOUND=$(find_latest) || { echo "No complete set of images found"; exit 1; }
 read -ra PARTS <<< "$FOUND"
-FOUND_TS="${PARTS[0]}"
+FOUND_TS="${PARTS[0]/_/ }"
 INPUT_FILES=("${PARTS[@]:1}")
 echo "Using inputs from $FOUND_TS: ${INPUT_FILES[*]}"
 
 # Stitch equirect
 TMP_EQ=$(mktemp "${OUTDIR}/equirect.XXXXXX.jpg")
-if "$STITCHER" --equirect --quiet --devignette -0.20 "${INPUT_FILES[@]}" "$TMP_EQ"; then
+if "$STITCHER" --equirect --quiet --devignette -0.20 --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_EQ"; then
     mv -f "$TMP_EQ" "${OUTDIR}/equirect.jpg"
     touch -d "$FOUND_TS" "${OUTDIR}/equirect.jpg"
 else
@@ -68,7 +68,7 @@ fi
 
 # Stitch fisheye
 TMP_FE=$(mktemp "${OUTDIR}/fisheye.XXXXXX.jpg")
-if "$STITCHER" --fisheye --quiet --devignette -0.20 "${INPUT_FILES[@]}" "$TMP_FE"; then
+if "$STITCHER" --fisheye --quiet --devignette -0.20 --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_FE"; then
     mv -f "$TMP_FE" "${OUTDIR}/fisheye.jpg"
     touch -d "$FOUND_TS" "${OUTDIR}/fisheye.jpg"
 else

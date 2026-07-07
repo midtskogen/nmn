@@ -938,10 +938,11 @@ class AS7Diagnostic:
     def check_network_config(self):
         """Performs a basic internet connectivity test."""
         print("\n--- Checking Network ---")
-        if self._check_port_open("8.8.8.8", 53):
-            self.log_success("Internet connectivity to 8.8.8.8:53 (Google DNS) is working.")
-        else:
-            self.log_issue("NO_INTERNET")
+        for _ in range(3):
+            if self._check_port_open("8.8.8.8", 53, timeout=15):
+                self.log_success("Internet connectivity to 8.8.8.8:53 (Google DNS) is working.")
+                return
+        self.log_issue("NO_INTERNET")
 
     def check_network_sanity(self):
         """Checks if camera IPs fall within the subnets of local network interfaces."""

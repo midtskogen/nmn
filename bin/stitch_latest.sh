@@ -2,10 +2,26 @@
 # stitch_latest.sh — Cron job to stitch the latest full_MM.jpg from all 7 cameras
 # into /meteor/equirect.jpg and /meteor/fisheye.jpg (atomic replacement).
 #
-# Typical crontab entry (every minute):
-#   * * * * * /home/steinar/norskmeteornettverk.no/nmn/bin/stitch_latest.sh
+# Usage:
+#   stitch_latest.sh [--sd] [--ssh HOST]
+#
+# Options:
+#   --sd         Use mini_MM.jpg instead of full_MM.jpg
+#   --ssh HOST   Fetch inputs from and upload results to HOST via SSH
 
 set -euo pipefail
+
+# Parse options
+PREFIX=full
+OUT_SUFFIX=_hd
+SSH_HOST=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sd)    PREFIX=mini; OUT_SUFFIX=""; shift ;;
+        --ssh)   SSH_HOST="$2"; shift 2 ;;
+        *)       echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 PIDFILE=/tmp/stitch_latest.pid
 if [ -f "$PIDFILE" ]; then
@@ -20,83 +36,152 @@ trap 'rm -f "$PIDFILE"' EXIT
 exec >>/tmp/stitch_latest.log 2>&1
 echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 
-STITCHER=/home/meteor/nmn/bin/stitcher.py
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+STITCHER="${SCRIPT_DIR}/stitcher.py"
 OUTDIR=/meteor
 NCAMS=7
-CAMS=$(seq 1 $NCAMS)
 
-# Try recent minutes (current-2 down to current-5) to find the latest
-# minute where all 7 cameras have a fully-written full_MM.jpg.
-NOW_EPOCH=$(date -u +%s)
+# --- SSH ControlMaster setup ---
+SSH_OPTS=()
+CTRL_SOCK=""
+if [ -n "$SSH_HOST" ]; then
+    CTRL_SOCK=$(mktemp -u /tmp/stitch_ssh_XXXXXX)
+    ssh -fNM -S "$CTRL_SOCK" -o ConnectTimeout=10 "$SSH_HOST"
+    SSH_OPTS=(-o "ControlPath=$CTRL_SOCK")
+    cleanup_ssh() { ssh -S "$CTRL_SOCK" -O exit "$SSH_HOST" 2>/dev/null || true; rm -f "$PIDFILE"; }
+    trap cleanup_ssh EXIT
+    echo "SSH ControlMaster to $SSH_HOST established"
+fi
 
-find_latest() {
-    for OFFSET in 2 3 4 5; do
-        TARGET_EPOCH=$((NOW_EPOCH - OFFSET * 60))
-        YYYYMMDD=$(date -u -d @$TARGET_EPOCH +%Y%m%d)
-        HH=$(date -u -d @$TARGET_EPOCH +%H)
-        MM=$(date -u -d @$TARGET_EPOCH +%M)
-
-        ALL_EXIST=true
-        FILES=()
-        for CAM in $CAMS; do
-            F="/meteor/cam${CAM}/${YYYYMMDD}/${HH}/full_${MM}.jpg"
-            if [ ! -f "$F" ]; then
-                ALL_EXIST=false
-                break
-            fi
-            # Check no process has the file open (still being written)
-            if fuser "$F" >/dev/null 2>&1; then
-                ALL_EXIST=false
-                break
-            fi
-            FILES+=("$F")
-        done
-
-        if [ "$ALL_EXIST" = true ]; then
-            echo "${YYYYMMDD:0:4}-${YYYYMMDD:4:2}-${YYYYMMDD:6:2}_${HH}:${MM}:00 ${FILES[@]}"
-            return 0
-        fi
-    done
-    return 1
+rcmd() {
+    # Run a command locally or remotely
+    if [ -n "$SSH_HOST" ]; then
+        ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"
+    else
+        eval "$@"
+    fi
 }
 
-FOUND=$(find_latest) || { echo "No complete set of images found"; exit 1; }
+# --- Find the latest complete set of images ---
+# One remote/local command checks all offsets, all cameras, and fuser.
+# Output: YYYY-MM-DD_HH:MM:SS file1 file2 ... file7
+FIND_SCRIPT=$(cat <<'FINDEOF'
+NOW_EPOCH=$(date -u +%s)
+for OFFSET in 2 3 4 5; do
+    TARGET_EPOCH=$((NOW_EPOCH - OFFSET * 60))
+    YYYYMMDD=$(date -u -d @$TARGET_EPOCH +%Y%m%d)
+    HH=$(date -u -d @$TARGET_EPOCH +%H)
+    MM=$(date -u -d @$TARGET_EPOCH +%M)
+    ALL=true
+    FILES=""
+    for CAM in $(seq 1 __NCAMS__); do
+        F="/meteor/cam${CAM}/${YYYYMMDD}/${HH}/XPREFX_${MM}.jpg"
+        if [ ! -f "$F" ] || fuser "$F" >/dev/null 2>&1; then
+            ALL=false
+            break
+        fi
+        FILES="$FILES $F"
+    done
+    if [ "$ALL" = true ]; then
+        echo "${YYYYMMDD:0:4}-${YYYYMMDD:4:2}-${YYYYMMDD:6:2}_${HH}:${MM}:00${FILES}"
+        exit 0
+    fi
+done
+exit 1
+FINDEOF
+)
+FIND_SCRIPT=${FIND_SCRIPT//__NCAMS__/$NCAMS}
+FIND_SCRIPT=${FIND_SCRIPT//XPREFX/$PREFIX}
+
+FOUND=$(rcmd "$FIND_SCRIPT") || { echo "No complete set of images found"; exit 1; }
 read -ra PARTS <<< "$FOUND"
 FOUND_TS="${PARTS[0]/_/ }"
-INPUT_FILES=("${PARTS[@]:1}")
-echo "Using inputs from $FOUND_TS: ${INPUT_FILES[*]}"
+REMOTE_FILES=("${PARTS[@]:1}")
+echo "Using inputs from $FOUND_TS: ${REMOTE_FILES[*]}"
 
-# Stitch equirect
-TMP_EQ=$(mktemp "${OUTDIR}/equirect.XXXXXX.jpg")
+# --- Fetch input files ---
+if [ -n "$SSH_HOST" ]; then
+    TMPDIR=$(mktemp -d /tmp/stitch_inputs_XXXXXX)
+    trap 'rm -rf "$TMPDIR" /tmp/stitch_out_*; cleanup_ssh' EXIT
+    # Mirror remote directory structure so stitcher can find lens.pto files.
+    # Collect unique cam directories and their lens.pto files.
+    INPUT_FILES=()
+    LENS_SRCS=()
+    for F in "${REMOTE_FILES[@]}"; do
+        LOCAL="${TMPDIR}${F}"
+        mkdir -p "$(dirname "$LOCAL")"
+        INPUT_FILES+=("$LOCAL")
+        # lens.pto is two dirs up from the image (e.g. /meteor/cam1/lens.pto)
+        CAM_DIR=$(dirname "$(dirname "$(dirname "$F")")")
+        LENS_SRCS+=("${CAM_DIR}/lens.pto")
+    done
+    # Deduplicate lens.pto paths
+    UNIQUE_LENS=($(printf '%s\n' "${LENS_SRCS[@]}" | sort -u))
+    # Download lens.pto files
+    for LP in "${UNIQUE_LENS[@]}"; do
+        LOCAL_LP="${TMPDIR}${LP}"
+        mkdir -p "$(dirname "$LOCAL_LP")"
+        scp -o "ControlPath=$CTRL_SOCK" "$SSH_HOST:$LP" "$LOCAL_LP"
+    done
+    # Download image files
+    for i in "${!REMOTE_FILES[@]}"; do
+        scp -o "ControlPath=$CTRL_SOCK" "$SSH_HOST:${REMOTE_FILES[$i]}" "${INPUT_FILES[$i]}"
+    done
+else
+    INPUT_FILES=("${REMOTE_FILES[@]}")
+fi
+
+# --- Stitch equirect ---
+LOCAL_OUTDIR="${OUTDIR}"
+[ -n "$SSH_HOST" ] && LOCAL_OUTDIR=$(mktemp -d /tmp/stitch_out_XXXXXX)
+
+TMP_EQ=$(mktemp "${LOCAL_OUTDIR}/equirect.XXXXXX.jpg")
 if "$STITCHER" --equirect --quiet --devignette -0.20 --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_EQ"; then
-    mv -f "$TMP_EQ" "${OUTDIR}/equirect.jpg"
-    touch -d "$FOUND_TS" "${OUTDIR}/equirect.jpg"
+    mv -f "$TMP_EQ" "${LOCAL_OUTDIR}/equirect${OUT_SUFFIX}.jpg"
 else
     rm -f "$TMP_EQ"
     echo "Equirect stitch failed" >&2
     exit 1
 fi
 
-# Stitch fisheye
-TMP_FE=$(mktemp "${OUTDIR}/fisheye.XXXXXX.jpg")
+# --- Stitch fisheye ---
+TMP_FE=$(mktemp "${LOCAL_OUTDIR}/fisheye.XXXXXX.jpg")
 if "$STITCHER" --fisheye --quiet --devignette -0.20 --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_FE"; then
-    mv -f "$TMP_FE" "${OUTDIR}/fisheye.jpg"
-    touch -d "$FOUND_TS" "${OUTDIR}/fisheye.jpg"
+    mv -f "$TMP_FE" "${LOCAL_OUTDIR}/fisheye${OUT_SUFFIX}.jpg"
 else
     rm -f "$TMP_FE"
     echo "Fisheye stitch failed" >&2
     exit 1
 fi
 
-# Archive copies in cam8 (equirect) and cam9 (fisheye)
-# FOUND_TS is "YYYY-MM-DD HH:MM:SS"
+# --- Archive paths ---
 ARCH_YYYYMMDD="${FOUND_TS:0:4}${FOUND_TS:5:2}${FOUND_TS:8:2}"
 ARCH_HH=${FOUND_TS:11:2}
 ARCH_MM=${FOUND_TS:14:2}
+ARCH8="cam8/${ARCH_YYYYMMDD}/${ARCH_HH}/${PREFIX}_${ARCH_MM}.jpg"
+ARCH9="cam9/${ARCH_YYYYMMDD}/${ARCH_HH}/${PREFIX}_${ARCH_MM}.jpg"
 
-mkdir -p "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}"
-mkdir -p "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}"
-cp "${OUTDIR}/equirect.jpg" "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"
-cp "${OUTDIR}/fisheye.jpg" "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"
-touch -d "$FOUND_TS" "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"
-touch -d "$FOUND_TS" "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}/full_${ARCH_MM}.jpg"
+if [ -n "$SSH_HOST" ]; then
+    # Upload equirect.jpg and fisheye.jpg as .tmp, then atomically move them
+    # and create archive copies — all in one SSH round-trip.
+    scp -o "ControlPath=$CTRL_SOCK" "${LOCAL_OUTDIR}/equirect${OUT_SUFFIX}.jpg" "$SSH_HOST:${OUTDIR}/equirect${OUT_SUFFIX}.jpg.tmp"
+    scp -o "ControlPath=$CTRL_SOCK" "${LOCAL_OUTDIR}/fisheye${OUT_SUFFIX}.jpg"  "$SSH_HOST:${OUTDIR}/fisheye${OUT_SUFFIX}.jpg.tmp"
+
+    ssh "${SSH_OPTS[@]}" "$SSH_HOST" bash -s <<REMEOF
+        set -euo pipefail
+        mv -f "${OUTDIR}/equirect${OUT_SUFFIX}.jpg.tmp" "${OUTDIR}/equirect${OUT_SUFFIX}.jpg"
+        mv -f "${OUTDIR}/fisheye${OUT_SUFFIX}.jpg.tmp" "${OUTDIR}/fisheye${OUT_SUFFIX}.jpg"
+        touch -d "$FOUND_TS" "${OUTDIR}/equirect${OUT_SUFFIX}.jpg" "${OUTDIR}/fisheye${OUT_SUFFIX}.jpg"
+        mkdir -p "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}" "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}"
+        cp "${OUTDIR}/equirect${OUT_SUFFIX}.jpg" "${OUTDIR}/${ARCH8}"
+        cp "${OUTDIR}/fisheye${OUT_SUFFIX}.jpg" "${OUTDIR}/${ARCH9}"
+        touch -d "$FOUND_TS" "${OUTDIR}/${ARCH8}" "${OUTDIR}/${ARCH9}"
+REMEOF
+    rm -rf "$LOCAL_OUTDIR"
+else
+    touch -d "$FOUND_TS" "${OUTDIR}/equirect${OUT_SUFFIX}.jpg" "${OUTDIR}/fisheye${OUT_SUFFIX}.jpg"
+    mkdir -p "${OUTDIR}/cam8/${ARCH_YYYYMMDD}/${ARCH_HH}" "${OUTDIR}/cam9/${ARCH_YYYYMMDD}/${ARCH_HH}"
+    cp "${OUTDIR}/equirect${OUT_SUFFIX}.jpg" "${OUTDIR}/${ARCH8}"
+    cp "${OUTDIR}/fisheye${OUT_SUFFIX}.jpg" "${OUTDIR}/${ARCH9}"
+    touch -d "$FOUND_TS" "${OUTDIR}/${ARCH8}" "${OUTDIR}/${ARCH9}"
+fi

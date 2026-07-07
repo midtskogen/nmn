@@ -10,7 +10,10 @@
     "station": {
       "name": "gaustatoppen",
       "code": "GAU",
-      "infrasound_id": "S34C4"
+      "infrasound_id": "S34C4",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.6232237724506 y172.239011095074 p20.5938189454355 r-2.53642788987438 a0.0051254164184834 b-0.0385537454618003 c0.0154561447189639 d21.7428247696834 e28.8125439563968 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -304,7 +307,10 @@
     "station": {
       "name": "kristiansand",
       "code": "KRI",
-      "quota": true
+      "quota": true,
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.5330812001696 Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 r-0.422030422969421 p26.7422916237172 y178.42325184224 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 a-0.00415368419392758 b-0.00744389963118467 c-0.015009322022405 d14.853278833297 e22.3233058326041 g0 t0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0  Vm5 n\"\"",
@@ -600,7 +606,10 @@
       "display_name": "Ørsta",
       "code": "ORS",
       "quota": true,
-      "infrasound_id": "R34F3"
+      "infrasound_id": "R34F3",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.563325752776 Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 r4.76800711927045 p32.9621235115002 y-101.339110178298 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 a0.0081254164184834 b-0.052554912515109 c0.0337505739259017 d41.9170512822584 e42.2087271421381 g0 t0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0  Vm5 n\"\"",
@@ -894,7 +903,10 @@
     "station": {
       "name": "vasteras",
       "display_name": "Västerås",
-      "code": "VAS"
+      "code": "VAS",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.3933869870225 y173.708284743185 p22.0875937327321 r-2.01484157174827 a-0.00415368419392758 b-0.00800633737730145 c-0.0135303146370513 d49.7540784302109 e-38.0467176366262 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -1188,7 +1200,10 @@
     "station": {
       "name": "trondheim",
       "code": "TRO",
-      "infrasound_id": "R3887"
+      "infrasound_id": "R3887",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.6267694852545 y-133.370967825299 p21.3236093512859 r-0.913761887123365 a-0.00415368419392758 b0.00015317849226213 c-0.0385608148147908 d64.6536250414671 e16.6284142096043 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -1483,7 +1498,10 @@
       "name": "sorreisa",
       "display_name": "Sørreisa",
       "code": "SOR",
-      "infrasound_id": "RCFDD"
+      "infrasound_id": "RCFDD",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v82.7619125468966 Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 r-0.852361639592569 p20.6089504398426 y-164.528876391179 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 a-0.00415368419392758 b0.00860682392321748 c-0.069222765985071 d32.4640051927383 e20.2122246066532 g0 t0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0  Vm5 n\"\"",
@@ -1777,7 +1795,10 @@
     "station": {
       "name": "voksenlia",
       "code": "OSL",
-      "infrasound_id": "R8DD8"
+      "infrasound_id": "R8DD8",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.6698873089762 y174.17641301672205 p23.9309500066125 r-1.81278565306356 a-0.00415368419392758 b-0.00340951791107079 c-0.0248854539617842 d73.0396062192006 e33.7481083553851 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -2071,7 +2092,10 @@
     },
     "station": {
       "name": "harestua",
-      "code": "HAR"
+      "code": "HAR",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.3788572103048 y-173.975735930839 p26.674996963666 r-1.51708969899377 a-0.00415368419392758 b-0.00642900397114097 c-0.0192642315602853 d42.4649094790737 e18.5736927366505 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -2364,7 +2388,10 @@
     },
     "station": {
       "name": "moss",
-      "code": "MOS"
+      "code": "MOS",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.3757183647318 y165.766834542343 p22.9044801461223 r0.0398607493476274 a-0.00415368419392758 b-0.00535549232242419 c-0.0209421216557615 d61.07265514793 e25.2602733979167 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -2658,7 +2685,10 @@
     "station": {
       "name": "larvik",
       "code": "LAR",
-      "infrasound_id": "R32A9"
+      "infrasound_id": "R32A9",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.5196202614318 y166.91479839428104 p21.0328500155622 r-1.56604509739808 a-0.00315368419392758 b-0.011548965887638703 c-0.00977677510500185 d46.2440781905988 e28.3533464806762 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -2952,7 +2982,10 @@
     "station": {
       "name": "skibotn",
       "code": "SKI",
-      "infrasound_id": "R7437"
+      "infrasound_id": "R7437",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.1493936019529 Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 r-0.559891492975005 p23.6292214233377 y170.341160932929 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 a-0.00415368419392758 b-0.0071188755098103 c-0.0156604804712869 d37.1696288551726 e21.617199849068 g0 t0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0  Vm5 n\"\"",
@@ -3247,7 +3280,10 @@
       "name": "loten",
       "display_name": "Løten",
       "code": "LOT",
-      "quota": true
+      "quota": true,
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.4884333456818 y-3.69384579044355 p156.32275415506 r179.668404307296 a-0.00415368419392758 b-0.00495829022243982 c-0.0213735932057177 d52.7346219097653 e16.2619300159869 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -3542,7 +3578,11 @@
       "name": "hagar",
       "display_name": "Hågår",
       "code": "HGR",
-      "infrasound_id": "R3D85"
+      "infrasound_id": "R3D85",
+      "contact_email": [
+        "steinar@latinitas.org",
+        "ole.alex@gmail.com"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.3952727886819 y106.173110315268 p23.6028372398784 r-2.52029492847221 a-0.00415368419392758 b-0.00780962663413623 c-0.0151735841749238 d48.2878087900653 e35.1875830856675 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",
@@ -3835,7 +3875,10 @@
     },
     "station": {
       "name": "finnskogen",
-      "code": "FIN"
+      "code": "FIN",
+      "contact_email": [
+        "steinar@latinitas.org"
+      ]
     },
     "cam1": {
       "calibration": "i w1920 h1080 f3 v83.5974627787637 y177.740422582595 p23.1724527988608 r-1.36297320211763 a-0.00415368419392758 b-0.00408525853171686 c-0.0248105830241577 d51.7470635286795 e34.4054684464093 g0 t0 n\"\" Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5",

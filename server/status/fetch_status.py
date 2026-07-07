@@ -472,7 +472,7 @@ def send_email(to_addresses, subject, body):
         return
     msg = MIMEText(body, 'plain', 'utf-8')
     msg['Subject'] = subject
-    msg['From'] = 'status@norskmeteornettverk.no'
+    msg['From'] = 'Norsk meteornettverk <steinar@norskmeteornettverk.no>'
     msg['To'] = ', '.join(to_addresses)
     try:
         with smtplib.SMTP('localhost') as smtp:

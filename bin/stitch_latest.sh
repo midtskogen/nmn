@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-PIDFILE=/tmp/stitch_latest.pid
+PIDFILE=/tmp/stitch_latest${OUT_SUFFIX}.pid
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
     if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
@@ -33,7 +33,7 @@ fi
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
-exec >>/tmp/stitch_latest.log 2>&1
+exec >>/tmp/stitch_latest${OUT_SUFFIX}.log 2>&1
 echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)

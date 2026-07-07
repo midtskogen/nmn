@@ -1792,7 +1792,7 @@ def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
     H, W = y_plane.shape
     dt = datetime.datetime.fromtimestamp(unix_ts, tz=datetime.timezone.utc)
     ff = int((unix_ts % 1) * 100)
-    text = dt.strftime(f"%Y-%m-%d %H:%M:%S.{ff:02d}")
+    text = dt.strftime(f"%Y-%m-%d %H:%M:%S.{ff:02d} UTC")
 
     font_size = max(14, W // 128)
     font = None

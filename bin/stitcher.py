@@ -5113,7 +5113,53 @@ def main():
 
     parser = argparse.ArgumentParser(
         description="Reproject and stitch images or videos into a panorama based on a Hugin .pto file.",
-        formatter_class=argparse.RawTextHelpFormatter
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""Examples:
+
+  Single image – explicit PTO file:
+    stitcher.py project.pto /meteor/cam?/20260101/00/full_00.jpg out.jpg
+
+  Single image – auto-generate PTO from lens.pto files (equirectangular):
+    stitcher.py --equirect /meteor/cam?/20260101/00/full_00.jpg out.jpg
+
+  Single image – fisheye output with vignetting correction:
+    stitcher.py --fisheye --devignette=-0.5 /meteor/cam?/20260101/00/full_00.jpg out.jpg
+
+  Single image – scale output canvas and enhance:
+    stitcher.py --equirect --output-width=1920 --enhance /meteor/cam?/20260101/00/full_00.jpg out.jpg
+
+  Single video – stitch multiple cameras into one panoramic video:
+    stitcher.py project.pto /meteor/cam?/20260101/00/full_00.mp4 out.mp4
+
+  Single video – with timestamp overlay, better quality, stop after 300 frames:
+    stitcher.py project.pto /meteor/cam?/20260101/00/full_00.mp4 out.mp4 \
+      --timestamp --crf=23 --preset=medium -n 300
+
+  Single video – synchronize streams from embedded timestamps:
+    stitcher.py project.pto /meteor/cam?/20260101/00/full_00.mp4 out.mp4 --sync --save-sync=sync.json
+
+  Single video – reuse a saved sync map:
+    stitcher.py project.pto /meteor/cam?/20260101/00/full_00.mp4 out.mp4 --sync --load-sync=sync.json
+
+  Single video – fetch inputs from a remote station over SSH:
+    stitcher.py project.pto /meteor/cam?/20260101/00/full_00.mp4 out.mp4 --station=ams000
+
+  Timelapse – one night (start/end), 60x speed, equirectangular:
+    stitcher.py out.mp4 --equirect --timelapse \\
+      --timelapse-start="2026-06-22 21:00:00" --timelapse-end="2026-06-23 04:00:00" \\
+      --timelapse-speed=60
+
+  Timelapse – fixed duration from start, HD quality, 25 fps:
+    stitcher.py out.mp4 --equirect --timelapse \\
+      --timelapse-start="2026-06-22 22:00:00" --timelapse-duration="6 hours" \\
+      --timelapse-quality=hd --timelapse-framerate=25 --timelapse-speed=120
+
+  Timelapse – custom PTO and camera pattern:
+    stitcher.py out.mp4 --timelapse --pto=custom.pto \\
+      --timelapse-pattern="/meteor/cam?" \\
+      --timelapse-start="2026-06-22 22:00:00" --timelapse-duration="4 hours" \\
+      --timelapse-speed=60
+"""
     )
     parser.add_argument("pto_file", nargs='?', help="Path to the Hugin PTO project file. Required unless --fisheye or --equirect is specified.")
     parser.add_argument("input_files", nargs='*', help="One or more input image or video files (must all be same type). Required unless --timelapse is used.")

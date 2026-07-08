@@ -18,6 +18,7 @@ import json
 import re
 import shlex
 import tempfile
+import time
 import glob
 import gc
 try:
@@ -380,12 +381,16 @@ def _blur_padded_area_numba(plane, pad_t, pad_b, pad_l, pad_r, blur_kernel_size,
 
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def reproject_y(py, dw, dh, sw, map_y_idx, c01, c23, out_y, fisheye_mask=None, crop_h=None):
+def reproject_y(py, dw, dh, sw, map_y_idx, c01, c23, out_y, fisheye_mask=None, crop_h=None, r0=0, r1=-1, c0=0, c1=-1):
+    # r0:r1, c0:c1 optionally restrict iteration to the camera's valid bounding
+    # box (pixels outside never receive kernel writes; callers pre-fill outputs).
     dh_limit = dh if crop_h is None else min(dh, crop_h)
-    for yi in prange(dh_limit):
+    row_end = dh_limit if r1 < 0 else min(dh_limit, r1)
+    col_end = dw if c1 < 0 else c1
+    for yi in prange(r0, row_end):
         base_out = yi * dw
         base_map = yi * dw
-        for xi in range(dw):
+        for xi in range(c0, col_end):
             if fisheye_mask is not None and fisheye_mask[base_out + xi]:
                 out_y[base_out + xi] = 0
                 continue
@@ -397,12 +402,14 @@ def reproject_y(py, dw, dh, sw, map_y_idx, c01, c23, out_y, fisheye_mask=None, c
             out_y[base_out + xi] = interpolated_value
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def reproject_float(p_float_src, dw, dh, sw, map_y_idx, c01, c23, out_float, fisheye_mask=None, crop_h=None):
+def reproject_float(p_float_src, dw, dh, sw, map_y_idx, c01, c23, out_float, fisheye_mask=None, crop_h=None, r0=0, r1=-1, c0=0, c1=-1):
     dh_limit = dh if crop_h is None else min(dh, crop_h)
-    for yi in prange(dh_limit):
+    row_end = dh_limit if r1 < 0 else min(dh_limit, r1)
+    col_end = dw if c1 < 0 else c1
+    for yi in prange(r0, row_end):
         base_out = yi * dw
         base_map = yi * dw
-        for xi in range(dw):
+        for xi in range(c0, col_end):
             if fisheye_mask is not None and fisheye_mask[base_out + xi]:
                 out_float[base_out + xi] = 0.0
                 continue
@@ -414,12 +421,15 @@ def reproject_float(p_float_src, dw, dh, sw, map_y_idx, c01, c23, out_float, fis
             out_float[base_out + xi] = interpolated_value
 
 @numba.njit(parallel=True, fastmath=True, cache=True, boundscheck=False)
-def reproject_uv(pu, pv, dw, dh, map_uv_idx, out_u, out_v, fisheye_mask=None, crop_h=None):
+def reproject_uv(pu, pv, dw, dh, map_uv_idx, out_u, out_v, fisheye_mask=None, crop_h=None, r0=0, r1=-1, c0=0, c1=-1):
+    # r0:r1, c0:c1 are in UV (half-resolution) grid coordinates.
     half_w, half_h = dw // 2, dh // 2
     half_h_limit = half_h if crop_h is None else min(half_h, (crop_h + 1) // 2)
-    for y_uv in prange(half_h_limit):
+    row_end = half_h_limit if r1 < 0 else min(half_h_limit, r1)
+    col_end = half_w if c1 < 0 else c1
+    for y_uv in prange(r0, row_end):
         base_uv = y_uv * half_w
-        for x_uv in range(half_w):
+        for x_uv in range(c0, col_end):
             if fisheye_mask is not None and fisheye_mask[base_uv + x_uv]:
                 out_u[base_uv + x_uv] = 128
                 out_v[base_uv + x_uv] = 128
@@ -560,8 +570,112 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
 
     task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s, padsides) for img in images]
 
+    # Projection maps are deterministic given the PTO content and parameters —
+    # cache them on disk so repeated runs with the same geometry skip the
+    # expensive per-pixel trig (~2s for 7 cameras). Arrays are cropped to the
+    # valid-pixel bounding box, index maps are delta-encoded (near-constant
+    # increments compress ~8x better), and everything is stored compressed;
+    # full-size arrays are reconstructed on load. All transforms are lossless.
+    _MAP_CACHE_VERSION = 3
+    cache_path = None
+    try:
+        import hashlib
+        with open(pto_file, 'rb') as _f:
+            _pto_bytes = _f.read()
+        _key_src = _pto_bytes + repr((_MAP_CACHE_VERSION, pad, sorted(padsides), is_video_output)).encode()
+        _key = hashlib.sha256(_key_src).hexdigest()[:24]
+        _cache_dir = os.path.join(tempfile.gettempdir(), 'stitcher_map_cache')
+        cache_path = os.path.join(_cache_dir, f'maps_{_key}.npz')
+        if os.path.exists(cache_path):
+            def _undelta(d, shape):
+                """Invert np.diff(..., prepend=0) delta encoding (exact)."""
+                return np.cumsum(d.ravel(), dtype=np.int64).astype(np.int32).reshape(shape)
+
+            with np.load(cache_path) as _npz:
+                n = int(_npz['n'])
+                all_mappings = []
+                for i in range(n):
+                    h, w, r0, c0 = (int(v) for v in _npz[f'ybox{i}'])
+                    my_d = _npz[f'my{i}']
+                    my_c = _undelta(my_d, my_d.shape)
+                    my = np.full(h * w, -1, dtype=np.int32)
+                    my.reshape(h, w)[r0:r0 + my_c.shape[0], c0:c0 + my_c.shape[1]] = my_c
+                    c01 = np.zeros((h, w), dtype=np.uint16)
+                    c23 = np.zeros((h, w), dtype=np.uint16)
+                    c01[r0:r0 + my_c.shape[0], c0:c0 + my_c.shape[1]] = _npz[f'c01_{i}']
+                    c23[r0:r0 + my_c.shape[0], c0:c0 + my_c.shape[1]] = _npz[f'c23_{i}']
+                    uh, uw, ur0, uc0 = (int(v) for v in _npz[f'uvbox{i}'])
+                    uv_d = _npz[f'uv{i}']
+                    uv_c = _undelta(uv_d, uv_d.shape)
+                    uv = np.full((uh, uw), -1, dtype=np.int32)
+                    uv[ur0:ur0 + uv_c.shape[0], uc0:uc0 + uv_c.shape[1]] = uv_c
+                    all_mappings.append((my, c01, c23, uv,
+                                         int(_npz[f'sw{i}']), int(_npz[f'sh{i}'])))
+            if n == len(images):
+                _print("Loaded projection maps from cache.")
+                return all_mappings, global_options
+    except Exception:
+        cache_path = None
+
     _print("Building projection maps...")
     all_mappings = [_map_one_image(args) for args in task_args]
+
+    if cache_path is not None:
+        try:
+            os.makedirs(_cache_dir, exist_ok=True)
+            # Opportunistically prune stale entries (>10 days old) and cap the
+            # cache at the 3 most recent geometries.
+            _now = time.time()
+            _entries = []
+            for _fn in os.listdir(_cache_dir):
+                _fp = os.path.join(_cache_dir, _fn)
+                try:
+                    _mt = os.path.getmtime(_fp)
+                    if _now - _mt > 10 * 86400:
+                        os.unlink(_fp)
+                    else:
+                        _entries.append((_mt, _fp))
+                except OSError:
+                    pass
+            _entries.sort(reverse=True)
+            for _, _fp in _entries[3:]:
+                try:
+                    os.unlink(_fp)
+                except OSError:
+                    pass
+            def _bbox(valid2d):
+                rows = np.any(valid2d, axis=1); cols = np.any(valid2d, axis=0)
+                if not rows.any():
+                    return 0, 0, 0, 0
+                r0 = int(rows.argmax()); r1 = int(len(rows) - rows[::-1].argmax())
+                c0 = int(cols.argmax()); c1 = int(len(cols) - cols[::-1].argmax())
+                return r0, r1, c0, c1
+
+            def _delta(a2d):
+                """Delta-encode a cropped int32 index map (lossless; diffs of
+                values in [-1, ~4e6] always fit int32)."""
+                flat = a2d.ravel().astype(np.int64)
+                return np.diff(flat, prepend=0).astype(np.int32).reshape(a2d.shape)
+
+            _payload = {'n': np.int64(len(all_mappings))}
+            for i, (my, c01, c23, uv, sw, sh) in enumerate(all_mappings):
+                h, w = c01.shape
+                my2 = my.reshape(h, w)
+                r0, r1, c0, c1 = _bbox(my2 >= 0)
+                _payload[f'ybox{i}'] = np.array([h, w, r0, c0], dtype=np.int64)
+                _payload[f'my{i}'] = _delta(np.ascontiguousarray(my2[r0:r1, c0:c1]))
+                _payload[f'c01_{i}'] = np.ascontiguousarray(c01[r0:r1, c0:c1])
+                _payload[f'c23_{i}'] = np.ascontiguousarray(c23[r0:r1, c0:c1])
+                uh, uw = uv.shape
+                ur0, ur1, uc0, uc1 = _bbox(uv >= 0)
+                _payload[f'uvbox{i}'] = np.array([uh, uw, ur0, uc0], dtype=np.int64)
+                _payload[f'uv{i}'] = _delta(np.ascontiguousarray(uv[ur0:ur1, uc0:uc1]))
+                _payload[f'sw{i}'] = np.int64(sw); _payload[f'sh{i}'] = np.int64(sh)
+            _tmp_path = cache_path + f'.tmp{os.getpid()}'
+            np.savez_compressed(_tmp_path, **_payload)
+            os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path, cache_path)
+        except Exception:
+            pass
 
     return all_mappings, global_options
 
@@ -713,10 +827,11 @@ def process_and_reproject_image(args):
     reproj_v.fill(128)
     reproj_weights_y.fill(0)
 
-    # Reproject into shared buffers
-    reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None)
-    reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel(), fisheye_mask[1].ravel() if fisheye_mask is not None else None)
-    reproject_float(blend_weights_y.ravel(), dw, dh, blend_weights_y.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None)
+    # Reproject into shared buffers (kernels restricted to the valid bbox)
+    yr0, yr1, yc0, yc1, ur0, ur1, uc0, uc1 = _mapping_bboxes(mapping, dh, dw)
+    reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, None, yr0, yr1, yc0, yc1)
+    reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel(), fisheye_mask[1].ravel() if fisheye_mask is not None else None, None, ur0, ur1, uc0, uc1)
+    reproject_float(blend_weights_y.ravel(), dw, dh, blend_weights_y.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, None, yr0, yr1, yc0, yc1)
 
 
 def _round_up_16(x: int) -> int:
@@ -806,8 +921,9 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         else:
             outside_y = outside_uv = None
 
-        reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel(), outside_y.ravel() if outside_y is not None else None)
-        reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel(), outside_uv.ravel() if outside_uv is not None else None)
+        yr0, yr1, yc0, yc1, ur0, ur1, uc0, uc1 = _mapping_bboxes(mapping, dh, dw)
+        reproject_y(py.ravel(), dw, dh, py.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_final.ravel(), outside_y.ravel() if outside_y is not None else None, None, yr0, yr1, yc0, yc1)
+        reproject_uv(pu.ravel(), pv.ravel(), dw, dh, map_uv_idx.ravel(), u_final.ravel(), v_final.ravel(), outside_uv.ravel() if outside_uv is not None else None, None, ur0, ur1, uc0, uc1)
 
         if enhance:
             _print("Applying enhancement filter...")
@@ -1147,9 +1263,24 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     save_image_yuv420(y_final, u_final, v_final, output_file)
     _print(f"✅ Success! Panoramic image saved to {output_file}")
 
+def _mapping_bboxes(mapping, dh, dw):
+    """Bounding boxes of valid pixels in a projection mapping.
+    Returns (yr0, yr1, yc0, yc1, ur0, ur1, uc0, uc1); UV coords are on the
+    half-resolution grid. Lets the reproject kernels skip dead canvas regions."""
+    def _bb(valid):
+        rows = np.any(valid, axis=1); cols = np.any(valid, axis=0)
+        if not rows.any():
+            return 0, 0, 0, 0
+        return (int(rows.argmax()), int(len(rows) - rows[::-1].argmax()),
+                int(cols.argmax()), int(len(cols) - cols[::-1].argmax()))
+    yb = _bb(mapping[0].reshape(dh, dw) >= 0)
+    ub = _bb(mapping[3] >= 0)
+    return yb + ub
+
+
 def worker_for_video_frame(args):
     """Worker function for video frames, writing to pre-allocated buffers."""
-    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, padsides, devignette_gain, fisheye_mask, crop_h), out_buffers = args
+    (idx, frame, mapping, dw, dh, blend_weights_y_src, blend_weights_uv_src, pad, padsides, devignette_gain, fisheye_mask, crop_h, map_bbox), out_buffers = args
     reproj_y, reproj_u, reproj_v, reproj_weights_y, reproj_weights_uv = out_buffers
 
     if frame is None: return None
@@ -1217,10 +1348,11 @@ def worker_for_video_frame(args):
         reproj_weights_y.fill(0)
         reproj_weights_uv.fill(0)
 
-    reproject_y(py_src.ravel(), dw, dh, padded_sw_y, map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, crop_h)
-    reproject_uv(pu_src.ravel(), pv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel(), fisheye_mask[1].ravel() if fisheye_mask is not None else None, crop_h)
+    yr0, yr1, yc0, yc1, ur0, ur1, uc0, uc1 = map_bbox if map_bbox is not None else (0, -1, 0, -1, 0, -1, 0, -1)
+    reproject_y(py_src.ravel(), dw, dh, padded_sw_y, map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, crop_h, yr0, yr1, yc0, yc1)
+    reproject_uv(pu_src.ravel(), pv_src.ravel(), dw, dh, map_uv_idx.ravel(), reproj_u.ravel(), reproj_v.ravel(), fisheye_mask[1].ravel() if fisheye_mask is not None else None, crop_h, ur0, ur1, uc0, uc1)
     if reproj_weights_y is not None:
-        reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, crop_h)
+        reproject_float(blend_weights_y_src.ravel(), dw, dh, blend_weights_y_src.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), reproj_weights_y.ravel(), fisheye_mask[0].ravel() if fisheye_mask is not None else None, crop_h, yr0, yr1, yc0, yc1)
         h, w = dh, dw
         reproj_weights_uv[:, :] = 0.25 * (reproj_weights_y[0:h:2, 0:w:2] +
                                           reproj_weights_y[1:h:2, 0:w:2] +
@@ -2252,6 +2384,8 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     cached_exp_info = None
     # Seam masks are static after the first frame; cache their pyramids in blend().
     seam_mask_cache = {}
+    # Valid-pixel bounding boxes per camera — reproject kernels skip dead regions.
+    _map_bboxes_cams = [_mapping_bboxes(mappings[i], final_h, final_w) for i in range(num_images)]
     frame_count = 0
 
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
@@ -2280,7 +2414,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                     _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
 
             worker_args = [
-                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h),
+                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h, _map_bboxes_cams[i]),
                  (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                 for i in range(num_images) if final_group_frames[i] is not None
             ]
@@ -2483,6 +2617,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             outside_y = outside_uv = None
 
         map_y_idx, c01, c23, map_uv_idx, _, _ = mapping
+        _yr0, _yr1, _yc0, _yc1, _ur0, _ur1, _uc0, _uc1 = _mapping_bboxes(mapping, dh, dw)
         frame_count = 0
 
         # Pre-compute pad dimensions once — they are constant across all frames.
@@ -2532,8 +2667,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 py_s = np.pad(py_s, pad_y_width, mode='edge')
                 pu_s = np.pad(pu_s, pad_uv_width, mode='edge')
                 pv_s = np.pad(pv_s, pad_uv_width, mode='edge')
-            reproject_y(py_s.ravel(), dw, dh, py_s.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_out.ravel(), outside_y.ravel() if outside_y is not None else None, dh)
-            reproject_uv(pu_s.ravel(), pv_s.ravel(), dw, dh, map_uv_idx.ravel(), u_out.ravel(), v_out.ravel(), outside_uv.ravel() if outside_uv is not None else None, dh)
+            reproject_y(py_s.ravel(), dw, dh, py_s.shape[1], map_y_idx.ravel(), c01.ravel(), c23.ravel(), y_out.ravel(), outside_y.ravel() if outside_y is not None else None, dh, _yr0, _yr1, _yc0, _yc1)
+            reproject_uv(pu_s.ravel(), pv_s.ravel(), dw, dh, map_uv_idx.ravel(), u_out.ravel(), v_out.ravel(), outside_uv.ravel() if outside_uv is not None else None, dh, _ur0, _ur1, _uc0, _uc1)
             return y_out, u_out, v_out
 
         def _encode_yuv(y, u, v, pts):
@@ -2935,6 +3070,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     cached_exp_info = None
     # Seam masks are static after the first frame; cache their pyramids in blend().
     seam_mask_cache = {}
+    # Valid-pixel bounding boxes per camera — reproject kernels skip dead regions.
+    _map_bboxes_cams = [_mapping_bboxes(mappings[i], final_h, final_w) for i in range(num_images)]
 
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         current_frame_indices = [-1] * num_images
@@ -2974,7 +3111,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 if any(f is None for f in final_group_frames): continue
 
                 worker_args = [
-                    ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h),
+                    ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h, _map_bboxes_cams[i]),
                      (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
                     for i in range(num_images) if final_group_frames[i] is not None
                 ]

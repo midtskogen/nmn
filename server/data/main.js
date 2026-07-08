@@ -795,31 +795,96 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
         dom.lengthSelect.addEventListener('change', refreshTimeUiState);
         dom.intervalSelect.addEventListener('change', refreshTimeUiState);
         refreshTimeUiState();
-        const updateStitchOptions = () => {
-            const isVideo = document.querySelector('input[name="primary_file_type"]:checked')?.value === 'video';
+        const updateTypeOptions = () => {
+            const primaryType = document.querySelector('input[name="primary_file_type"]:checked')?.value;
+            const isVideo = primaryType === 'video';
+            const isTimelapse = primaryType === 'timelapse';
             const fisheyeSwitch = document.getElementById('fisheye-switch');
             const equirectSwitch = document.getElementById('equirect-switch');
             const fisheyeLabel = document.getElementById('fisheye-label');
             const equirectLabel = document.getElementById('equirect-label');
-            if (fisheyeSwitch) { fisheyeSwitch.disabled = isVideo; if (isVideo) fisheyeSwitch.checked = false; }
-            if (equirectSwitch) { equirectSwitch.disabled = isVideo; if (isVideo) equirectSwitch.checked = false; }
-            if (fisheyeLabel) fisheyeLabel.style.opacity = isVideo ? '0.4' : '';
-            if (equirectLabel) equirectLabel.style.opacity = isVideo ? '0.4' : '';
-            const stitchActive = !isVideo && ((fisheyeSwitch?.checked) || (equirectSwitch?.checked));
-            document.querySelectorAll('input[name="cameras"]').forEach(cb => {
-                if (stitchActive) {
-                    cb.checked = true;
-                    cb.disabled = true;
-                } else {
-                    cb.disabled = false;
+            const highResLabel = document.querySelector('label:has(#high-resolution-switch)');
+            const longIntLabel = document.getElementById('long-integration-label');
+            const hourSelect = dom.hourSelect;
+            const minuteSelect = dom.minuteSelect;
+            const lengthSelect = dom.lengthSelect;
+            const intervalSelect = dom.intervalSelect;
+            const hourPrevBtn = document.getElementById('hour-prev-btn');
+            const hourNextBtn = document.getElementById('hour-next-btn');
+            const minutePrevBtn = document.getElementById('minute-prev-btn');
+            const minuteNextBtn = document.getElementById('minute-next-btn');
+            const lengthPrevBtn = document.getElementById('length-prev-btn');
+            const lengthNextBtn = document.getElementById('length-next-btn');
+            const intervalPrevBtn = document.getElementById('interval-prev-btn');
+            const intervalNextBtn = document.getElementById('interval-next-btn');
+
+            const intervalLabelEl = document.getElementById('interval-label');
+            if (isTimelapse) {
+                // Clamp date to yesterday if today or future (timelapse for today doesn't exist yet)
+                const todayStr = new Date().toISOString().slice(0, 10);
+                const yesterdayStr = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+                if (!dom.dateInput.value || dom.dateInput.value >= todayStr) {
+                    dom.dateInput.value = yesterdayStr;
+                    if (dom.dateDisplayInput) dom.dateDisplayInput.value = yesterdayStr;
+                    dom.dateInput.dispatchEvent(new Event('change'));
                 }
-            });
+                // Fisheye/equirect: enabled, default equirect if neither checked
+                if (fisheyeSwitch) fisheyeSwitch.disabled = false;
+                if (equirectSwitch) { equirectSwitch.disabled = false; if (!fisheyeSwitch?.checked && !equirectSwitch.checked) equirectSwitch.checked = true; }
+                if (fisheyeLabel) fisheyeLabel.style.opacity = '';
+                if (equirectLabel) equirectLabel.style.opacity = '';
+                // Grey out cameras 1-7
+                const cameraGroup = document.getElementById('camera-checkbox-group');
+                if (cameraGroup) cameraGroup.style.opacity = '0.4';
+                document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.checked = false; cb.disabled = true; });
+                // Grey out hour and minute only (length/interval used for multi-day)
+                if (hourSelect) { hourSelect.disabled = true; hourSelect.style.opacity = '0.4'; }
+                if (minuteSelect) { minuteSelect.disabled = true; minuteSelect.style.opacity = '0.4'; }
+                if (lengthSelect) { lengthSelect.disabled = false; lengthSelect.style.opacity = ''; }
+                if (intervalSelect) { intervalSelect.disabled = false; intervalSelect.style.opacity = ''; }
+                [hourPrevBtn, hourNextBtn, minutePrevBtn, minuteNextBtn].forEach(b => { if (b) { b.disabled = true; b.style.opacity = '0.4'; } });
+                [lengthPrevBtn, lengthNextBtn, intervalPrevBtn, intervalNextBtn].forEach(b => { if (b) { b.disabled = false; b.style.opacity = ''; } });
+                // Swap interval label to days
+                if (intervalLabelEl) intervalLabelEl.textContent = t('interval_label_days');
+                // Grey out high-res and long-int
+                if (highResLabel) highResLabel.style.opacity = '0.4';
+                document.getElementById('high-resolution-switch').disabled = true;
+                if (longIntLabel) longIntLabel.style.display = 'none';
+            } else {
+                // Restore hour/minute/length/interval
+                if (hourSelect) { hourSelect.disabled = false; hourSelect.style.opacity = ''; }
+                if (minuteSelect) { minuteSelect.disabled = false; minuteSelect.style.opacity = ''; }
+                if (lengthSelect) { lengthSelect.disabled = false; lengthSelect.style.opacity = ''; }
+                if (intervalSelect) { intervalSelect.disabled = false; intervalSelect.style.opacity = ''; }
+                [hourPrevBtn, hourNextBtn, minutePrevBtn, minuteNextBtn, lengthPrevBtn, lengthNextBtn, intervalPrevBtn, intervalNextBtn].forEach(b => { if (b) { b.disabled = false; b.style.opacity = ''; } });
+                // Restore interval label to minutes
+                if (intervalLabelEl) intervalLabelEl.textContent = t('interval_label');
+                // Restore high-res
+                if (highResLabel) highResLabel.style.opacity = '';
+                document.getElementById('high-resolution-switch').disabled = false;
+                // Long-int: only visible for image
+                if (longIntLabel) longIntLabel.style.display = isVideo ? 'none' : 'flex';
+                // Fisheye/equirect: disabled for video
+                if (fisheyeSwitch) { fisheyeSwitch.disabled = isVideo; if (isVideo) fisheyeSwitch.checked = false; }
+                if (equirectSwitch) { equirectSwitch.disabled = isVideo; if (isVideo) equirectSwitch.checked = false; }
+                if (fisheyeLabel) fisheyeLabel.style.opacity = isVideo ? '0.4' : '';
+                if (equirectLabel) equirectLabel.style.opacity = isVideo ? '0.4' : '';
+                // Cameras 1-7: re-enable (and re-check if restoring from timelapse)
+                const cameraGroup = document.getElementById('camera-checkbox-group');
+                if (cameraGroup) cameraGroup.style.opacity = '';
+                const stitchActive = !isVideo && ((fisheyeSwitch?.checked) || (equirectSwitch?.checked));
+                document.querySelectorAll('input[name="cameras"]').forEach(cb => {
+                    if (stitchActive) { cb.checked = true; cb.disabled = true; }
+                    else { cb.disabled = false; if (!cb.checked) cb.checked = true; }
+                });
+            }
         };
-        document.querySelector('input[name="primary_file_type"][value="video"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'none'; updateStitchOptions(); });
-        document.querySelector('input[name="primary_file_type"][value="image"]').addEventListener('change', () => { document.getElementById('long-integration-label').style.display = 'flex'; updateStitchOptions(); });
-        document.getElementById('fisheye-switch')?.addEventListener('change', updateStitchOptions);
-        document.getElementById('equirect-switch')?.addEventListener('change', updateStitchOptions);
-        updateStitchOptions();
+        document.querySelector('input[name="primary_file_type"][value="video"]').addEventListener('change', updateTypeOptions);
+        document.querySelector('input[name="primary_file_type"][value="image"]').addEventListener('change', updateTypeOptions);
+        document.querySelector('input[name="primary_file_type"][value="timelapse"]').addEventListener('change', updateTypeOptions);
+        document.getElementById('fisheye-switch')?.addEventListener('change', updateTypeOptions);
+        document.getElementById('equirect-switch')?.addEventListener('change', updateTypeOptions);
+        updateTypeOptions();
         
         document.getElementById('cloud-toggle').addEventListener('change', (e) => {
             if (e.target.checked) document.getElementById('aurora-toggle').checked = false;
@@ -1114,23 +1179,28 @@ false, false);
                 return;
         
             }
-            if (selectedCameras.length === 0) {
+            const primaryType = document.querySelector('input[name="primary_file_type"]:checked').value;
+            const isTimelapse = primaryType === 'timelapse';
+            if (!isTimelapse && selectedCameras.length === 0) {
                 dom.formError.textContent = t('error_no_camera_selected');
                 return;
             }
             dom.formError.textContent = '';
-
-   
-            const primaryType = document.querySelector('input[name="primary_file_type"]:checked').value;
-  
             const isHighRes = document.getElementById('high-resolution-switch').checked;
             const isLongInt = document.getElementById('long-integration-switch').checked;
-            const fileType = primaryType === 'video'
-                ? (isHighRes ? 'hires' : 'lowres')
-                : (isHighRes ?
-(isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres'));
             const isFisheye = document.getElementById('fisheye-switch')?.checked || false;
             const isEquirect = document.getElementById('equirect-switch')?.checked || false;
+
+            if (isTimelapse && !isFisheye && !isEquirect) {
+                dom.formError.textContent = t('error_timelapse_no_projection');
+                return;
+            }
+
+            const fileType = isTimelapse
+                ? 'timelapse'
+                : (primaryType === 'video'
+                    ? (isHighRes ? 'hires' : 'lowres')
+                    : (isHighRes ? (isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres')));
             const payload = {
                 stations: [...selectedStations],
                 date: dom.dateInput.value,
@@ -1138,7 +1208,7 @@ false, false);
                 minute: dom.minuteSelect.value,
                 length: dom.lengthSelect.value,
                 interval: dom.intervalSelect.value,
-                cameras: selectedCameras,
+                cameras: isTimelapse ? [] : selectedCameras,
                 file_type: fileType,
                 hevc_supported: isHevcSupported(),
                 stitch_fisheye: isFisheye,

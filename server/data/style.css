@@ -1293,13 +1293,7 @@ button:hover:not(:disabled) {
 
 .preview-video-wrapper:fullscreen video.preview-video,
 .preview-video-wrapper:-webkit-full-screen video.preview-video,
-.preview-video-wrapper:-moz-full-screen video.preview-video,
-.preview-video-wrapper:fullscreen #grid-overlay-image,
-.preview-video-wrapper:-webkit-full-screen #grid-overlay-image,
-.preview-video-wrapper:-moz-full-screen #grid-overlay-image,
-.preview-video-wrapper:fullscreen #annotation-overlay-image,
-.preview-video-wrapper:-webkit-full-screen #annotation-overlay-image,
-.preview-video-wrapper:-moz-full-screen #annotation-overlay-image {
+.preview-video-wrapper:-moz-full-screen video.preview-video {
     width: 100% !important;
     height: 100% !important;
     max-height: none !important;

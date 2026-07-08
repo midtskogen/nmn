@@ -214,8 +214,10 @@ export function setDefaultFormValues() {
     dom.minuteSelect.value = 0;
     dom.lengthSelect.value = 1;
     dom.intervalSelect.value = 1;
-    document.querySelectorAll('input[name="cameras"]').forEach(cb => cb.checked = true);
-    document.querySelector('input[name="primary_file_type"][value="image"]').checked = true;
+    document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.checked = true; cb.disabled = false; });
+    const imageRadio = document.querySelector('input[name="primary_file_type"][value="image"]');
+    imageRadio.checked = true;
+    imageRadio.dispatchEvent(new Event('change'));
     document.getElementById('high-resolution-switch').checked = false;
     document.getElementById('long-integration-switch').checked = false;
     document.getElementById('long-integration-label').style.display = 'flex';
@@ -867,13 +869,29 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     });
     timestampToggleContainer.append(timestampCheckbox, ' ', t('show_timestamp', 'Show timestamp'));
 
+    // Detect timelapse files: STATION_YYYYMMDD_teq.mp4 or STATION_YYYYMMDD_tfe.mp4
+    const timelapseFisheye = title.match(/^([A-Z]{2,4})_(\d{8})_tfe\.mp4$/);
+    const timelapseEquirect = title.match(/^([A-Z]{2,4})_(\d{8})_teq\.mp4$/);
+    const timelapseFull = timelapseFisheye || timelapseEquirect;
+
     // Parse station and camera from video filename (e.g., "GAU_cam1_20260429_2056_hires.mp4")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_\d{8}_\d{4}/);
     let stationId = null, cameraNum = null, videoTimestamp = null, annotationTimestamp = null;
     let gridToggleContainer = null, annotationToggleContainer = null;
     let gridCheckbox = null, annotationCheckbox = null;
 
-    if (filenameMatch) {
+    if (timelapseFull) {
+        // Timelapse: derive stationId, cameraNum, timestamp from filename
+        stationId = timelapseFull[1];
+        cameraNum = timelapseFisheye ? '9' : '8';
+        const ds = timelapseFull[2]; // YYYYMMDD
+        videoTimestamp = `${ds.substring(0,4)}-${ds.substring(4,6)}-${ds.substring(6,8)}T00:00:00`;
+
+        // Grid overlay toggle only (no annotation for timelapse)
+        gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        gridCheckbox = createEl('input', { type: 'checkbox', id: 'grid-overlay-toggle', disabled: true });
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+    } else if (filenameMatch) {
         stationId = filenameMatch[1];
         cameraNum = filenameMatch[2];
 
@@ -891,7 +909,6 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             // Add 30 seconds for annotation (middle of video)
             annotationTimestamp = `${year}-${month}-${day}T${hour}:${minute}:30`;
         }
-
 
         // Grid overlay toggle - initially greyed out until loaded
         gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
@@ -926,7 +943,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     );
 
     const checkboxesWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '4px' } });
-    checkboxesWrapper.append(timestampToggleContainer);
+    if (!timelapseFull) checkboxesWrapper.append(timestampToggleContainer);
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
 
@@ -942,7 +959,10 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     // Load grid overlay - fetch JSON metadata first, then set image src
     if (videoTimestamp && stationId && cameraNum) {
-        const gridApiUrl = `index.php?action=fetch_archive_grid&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(videoTimestamp)}`;
+        // For timelapse, use the local stitch grid (same as fisheye/equirect images)
+        const gridApiUrl = timelapseFull
+            ? `index.php?action=fetch_stitch_grid&projection=${timelapseFisheye ? 'fe' : 'eq'}&resolution=hires`
+            : `index.php?action=fetch_archive_grid&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(videoTimestamp)}`;
         fetch(gridApiUrl)
             .then(response => response.json())
             .then(data => {
@@ -955,16 +975,15 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
                     gridCheckbox.disabled = true;
                 }
             })
-            .catch(err => {
+            .catch(() => {
                 gridToggleContainer.style.opacity = '0.5';
                 gridCheckbox.disabled = true;
             });
-
-        // Grid toggle handler - toggle opacity (0.6)
         gridCheckbox.addEventListener('change', () => {
             gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0';
         });
 
+        if (!timelapseFull) {
         // Load annotation overlay - fetch JSON metadata first, then set image src
         const annotationApiUrl = `index.php?action=fetch_archive_annotation&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(annotationTimestamp)}`;
         fetch(annotationApiUrl)
@@ -988,6 +1007,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         annotationCheckbox.addEventListener('change', () => {
             annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.6' : '0';
         });
+        } // end if (!timelapseFull)
     }
 
     // Video event handlers
@@ -1012,8 +1032,12 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         return `${currentDateStr} ${timeStr}.${decimals}`;
     }
 
-    // Set initial timestamp immediately before video loads
-    timestampOverlay.textContent = `${currentDateStr} 00:00:00.00`;
+    // Set initial timestamp immediately before video loads (hidden for timelapse)
+    if (timelapseFull) {
+        timestampOverlay.style.display = 'none';
+    } else {
+        timestampOverlay.textContent = `${currentDateStr} 00:00:00.00`;
+    }
 
     video.addEventListener('loadedmetadata', () => {
         loadingIndicator.style.display = 'none';
@@ -1035,6 +1059,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     video.addEventListener('timeupdate', () => {
         // Update timestamp overlay with date and 2-decimal precision (lower right)
+        if (timelapseFull) return;
         if (timestampCheckbox.checked) {
             timestampOverlay.textContent = getFormattedTimestamp(video.currentTime);
             timestampOverlay.style.display = 'block';
@@ -1121,20 +1146,80 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
     });
 
-    // --- Pan/Zoom Logic (same as live video) ---
+    // Sync overlays to the actual rendered video area (letterboxed inside the wrapper)
+    // Also sets transformOrigin to content centre for correct zoom behaviour.
+    // contentRect holds {x, y, w, h} relative to videoWrapper top-left.
+    let contentRect = { x: 0, y: 0, w: 0, h: 0 };
+    const syncVideoOverlays = () => {
+        const vw = video.offsetWidth, vh = video.offsetHeight;
+        const nw = video.videoWidth || vw, nh = video.videoHeight || vh;
+        if (!nw || !nh) return;
+        const videoAspect = nw / nh, boxAspect = vw / vh;
+        let rw, rh, rl, rt;
+        if (videoAspect > boxAspect) {
+            rw = vw; rh = vw / videoAspect;
+            rl = video.offsetLeft; rt = video.offsetTop + (vh - rh) / 2;
+        } else {
+            rh = vh; rw = vh * videoAspect;
+            rt = video.offsetTop; rl = video.offsetLeft + (vw - rw) / 2;
+        }
+        contentRect = { x: rl, y: rt, w: rw, h: rh };
+        // transformOrigin on content centre so scale() zooms from the middle
+        const originX = (rl + rw / 2) + 'px';
+        const originY = (rt + rh / 2) + 'px';
+        video.style.transformOrigin = originX + ' ' + originY;
+        [gridOverlay, annotationOverlay].forEach(ov => {
+            ov.style.left            = rl + 'px';
+            ov.style.top             = rt + 'px';
+            ov.style.width           = rw + 'px';
+            ov.style.height          = rh + 'px';
+            ov.style.transformOrigin = (rw / 2) + 'px ' + (rh / 2) + 'px';
+        });
+    };
+    video.addEventListener('loadedmetadata', syncVideoOverlays);
+    const videoRo = new ResizeObserver(() => setTimeout(syncVideoOverlays, 0));
+    videoRo.observe(videoWrapper);
+
+    // --- Pan/Zoom Logic ---
     let scale=1, panX=0, panY=0, isPanning=false, startPanX=0, startPanY=0, panOriginX=0, panOriginY=0;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => { 
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
         video.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
-    video.style.transformOrigin = gridOverlay.style.transformOrigin = annotationOverlay.style.transformOrigin = '0 0';
-    const onWheel = e => { e.preventDefault(); const rect=videoWrapper.getBoundingClientRect(); const videoRect=video.getBoundingClientRect(); const mouseX=e.clientX-rect.left; const mouseY=e.clientY-rect.top; const newScale=clamp(scale*(e.deltaY>0?0.9:1.1),1,8); const newPanX=mouseX-(mouseX-panX)*(newScale/scale); const newPanY=mouseY-(mouseY-panY)*(newScale/scale); scale=newScale; if(scale<=1.01){panX=0;panY=0;}else{panX=clamp(newPanX,-(videoRect.width*(scale-1)),0); panY=clamp(newPanY,-(videoRect.height*(scale-1)),0);} updateTransform(); };
-    const onMouseMove = e => { if(!isPanning)return; const videoRect=video.getBoundingClientRect(); panX=clamp(startPanX+(e.clientX-panOriginX),-(videoRect.width*(scale-1)),0); panY=clamp(startPanY+(e.clientY-panOriginY),-(videoRect.height*(scale-1)),0); updateTransform(); };
+    const getContentCentre = () => {
+        const rect = videoWrapper.getBoundingClientRect();
+        return { cx: rect.left + contentRect.x + contentRect.w / 2,
+                 cy: rect.top  + contentRect.y + contentRect.h / 2 };
+    };
+    const onWheel = e => {
+        e.preventDefault();
+        const { cx, cy } = getContentCentre();
+        const mouseX = e.clientX - cx, mouseY = e.clientY - cy;
+        const newScale = clamp(scale * (e.deltaY > 0 ? 0.9 : 1.1), 1, 8);
+        const newPanX = mouseX - (mouseX - panX) * (newScale / scale);
+        const newPanY = mouseY - (mouseY - panY) * (newScale / scale);
+        scale = newScale;
+        if (scale <= 1.01) { panX = 0; panY = 0; } else {
+            const maxPanX = contentRect.w * (scale - 1) / 2;
+            const maxPanY = contentRect.h * (scale - 1) / 2;
+            panX = clamp(newPanX, -maxPanX, maxPanX);
+            panY = clamp(newPanY, -maxPanY, maxPanY);
+        }
+        updateTransform();
+    };
+    const onMouseMove = e => {
+        if (!isPanning) return;
+        const maxPanX = contentRect.w * (scale - 1) / 2;
+        const maxPanY = contentRect.h * (scale - 1) / 2;
+        panX = clamp(startPanX + (e.clientX - panOriginX), -maxPanX, maxPanX);
+        panY = clamp(startPanY + (e.clientY - panOriginY), -maxPanY, maxPanY);
+        updateTransform();
+    };
     const onMouseUp = () => { isPanning=false; videoWrapper.style.cursor='default'; window.removeEventListener('mousemove',onMouseMove); window.removeEventListener('mouseup',onMouseUp); };
     const onMouseDown = e => { if(e.button!==0)return; e.preventDefault(); isPanning=true; videoWrapper.style.cursor='grabbing'; panOriginX=e.clientX; panOriginY=e.clientY; startPanX=panX; startPanY=panY; window.addEventListener('mousemove',onMouseMove); window.addEventListener('mouseup',onMouseUp); };
     videoWrapper.addEventListener('wheel', onWheel); videoWrapper.addEventListener('mousedown', onMouseDown);
-    
+
     // Sync overlay visibility when entering/exiting fullscreen
     const onFullscreenChange = () => {
         const isFullscreen = !!document.fullscreenElement;
@@ -1146,6 +1231,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             video.style.height = '';
             scale=1; panX=0; panY=0; updateTransform();
         }
+        setTimeout(syncVideoOverlays, 50);
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
         annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
     };
@@ -1275,6 +1361,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         videoWrapper.removeEventListener('wheel', onWheel);
         videoWrapper.removeEventListener('mousedown', onMouseDown);
+        videoRo.disconnect();
         history.back();
     });
 
@@ -1856,6 +1943,8 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                         if (filename.includes('_lowres_fisheye.jpg')) return 'fe';
                         if (filename.includes('_hires_equirect.jpg')) return 'eq';
                         if (filename.includes('_lowres_equirect.jpg')) return 'eq';
+                        if (filename.endsWith('_teq.mp4')) return 'teq';
+                        if (filename.endsWith('_tfe.mp4')) return 'tfe';
                         const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
                         let baseType = filename;
                         let isOverlay = false;

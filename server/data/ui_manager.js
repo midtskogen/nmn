@@ -1742,11 +1742,31 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     ro.observe(imageWrapper);
 
     // Pan/Zoom
-    let scale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
+    let scale = 1, minScale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => {
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
         img.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = transform;
+    };
+
+    // Compute scale needed to fill the fullscreen wrapper.
+    // Reads actual rendered img rect (post-CSS, pre-transform) and wrapper rect.
+    // Picks the scale that fills the screen on the constrained axis without overflowing the other.
+    const computeFillScale = () => {
+        const wRect = imageWrapper.getBoundingClientRect();
+        const iRect = img.getBoundingClientRect();
+        if (!iRect.width || !iRect.height || !wRect.width || !wRect.height) return 1;
+        const nw = img.naturalWidth, nh = img.naturalHeight;
+        if (!nw || !nh) return 1;
+        const imgAspect = nw / nh;
+        const wrapperAspect = wRect.width / wRect.height;
+        if (imgAspect >= wrapperAspect) {
+            // Wide image (equirect): contained by width → letterbox bars → return 1
+            return 1;
+        }
+        // Square/portrait image (fisheye): should be contained by height → pillarbox bars
+        // CSS is actually containing by width, so scaleY fills height without width overflow
+        return Math.max(1, wRect.height / iRect.height);
     };
 
     const onWheel = e => {
@@ -1772,11 +1792,11 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         const centerY = baseImgY + baseImgHeight / 2;
         const mouseX = e.clientX - rect.left - centerX;
         const mouseY = e.clientY - rect.top - centerY;
-        const newScale = clamp(scale * (e.deltaY > 0 ? 0.9 : 1.1), 1, 8);
+        const newScale = clamp(scale * (e.deltaY > 0 ? 0.9 : 1.1), minScale, 8);
         const newPanX = mouseX - (mouseX - panX) * (newScale / scale);
         const newPanY = mouseY - (mouseY - panY) * (newScale / scale);
         scale = newScale;
-        if (scale <= 1.01) { panX = 0; panY = 0; } else {
+        if (scale <= minScale + 0.01) { panX = 0; panY = 0; } else {
             const maxPanX = baseImgWidth * (scale - 1) / 2;
             const maxPanY = baseImgHeight * (scale - 1) / 2;
             panX = clamp(newPanX, -maxPanX, maxPanX);
@@ -1791,13 +1811,37 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Fullscreen
     fullscreenBtn.addEventListener('click', () => {
+        imageWrapper.style.opacity = '0';
         if (imageWrapper.requestFullscreen) imageWrapper.requestFullscreen();
         else if (imageWrapper.webkitRequestFullscreen) imageWrapper.webkitRequestFullscreen();
     });
     const onFullscreenChange = () => {
-        if (!document.fullscreenElement) { scale = 1; panX = 0; panY = 0; updateTransform(); }
-        // Re-sync after layout settles (fullscreen changes img rendered size)
-        setTimeout(syncOverlays, 50);
+        if (!document.fullscreenElement) {
+            minScale = 1; scale = 1; panX = 0; panY = 0;
+            imageWrapper.style.opacity = '';
+            updateTransform();
+            syncOverlays();
+        } else {
+            // Use a one-shot ResizeObserver to apply scale only once the wrapper
+            // has actually reached its final fullscreen dimensions.
+            const fsRo = new ResizeObserver(() => {
+                const rect = imageWrapper.getBoundingClientRect();
+                if (document.fullscreenElement === imageWrapper && rect.width >= screen.width * 0.9) {
+                    fsRo.disconnect();
+                    // Reset to scale=1 so getBoundingClientRect() returns unscaled size
+                    scale = 1; panX = 0; panY = 0;
+                    updateTransform();
+                    void img.offsetWidth; // force reflow
+                    minScale = computeFillScale();
+                    scale = minScale;
+                    panX = 0; panY = 0;
+                    updateTransform();
+                    syncOverlays();
+                    imageWrapper.style.opacity = '';
+                }
+            });
+            fsRo.observe(imageWrapper);
+        }
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
         boundsOverlay.style.opacity = boundsCheckbox?.checked ? '0.8' : '0';
         annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';

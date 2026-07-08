@@ -2019,7 +2019,11 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             ri_ds_i, ci_ds_i = _geo_edt(~sd, return_distances=False, return_indices=True)
             ri_i = np.repeat(np.repeat(ri_ds_i * ds_i, ds_i, axis=0), ds_i, axis=1)[:H_i, :W_i]
             ci_i = np.repeat(np.repeat(ci_ds_i * ds_i, ds_i, axis=0), ds_i, axis=1)[:H_i, :W_i]
-            cam_inpaint.append((ri_i, ci_i, ~mask_crop_i))
+            # Precompute flat source/destination indices for fast per-frame inpaint
+            inv_i = ~mask_crop_i
+            dst_flat_i = np.flatnonzero(inv_i)
+            src_flat_i = ri_i[inv_i].astype(np.intp) * W_i + ci_i[inv_i].astype(np.intp)
+            cam_inpaint.append((src_flat_i, dst_flat_i))
         else:
             cam_inpaint.append(None)
     del _tmp_reproj_i
@@ -2109,7 +2113,6 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     out_stream.options = {"preset": preset, "crf": str(crf)}
 
     total_frames = len(selected_groups)
-    seam_cache_file = tempfile.mktemp(suffix='_seam.png') if multiblend is not None else None
 
     frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     frame_u_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
@@ -2138,10 +2141,10 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         b_crop = b[:h_bb, :w_bb].copy()
         inpaint = cam_inpaint[i]
         if inpaint is not None:
-            ri_i, ci_i, invalid_i = inpaint
-            r_crop[invalid_i] = r_crop[ri_i[invalid_i], ci_i[invalid_i]]
-            g_crop[invalid_i] = g_crop[ri_i[invalid_i], ci_i[invalid_i]]
-            b_crop[invalid_i] = b_crop[ri_i[invalid_i], ci_i[invalid_i]]
+            src_flat, dst_flat = inpaint
+            r_crop.ravel()[dst_flat] = r_crop.ravel()[src_flat]
+            g_crop.ravel()[dst_flat] = g_crop.ravel()[src_flat]
+            b_crop.ravel()[dst_flat] = b_crop.ravel()[src_flat]
         return i, (r_crop, g_crop, b_crop)
 
     # Per-camera state for sequential file decoding
@@ -2247,6 +2250,8 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             return result.astype(np.uint8)
 
     cached_exp_info = None
+    # Seam masks are static after the first frame; cache their pyramids in blend().
+    seam_mask_cache = {}
     frame_count = 0
 
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
@@ -2281,9 +2286,10 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             ]
             list(executor.map(worker_for_video_frame, worker_args))
 
+            crop_results = dict(executor.map(_yuv_crop_inpaint, range(num_images)))
             images = []
             for i in range(num_images):
-                _, rgb_crops = _yuv_crop_inpaint(i)
+                rgb_crops = crop_results[i]
                 if rgb_crops is None:
                     continue
                 r0, r1, c0, c1 = cam_bboxes[i]
@@ -2308,17 +2314,6 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                     verbosity=0,
                     print_func=_print,
                 )
-                if seam_cache_file:
-                    try:
-                        multiblend._save_seams_png(seam_cache_file, assignment, workwidth, workheight, 0, _print)
-                    except Exception:
-                        seam_cache_file = None
-            else:
-                if seam_cache_file and os.path.exists(seam_cache_file):
-                    try:
-                        assignment = multiblend._load_seams_png(seam_cache_file, workwidth, workheight, 0, _print)
-                    except Exception:
-                        assignment = np.zeros((workheight, workwidth), dtype=np.uint8)
 
             recompute_exposure = (frame_count - 1) % level_subsample == 0
             blend_out_info = {}
@@ -2335,6 +2330,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                 print_func=_print,
                 exposure_info=None if recompute_exposure else cached_exp_info,
                 out_info=blend_out_info,
+                seam_mask_cache=seam_mask_cache,
             )
             if recompute_exposure and 'exposure' in blend_out_info:
                 cached_exp_info = blend_out_info['exposure']
@@ -2421,11 +2417,6 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     out_container.close()
     for decoder in camera_decoders:
         decoder.close()
-    if seam_cache_file and os.path.exists(seam_cache_file):
-        try:
-            os.unlink(seam_cache_file)
-        except Exception:
-            pass
     _print(f"\n✅ Success! Timelapse video saved to {output_file}")
 
 
@@ -2734,7 +2725,11 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             ri_ds_i, ci_ds_i = _geo_edt(~sd, return_distances=False, return_indices=True)
             ri_i = np.repeat(np.repeat(ri_ds_i*ds_i, ds_i, axis=0), ds_i, axis=1)[:H_i, :W_i]
             ci_i = np.repeat(np.repeat(ci_ds_i*ds_i, ds_i, axis=0), ds_i, axis=1)[:H_i, :W_i]
-            cam_inpaint.append((ri_i, ci_i, ~mask_crop_i))
+            # Precompute flat source/destination indices for fast per-frame inpaint
+            inv_i = ~mask_crop_i
+            dst_flat_i = np.flatnonzero(inv_i)
+            src_flat_i = ri_i[inv_i].astype(np.intp) * W_i + ci_i[inv_i].astype(np.intp)
+            cam_inpaint.append((src_flat_i, dst_flat_i))
         else:
             cam_inpaint.append(None)
     del _tmp_reproj_i
@@ -2862,8 +2857,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     if max_frames > 0 and total_frames > max_frames:
         total_frames = max_frames
 
-    seam_cache_file = tempfile.mktemp(suffix='_seam.png') if multiblend is not None else None
-
     frame_y_planes = np.empty((num_images, final_h, final_w), dtype=np.uint8)
     frame_u_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
     frame_v_planes = np.empty((num_images, final_h // 2, final_w // 2), dtype=np.uint8)
@@ -2898,10 +2891,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         b_crop = b[:h_bb, :w_bb].copy()
         inpaint = cam_inpaint[i]
         if inpaint is not None:
-            ri_i, ci_i, invalid_i = inpaint
-            r_crop[invalid_i] = r_crop[ri_i[invalid_i], ci_i[invalid_i]]
-            g_crop[invalid_i] = g_crop[ri_i[invalid_i], ci_i[invalid_i]]
-            b_crop[invalid_i] = b_crop[ri_i[invalid_i], ci_i[invalid_i]]
+            src_flat, dst_flat = inpaint
+            r_crop.ravel()[dst_flat] = r_crop.ravel()[src_flat]
+            g_crop.ravel()[dst_flat] = g_crop.ravel()[src_flat]
+            b_crop.ravel()[dst_flat] = b_crop.ravel()[src_flat]
         return i, (r_crop, g_crop, b_crop)
 
     frame_iters = [c.decode(s) for c, s in zip(in_containers, in_streams)]
@@ -2940,36 +2933,90 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
     # Cache exposure correction info to support --level-subsample.
     cached_exp_info = None
+    # Seam masks are static after the first frame; cache their pyramids in blend().
+    seam_mask_cache = {}
 
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         current_frame_indices = [-1] * num_images
-        
-        for loop_idx, group in enumerate(loop_iterator, 1):
-            final_group_frames = [None] * num_images
-            if use_sync:
-                target_indices = group
-                for i, target_idx in enumerate(target_indices):
-                    if target_idx == -1: continue
-                    frame = None
-                    try:
-                        while current_frame_indices[i] < target_idx:
-                            frame = next(frame_iters[i])
-                            current_frame_indices[i] += 1
-                        if frame and current_frame_indices[i] == target_idx:
-                             final_group_frames[i] = frame
-                        else: raise StopIteration
-                    except StopIteration:
-                        _print(f"\nWarning: Stream {i} ended unexpectedly while seeking frame {target_idx}. Terminating.", file=sys.stderr)
-                        group = None; break
-                if group is None: break
-            else:
-                try: final_group_frames = list(group)
-                except StopIteration: break
-            
-            if any(f is None for f in final_group_frames): continue
+        loop_iter = iter(enumerate(loop_iterator, 1))
+
+        def _produce_one():
+            """Decode, reproject and crop the next valid frame group.
+            Runs on a dedicated producer thread so it overlaps with the
+            blend/encode of the previous frame. Returns None at end of input."""
+            while True:
+                try:
+                    loop_idx, group = next(loop_iter)
+                except StopIteration:
+                    return None
+                final_group_frames = [None] * num_images
+                if use_sync:
+                    target_indices = group
+                    ended = False
+                    for i, target_idx in enumerate(target_indices):
+                        if target_idx == -1: continue
+                        frame = None
+                        try:
+                            while current_frame_indices[i] < target_idx:
+                                frame = next(frame_iters[i])
+                                current_frame_indices[i] += 1
+                            if frame and current_frame_indices[i] == target_idx:
+                                final_group_frames[i] = frame
+                            else: raise StopIteration
+                        except StopIteration:
+                            _print(f"\nWarning: Stream {i} ended unexpectedly while seeking frame {target_idx}. Terminating.", file=sys.stderr)
+                            ended = True; break
+                    if ended:
+                        return None
+                else:
+                    final_group_frames = list(group)
+
+                if any(f is None for f in final_group_frames): continue
+
+                worker_args = [
+                    ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h),
+                     (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
+                    for i in range(num_images) if final_group_frames[i] is not None
+                ]
+                list(executor.map(worker_for_video_frame, worker_args))
+
+                # Build ImageInfo list: yuv_to_rgb + crop + inpaint per camera (parallel)
+                crop_results = dict(executor.map(_yuv_crop_inpaint, range(num_images)))
+                images = []
+                for i in range(num_images):
+                    rgb_crops = crop_results[i]
+                    if rgb_crops is None:
+                        continue
+                    r0, r1, c0, c1 = cam_bboxes[i]
+                    tight_ypos, tight_xpos = cam_tight_pos[i]
+                    images.append(multiblend.ImageInfo(
+                        filename="", bpp=8, width=c1-c0, height=r1-r0,
+                        xpos=tight_xpos, ypos=tight_ypos,
+                        channels=list(rgb_crops),
+                        mask=cam_masks[i],
+                    ))
+
+                # Capture the timestamp value now — the frame objects are
+                # released once the next group is decoded.
+                ts_val = None
+                if timestamp:
+                    f0 = final_group_frames[0]
+                    ct = in_containers[0].start_time
+                    if f0 is not None and f0.pts is not None and ct is not None and ct > 0:
+                        ts_val = ct / 1_000_000 + float(f0.pts) * float(in_streams[0].time_base)
+                return loop_idx, images, ts_val
+
+        producer = ThreadPoolExecutor(max_workers=1)
+        pending = producer.submit(_produce_one)
+        while True:
+            item = pending.result()
+            if item is None: break
             frame_count += 1
             if max_frames > 0 and frame_count > max_frames: break
-            
+            # Prefetch the next frame group while this one is blended/encoded.
+            pending = producer.submit(_produce_one)
+            loop_idx, images, ts_val = item
+
             if not _quiet and total_frames > 0 and (loop_idx % 5 == 0 or loop_idx == total_frames):
                 percent_done = (loop_idx / total_frames) * 100
                 if sys.stderr.isatty():
@@ -2977,28 +3024,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                     bar = '█'*filled_len + '-'*(bar_length - filled_len)
                     sys.stderr.write(f'Stitching: [{bar}] {percent_done:.1f}% \r'); sys.stderr.flush()
                 else: _print(f"PROGRESS:{percent_done:.1f}", file=sys.stderr, flush=True)
-
-            worker_args = [
-                ((i, final_group_frames[i], mappings[i], final_w, final_h, blend_weights_y[i], None, pad, padsides, _vignette_gains[i], (geo_outside_y, geo_outside_uv) if geo_outside_y is not None else None, out_h),
-                 (frame_y_planes[i], frame_u_planes[i], frame_v_planes[i], None, None))
-                for i in range(num_images) if final_group_frames[i] is not None
-            ]
-            list(executor.map(worker_for_video_frame, worker_args))
-
-            # Build ImageInfo list: yuv_to_rgb + crop + inpaint per camera
-            images = []
-            for i in range(num_images):
-                _, rgb_crops = _yuv_crop_inpaint(i)
-                if rgb_crops is None:
-                    continue
-                r0, r1, c0, c1 = cam_bboxes[i]
-                tight_ypos, tight_xpos = cam_tight_pos[i]
-                images.append(multiblend.ImageInfo(
-                    filename="", bpp=8, width=c1-c0, height=r1-r0,
-                    xpos=tight_xpos, ypos=tight_ypos,
-                    channels=list(rgb_crops),
-                    mask=cam_masks[i],
-                ))
 
             workwidth, workheight = geo_workwidth, geo_workheight
             # Seam computation — only on first frame, then reuse
@@ -3014,18 +3039,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                     verbosity=0,
                     print_func=_print,
                 )
-                if seam_cache_file:
-                    try:
-                        multiblend._save_seams_png(seam_cache_file, assignment, workwidth, workheight, 0, _print)
-                    except Exception:
-                        seam_cache_file = None
-            else:
-                if seam_cache_file and os.path.exists(seam_cache_file):
-                    try:
-                        assignment = multiblend._load_seams_png(seam_cache_file, workwidth, workheight, 0, _print)
-                    except Exception:
-                        assignment = np.zeros((workheight, workwidth), dtype=np.uint8)
-
             # Blend using multiblend with exposure correction. Recompute only
             # every level_subsample frames; reuse cached correction otherwise.
             recompute_exposure = (frame_count - 1) % level_subsample == 0
@@ -3043,6 +3056,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 print_func=_print,
                 exposure_info=None if recompute_exposure else cached_exp_info,
                 out_info=blend_out_info,
+                seam_mask_cache=seam_mask_cache,
             )
             if recompute_exposure and 'exposure' in blend_out_info:
                 cached_exp_info = blend_out_info['exposure']
@@ -3091,12 +3105,8 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
                 v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
-            if timestamp:
-                f0 = final_group_frames[0]
-                ct = in_containers[0].start_time
-                if f0 is not None and f0.pts is not None and ct is not None and ct > 0:
-                    _draw_timestamp_yuv(y_final, u_final, v_final,
-                                        ct / 1_000_000 + float(f0.pts) * float(in_streams[0].time_base))
+            if timestamp and ts_val is not None:
+                _draw_timestamp_yuv(y_final, u_final, v_final, ts_val)
 
             # --- Update and encode the single, reused output frame ---
             out_frame.planes[0].update(y_final); out_frame.planes[1].update(u_final); out_frame.planes[2].update(v_final)
@@ -3105,18 +3115,14 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             for packet in out_stream.encode(out_frame):
                 out_container.mux(packet)
 
+        producer.shutdown(wait=True)
+
     if not _quiet and total_frames > 0 and sys.stderr.isatty(): sys.stderr.write("\n"); sys.stderr.flush()
 
     for packet in out_stream.encode(): out_container.mux(packet)
     out_container.close()
     for c in in_containers: c.close()
     _print(f"\n✅ Success! Panoramic video saved to {output_file}")
-
-    if seam_cache_file and os.path.exists(seam_cache_file):
-        try:
-            os.unlink(seam_cache_file)
-        except Exception:
-            pass
 
 
 def stitch(input_files, output_file, *, pto_file=None, projection='equirect',

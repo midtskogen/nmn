@@ -1680,7 +1680,8 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
           saturation_correct: bool = False,
           out_info: Optional[dict] = None,
           print_func: Callable = print,
-          exposure_info: Optional[List[dict]] = None) -> List[np.ndarray]:
+          exposure_info: Optional[List[dict]] = None,
+          seam_mask_cache: Optional[dict] = None) -> List[np.ndarray]:
     if verbosity >= 1:
         print_func("  blending...")
 
@@ -1741,15 +1742,25 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
             r0, r1 = img.ypos, img.ypos + img.height
             c0, c1 = img.xpos, img.xpos + img.width
 
-            if _NUMBA_OK:
-                _nb_assign_mask(assignment, np.uint8(i), mask_g[0])
+            # Seam masks depend only on the (static) assignment; reuse cached
+            # pyramids across frames when a cache dict is provided.
+            if seam_mask_cache is not None and i in seam_mask_cache:
+                mask_p = seam_mask_cache[i]
             else:
-                mask_g[0][:] = (assignment == np.uint8(i))
-            for l in range(levels - 1):
                 if _NUMBA_OK:
-                    _nb_ds2(mask_g[l], mask_g[l + 1])
+                    _nb_assign_mask(assignment, np.uint8(i), mask_g[0])
                 else:
-                    _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
+                    mask_g[0][:] = (assignment == np.uint8(i))
+                for l in range(levels - 1):
+                    if _NUMBA_OK:
+                        _nb_ds2(mask_g[l], mask_g[l + 1])
+                    else:
+                        _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
+                if seam_mask_cache is not None:
+                    seam_mask_cache[i] = [m.copy() for m in mask_g]
+                    mask_p = seam_mask_cache[i]
+                else:
+                    mask_p = mask_g
 
             for c in range(3):
                 ci = (2 - c) if bgr else c
@@ -1772,15 +1783,15 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
                     _nb_us(gauss[l + 1], lapl[l], rl0, rl1, cl0, cl1)
                     # Compute lapl contribution into lapl (reuse buffer): lapl = (gauss - upsampled) * mask
                     # Store band in lapl[l] ready for accumulation
-                    _nb_accum_prep(gauss[l], lapl[l], mask_g[l], rl0, rl1, cl0, cl1)
+                    _nb_accum_prep(gauss[l], lapl[l], mask_p[l], rl0, rl1, cl0, cl1)
                 else:
                     _downsample_into(gauss[l], lapl[l], gauss[l + 1], rl0, rl1, cl0, cl1)
                     _upsample_into(gauss[l + 1], uph_t[l], lapl[l], rl0, rl1, cl0, cl1)
                     lb = lapl[l][..., rl0:rl1, cl0:cl1]
                     np.subtract(gauss[l][..., rl0:rl1, cl0:cl1], lb, out=lb)
-                    np.multiply(lb, mask_g[l][rl0:rl1, cl0:cl1], out=lb)
+                    np.multiply(lb, mask_p[l][rl0:rl1, cl0:cl1], out=lb)
             np.copyto(lapl[-1], gauss[-1])
-            np.multiply(lapl[-1], mask_g[-1], out=lapl[-1])
+            np.multiply(lapl[-1], mask_p[-1], out=lapl[-1])
 
             # Accumulate into shared out_pyr under lock (fast: banded adds)
             with _accum_lock:

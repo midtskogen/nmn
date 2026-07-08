@@ -833,6 +833,34 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                                             stitch_hit[proj] = {'path': fpath, 'name': fname}
                                 _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
 
+                                # Try to fetch pre-stitched files from station (not available for long-integration)
+                                if not is_long:
+                                    _PRESTITCH_PREFIX = {'equirect': 'mini' if not is_hires else 'full',
+                                                         'fisheye':  'mini' if not is_hires else 'full'}
+                                    for proj, cam_num in [('equirect', 8), ('fisheye', 9)]:
+                                        if not (proj == 'equirect' and do_equirect or proj == 'fisheye' and do_fisheye):
+                                            continue
+                                        if proj in stitch_hit:
+                                            continue
+                                        fname = f"{base_name}_{res_suffix}_{proj}.jpg"
+                                        fpath = os.path.join(DOWNLOAD_DIR, fname)
+                                        remote_dir = f"/meteor/cam{cam_num}/{t_obj.strftime('%Y%m%d')}/{t_obj.strftime('%H')}"
+                                        remote_file = f"{'mini' if not is_hires else 'full'}_{t_obj.strftime('%M')}.jpg"
+                                        remote_path = f"{remote_dir}/{remote_file}"
+                                        temp_path = fpath + ".part"
+                                        cmd_scp = ["scp", "-B", "-o", "ConnectTimeout=15"]
+                                        if ssh_control_socket and os.path.exists(ssh_control_socket):
+                                            cmd_scp += ["-o", f"ControlPath={ssh_control_socket}"]
+                                        cmd_scp += [f"{station_id}:{remote_path}", temp_path]
+                                        try:
+                                            subprocess.run(cmd_scp, check=True, timeout=60, capture_output=True)
+                                            os.rename(temp_path, fpath)
+                                            stitch_hit[proj] = {'path': fpath, 'name': fname}
+                                            logging.info(f"Worker {task_id} - Pre-stitched {proj} fetched from station: {remote_path}")
+                                        except subprocess.CalledProcessError:
+                                            if os.path.exists(temp_path): os.remove(temp_path)
+                                            logging.info(f"Worker {task_id} - Pre-stitched {proj} not found on station: {remote_path}, will stitch locally")
+
                                 def get_stitch_display_name(proj, is_hires, is_long):
                                     """Generate display name for stitch output based on projection, resolution, and exposure."""
                                     prefix = 'eq' if proj == 'equirect' else 'fe'

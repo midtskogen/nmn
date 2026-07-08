@@ -538,9 +538,10 @@ def check_and_notify(station_id):
         )
         send_email(contacts, subject, body)
     
-    # Case 2: Recovery (previous had failures, current is clean and online)
+    # Case 2: Recovery (current is clean, and the last two checks both had failures)
     elif (not station_has_failure(current) and not station_is_offline(current)
-              and station_has_failure(previous)):
+              and station_has_failure(previous)
+              and before_prev is not None and station_has_failure(before_prev)):
         subject = f"[NMN] {display_name} ({station_id}) er tilbake uten feil"
         body = (
             f"Hei,\n\n"

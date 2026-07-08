@@ -719,12 +719,14 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         muted: true
     });
 
-    // Grid and annotation overlays for archive videos (hidden by default via opacity, shown via toggle)
+    // Grid, annotation, and camera-boundary overlays for archive videos (hidden by default via opacity, shown via toggle)
     const gridOverlay = createEl('img', { id: 'grid-overlay-image', className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 10 } });
-    const annotationOverlay = createEl('img', { id: 'annotation-overlay-image', className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 11 } });
+    const annotationOverlay = createEl('img', { id: 'annotation-overlay-image', className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 12 } });
+    const boundsOverlay = createEl('img', { id: 'bounds-overlay-image', className: 'archive-overlay bounds-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 11 } });
     // Explicitly set opacity 0 to hide initially
     gridOverlay.style.opacity = '0';
     annotationOverlay.style.opacity = '0';
+    boundsOverlay.style.opacity = '0';
 
     // Timestamp overlay with date (2 decimal precision) - lower right
     const timestampOverlay = createEl('div', { className: 'preview-timestamp', textContent: '' });
@@ -732,7 +734,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Loading indicator
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
 
-    videoWrapper.append(video, gridOverlay, annotationOverlay, timestampOverlay, loadingIndicator);
+    videoWrapper.append(video, gridOverlay, boundsOverlay, annotationOverlay, timestampOverlay, loadingIndicator);
 
     // Playback controls
     const controls = createEl('div', { className: 'preview-controls' });
@@ -877,8 +879,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Parse station and camera from video filename (e.g., "GAU_cam1_20260429_2056_hires.mp4")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_\d{8}_\d{4}/);
     let stationId = null, cameraNum = null, videoTimestamp = null, annotationTimestamp = null;
-    let gridToggleContainer = null, annotationToggleContainer = null;
-    let gridCheckbox = null, annotationCheckbox = null;
+    let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null;
+    let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null;
 
     if (timelapseFull) {
         // Timelapse: derive stationId, cameraNum, timestamp from filename
@@ -891,6 +893,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         gridCheckbox = createEl('input', { type: 'checkbox', id: 'grid-overlay-toggle', disabled: true });
         gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+
+        // Camera boundary overlay toggle
+        boundsToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        boundsCheckbox = createEl('input', { type: 'checkbox', id: 'bounds-overlay-toggle', disabled: true });
+        boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle', 'Show Cameras'));
     } else if (filenameMatch) {
         stationId = filenameMatch[1];
         cameraNum = filenameMatch[2];
@@ -945,6 +952,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const checkboxesWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '4px' } });
     if (!timelapseFull) checkboxesWrapper.append(timestampToggleContainer);
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
+    if (boundsToggleContainer) checkboxesWrapper.append(boundsToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
 
     filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, saturationWrapper, checkboxesWrapper);
@@ -982,6 +990,23 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         gridCheckbox.addEventListener('change', () => {
             gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0';
         });
+
+        if (timelapseFull && boundsToggleContainer) {
+            const proj = timelapseFisheye ? 'fe' : 'eq';
+            fetch(`index.php?action=fetch_stitch_cam_boundaries&station_id=${stationId}&projection=${proj}&resolution=lowres`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success && data.grid_url) {
+                        boundsOverlay.src = data.grid_url;
+                        boundsToggleContainer.style.opacity = '1';
+                        boundsCheckbox.disabled = false;
+                    }
+                })
+                .catch(() => {});
+            boundsCheckbox.addEventListener('change', () => {
+                boundsOverlay.style.opacity = boundsCheckbox.checked ? '0.8' : '0';
+            });
+        }
 
         if (!timelapseFull) {
         // Load annotation overlay - fetch JSON metadata first, then set image src
@@ -1168,7 +1193,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         const originX = (rl + rw / 2) + 'px';
         const originY = (rt + rh / 2) + 'px';
         video.style.transformOrigin = originX + ' ' + originY;
-        [gridOverlay, annotationOverlay].forEach(ov => {
+        [gridOverlay, boundsOverlay, annotationOverlay].forEach(ov => {
             ov.style.left            = rl + 'px';
             ov.style.top             = rt + 'px';
             ov.style.width           = rw + 'px';
@@ -1185,7 +1210,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => { 
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-        video.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
+        video.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
     const getContentCentre = () => {
         const rect = videoWrapper.getBoundingClientRect();
@@ -1233,6 +1258,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
         setTimeout(syncVideoOverlays, 50);
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
+        boundsOverlay.style.opacity = boundsCheckbox?.checked ? '0.8' : '0';
         annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -1252,6 +1278,13 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         if (gridCheckbox?.checked && gridOverlay.src) {
             ctx.globalAlpha = 0.6;
             ctx.drawImage(gridOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+
+        // Draw camera bounds overlay if enabled
+        if (boundsCheckbox?.checked && boundsOverlay.src) {
+            ctx.globalAlpha = 0.8;
+            ctx.drawImage(boundsOverlay, 0, 0, canvas.width, canvas.height);
             ctx.globalAlpha = 1.0;
         }
 
@@ -1409,10 +1442,11 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Overlays: positioned to exactly match img's rendered position/size within wrapper
     const gridOverlay = createEl('img', { className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 10, opacity: '0' } });
-    const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 11, opacity: '0' } });
+    const boundsOverlay = createEl('img', { className: 'archive-overlay bounds-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 11, opacity: '0' } });
+    const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 12, opacity: '0' } });
 
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
-    imageWrapper.append(img, gridOverlay, annotationOverlay, loadingIndicator);
+    imageWrapper.append(img, gridOverlay, boundsOverlay, annotationOverlay, loadingIndicator);
 
     img.addEventListener('load', () => {
         loadingIndicator.style.display = 'none';
@@ -1488,8 +1522,8 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     // Detect stitched panorama filenames (e.g. "GAU_20260429_2056_hires_equirect.jpg")
     // Match against imageUrl since title may be a short display name like 'eqh'
     const stitchMatch = imageUrl.match(/_(hires|lowres)_(equirect|fisheye)\.jpg(?:[?#].*)?$/i);
-    let gridToggleContainer = null, annotationToggleContainer = null;
-    let gridCheckbox = null, annotationCheckbox = null;
+    let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null;
+    let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null;
 
     if (stitchMatch) {
         const resolution = stitchMatch[1].toLowerCase();   // 'hires' or 'lowres'
@@ -1498,6 +1532,10 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         gridCheckbox = createEl('input', { type: 'checkbox', id: 'img-grid-overlay-toggle', disabled: true });
         gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+
+        boundsToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        boundsCheckbox = createEl('input', { type: 'checkbox', id: 'img-bounds-overlay-toggle', disabled: true });
+        boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle', 'Show Cameras'));
 
         fetch(`index.php?action=fetch_stitch_grid&projection=${projection}&resolution=${resolution}`)
             .then(r => r.json())
@@ -1510,8 +1548,26 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
             })
             .catch(() => {});
 
+        // Extract station code from the URL (e.g. GAU_20260429_2056_hires_equirect.jpg)
+        const stationCodeMatch = imageUrl.match(/\/([A-Z]{2,4})_\d{8}_/);
+        if (stationCodeMatch) {
+            fetch(`index.php?action=fetch_stitch_cam_boundaries&station_id=${stationCodeMatch[1]}&projection=${projection}&resolution=${resolution}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success && data.grid_url) {
+                        boundsOverlay.src = data.grid_url;
+                        boundsToggleContainer.style.opacity = '1';
+                        boundsCheckbox.disabled = false;
+                    }
+                })
+                .catch(() => {});
+        }
+
         gridCheckbox.addEventListener('change', () => {
             gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0';
+        });
+        boundsCheckbox.addEventListener('change', () => {
+            boundsOverlay.style.opacity = boundsCheckbox.checked ? '0.8' : '0';
         });
     } else if (filenameMatch) {
         const stationId = filenameMatch[1];
@@ -1571,6 +1627,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     const checkboxesWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '4px' } });
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
+    if (boundsToggleContainer) checkboxesWrapper.append(boundsToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
 
     // Enhance filter slider
@@ -1670,7 +1727,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
             rh = eh; rw = eh * imgAspect;
             rt = img.offsetTop; rl = img.offsetLeft + (ew - rw) / 2;
         }
-        [gridOverlay, annotationOverlay].forEach(ov => {
+        [gridOverlay, boundsOverlay, annotationOverlay].forEach(ov => {
             ov.style.left   = rl + 'px';
             ov.style.top    = rt + 'px';
             ov.style.width  = rw + 'px';
@@ -1689,7 +1746,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => {
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-        img.style.transform = gridOverlay.style.transform = annotationOverlay.style.transform = transform;
+        img.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = transform;
     };
 
     const onWheel = e => {
@@ -1742,6 +1799,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         // Re-sync after layout settles (fullscreen changes img rendered size)
         setTimeout(syncOverlays, 50);
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
+        boundsOverlay.style.opacity = boundsCheckbox?.checked ? '0.8' : '0';
         annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -1749,8 +1807,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     // Download — composite active overlays onto the image at full resolution
     downloadBtn.addEventListener('click', () => {
         const hasGrid = gridCheckbox?.checked && gridOverlay.src && gridOverlay.complete;
+        const hasBounds = boundsCheckbox?.checked && boundsOverlay.src && boundsOverlay.complete;
         const hasAnnotation = annotationCheckbox?.checked && annotationOverlay.src && annotationOverlay.complete;
-        if (!hasGrid && !hasAnnotation) {
+        if (!hasGrid && !hasBounds && !hasAnnotation) {
             const link = document.createElement('a');
             link.href = imageUrl;
             link.download = title;
@@ -1767,6 +1826,11 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         if (hasGrid) {
             ctx.globalAlpha = 0.6;
             ctx.drawImage(gridOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+        if (hasBounds) {
+            ctx.globalAlpha = 0.8;
+            ctx.drawImage(boundsOverlay, 0, 0, canvas.width, canvas.height);
             ctx.globalAlpha = 1.0;
         }
         if (hasAnnotation) {

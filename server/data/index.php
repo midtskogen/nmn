@@ -445,6 +445,25 @@ switch ($action) {
         }
         break;
 
+    case 'fetch_stitch_cam_boundaries':
+        header('Content-Type: application/json');
+        $station_id = $_GET['station_id'] ?? null;
+        $projection  = $_GET['projection']  ?? null;  // 'eq' or 'fe'
+        $resolution  = $_GET['resolution']  ?? 'hires';  // 'hires' or 'lowres'
+        if (!in_array($resolution, ['hires', 'lowres'], true)) $resolution = 'hires';
+        if (!$station_id || !in_array($projection, ['eq', 'fe'], true) || !preg_match('/^[a-zA-Z0-9_-]+$/', $station_id)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid parameters']);
+            exit;
+        }
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT)
+            . ' fetch_stitch_cam_boundaries '
+            . escapeshellarg($station_id) . ' '
+            . escapeshellarg($projection) . ' '
+            . escapeshellarg($resolution);
+        echo shell_exec($command);
+        break;
+
     case 'fetch_archive_grid':
         header('Content-Type: application/json');
         $station_id = $_GET['station_id'] ?? null;

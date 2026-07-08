@@ -122,6 +122,7 @@
     "modal_starting_stream": "Starte Videostream...",
     "modal_grid_toggle": " Gitter anzeigen",
     "modal_annotation_toggle": " Annotationen anzeigen",
+    "modal_bounds_toggle": " Kameragrenzen anzeigen",
     "modal_rewind": "Zurück zum Anfang",
     "modal_frame_back": "Voriger Frame",
     "modal_play_pause": "Abspielen/Pause",

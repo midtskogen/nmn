@@ -122,6 +122,7 @@
     "modal_starting_stream": "Starter videostrøm...",
     "modal_grid_toggle": " Vis rutenett",
     "modal_annotation_toggle": " Vis annoteringer",
+    "modal_bounds_toggle": " Vis kameragrenser",
     "modal_rewind": "Spol tilbake til start",
     "modal_frame_back": "Forrige ramme",
     "modal_play_pause": "Spill/Pause",

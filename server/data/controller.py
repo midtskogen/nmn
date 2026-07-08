@@ -208,7 +208,8 @@ try:
     )
     from live_streamer import (
         start_stream_relay, stop_stream_relay, fetch_grid_file, fetch_annotation_file,
-        get_archive_grid_overlay, get_archive_annotation_overlay
+        get_archive_grid_overlay, get_archive_annotation_overlay,
+        get_stitch_cam_boundaries
     )
     from data_fetchers import (
         get_kp_data, get_lightning_data, get_meteor_data, get_camera_fovs, get_station_stats
@@ -1259,6 +1260,9 @@ def main():
             "fetch_annotation": lambda: print(json.dumps(fetch_annotation_file(sys.argv[2], sys.argv[3], sys.argv[4]))),
             "fetch_archive_grid": lambda: print(json.dumps(get_archive_grid_overlay(
                 sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
+            "fetch_stitch_cam_boundaries": lambda: print(json.dumps(get_stitch_cam_boundaries(
+                sys.argv[2], sys.argv[3], stations_data,
+                resolution=sys.argv[4] if len(sys.argv) > 4 else 'hires'))),
             "fetch_archive_annotation": lambda: print(json.dumps(get_archive_annotation_overlay(
                 sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
             "enhance_filter": lambda: print(json.dumps({"image": apply_enhance_filter(sys.argv[2], int(sys.argv[3]))})),

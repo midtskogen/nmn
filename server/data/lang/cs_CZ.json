@@ -122,6 +122,7 @@
     "modal_starting_stream": "Spouštím živé vysílání...",
     "modal_grid_toggle": " Zobrazit mřížku",
     "modal_annotation_toggle": " Zobrazit anotace",
+    "modal_bounds_toggle": " Zobrazit hranice kamer",
     "modal_rewind": "Převinout na začátek",
     "modal_frame_back": "Předchozí snímek",
     "modal_play_pause": "Přehrát/Pauza",

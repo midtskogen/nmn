@@ -15,9 +15,15 @@ set -euo pipefail
 PREFIX=full
 OUT_SUFFIX=_hd
 SSH_HOST=""
+EQ_SIZE_ARGS=()
+FE_SIZE_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --sd)    PREFIX=mini; OUT_SUFFIX=""; shift ;;
+        --sd)
+            PREFIX=mini; OUT_SUFFIX=""
+            EQ_SIZE_ARGS=(--output-width 1280 --output-height 848)
+            FE_SIZE_ARGS=(--output-width 2048 --output-height 2048)
+            shift ;;
         --ssh)   SSH_HOST="$2"; shift 2 ;;
         *)       echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -136,7 +142,7 @@ LOCAL_OUTDIR="${OUTDIR}"
 [ -n "$SSH_HOST" ] && LOCAL_OUTDIR=$(mktemp -d /tmp/stitch_out_XXXXXX)
 
 TMP_EQ=$(mktemp "${LOCAL_OUTDIR}/equirect.XXXXXX.jpg")
-if "$STITCHER" --equirect --quiet --devignette -0.20 --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_EQ"; then
+if "$STITCHER" --equirect --quiet --devignette -0.20 "${EQ_SIZE_ARGS[@]}" --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_EQ"; then
     mv -f "$TMP_EQ" "${LOCAL_OUTDIR}/equirect${OUT_SUFFIX}.jpg"
 else
     rm -f "$TMP_EQ"
@@ -146,7 +152,7 @@ fi
 
 # --- Stitch fisheye ---
 TMP_FE=$(mktemp "${LOCAL_OUTDIR}/fisheye.XXXXXX.jpg")
-if "$STITCHER" --fisheye --quiet --devignette -0.20 --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_FE"; then
+if "$STITCHER" --fisheye --quiet --devignette -0.20 "${FE_SIZE_ARGS[@]}" --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_FE"; then
     mv -f "$TMP_FE" "${LOCAL_OUTDIR}/fisheye${OUT_SUFFIX}.jpg"
 else
     rm -f "$TMP_FE"

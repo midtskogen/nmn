@@ -121,6 +121,7 @@
     "modal_starting_stream": "Sāk video straumi...",
     "modal_grid_toggle": " Rādīt režģi",
     "modal_annotation_toggle": " Rādīt anotācijas",
+    "modal_bounds_toggle": " Rādīt kameru robežas",
     "modal_rewind": "Attīt atpakaļ uz sākumu",
     "modal_frame_back": "Iepriekšējais kadrs",
     "modal_play_pause": "Atskaņot/Pauzēt",

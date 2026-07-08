@@ -122,6 +122,7 @@
     "modal_starting_stream": "Käynnistetään videolähetystä...",
     "modal_grid_toggle": " Näytä ruudukko",
     "modal_annotation_toggle": " Näytä merkinnät",
+    "modal_bounds_toggle": " Näytä kamerarajat",
     "modal_rewind": "Kelaa alkuun",
     "modal_frame_back": "Edellinen kuva",
     "modal_play_pause": "Toista/Tauko",

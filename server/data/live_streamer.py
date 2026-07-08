@@ -273,6 +273,274 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
         return {"success": False, "error": "error_internal"}
 
 
+def _equirect_map_h(stitch_w: int, stitch_h: int = 0) -> int:
+    """Return the equirect PTO canvas height (orig_h) for a given output width.
+
+    Two canvas aspect ratios are in use:
+      - stitch_latest.sh scales the default 4096×2160 canvas proportionally
+        (h/w = 2160/4096 ≈ 0.5273).
+      - server stitch.py passes explicit 5120×3392 or 1280×848
+        (h/w = 3392/5120 = 0.6625).
+
+    """
+    # server stitch.py uses exactly two fixed canvas widths defined in stitch.py:
+    #   EQUIRECT_HIRES_W=5120, EQUIRECT_LOWRES_W=1280
+    # Everything else comes from stitch_latest.sh which scales the 4096x2160 default.
+    if stitch_w in (5120, 1280):
+        return round(3392 * stitch_w / 5120) & ~1
+    return round(2160 * stitch_w / 4096) & ~1
+
+
+def get_stitch_cam_boundaries(station_id_arg: str, projection: str, stations_data: dict, resolution: str = 'hires') -> dict:
+    """
+    Generate (or return cached) a camera-boundary overlay PNG for a stitched
+    equirectangular or fisheye panorama.
+
+    Fetches /meteor/camN/lens.pto for every camera of the station via SSH,
+    then runs draw_camera_boundaries.py to produce a transparent PNG.
+
+    Args:
+        station_id_arg: Station ID string (e.g. 'ams173') used as SSH host.
+        projection:     'eq' or 'fe'
+        stations_data:  Full stations.json dict.
+
+    Returns:
+        {'success': True,  'grid_url': 'download/cam_bounds_ams173_eq.png'}
+        {'success': False, 'error': '...'}
+    """
+    if projection not in ('eq', 'fe'):
+        return {"success": False, "error": "error_invalid_projection"}
+
+    # Accept either station SSH ID (e.g. 'ams173') or 3-letter station code (e.g. 'GAU')
+    station_id = station_id_arg
+    station_data = stations_data.get(station_id_arg)
+    if not station_data:
+        # Try resolving by 3-letter code
+        for sid, s in stations_data.items():
+            if s.get('station', {}).get('code', '').upper() == station_id_arg.upper():
+                station_id = sid
+                station_data = s
+                break
+    if not station_data:
+        return {"success": False, "error": "error_station_not_found"}
+
+    resolution = resolution if resolution in ('hires', 'lowres') else 'hires'
+    log_prefix = f"[CamBounds {station_id} {projection} {resolution}]"
+
+    cached_name = f"cam_bounds_{station_id}_{projection}_{resolution}.png"
+    cached_path = os.path.join(DOWNLOAD_DIR, cached_name)
+    if os.path.exists(cached_path) and os.path.getsize(cached_path) > 0:
+        logging.info(f"{log_prefix} Using cached: {cached_name}")
+        return {"success": True, "grid_url": f"download/{cached_name}"}
+
+    # Determine which camera numbers to fetch based on projection.
+    # equirect uses cams 1-7 (not 8/9 which are stitched outputs),
+    # fisheye likewise.  We fetch all available.
+    # The station's cameras list comes from stations.json where available.
+    cameras_info = station_data.get('cameras', {})
+    cam_nums = sorted(int(k.replace('cam', '')) for k in cameras_info if k.startswith('cam') and k.replace('cam', '').isdigit())
+    # Exclude virtual stitch cameras (8, 9)
+    cam_nums = [c for c in cam_nums if c < 8]
+    if not cam_nums:
+        # Fallback: assume cams 1-7
+        cam_nums = list(range(1, 8))
+
+    logging.info(f"{log_prefix} Fetching lens.pto for cams {cam_nums}")
+
+    # Fetch lens.pto files (SSH tar) and stitch dimensions (SSH identify) in parallel.
+    import tempfile, threading
+    workdir = tempfile.mkdtemp(prefix="cam_bounds_")
+    try:
+        stitch_cam = "cam8" if projection == "eq" else "cam9"
+        pat = 'mini' if resolution == 'lowres' else 'full'
+
+        tar_result   = [None]
+        id_result    = [None]
+        tar_exc      = [None]
+        id_exc       = [None]
+
+        def _fetch_tar():
+            try:
+                remote_files = " ".join(f"/meteor/cam{c}/lens.pto" for c in cam_nums)
+                remote_cmd = f"tar -c -h --ignore-failed-read -f - {remote_files} 2>/dev/null"
+                tar_result[0] = subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=30", "-o", "BatchMode=yes",
+                     station_id, remote_cmd],
+                    capture_output=True, timeout=60
+                )
+            except Exception as e:
+                tar_exc[0] = e
+
+        def _fetch_size():
+            try:
+                id_result[0] = subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
+                     station_id,
+                     f"find /meteor/{stitch_cam}/ -name '{pat}_*.jpg' | head -1 | xargs -r identify -format '%w %h\\n' 2>/dev/null"],
+                    capture_output=True, timeout=30, text=True
+                )
+            except Exception as e:
+                id_exc[0] = e
+
+        t_tar  = threading.Thread(target=_fetch_tar,  daemon=True)
+        t_size = threading.Thread(target=_fetch_size, daemon=True)
+        t_tar.start(); t_size.start()
+        t_tar.join();  t_size.join()
+
+        if tar_exc[0]:
+            logging.warning(f"{log_prefix} SSH tar error: {tar_exc[0]}")
+            return {"success": False, "error": "error_lens_fetch_failed"}
+        result = tar_result[0]
+        if result is None or result.returncode not in (0, 1) or not result.stdout:
+            logging.warning(f"{log_prefix} SSH tar failed, rc={result.returncode if result else 'None'}")
+            return {"success": False, "error": "error_lens_fetch_failed"}
+
+        tar_dir = os.path.join(workdir, "tar")
+        os.makedirs(tar_dir, exist_ok=True)
+        subprocess.run(["tar", "-x", "-f", "-", "-C", tar_dir],
+                       input=result.stdout, capture_output=True, timeout=30)
+
+        lens_files = []
+        for c in cam_nums:
+            src = os.path.join(tar_dir, "meteor", f"cam{c}", "lens.pto")
+            dest = os.path.join(workdir, f"lens_cam{c}.pto")
+            if os.path.exists(src) and os.path.getsize(src) > 0:
+                shutil.move(src, dest)
+                lens_files.append(dest)
+                logging.info(f"{log_prefix} lens.pto cam{c} OK")
+            else:
+                logging.warning(f"{log_prefix} lens.pto cam{c} not found on station")
+
+        if not lens_files:
+            return {"success": False, "error": "error_no_lens_files"}
+
+        # Locate draw_camera_boundaries.py and the panorama PTO.
+        # Use __file__'s realpath (the repo copy of live_streamer.py) so that
+        # symlinked or NFS-mounted BASE_DIR paths don't lead to wrong locations.
+        _here = os.path.realpath(os.path.dirname(__file__))
+        draw_script = os.path.normpath(os.path.join(_here, '..', '..', 'bin', 'draw_camera_boundaries.py'))
+        if not os.path.exists(draw_script):
+            # Fallback: search upward from __file__ for a bin/ sibling
+            p = _here
+            draw_script = None
+            for _ in range(5):
+                candidate = os.path.join(p, 'bin', 'draw_camera_boundaries.py')
+                if os.path.exists(candidate):
+                    draw_script = candidate
+                    break
+                p = os.path.dirname(p)
+            if not draw_script:
+                logging.error(f"{log_prefix} draw_camera_boundaries.py not found (searched from {_here})")
+                return {"success": False, "error": "error_script_not_found"}
+
+        # Panorama PTO lives alongside live_streamer.py in the repo data dir
+        pano_pto_name = f"grid_{'eq' if projection == 'eq' else 'fe'}_hd.pto"
+        pano_pto = os.path.join(_here, pano_pto_name)
+        if not os.path.exists(pano_pto):
+            logging.error(f"{log_prefix} Pano PTO not found: {pano_pto}")
+            return {"success": False, "error": "error_pano_pto_not_found"}
+
+        # Collect stitch dimensions from the parallel identify result
+        stitch_w, stitch_h = None, None
+        if id_exc[0]:
+            logging.warning(f"{log_prefix} Could not get stitch dimensions: {id_exc[0]}")
+        elif id_result[0] is not None and id_result[0].returncode == 0 and id_result[0].stdout.strip():
+            try:
+                parts = id_result[0].stdout.strip().split()
+                stitch_w, stitch_h = int(parts[0]), int(parts[1])
+                logging.info(f"{log_prefix} Stitch size from station: {stitch_w}x{stitch_h}")
+            except Exception as e:
+                logging.warning(f"{log_prefix} Could not parse stitch dimensions: {e}")
+
+        # Defaults if station query failed
+        if not stitch_w or not stitch_h:
+            if projection == "eq":
+                stitch_w, stitch_h = (1280, 448) if resolution == 'lowres' else (4096, 1168)
+            else:
+                stitch_w, stitch_h = (4096, 4096)
+            logging.info(f"{log_prefix} Using default stitch size: {stitch_w}x{stitch_h}")
+
+        # For equirect: compute crop_top — the y-offset of the stitched strip
+        # within the full equirect sphere.  The stitcher crops from the first row
+        # with any camera coverage.  We replicate that by projecting all camera
+        # sensor corners through the same mapping and taking the minimum y.
+        crop_top = 0
+        if projection == "eq":
+            try:
+                import sys as _sys
+                _bin = os.path.normpath(os.path.join(os.path.realpath(os.path.dirname(__file__)), '..', '..', 'bin'))
+                if _bin not in _sys.path:
+                    _sys.path.insert(0, _bin)
+                import pto_mapper as _pto_mapper
+                _pano_global, _ = _pto_mapper.parse_pto_file(pano_pto)
+                _pano_v = float(_pano_global.get('v', 360))
+                # Use the exact same canvas as stitcher.py's calculate_source_coords.
+                # Two canvas aspect ratios exist:
+                #   stitch_latest.sh  -> scaled from 4096x2160  (h/w = 2160/4096)
+                #   server stitch.py  -> explicit 5120x3392 or 1280x848  (h/w = 3392/5120)
+                # Detect by checking which base width the stitch_w scales from.
+                _map_w = stitch_w
+                _map_h = _equirect_map_h(stitch_w, stitch_h)  # even, matches stitcher's canvas
+                _mapping = {'f': 2, 'v': _pano_v, 'w': _map_w, 'h': _map_h, 'r': 0.0, 's': 1.0}
+                _min_y = float(_map_h)  # start high
+                for lf in lens_files:
+                    _, _imgs = _pto_mapper.parse_pto_file(lf)
+                    if not _imgs:
+                        continue
+                    _img = _imgs[0]
+                    _w, _h = float(_img.get('w', 1920)), float(_img.get('h', 1080))
+                    _pto = (_mapping, [_img])
+                    _N = 100
+                    for _i in range(_N + 1):
+                        _t = _i / _N
+                        for _ex, _ey in [(_t*_w, 0), (_t*_w, _h), (0, _t*_h), (_w, _t*_h)]:
+                            _r = _pto_mapper.map_image_to_pano(_pto, 0, _ex, _ey)
+                            if _r is not None:
+                                _min_y = min(_min_y, _r[1])
+                # crop_top is in PTO canvas units (unscaled); the script subtracts
+                # it before applying x_scale, so do NOT pre-scale here.
+                crop_top = int(_min_y)
+                logging.info(f"{log_prefix} Equirect crop_top={crop_top} (min_y={_min_y:.0f}, map={_map_w}x{_map_h})")
+            except Exception as e:
+                logging.warning(f"{log_prefix} Could not compute crop_top: {e}")
+                crop_top = 0
+
+        import uuid
+        tmp_out = os.path.join(DOWNLOAD_DIR, f"cam_bounds_tmp_{uuid.uuid4().hex}.png")
+        map_h_arg = str(_equirect_map_h(stitch_w, stitch_h)) if projection == "eq" else str(stitch_h)
+        cmd = [
+            "python3", draw_script,
+            "--pano", pano_pto,
+            "--lens"] + lens_files + [
+            "--output", tmp_out,
+            "--width", str(stitch_w),
+            "--height", str(stitch_h),
+            "--map-height", map_h_arg,
+            "--crop-top", str(crop_top),
+            "--samples", "400",
+        ]
+        logging.info(f"{log_prefix} Running draw_camera_boundaries.py")
+        proc = subprocess.run(cmd, capture_output=True, timeout=120, text=True)
+        if proc.returncode != 0 or not os.path.exists(tmp_out):
+            logging.error(f"{log_prefix} draw_camera_boundaries failed: {proc.stderr[:500]}")
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+            return {"success": False, "error": "error_boundary_generation_failed"}
+
+        os.replace(tmp_out, cached_path)
+        logging.info(f"{log_prefix} Saved: {cached_name}")
+        return {"success": True, "grid_url": f"download/{cached_name}"}
+
+    except subprocess.TimeoutExpired:
+        logging.error(f"{log_prefix} Timeout")
+        return {"success": False, "error": "error_timeout"}
+    except Exception as e:
+        logging.exception(f"{log_prefix} Exception: {e}")
+        return {"success": False, "error": "error_internal"}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_data):
     """
     Generates a star annotation overlay for an archive video using drawgrid.py.

@@ -982,9 +982,6 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     _buf_v  = np.empty((final_h // 2, final_w // 2), dtype=np.uint8)
     _buf_w  = np.empty((final_h, final_w), dtype=np.float32)
 
-    # gap_map: True where no camera has weight > 0. Accumulate as uint8 count.
-    gap_map_acc = np.zeros((final_h, final_w), dtype=np.uint8)
-
     from scipy.ndimage import distance_transform_edt as _edt, binary_erosion as _binary_erosion
 
     def _build_image_info(y_snap, u_snap, v_snap, w_snap, cam_idx):
@@ -1048,8 +1045,6 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
                  (_buf_y, _buf_u, _buf_v, _buf_w))
             )
 
-            gap_map_acc[_buf_w < 1e-9] += 1
-
             # Snapshot the shared buffers — these copies are consumed by the
             # background thread while the next reprojection runs on the originals.
             del mapping
@@ -1080,10 +1075,6 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
 
     _print("Blending with multiblend (graph-cut seams + exposure correction)...")
 
-    # gap_map: pixel is a gap if ALL cameras had zero weight there.
-    gap_map = gap_map_acc == num_images
-    del gap_map_acc
-
     min_left, min_top, workwidth, workheight = multiblend.tighten(images)
     levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
     _print(f"  {workwidth}x{workheight}, {levels} levels (tightened from {final_w}x{final_h})")
@@ -1113,7 +1104,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     # Compute coverage in the tightened workspace (image xpos/ypos are relative
     # to the tightened bbox after tighten() shifted them).
     covered_tight = multiblend._coverage_mask(images, workwidth, workheight)
-    del images, assignment, gap_map
+    del images, assignment
 
     # Embed tightened result and coverage back into full canvas.
     if min_left > 0 or min_top > 0 or workwidth < final_w or workheight < final_h:

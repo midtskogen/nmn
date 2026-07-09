@@ -72,9 +72,16 @@ def _get_buf_pool(pyr_shapes, n_workers):
         _g  = [np.empty((3,) + s, dtype=np.float32) for s in pyr_shapes]
         _l  = [np.empty((3,) + s, dtype=np.float32) for s in pyr_shapes]
         _m  = [np.empty(s, dtype=np.float32) for s in pyr_shapes]
-        _mc = [np.empty(s, dtype=np.float32) for s in pyr_shapes]
-        _ut = [np.empty((3, pyr_shapes[lv + 1][0], pyr_shapes[lv][1]), dtype=np.float32)
-               for lv in range(len(pyr_shapes) - 1)]
+        # mask_c and uph_t are only used in the non-Numba fallback paths
+        # (_downsample_into/_upsample_into). Skip them when Numba is available:
+        # ~215 MB per worker for a 4096x4096 10-level pyramid.
+        if _NUMBA_OK:
+            _mc = None
+            _ut = None
+        else:
+            _mc = [np.empty(s, dtype=np.float32) for s in pyr_shapes]
+            _ut = [np.empty((3, pyr_shapes[lv + 1][0], pyr_shapes[lv][1]), dtype=np.float32)
+                   for lv in range(len(pyr_shapes) - 1)]
         pool.append((_g, _l, _m, _mc, _ut))
     _BUF_POOL_CACHE = pool
     _BUF_POOL_KEY   = key

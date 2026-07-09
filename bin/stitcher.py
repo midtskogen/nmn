@@ -987,10 +987,10 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
 
     from scipy.ndimage import distance_transform_edt as _edt, binary_erosion as _binary_erosion
 
-    def _build_image_info(y_snap, u_snap, v_snap, w_snap, map_y_snap, cam_idx):
+    def _build_image_info(y_snap, u_snap, v_snap, w_snap, cam_idx):
         """Build ImageInfo from snapshotted per-camera arrays (runs in a thread,
         overlapping with the next camera's Numba reprojection)."""
-        mask = (map_y_snap >= 0) & (w_snap > 1e-9)
+        mask = w_snap > 1e-9
         mask = _binary_erosion(mask, iterations=2)
 
         rows = np.any(mask, axis=1)
@@ -1002,11 +1002,12 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         c0 = int(np.argmax(cols))
         c1 = int(len(cols) - 1 - np.argmax(cols[::-1])) + 1
 
-        r, g, b = yuv_to_rgb(y_snap, u_snap, v_snap)
-        r_crop = r[r0:r1, c0:c1].copy()
-        g_crop = g[r0:r1, c0:c1].copy()
-        b_crop = b[r0:r1, c0:c1].copy()
-        del r, g, b
+        # Crop YUV to bbox first, then convert only the small region to RGB —
+        # avoids allocating three full-canvas uint8 arrays before discarding them.
+        u2 = u_snap[r0//2:(r1+1)//2, c0//2:(c1+1)//2]
+        v2 = v_snap[r0//2:(r1+1)//2, c0//2:(c1+1)//2]
+        r_crop, g_crop, b_crop = yuv_to_rgb(y_snap[r0:r1, c0:c1], u2, v2)
+        del u2, v2
         mask_crop = mask[r0:r1, c0:c1].copy()
 
         if not mask_crop.all():
@@ -1051,7 +1052,6 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
 
             # Snapshot the shared buffers — these copies are consumed by the
             # background thread while the next reprojection runs on the originals.
-            map_y_snap = mapping[0].reshape(final_h, final_w).copy()
             del mapping
             y_snap = _buf_y.copy()
             u_snap = _buf_u.copy()
@@ -1065,7 +1065,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
                     images[pending_idx] = result
 
             pending_future = post_pool.submit(
-                _build_image_info, y_snap, u_snap, v_snap, w_snap, map_y_snap, i)
+                _build_image_info, y_snap, u_snap, v_snap, w_snap, i)
             pending_idx = i
 
         if pending_future is not None:
@@ -1182,8 +1182,9 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         gap_ds = gap_pad[::S, ::S];  del gap_pad
         ri_ds, ci_ds = distance_transform_edt(gap_ds, return_distances=False, return_indices=True)
         del gap_ds
-        ri = np.repeat(np.repeat(ri_ds * S, S, axis=0), S, axis=1)[:H, :W];  del ri_ds
-        ci = np.repeat(np.repeat(ci_ds * S, S, axis=0), S, axis=1)[:H, :W];  del ci_ds
+        # int32 is sufficient: max canvas index < 4096² < 2³¹, saves ~128 MB vs int64.
+        ri = np.repeat(np.repeat((ri_ds * S).astype(np.int32), S, axis=0), S, axis=1)[:H, :W];  del ri_ds
+        ci = np.repeat(np.repeat((ci_ds * S).astype(np.int32), S, axis=0), S, axis=1)[:H, :W];  del ci_ds
 
         # Step 2: Feather weights from full-res EDT (shared across channels).
         dist = distance_transform_edt(~gap)
@@ -1193,11 +1194,11 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         out_channels = []
         for ch in rgb_channels:
             ch_f = ch.astype(np.float32)
-            # EDT fill: gap pixels get nearest valid pixel colour.
-            ch_fill = ch_f.copy()
-            ch_fill[gap] = ch_f[ri[gap], ci[gap]]
+            # EDT fill in-place: gap pixels get nearest valid pixel colour.
+            # No separate ch_fill copy needed — gap and non-gap pixels are disjoint.
+            ch_f[gap] = ch_f[ri[gap], ci[gap]]
             # Gaussian smooth at downscale.
-            src_u8 = ch_fill.clip(0, 255).astype(np.uint8)
+            src_u8 = ch_f.clip(0, 255).astype(np.uint8)
             if _cv2 is not None:
                 small = _cv2.resize(src_u8, (sw, sh), interpolation=_cv2.INTER_AREA).astype(np.float32)
             else:
@@ -1213,7 +1214,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
             del blurred, blurred_u8
             # Feathered blend.
             result = (ch_f * blend_w + full * (1.0 - blend_w))
-            del ch_f, full, ch_fill
+            del ch_f, full
             np.clip(result, 0, 255, out=result)
             out_channels.append(result.astype(np.uint8));  del result
 

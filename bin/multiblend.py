@@ -29,8 +29,6 @@ import sys
 import os
 import time
 import ctypes
-import concurrent.futures as _cf
-import threading
 # Disable scipy/numpy thread pool: for our banded array sizes the 48-thread
 # overhead (futex + context switches) costs ~3.6s sys and ~5s user with no
 # real-time benefit.  Users can override by setting OMP_NUM_THREADS in env.
@@ -42,21 +40,6 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Callable
 
 __version__ = '0.6.2'
-
-# Persistent thread pool for parallel pyramid builds in blend().
-# Created lazily on first blend() call; shared across all calls.
-_BLEND_POOL: '_cf.ThreadPoolExecutor | None' = None
-_BLEND_POOL_SIZE: int = 0
-
-def _get_blend_pool(n_workers: int) -> '_cf.ThreadPoolExecutor':
-    global _BLEND_POOL, _BLEND_POOL_SIZE
-    if _BLEND_POOL is None or _BLEND_POOL_SIZE != n_workers:
-        if _BLEND_POOL is not None:
-            _BLEND_POOL.shutdown(wait=False)
-        _BLEND_POOL = _cf.ThreadPoolExecutor(max_workers=n_workers,
-                                              thread_name_prefix='mb_blend')
-        _BLEND_POOL_SIZE = n_workers
-    return _BLEND_POOL
 
 _BUF_POOL_CACHE: 'dict | None' = None
 _BUF_POOL_KEY: 'tuple | None' = None
@@ -1723,102 +1706,73 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
     # out_pyr: shared accumulator, zeroed once.
     out_pyr = [np.zeros((3,) + s, dtype=np.float32) for s in pyr_shapes]
 
-    # Per-worker scratch buffers: gauss/lapl/mask_g are private to each worker thread.
-    # Seam assignment guarantees per-image banded regions are disjoint, so out_pyr
-    # writes are race-free without a lock.
-    _n_workers = min(len(images), 4)
-    _buf_pool = _get_buf_pool(pyr_shapes, _n_workers)
+    # Single scratch buffer set. Only one worker is needed because each image's
+    # pyramid build uses Numba's parallel=True threads, which already saturate
+    # CPU cores; additional Python-level workers would only duplicate buffers and
+    # cause oversubscription.
+    _buf_pool = _get_buf_pool(pyr_shapes, 1)
+    gauss, lapl, mask_g, mask_c, uph_t = _buf_pool[0]
 
-    _buf_sem = threading.Semaphore(_n_workers)
-    _buf_lock = threading.Lock()
-    _free_bufs = list(range(_n_workers))
-    # Per-level locks so concurrent threads don't race on out_pyr writes.
-    # Banded regions at levels > 0 are disjoint in pixel space, so these locks
-    # are only needed at level 0 where _nb_accum uses prange internally and
-    # concurrent threads writing to adjacent bands may share cache lines.
-    # Using one lock for all levels is simplest and safe.
-    _accum_lock = threading.Lock()
+    for i, img in enumerate(images):
+        r0, r1 = img.ypos, img.ypos + img.height
+        c0, c1 = img.xpos, img.xpos + img.width
 
-    def _build_image_pyramid(i, img):
-        # Acquire a private scratch buffer set
-        _buf_sem.acquire()
-        with _buf_lock:
-            buf_idx = _free_bufs.pop()
-        gauss, lapl, mask_g, mask_c, uph_t = _buf_pool[buf_idx]
-        try:
-            r0, r1 = img.ypos, img.ypos + img.height
-            c0, c1 = img.xpos, img.xpos + img.width
-
-            # Seam masks depend only on the (static) assignment; reuse cached
-            # pyramids across frames when a cache dict is provided.
-            if seam_mask_cache is not None and i in seam_mask_cache:
+        # Seam masks depend only on the (static) assignment; reuse cached
+        # pyramids across frames when a cache dict is provided.
+        if seam_mask_cache is not None and i in seam_mask_cache:
+            mask_p = seam_mask_cache[i]
+        else:
+            if _NUMBA_OK:
+                _nb_assign_mask(assignment, np.uint8(i), mask_g[0])
+            else:
+                mask_g[0][:] = (assignment == np.uint8(i))
+            for l in range(levels - 1):
+                if _NUMBA_OK:
+                    _nb_ds2(mask_g[l], mask_g[l + 1])
+                else:
+                    _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
+            if seam_mask_cache is not None:
+                seam_mask_cache[i] = [m.copy() for m in mask_g]
                 mask_p = seam_mask_cache[i]
             else:
-                if _NUMBA_OK:
-                    _nb_assign_mask(assignment, np.uint8(i), mask_g[0])
-                else:
-                    mask_g[0][:] = (assignment == np.uint8(i))
-                for l in range(levels - 1):
-                    if _NUMBA_OK:
-                        _nb_ds2(mask_g[l], mask_g[l + 1])
-                    else:
-                        _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
-                if seam_mask_cache is not None:
-                    seam_mask_cache[i] = [m.copy() for m in mask_g]
-                    mask_p = seam_mask_cache[i]
-                else:
-                    mask_p = mask_g
+                mask_p = mask_g
 
+        for c in range(3):
+            ci = (2 - c) if bgr else c
+            gauss[0][c, r0:r1, c0:c1] = img.channels[ci]
+        if _NUMBA_OK:
+            _nb_fill_border(gauss[0], r0, r1, c0, c1)
+        else:
             for c in range(3):
-                ci = (2 - c) if bgr else c
-                gauss[0][c, r0:r1, c0:c1] = img.channels[ci]
+                if r0 > 0:          gauss[0][c, :r0, c0:c1]  = gauss[0][c, r0, c0:c1]
+                if r1 < workheight: gauss[0][c, r1:, c0:c1]  = gauss[0][c, r1 - 1:c1]
+                if c0 > 0:          gauss[0][c, :, :c0]      = gauss[0][c, :, c0:c0 + 1]
+                if c1 < workwidth:  gauss[0][c, :, c1:]      = gauss[0][c, :, c1 - 1:c1]
+
+        # Build full pyramid, then accumulate into out_pyr
+        for l in range(levels - 1):
+            rl0 = r0 >> l;  rl1 = min((r1 + (1 << l) - 1) >> l, pyr_shapes[l][0])
+            cl0 = c0 >> l;  cl1 = min((c1 + (1 << l) - 1) >> l, pyr_shapes[l][1])
             if _NUMBA_OK:
-                _nb_fill_border(gauss[0], r0, r1, c0, c1)
+                _nb_ds3(gauss[l], gauss[l + 1])
+                _nb_us(gauss[l + 1], lapl[l], rl0, rl1, cl0, cl1)
+                _nb_accum_prep(gauss[l], lapl[l], mask_p[l], rl0, rl1, cl0, cl1)
             else:
-                for c in range(3):
-                    if r0 > 0:          gauss[0][c, :r0, c0:c1]  = gauss[0][c, r0, c0:c1]
-                    if r1 < workheight: gauss[0][c, r1:, c0:c1]  = gauss[0][c, r1 - 1, c0:c1]
-                    if c0 > 0:          gauss[0][c, :, :c0]      = gauss[0][c, :, c0:c0 + 1]
-                    if c1 < workwidth:  gauss[0][c, :, c1:]      = gauss[0][c, :, c1 - 1:c1]
+                _downsample_into(gauss[l], lapl[l], gauss[l + 1], rl0, rl1, cl0, cl1)
+                _upsample_into(gauss[l + 1], uph_t[l], lapl[l], rl0, rl1, cl0, cl1)
+                lb = lapl[l][..., rl0:rl1, cl0:cl1]
+                np.subtract(gauss[l][..., rl0:rl1, cl0:cl1], lb, out=lb)
+                np.multiply(lb, mask_p[l][rl0:rl1, cl0:cl1], out=lb)
+        np.copyto(lapl[-1], gauss[-1])
+        np.multiply(lapl[-1], mask_p[-1], out=lapl[-1])
 
-            # Build full private pyramid first, then accumulate under lock
-            for l in range(levels - 1):
-                rl0 = r0 >> l;  rl1 = min((r1 + (1 << l) - 1) >> l, pyr_shapes[l][0])
-                cl0 = c0 >> l;  cl1 = min((c1 + (1 << l) - 1) >> l, pyr_shapes[l][1])
-                if _NUMBA_OK:
-                    _nb_ds3(gauss[l], gauss[l + 1])
-                    _nb_us(gauss[l + 1], lapl[l], rl0, rl1, cl0, cl1)
-                    # Compute lapl contribution into lapl (reuse buffer): lapl = (gauss - upsampled) * mask
-                    # Store band in lapl[l] ready for accumulation
-                    _nb_accum_prep(gauss[l], lapl[l], mask_p[l], rl0, rl1, cl0, cl1)
-                else:
-                    _downsample_into(gauss[l], lapl[l], gauss[l + 1], rl0, rl1, cl0, cl1)
-                    _upsample_into(gauss[l + 1], uph_t[l], lapl[l], rl0, rl1, cl0, cl1)
-                    lb = lapl[l][..., rl0:rl1, cl0:cl1]
-                    np.subtract(gauss[l][..., rl0:rl1, cl0:cl1], lb, out=lb)
-                    np.multiply(lb, mask_p[l][rl0:rl1, cl0:cl1], out=lb)
-            np.copyto(lapl[-1], gauss[-1])
-            np.multiply(lapl[-1], mask_p[-1], out=lapl[-1])
+        for l in range(levels - 1):
+            rl0 = r0 >> l;  rl1 = min((r1 + (1 << l) - 1) >> l, pyr_shapes[l][0])
+            cl0 = c0 >> l;  cl1 = min((c1 + (1 << l) - 1) >> l, pyr_shapes[l][1])
+            out_pyr[l][..., rl0:rl1, cl0:cl1] += lapl[l][..., rl0:rl1, cl0:cl1]
+        out_pyr[-1] += lapl[-1]
 
-            # Accumulate into shared out_pyr under lock (fast: banded adds)
-            with _accum_lock:
-                for l in range(levels - 1):
-                    rl0 = r0 >> l;  rl1 = min((r1 + (1 << l) - 1) >> l, pyr_shapes[l][0])
-                    cl0 = c0 >> l;  cl1 = min((c1 + (1 << l) - 1) >> l, pyr_shapes[l][1])
-                    if _NUMBA_OK:
-                        out_pyr[l][..., rl0:rl1, cl0:cl1] += lapl[l][..., rl0:rl1, cl0:cl1]
-                    else:
-                        out_pyr[l][..., rl0:rl1, cl0:cl1] += lapl[l][..., rl0:rl1, cl0:cl1]
-                out_pyr[-1] += lapl[-1]
-        finally:
-            with _buf_lock:
-                _free_bufs.append(buf_idx)
-            _buf_sem.release()
-
-    _pool = _get_blend_pool(_n_workers)
-    list(_pool.map(lambda args: _build_image_pyramid(*args), enumerate(images)))
-
-    # Collapse in-place: reuse buffer pool slot 0 (all workers finished)
+    # Collapse in-place: reuse the single buffer pool slot
     _cg, _cl, _cm, _cmc, _cut = _buf_pool[0]
     np.copyto(_cg[-1], out_pyr[-1])
     for l in range(levels - 2, -1, -1):

@@ -916,12 +916,13 @@
                     const name = cameras[id]?.station?.name;
                     if (!name) continue;
                     const displayName = cameras[id]?.station?.display_name || name.charAt(0).toUpperCase() + name.slice(1);
-                    const baseUrl = `https://norskmeteornettverk.no/cam/${name}`;
+                    const baseUrl = `/cam/${name}`;
                     const sdUrl = `${baseUrl}/equirect.jpg`;
                     const hdUrl = `${baseUrl}/equirect_hd.jpg`;
                     const item = document.createElement('div');
                     item.className = 'equirect-item';
                     item.innerHTML = `<div class="equirect-label">${id} — ${displayName}</div>`;
+                    
                     const describeError = (url, status) => {
                         const file = url.split('/').slice(-2).join('/');
                         if (status === 0) return `${file}: Tilkopling feila (endepunkt ikke tilkopla)`;
@@ -932,56 +933,74 @@
                         if (status === 503) return `${file}: Tjenesten utilgjengelig (503)`;
                         return `${file}: Feil ${status}`;
                     };
-                    const tryLoad = async () => {
-                        // Try SD first
-                        try {
-                            const sdResp = await fetch(sdUrl, {method:'HEAD'});
-                            if (sdResp.ok) {
-                                const img = new Image();
-                                img.alt = `${id} equirect`;
-                                img.loading = 'lazy';
-                                img.src = sdUrl;
-                                const link = document.createElement('a');
-                                link.target = '_blank';
-                                link.appendChild(img);
-                                item.appendChild(link);
-                                // Check if HD exists for the link
-                                try {
-                                    const hdResp = await fetch(hdUrl, {method:'HEAD'});
-                                    link.href = hdResp.ok ? hdUrl : sdUrl;
-                                } catch { link.href = sdUrl; }
-                                return;
-                            }
-                        } catch {}
-                        // Try HD
-                        try {
-                            const hdResp = await fetch(hdUrl, {method:'HEAD'});
-                            if (hdResp.ok) {
-                                const img = new Image();
-                                img.alt = `${id} equirect`;
-                                img.loading = 'lazy';
-                                img.src = hdUrl;
-                                const link = document.createElement('a');
-                                link.target = '_blank';
-                                link.href = hdUrl;
-                                link.appendChild(img);
-                                item.appendChild(link);
-                                return;
-                            }
-                        } catch {}
-                        // Both failed — get detailed error
-                        let errMsg = 'Bilde ikke tilgjengelig';
-                        try {
-                            const sdResp = await fetch(sdUrl, {method:'HEAD'}).catch(() => ({ok:false, status:0}));
-                            const hdResp = await fetch(hdUrl, {method:'HEAD'}).catch(() => ({ok:false, status:0}));
-                            errMsg = describeError(sdUrl, sdResp.status) + '\n' + describeError(hdUrl, hdResp.status);
-                        } catch {}
-                        const err = document.createElement('div');
-                        err.style.cssText = 'color:#999;padding:1em;white-space:pre-line;font-size:0.85em;';
-                        err.textContent = errMsg;
-                        item.appendChild(err);
+                    
+                    const img = new Image();
+                    img.alt = `${id} equirect`;
+                    img.loading = 'lazy';
+                    img.decoding = 'async';
+                    const link = document.createElement('a');
+                    link.target = '_blank';
+                    link.href = sdUrl;
+                    link.appendChild(img);
+                    item.appendChild(link);
+                    
+                    img.onload = () => {
+                        fetch(hdUrl, { method: 'HEAD' })
+                            .then(hdResp => { link.href = hdResp.ok ? hdUrl : sdUrl; })
+                            .catch(() => { link.href = sdUrl; });
                     };
-                    tryLoad();
+                    img.onerror = async () => {
+                        try {
+                            const hdResp = await fetch(hdUrl, { method: 'HEAD' });
+                            if (hdResp.ok) {
+                                const hdImg = new Image();
+                                hdImg.alt = `${id} equirect`;
+                                const hdLink = document.createElement('a');
+                                hdLink.target = '_blank';
+                                hdLink.href = hdUrl;
+                                hdLink.appendChild(hdImg);
+                                hdImg.onload = () => {
+                                    item.replaceChild(hdLink, link);
+                                };
+                                hdImg.onerror = () => {
+                                    const err = document.createElement('div');
+                                    err.style.cssText = 'color:#999;padding:1em;white-space:pre-line;font-size:0.85em;';
+                                    err.textContent = 'Bilde ikke tilgjengelig';
+                                    item.replaceChild(err, link);
+                                };
+                                hdImg.src = hdUrl;
+                                return;
+                            }
+                            let errMsg = 'Bilde ikke tilgjengelig';
+                            try {
+                                const sdResp = await fetch(sdUrl, { method: 'HEAD' }).catch(() => ({ok: false, status: 0}));
+                                errMsg = describeError(sdUrl, sdResp.status) + '\n' + describeError(hdUrl, hdResp.status);
+                            } catch {}
+                            const err = document.createElement('div');
+                            err.style.cssText = 'color:#999;padding:1em;white-space:pre-line;font-size:0.85em;';
+                            err.textContent = errMsg;
+                            item.replaceChild(err, link);
+                        } catch {
+                            const hdImg = new Image();
+                            hdImg.alt = `${id} equirect`;
+                            const hdLink = document.createElement('a');
+                            hdLink.target = '_blank';
+                            hdLink.href = hdUrl;
+                            hdLink.appendChild(hdImg);
+                            hdImg.onload = () => {
+                                item.replaceChild(hdLink, link);
+                            };
+                            hdImg.onerror = () => {
+                                const err = document.createElement('div');
+                                err.style.cssText = 'color:#999;padding:1em;white-space:pre-line;font-size:0.85em;';
+                                err.textContent = 'Bilde ikke tilgjengelig';
+                                item.replaceChild(err, link);
+                            };
+                            hdImg.src = hdUrl;
+                        }
+                    };
+                    
+                    img.src = sdUrl;
                     gallery.appendChild(item);
                 }
                 

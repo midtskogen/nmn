@@ -108,7 +108,7 @@ echo "Using inputs from $FOUND_TS: ${REMOTE_FILES[*]}"
 # --- Fetch input files ---
 if [ -n "$SSH_HOST" ]; then
     TMPDIR=$(mktemp -d /tmp/stitch_inputs_XXXXXX)
-    trap 'rm -rf "$TMPDIR" /tmp/stitch_out_*; cleanup_ssh' EXIT
+    trap 'rm -rf "$TMPDIR" "$LOCAL_OUTDIR"; cleanup_ssh' EXIT
     # Mirror remote directory structure so stitcher can find lens.pto files.
     # Collect unique cam directories and their lens.pto files.
     INPUT_FILES=()

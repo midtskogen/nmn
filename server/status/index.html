@@ -1,0 +1,1020 @@
+<!doctype html>
+<html lang="no">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Stasjonsstatus - Norsk meteornettverk</title>
+    
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    
+    <style>
+        :root {
+            --status-ok: #28a745;
+            --status-warn: #ffc107;
+            --status-fail: #dc3545;
+            --status-info: #17a2b8;
+            --status-unknown: #6c757d;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e9ecef;
+            min-height: 100vh;
+        }
+        
+        .navbar {
+            background: rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            padding: 0.25rem 0;
+        }
+        
+        .navbar-brand {
+            font-size: 0.9rem;
+            padding: 0.25rem 0;
+        }
+        
+        .status-header {
+            padding: 0.75rem 0;
+            text-align: center;
+        }
+        
+        .status-header h1 {
+            font-weight: 300;
+            margin-bottom: 0.25rem;
+            font-size: 1.5rem;
+        }
+        
+        .last-updated {
+            color: #adb5bd;
+            font-size: 0.75rem;
+        }
+        
+        .overview-cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.1rem;
+            margin-bottom: 0.1rem;
+        }
+        
+        .overview-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+            padding: 0.25rem;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .overview-card .number {
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin-bottom: 0.1rem;
+        }
+        
+        .overview-card .label {
+            color: #adb5bd;
+            font-size: 0.7rem;
+        }
+        
+        .overview-card.ok .number { color: var(--status-ok); }
+        .overview-card.warning .number { color: var(--status-warn); }
+        .overview-card.fail .number { color: var(--status-fail); }
+        .overview-card.unknown .number { color: var(--status-unknown); }
+        
+        .station-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 0.1rem;
+        }
+        
+        .station-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .station-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        }
+        
+        .station-header {
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .station-title {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .station-id {
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+        
+        .station-location {
+            font-size: 0.6rem;
+            color: #adb5bd;
+            white-space: nowrap;
+        }
+        
+        .status-badge {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .status-badge.ok { background: var(--status-ok); box-shadow: 0 0 8px var(--status-ok); }
+        .status-badge.warning { background: var(--status-warn); box-shadow: 0 0 8px var(--status-warn); }
+        .status-badge.fail { background: var(--status-fail); box-shadow: 0 0 8px var(--status-fail); }
+        .status-badge.unknown { background: var(--status-unknown); }
+        
+        .station-body {
+            padding: 0.1rem 0.5rem 0.25rem;
+        }
+        
+        .status-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.1rem;
+            margin-bottom: 0.1rem;
+        }
+        
+        .metric {
+            text-align: center;
+            padding: 0.1rem;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 2px;
+        }
+        
+        .metric-value {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        
+        .metric-value.ok { color: var(--status-ok); }
+        .metric-value.warn { color: var(--status-warn); }
+        .metric-value.fail { color: var(--status-fail); }
+        
+        .metric-label {
+            font-size: 0.6rem;
+            color: #adb5bd;
+            text-transform: uppercase;
+        }
+        
+        .issue-list {
+            max-height: 60px;
+            overflow-y: auto;
+            font-size: 0.7rem;
+        }
+        
+        .issue-item {
+            padding: 0.1rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            display: flex;
+            align-items: flex-start;
+            gap: 0.1rem;
+        }
+        
+        .issue-item:last-child {
+            border-bottom: none;
+        }
+        
+        .issue-icon {
+            font-size: 0.9rem;
+            margin-top: 0.1rem;
+        }
+        
+        .issue-icon.fail { color: var(--status-fail); }
+        .issue-icon.warn { color: var(--status-warn); }
+        .issue-icon.info { color: var(--status-info); }
+        
+        .station-footer {
+            padding: 0.1rem 0.5rem;
+            background: rgba(0, 0, 0, 0.2);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.65rem;
+            color: #6c757d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .view-log-btn {
+            color: #adb5bd;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        
+        .view-log-btn:hover {
+            color: #fff;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 4rem;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top-color: var(--status-info);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .filter-bar {
+            display: flex;
+            gap: 0.1rem;
+            margin-bottom: 0.1rem;
+            flex-wrap: wrap;
+        }
+        
+        .filter-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #adb5bd;
+            padding: 0.1rem 0.5rem;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.7rem;
+        }
+        
+        .filter-btn:hover, .filter-btn.active {
+            background: rgba(255, 255, 255, 0.15);
+            color: #fff;
+        }
+        
+        .filter-btn.ok.active { border-color: var(--status-ok); }
+        .filter-btn.warning.active { border-color: var(--status-warn); }
+        .filter-btn.fail.active { border-color: var(--status-fail); }
+        
+        .equirect-section {
+            margin-top: 2rem;
+        }
+        
+        .equirect-section h2 {
+            font-weight: 300;
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        
+        .equirect-item {
+            margin-bottom: 1rem;
+        }
+        
+        .equirect-item .equirect-label {
+            font-size: 0.8rem;
+            color: #adb5bd;
+            margin-bottom: 0.25rem;
+        }
+        
+        .equirect-item img {
+            width: 100%;
+            height: auto;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="bi bi-stars me-2"></i>Norsk meteornettverk
+            </a>
+            <span class="navbar-text">Stasjonsstatus</span>
+        </div>
+    </nav>
+    
+    <div class="container">
+        <div class="status-header">
+            <h1><i class="bi bi-activity me-2"></i>Nettverksstatus</h1>
+            <p class="last-updated">Siste oppdatering: <span id="last-updated">-</span></p>
+        </div>
+        
+        <div class="overview-cards" id="overview">
+            <div class="overview-card ok">
+                <div class="number" id="count-ok">-</div>
+                <div class="label">Feilfrie uten advarsler</div>
+            </div>
+            <div class="overview-card warning">
+                <div class="number" id="count-warn">-</div>
+                <div class="label">Feilfrie med advarsler</div>
+            </div>
+            <div class="overview-card fail">
+                <div class="number" id="count-fail">-</div>
+                <div class="label">Feil</div>
+            </div>
+            <div class="overview-card unknown">
+                <div class="number" id="count-unknown">-</div>
+                <div class="label">Ukjent/Offline</div>
+            </div>
+        </div>
+        
+        <div class="station-lists" style="margin: 0.35rem 0; font-size: 0.75rem; line-height: 1.3;">
+            <div id="list-ok" style="color: #51cf66; margin-bottom: 0.25rem;"></div>
+            <div id="list-warning" style="color: #ffd43b; margin-bottom: 0.25rem;"></div>
+            <div id="list-fail" style="color: #ff6b6b; margin-bottom: 0.25rem;"></div>
+            <div id="list-unknown" style="color: #868e96;"></div>
+        </div>
+        
+        <div class="filter-bar">
+            <button class="filter-btn active" data-filter="all">Alle stasjoner</button>
+            <button class="filter-btn ok" data-filter="ok"><i class="bi bi-check-circle me-1"></i>Feilfrie</button>
+            <button class="filter-btn warning" data-filter="warning"><i class="bi bi-exclamation-triangle me-1"></i>Med advarsler</button>
+            <button class="filter-btn fail" data-filter="fail"><i class="bi bi-x-circle me-1"></i>Med feil</button>
+            <button class="filter-btn" data-filter="unknown"><i class="bi bi-question-circle me-1"></i>Offline</button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Laster stasjonsstatus...</p>
+        </div>
+        
+        <div class="station-grid" id="station-grid" style="display: none;"></div>
+        
+        <div class="equirect-section" id="equirect-section" style="display: none;">
+            <h2><i class="bi bi-panorama me-2"></i>Panoramabilder</h2>
+            <div id="equirect-gallery"></div>
+        </div>
+    </div>
+    
+    <!-- Log Modal -->
+    <div class="modal fade" id="logModal" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content bg-dark text-light">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title" id="logModalTitle">Stasjon</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-0">
+                    <!-- Tabs -->
+                    <ul class="nav nav-tabs nav-fill bg-dark border-secondary" id="logTabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active text-light bg-dark border-secondary" id="log-tab" data-bs-toggle="tab" data-bs-target="#log-tab-pane" type="button" role="tab">
+                                <i class="bi bi-file-text me-1"></i>Siste logg
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link text-light bg-dark border-secondary" id="history-tab" data-bs-toggle="tab" data-bs-target="#history-tab-pane" type="button" role="tab">
+                                <i class="bi bi-clock-history me-1"></i>Historikk
+                            </button>
+                        </li>
+                    </ul>
+                    <!-- Tab Content -->
+                    <div class="tab-content" id="logTabsContent">
+                        <div class="tab-pane fade show active p-3" id="log-tab-pane" role="tabpanel">
+                            <div id="logTimestamp" class="text-light border-bottom border-secondary pb-2 mb-2" style="font-size: 0.8rem; font-weight: 500;"></div>
+                            <pre id="logContent" class="mb-0" style="font-size: 0.8rem; white-space: pre-wrap;"></pre>
+                        </div>
+                        <div class="tab-pane fade p-3" id="history-tab-pane" role="tabpanel">
+                            <div id="historyContent" style="font-size: 0.8rem;">
+                                <div class="text-center text-muted">Laster historikk...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Helper to format timestamps to ISO format: YYYY-MM-DD HH:MM:SS
+        function formatTimestamp(ts) {
+            if (!ts) return '-';
+            
+            let date;
+            
+            // Check if it's the YYYYMMDD_HHMMSS format
+            if (typeof ts === 'string' && ts.match(/^\d{8}_\d{6}$/)) {
+                const year = ts.substring(0, 4);
+                const month = ts.substring(4, 6);
+                const day = ts.substring(6, 8);
+                const hour = ts.substring(9, 11);
+                const minute = ts.substring(11, 13);
+                const second = ts.substring(13, 15);
+                date = new Date(year, month - 1, day, hour, minute, second);
+            } else {
+                // Try standard date parsing
+                date = new Date(ts);
+            }
+            
+            if (isNaN(date.getTime())) return '-';
+            
+            // Format as YYYY-MM-DD HH:MM:SS (ISO-like)
+            const yyyy = date.getFullYear();
+            const mm = String(date.getMonth() + 1).padStart(2, '0');
+            const dd = String(date.getDate()).padStart(2, '0');
+            const hh = String(date.getHours()).padStart(2, '0');
+            const mi = String(date.getMinutes()).padStart(2, '0');
+            const ss = String(date.getSeconds()).padStart(2, '0');
+            
+            return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+        }
+        
+        let allStations = [];
+
+        // Status loading from API
+        async function loadStatusData() {
+            try {
+                const response = await fetch('api.php');
+                if (!response.ok) throw new Error(`API error: ${response.status}`);
+                const data = await response.json();
+                
+                if (data.error) throw new Error(data.error);
+                
+                allStations = data.stations.map(s => ({
+                    id: s.id,
+                    station: s.station,
+                    astronomy: s.astronomy,
+                    country: s.country,
+                    status: s.status,
+                    lastCheck: s.timestamp,
+                    total: s.total,
+                    successes: s.successes,
+                    warnings: s.warnings,
+                    failures: s.failures,
+                    issues: s.issues || [],
+                    backupPcOk: s.backup_pc_ok,
+                    geophoneId: s.geophone_id,
+                    infrasoundId: s.infrasound_id,
+                    geophoneOk: s.geophone_ok,
+                    infrasoundOk: s.infrasound_ok,
+                    fetchSuccess: s.fetch_success,
+                    errorMessage: s.error_message
+                }));
+                
+                displayStations(allStations);
+                updateOverview(allStations);
+                displayEquirectImages();
+                document.getElementById('last-updated').textContent = 
+                    formatTimestamp(data.timestamp);
+                
+            } catch (error) {
+                console.error('Error loading status:', error);
+                document.getElementById('loading').innerHTML = 
+                    `<p class="text-danger"><i class="bi bi-exclamation-triangle"></i> Feil ved lasting av status: ${error.message}</p>`;
+            }
+        }
+        
+        // Parse log for display in modal (client-side parsing)
+        function extractStatusFromLog(logText) {
+            
+            // Parse summary section
+            let successes = 0;
+            let info = 0;
+            let warnings = 0;
+            let failures = 0;
+            let total = 0;
+            const issues = [];
+            
+            let inSummary = false;
+            let inIssues = false;
+            
+            for (let i = 0; i < cleanLines.length; i++) {
+                const line = cleanLines[i];
+                
+                // Check for summary section start
+                if (line.includes('Health Check Summary')) {
+                    inSummary = true;
+                    inIssues = false;
+                    continue;
+                }
+                
+                // Check for detailed issues section (after summary)
+                if (line.includes('=== Detailed Issues and Recommendations ===')) {
+                    inSummary = false;
+                    inIssues = true;
+                    continue;
+                }
+                
+                if (inSummary) {
+                    // Parse summary counts - format: "Successful: 122"
+                    const totalMatch = line.match(/Total checks:\s*(\d+)/i);
+                    if (totalMatch) total = parseInt(totalMatch[1]);
+                    
+                    const successMatch = line.match(/Successful:\s*(\d+)/i);
+                    if (successMatch) successes = parseInt(successMatch[1]);
+                    
+                    const infoMatch = line.match(/Info:\s*(\d+)/i);
+                    if (infoMatch) info = parseInt(infoMatch[1]);
+                    
+                    const warnMatch = line.match(/Warnings:\s*(\d+)/i);
+                    if (warnMatch) warnings = parseInt(warnMatch[1]);
+                    
+                    const failMatch = line.match(/Failures:\s*(\d+)/i);
+                    if (failMatch) failures = parseInt(failMatch[1]);
+                }
+                
+                if (inIssues && line.trim().startsWith('Issue:')) {
+                    // Extract issue description
+                    let issueText = line.replace(/^\s*\d+\.\s*Issue:\s*/, '').trim();
+                    
+                    // Determine issue type from the original colored output
+                    const originalLine = lines[i] || '';
+                    let type = 'info';
+                    if (originalLine.includes('[91m') || originalLine.includes('FAIL')) {
+                        type = 'fail';
+                    } else if (originalLine.includes('[93m') || originalLine.includes('WARN')) {
+                        type = 'warn';
+                    }
+                    
+                    if (issueText && issueText.length > 5) {
+                        issues.push({
+                            type: type,
+                            text: issueText.substring(0, 120)
+                        });
+                    }
+                }
+            }
+            
+            // If no summary found, try alternate parsing from [ OK ] / [ FAIL ] markers
+            if (total === 0) {
+                for (const line of cleanLines) {
+                    if (line.includes('[ OK ]') || line.includes('SUCCESS')) successes++;
+                    if (line.includes('[ INFO ]')) info++;
+                    if (line.includes('[ WARN ]')) warnings++;
+                    if (line.includes('[ FAIL ]') || line.includes('FAIL')) failures++;
+                }
+            }
+            
+            // Determine overall status
+            let status = 'ok';
+            if (failures > 0) status = 'fail';
+            else if (warnings > 0) status = 'warning';
+            else if (info > 0) status = 'ok';  // Info alone doesn't trigger warning
+            
+            return { 
+                status, 
+                successes, 
+                info,
+                warnings, 
+                failures, 
+                total,
+                issues: issues.slice(0, 5),  // Limit to top 5 issues
+                lastCheck: timestamp 
+            };
+        }
+        
+        function displayStations(stations) {
+            const grid = document.getElementById('station-grid');
+            grid.innerHTML = '';
+            
+            // Sort by: 1) status (offline first), 2) failures desc, 3) warnings desc, 4) station name asc
+            const statusOrder = { unknown: 0, fail: 1, warning: 2, ok: 3 };
+            stations.sort((a, b) => {
+                const statusDiff = statusOrder[a.status] - statusOrder[b.status];
+                if (statusDiff !== 0) return statusDiff;
+                
+                const failDiff = (b.failures || 0) - (a.failures || 0);
+                if (failDiff !== 0) return failDiff;
+                
+                const warnDiff = (b.warnings || 0) - (a.warnings || 0);
+                if (warnDiff !== 0) return warnDiff;
+                
+                return a.id.localeCompare(b.id);
+            });
+            
+            for (const station of stations) {
+                const card = createStationCard(station);
+                grid.appendChild(card);
+            }
+            
+            document.getElementById('loading').style.display = 'none';
+            grid.style.display = 'grid';
+        }
+        
+        function createStationCard(station) {
+            const div = document.createElement('div');
+            div.className = `station-card status-${station.status}`;
+            div.dataset.status = station.status;
+            
+            const stationName = station.station?.display_name || (station.station?.name ? station.station.name.charAt(0).toUpperCase() + station.station.name.slice(1) : station.id);
+            const stationCode = station.station?.code || '';
+            const location = station.astronomy ? 
+                `${Math.abs(station.astronomy.latitude).toFixed(4)}${station.astronomy.latitude >= 0 ? 'N' : 'S'} ${Math.abs(station.astronomy.longitude).toFixed(4)}${station.astronomy.longitude >= 0 ? 'E' : 'W'}${station.astronomy.elevation ? ' ' + Math.round(station.astronomy.elevation) + ' moh' : ''}` : '';
+            
+            const total = station.total || (station.successes + station.info + station.warnings + station.failures) || 0;
+            
+            div.innerHTML = `
+                <div class="station-header">
+                    <div class="station-title">
+                        <span class="status-badge ${station.status}"></span>
+                        <div>
+                            <div class="station-id">${station.id} ${stationCode ? `(${stationCode})` : ''}</div>
+                            <div class="station-location">${stationName} ${location ? `• ${location}` : ''}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="station-body">
+                    <div class="status-metrics">
+                        <div class="metric">
+                            <div class="metric-value ok">${station.fetchSuccess === false ? '?' : (station.successes || 0)}</div>
+                            <div class="metric-label">OK</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value ${station.warnings > 0 ? 'warn' : ''}">${station.fetchSuccess === false ? '?' : (station.warnings || 0)}</div>
+                            <div class="metric-label">${station.warnings === 1 ? 'Advarsel' : 'Advarsler'}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value ${station.failures > 0 ? 'fail' : ''}">${station.fetchSuccess === false ? '?' : (station.failures || 0)}</div>
+                            <div class="metric-label">Feil</div>
+                        </div>
+                    </div>
+                    ${total > 0 ? `
+                        <div class="text-center mb-2">
+                            <small class="text-muted">${total} tester totalt</small>
+                        </div>
+                    ` : ''}
+                    ${station.issues && station.issues.length > 0 ? `
+                        <div class="issue-list">
+                            ${station.issues.slice(0, 3).map(issue => `
+                                <div class="issue-item">
+                                    <i class="bi bi-${issue.type === 'fail' ? 'x-circle' : 'exclamation-triangle'} issue-icon ${issue.type}"></i>
+                                    <span>${escapeHtml(issue.text)}</span>
+                                </div>
+                            `).join('')}
+                            ${station.issues.length > 3 ? `<div class="issue-item text-muted">+${station.issues.length - 3} flere...</div>` : ''}
+                        </div>
+                    ` : station.fetchSuccess === false ? `
+                        <div class="text-light text-center" style="font-size: 0.75rem; line-height: 1.2;">
+                            <i class="bi bi-x-circle text-danger"></i>
+                            PC ikke på nett
+                            ${station.errorMessage ? `<br><small class="text-danger">${escapeHtml(station.errorMessage)}</small>` : ''}
+                        </div>
+                    ` : `
+                        <div class="text-light text-center" style="font-size: 0.75rem; line-height: 1.2;">
+                            <i class="bi bi-check-circle text-success"></i> 
+                            PC på nett, ${station.successes || 0}/${station.total !== null && station.total !== undefined ? station.total : '?'} OK
+                            ${station.backupPcOk === false ? `<br><small class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Backup-PC ikke på nett</small>` : ''}
+                            ${(station.geophoneId || station.infrasoundId) ? `
+                                <div class="mt-1" style="font-size: 0.7rem;">
+                                    ${station.geophoneId ? `<a href="https://dataview.raspberryshake.org/#/AM/${station.geophoneId}/00/EHZ" target="_blank" class="${station.geophoneOk ? 'text-success' : 'text-danger'} text-decoration-none"><i class="bi bi-broadcast"></i> Seismo</a>` : ''}
+                                    ${station.infrasoundId ? `<a href="https://dataview.raspberryshake.org/#/AM/${station.infrasoundId}/00/HDF" target="_blank" class="${station.infrasoundOk ? 'text-success' : 'text-danger'} text-decoration-none ms-2"><i class="bi bi-mic"></i> Infralyd</a>` : ''}
+                                </div>
+                            ` : ''}
+                        </div>
+                    `}
+                </div>
+                <div class="station-footer">
+                    <span>Sist sjekka: ${station.lastCheck ? formatTimestamp(station.lastCheck) : '-'}</span>
+                    <a href="#" class="view-log-btn" onclick="showLog('${station.id}')">
+                        <i class="bi bi-file-text me-1"></i>Vis logg
+                    </a>
+                </div>
+            `;
+            
+            return div;
+        }
+        
+        function updateOverview(stations) {
+            const counts = { ok: 0, warning: 0, fail: 0, unknown: 0 };
+            const lists = { ok: [], warning: [], fail: [], unknown: [] };
+            let totalChecks = 0;
+            let totalSuccesses = 0;
+            let totalWarnings = 0;
+            let totalFailures = 0;
+            
+            for (const s of stations) {
+                counts[s.status]++;
+                lists[s.status].push(s.id);
+                totalChecks += s.total || 0;
+                totalSuccesses += s.successes || 0;
+                totalWarnings += s.warnings || 0;
+                totalFailures += s.failures || 0;
+            }
+            
+            document.getElementById('count-ok').textContent = counts.ok;
+            document.getElementById('count-warn').textContent = counts.warning;
+            document.getElementById('count-fail').textContent = counts.fail;
+            document.getElementById('count-unknown').textContent = counts.unknown;
+            
+            // Update overview labels for singular/plural
+            document.querySelector('.overview-card.ok .label').textContent = 
+                counts.ok === 1 ? 'Feilfri uten advarsler' : 'Feilfrie uten advarsler';
+            document.querySelector('.overview-card.warning .label').textContent = 
+                counts.warning === 1 ? 'Feilfri med advarsler' : 'Feilfrie med advarsler';
+            
+            // Update station ID lists with singular/plural
+            document.getElementById('list-ok').textContent = lists.ok.length > 0 ? 
+                (lists.ok.length === 1 ? 'Feilfri uten advarsler: ' : 'Feilfrie uten advarsler: ') + lists.ok.join(', ') : '';
+            document.getElementById('list-warning').textContent = lists.warning.length > 0 ? 
+                (lists.warning.length === 1 ? 'Feilfri med advarsler: ' : 'Feilfrie med advarsler: ') + lists.warning.join(', ') : '';
+            document.getElementById('list-fail').textContent = lists.fail.length > 0 ? 
+                (lists.fail.length === 1 ? 'Feil: ' : 'Feil: ') + lists.fail.join(', ') : '';
+            document.getElementById('list-unknown').textContent = lists.unknown.length > 0 ? 
+                (lists.unknown.length === 1 ? 'Ukjent/Offline: ' : 'Ukjent/Offline: ') + lists.unknown.join(', ') : '';
+            
+            // Update or create detailed metrics display
+            let metricsDiv = document.getElementById('summary-metrics');
+            if (!metricsDiv && totalChecks > 0) {
+                metricsDiv = document.createElement('div');
+                metricsDiv.id = 'summary-metrics';
+                metricsDiv.className = 'mt-3 text-center';
+                const container = document.querySelector('.stats-container');
+                if (container) {
+                    container.after(metricsDiv);
+                }
+            }
+            if (metricsDiv && totalChecks > 0) {
+                metricsDiv.innerHTML = `
+                    <div class="text-muted">Totalt ${totalChecks.toLocaleString()} tester: 
+                        <span class="text-success">${totalSuccesses.toLocaleString()} OK</span> • 
+                        <span class="text-warning">${totalWarnings.toLocaleString()} advarsler</span> • 
+                        <span class="text-danger">${totalFailures.toLocaleString()} feil</span>
+                    </div>
+                `;
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Convert ANSI color codes to HTML
+        function ansiToHtml(text) {
+            // ANSI color code mapping
+            const colorMap = {
+                '0': 'reset', '1': 'bold', '22': 'normal',
+                '31': '#ff6b6b', '91': '#ff4444',  // Red
+                '32': '#51cf66', '92': '#69db7c',  // Green  
+                '33': '#ffd43b', '93': '#ffe066',  // Yellow
+                '34': '#74c0fc', '94': '#a5d8ff',  // Blue
+                '35': '#e599f7', '95': '#eebefa',  // Magenta
+                '36': '#66d9e8', '96': '#99e9f2',  // Cyan
+                '37': '#f8f9fa', '97': '#ffffff',  // White
+                '90': '#868e96'  // Bright black (gray)
+            };
+            
+            let html = escapeHtml(text);
+            let result = '';
+            let inSpan = false;
+            let currentColor = '';
+            
+            // Split by ANSI codes
+            const parts = html.split(/(\x1b\[\d+m)/);
+            
+            for (const part of parts) {
+                if (part.match(/^\x1b\[(\d+)m$/)) {
+                    const code = part.match(/^\x1b\[(\d+)m$/)[1];
+                    const color = colorMap[code];
+                    
+                    if (color === 'reset' || code === '0') {
+                        if (inSpan) {
+                            result += '</span>';
+                            inSpan = false;
+                            currentColor = '';
+                        }
+                    } else if (color && !color.match(/^(bold|normal|reset)$/)) {
+                        if (inSpan) {
+                            result += '</span>';
+                        }
+                        result += `<span style="color: ${color}">`;
+                        inSpan = true;
+                        currentColor = color;
+                    }
+                } else {
+                    result += part;
+                }
+            }
+            
+            if (inSpan) {
+                result += '</span>';
+            }
+            
+            return result;
+        }
+        
+        async function showLog(stationId) {
+            try {
+                // Load both log and history in parallel
+                const [logResponse, historyResponse] = await Promise.all([
+                    fetch(`log_api.php?station=${stationId}`),
+                    fetch(`log_api.php?station=${stationId}&action=history`)
+                ]);
+                
+                const logData = await logResponse.json();
+                const historyData = await historyResponse.json();
+                
+                if (logData.error) throw new Error(logData.error);
+                
+                // Display log
+                const coloredLog = ansiToHtml(logData.content);
+                const stationData = allStations.find(s => s.id === stationId);
+                const modalTitle = stationData?.station?.display_name || (stationData?.station?.name ? stationData.station.name.charAt(0).toUpperCase() + stationData.station.name.slice(1) : stationId);
+                document.getElementById('logModalTitle').textContent = modalTitle;
+                document.getElementById('logTimestamp').textContent = formatTimestamp(logData.timestamp);
+                document.getElementById('logContent').innerHTML = coloredLog;
+                
+                // Display history
+                displayHistory(stationId, historyData.history || []);
+                
+                const modal = new bootstrap.Modal(document.getElementById('logModal'));
+                modal.show();
+            } catch (error) {
+                alert('Kunne ikke laste logg: ' + error.message);
+            }
+        }
+        
+        function displayHistory(stationId, history) {
+            const container = document.getElementById('historyContent');
+            
+            if (!history || history.length === 0) {
+                container.innerHTML = '<div class="text-center text-muted">Ingen historikk tilgjengelig</div>';
+                return;
+            }
+            
+            let html = '<div class="table-responsive"><table class="table table-dark table-sm" style="font-size: 0.75rem;">';
+            html += '<thead><tr><th>Tid</th><th>Status</th><th>OK</th><th>Advarsler</th><th>Feil</th></tr></thead><tbody>';
+            
+            for (const entry of history) {
+                const date = formatTimestamp(entry.timestamp);
+                const statusIcon = entry.fetch_success 
+                    ? '<i class="bi bi-check-circle text-success"></i>' 
+                    : '<i class="bi bi-x-circle text-danger"></i>';
+                const warnClass = entry.warnings > 0 ? 'text-warning' : '';
+                const failClass = entry.failures > 0 ? 'text-danger' : '';
+                
+                html += `<tr class="history-row" onclick="loadHistoryLog('${stationId}', '${entry.timestamp}')" style="cursor: pointer;">
+                    <td>${date}</td>
+                    <td>${statusIcon}</td>
+                    <td>${entry.fetch_success === 0 || entry.fetch_success === false ? '?' : (entry.successes || 0)}</td>
+                    <td class="${warnClass}">${entry.fetch_success === 0 || entry.fetch_success === false ? '?' : (entry.warnings || 0)}</td>
+                    <td class="${failClass}">${entry.fetch_success === 0 || entry.fetch_success === false ? '?' : (entry.failures || 0)}</td>
+                </tr>`;
+            }
+            
+            html += '</tbody></table></div>';
+            container.innerHTML = html;
+        }
+        
+        async function loadHistoryLog(stationId, timestamp) {
+            try {
+                const response = await fetch(`log_api.php?station=${stationId}&timestamp=${timestamp}`);
+                const data = await response.json();
+                
+                if (data.error) throw new Error(data.error);
+                
+                // Convert ANSI colors to HTML
+                const coloredLog = ansiToHtml(data.content);
+                
+                // Update log content and timestamp
+                document.getElementById('logTimestamp').textContent = formatTimestamp(data.timestamp);
+                document.getElementById('logContent').innerHTML = coloredLog;
+                
+                // Switch to log tab
+                const logTab = document.getElementById('log-tab');
+                const logTabPane = document.getElementById('log-tab-pane');
+                const historyTab = document.getElementById('history-tab');
+                const historyTabPane = document.getElementById('history-tab-pane');
+                
+                // Remove active class from history
+                historyTab.classList.remove('active');
+                historyTabPane.classList.remove('show', 'active');
+                
+                // Add active class to log
+                logTab.classList.add('active');
+                logTabPane.classList.add('show', 'active');
+                
+            } catch (error) {
+                alert('Kunne ikke laste logg: ' + error.message);
+            }
+        }
+        
+        async function displayEquirectImages() {
+            const gallery = document.getElementById('equirect-gallery');
+            gallery.innerHTML = '';
+            
+            try {
+                const response = await fetch('cameras_api.php');
+                if (!response.ok) throw new Error('Failed to load cameras.json');
+                const cameras = await response.json();
+                
+                const stationIds = Object.keys(cameras).sort();
+                
+                for (const id of stationIds) {
+                    const name = cameras[id]?.station?.name;
+                    if (!name) continue;
+                    const displayName = cameras[id]?.station?.display_name || name.charAt(0).toUpperCase() + name.slice(1);
+                    const baseUrl = `https://norskmeteornettverk.no/cam/${name}`;
+                    const sdUrl = `${baseUrl}/equirect.jpg`;
+                    const hdUrl = `${baseUrl}/equirect_hd.jpg`;
+                    const item = document.createElement('div');
+                    item.className = 'equirect-item';
+                    item.innerHTML = `<div class="equirect-label">${id} — ${displayName}</div>`;
+                    const describeError = (url, status) => {
+                        const file = url.split('/').slice(-2).join('/');
+                        if (status === 0) return `${file}: Tilkopling feila (endepunkt ikke tilkopla)`;
+                        if (status === 403) return `${file}: Ingen tilgang (403)`;
+                        if (status === 404) return `${file}: Fila fins ikke (404)`;
+                        if (status === 500) return `${file}: Serverfeil (500)`;
+                        if (status === 502) return `${file}: Gateway-feil (502)`;
+                        if (status === 503) return `${file}: Tjenesten utilgjengelig (503)`;
+                        return `${file}: Feil ${status}`;
+                    };
+                    const tryLoad = async () => {
+                        // Try SD first
+                        try {
+                            const sdResp = await fetch(sdUrl, {method:'HEAD'});
+                            if (sdResp.ok) {
+                                const img = new Image();
+                                img.alt = `${id} equirect`;
+                                img.loading = 'lazy';
+                                img.src = sdUrl;
+                                const link = document.createElement('a');
+                                link.target = '_blank';
+                                link.appendChild(img);
+                                item.appendChild(link);
+                                // Check if HD exists for the link
+                                try {
+                                    const hdResp = await fetch(hdUrl, {method:'HEAD'});
+                                    link.href = hdResp.ok ? hdUrl : sdUrl;
+                                } catch { link.href = sdUrl; }
+                                return;
+                            }
+                        } catch {}
+                        // Try HD
+                        try {
+                            const hdResp = await fetch(hdUrl, {method:'HEAD'});
+                            if (hdResp.ok) {
+                                const img = new Image();
+                                img.alt = `${id} equirect`;
+                                img.loading = 'lazy';
+                                img.src = hdUrl;
+                                const link = document.createElement('a');
+                                link.target = '_blank';
+                                link.href = hdUrl;
+                                link.appendChild(img);
+                                item.appendChild(link);
+                                return;
+                            }
+                        } catch {}
+                        // Both failed — get detailed error
+                        let errMsg = 'Bilde ikke tilgjengelig';
+                        try {
+                            const sdResp = await fetch(sdUrl, {method:'HEAD'}).catch(() => ({ok:false, status:0}));
+                            const hdResp = await fetch(hdUrl, {method:'HEAD'}).catch(() => ({ok:false, status:0}));
+                            errMsg = describeError(sdUrl, sdResp.status) + '\n' + describeError(hdUrl, hdResp.status);
+                        } catch {}
+                        const err = document.createElement('div');
+                        err.style.cssText = 'color:#999;padding:1em;white-space:pre-line;font-size:0.85em;';
+                        err.textContent = errMsg;
+                        item.appendChild(err);
+                    };
+                    tryLoad();
+                    gallery.appendChild(item);
+                }
+                
+                document.getElementById('equirect-section').style.display = 'block';
+            } catch (error) {
+                console.error('Error loading equirect images:', error);
+            }
+        }
+        
+        // Filter buttons
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                
+                const filter = btn.dataset.filter;
+                const cards = document.querySelectorAll('.station-card');
+                
+                cards.forEach(card => {
+                    if (filter === 'all' || card.dataset.status === filter) {
+                        card.style.display = 'block';
+                    } else {
+                        card.style.display = 'none';
+                    }
+                });
+            });
+        });
+        
+        // Initialize
+        loadStatusData();
+        
+        // Auto-refresh every 10 minutes
+        setInterval(loadStatusData, 10 * 60 * 1000);
+    </script>
+</body>
+</html>

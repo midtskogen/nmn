@@ -176,14 +176,14 @@ def rgb_to_yuv(rgb_channels):
 # --- Numba JIT-compiled Core Functions ---
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
-def _build_vignette_gain(width, height, k1, k2, k3):
+def _build_vignette_gain(width, height, k1):
     """Build a per-pixel multiplicative gain LUT to undo radial vignetting.
 
-    Model:  brightness(r) = 1 + k1*r^2 + k2*r^4 + k3*r^6
+    Model:  brightness(r) = 1 + k1*r^2
     where r is distance from centre normalised so that the corner = 1.
     Gain = 1 / brightness(r), clamped to [1, 4] to avoid blowup.
 
-    Typical usage: k1 < 0 (darkening toward edges).  E.g. k1=-0.5, k2=0, k3=0
+    Typical usage: k1 < 0 (darkening toward edges).  E.g. k1=-0.5
     gives ~33 % brightening at the corners.
     """
     gain = np.empty((height, width), dtype=np.float32)
@@ -196,10 +196,9 @@ def _build_vignette_gain(width, height, k1, k2, k3):
         dy2 = dy * dy
         for x in range(width):
             dx = x - cx
-            r2 = (dx * dx + dy2) * inv_r2max          # normalised r²
-            r4 = r2 * r2
-            v = 1.0 + k1 * r2 + k2 * r4 + k3 * (r4 * r2)
-            g = 1.0 / v if v > 0.25 else 4.0   # clamp gain ≤ 4
+            r2 = (dx * dx + dy2) * inv_r2max      # normalised r²
+            v = 1.0 + k1 * r2
+            g = 1.0 / v if v > 0.25 else 4.0       # clamp gain ≤ 4
             if g < 1.0:
                 g = 1.0   # never darken
             gain[y, x] = g
@@ -790,8 +789,7 @@ def process_and_reproject_image(args):
         input_path, pad, padsides, target_w=sw_pto, target_h=sh_pto)
 
     if devignette is not None:
-        k1, k2, k3 = devignette
-        gain = _build_vignette_gain(sw_orig, sh_orig, k1, k2, k3)
+        gain = _build_vignette_gain(sw_orig, sh_orig, devignette)
         # Apply to original region only (not padding)
         pad_t_ = pad if 'top' in padsides else 0
         pad_l_ = pad if 'left' in padsides else 0
@@ -897,8 +895,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         py, pu, pv, sw_orig, sh_orig = load_image_to_yuv(input_path, pad, padsides, target_w=sw_pto, target_h=sh_pto)
 
         if devignette is not None:
-            k1, k2, k3 = devignette
-            gain = _build_vignette_gain(sw_orig, sh_orig, k1, k2, k3)
+            gain = _build_vignette_gain(sw_orig, sh_orig, devignette)
             pad_t_ = pad if 'top' in padsides else 0
             pad_l_ = pad if 'left' in padsides else 0
             _apply_vignette_y(py[pad_t_:pad_t_ + sh_orig, pad_l_:pad_l_ + sw_orig], gain)
@@ -2046,10 +2043,9 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     # Build per-camera vignette gain LUTs (once — same resolution for all frames)
     _vignette_gains = [None] * num_images
     if devignette is not None:
-        k1, k2, k3 = devignette
         for i in range(num_images):
             sw_map, sh_map = mappings[i][4], mappings[i][5]
-            _vignette_gains[i] = _build_vignette_gain(sw_map, sh_map, k1, k2, k3)
+            _vignette_gains[i] = _build_vignette_gain(sw_map, sh_map, devignette)
         _print(f"  built {num_images} vignette gain LUTs")
 
     # Initialize fisheye mask geometry (needed for geometry precomputation)
@@ -2561,10 +2557,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     # Build per-camera vignette gain LUTs (once — same resolution for all frames)
     _vignette_gains = [None] * num_images
     if devignette is not None:
-        k1, k2, k3 = devignette
         for i in range(num_images):
             sw_map, sh_map = mappings[i][4], mappings[i][5]
-            _vignette_gains[i] = _build_vignette_gain(sw_map, sh_map, k1, k2, k3)
+            _vignette_gains[i] = _build_vignette_gain(sw_map, sh_map, devignette)
         _print(f"  built {num_images} vignette gain LUTs")
 
     # --- Start of Single-Video Optimization ---
@@ -3260,7 +3255,7 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
            sync=False, model=None, save_sync=None, load_sync=None,
            quiet=False, num_cores=None, lens_files=None,
            output_width=None, output_height=None, crop_to_content: bool = True,
-           timestamp: bool = False, devignette=(-0.20, 0.0, 0.0)):
+           timestamp: bool = False, devignette=-0.20):
     """Stitch images or videos into a panoramic image or video.
 
     This is the public API entry point for programs that import stitcher.py.
@@ -3321,10 +3316,10 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
     timestamp : bool, optional
         Overlay a UTC timestamp (YYYY-MM-DD hh:mm:ss.ff) in the lower-left
         corner of each video frame. Has no effect for still-image output.
-    devignette : tuple[float, float, float] or None, optional
-        Radial vignetting correction coefficients (k1, k2, k3) for the model
-        brightness(r) = 1 + k1*r² + k2*r⁴ + k3*r⁶ where r is normalised to the corner.
-        Default is (-0.20, 0.0, 0.0). Set to (0.0, 0.0, 0.0) or None to disable.
+    devignette : float or None, optional
+        Radial vignetting correction coefficient k1 for the model
+        brightness(r) = 1 + k1*r² where r is normalised to the corner.
+        Default is -0.20. Set to 0.0 or None to disable.
 
     Raises
     ------
@@ -5322,11 +5317,11 @@ def main():
         help="libx264 preset for video output (default: ultrafast).")
     parser.add_argument("--saturation", type=float, default=1.0, metavar="S",
         help="Chroma saturation multiplier applied to the output (default: 1.0 = unchanged, >1 = more vivid).")
-    parser.add_argument("--devignette", type=str, default="-0.20", metavar="K1[,K2,K3]",
-        help="Radial vignetting correction. Polynomial coefficients k1[,k2,k3] for the model "
-             "brightness(r) = 1 + k1*r² + k2*r⁴ + k3*r⁶ where r is normalised to the corner. "
+    parser.add_argument("--devignette", type=float, default=-0.20, metavar="K1",
+        help="Radial vignetting correction coefficient k1 for the model "
+             "brightness(r) = 1 + k1*r² where r is normalised to the corner. "
              "Default: -0.20. Set to 0 to disable. "
-             "Typical: --devignette=-0.5 (brightens corners ~33%%). Omitted coefficients default to 0.")
+             "Typical: --devignette=-0.5 (brightens corners ~33%%).")
     parser.add_argument("--station", type=str, default=None, metavar="HOST",
         help="Fetch input files from a remote host via SSH. The paths are interpreted on the remote host; the output is written locally.")
 
@@ -5378,22 +5373,13 @@ def main():
     if args.fisheye and args.equirect:
         _print("Error: --fisheye and --equirect are mutually exclusive.", file=sys.stderr); sys.exit(1)
 
-    # Parse --devignette coefficients
-    devignette = None
-    if args.devignette:
-        try:
-            parts = [float(x.strip()) for x in args.devignette.split(',')]
-            k1 = parts[0] if len(parts) > 0 else 0.0
-            k2 = parts[1] if len(parts) > 1 else 0.0
-            k3 = parts[2] if len(parts) > 2 else 0.0
-            if abs(k1) > 1e-9 or abs(k2) > 1e-9 or abs(k3) > 1e-9:
-                devignette = (k1, k2, k3)
-                _print(f"INFO: Devignetting enabled — k1={k1}, k2={k2}, k3={k3}")
-            else:
-                _print("INFO: Devignetting disabled (all coefficients zero)")
-        except ValueError:
-            _print("Error: --devignette must be comma-separated floats, e.g. --devignette=-0.5", file=sys.stderr)
-            sys.exit(1)
+    # Parse --devignette coefficient
+    if abs(args.devignette) > 1e-9:
+        devignette = args.devignette
+        _print(f"INFO: Devignetting enabled — k1={devignette}")
+    else:
+        devignette = None
+        _print("INFO: Devignetting disabled (coefficient is zero)")
 
     remote_temp_dir = None
     _output_file_written = [False]   # set True only on successful completion

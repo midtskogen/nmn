@@ -21,7 +21,7 @@ from pathlib import Path
 # Configuration
 STATUS_DIR = Path(__file__).parent.resolve()
 DB_PATH = STATUS_DIR / "status.db"
-CAMERAS_JSON = STATUS_DIR.parent / "nmn" / "server" / "data" / "cameras.json"
+CAMERAS_JSON = STATUS_DIR.parent / "data" / "cameras.json"
 LOG_FILE = "/var/log/as7health.log"
 MAX_HISTORY_PER_STATION = 186  # 6 fetches/day × 31 days = ~1 month
 SSH_TIMEOUT = 30

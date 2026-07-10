@@ -3829,7 +3829,13 @@ def find_lens_pto_for_image(image_path: str) -> str:
 def build_pto_header(w: int, h: int, projection: str) -> str:
     """Return the two-line PTO header for nona/hugin.
     projection: 'fisheye' (f3) or 'equirect' (f2)
+
+    w and h are rounded up to the nearest multiple of 16 so the rendered
+    canvas is already the correct output size, avoiding zero-pad expansion
+    that would create black edge bars and gap pixels near canvas boundaries.
     """
+    w = (w + 15) & ~15
+    h = (h + 15) & ~15
     f = 3 if projection == 'fisheye' else 2
     v = 190 if projection == 'fisheye' else 360
     return (f'p f{f} w{w} h{h} v{v} E0 R0 n"TIFF_m c:LZW"\n'

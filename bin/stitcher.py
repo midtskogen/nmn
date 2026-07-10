@@ -1505,12 +1505,6 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     gap = ~covered
     del covered
 
-    # DIAGNOSTIC: verify cyclic wrap detection and edge gap distribution
-    _print(f"  [diag] cyclic_x={cyclic_x}, final_w={final_w}, final_h={final_h}")
-    edge_gap_l = int(np.any(gap, axis=0)[:final_w//16].sum())
-    edge_gap_r = int(np.any(gap, axis=0)[-final_w//16:].sum())
-    _print(f"  [diag] total gap={int(gap.sum())}, left-edge gap rows={edge_gap_l}, right-edge gap rows={edge_gap_r}")
-
     # Determine final crop height before gap fill so we don't process rows
     # that will be discarded. Round both dimensions up to a multiple of 16
     # for image/video compatibility.

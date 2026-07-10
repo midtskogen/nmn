@@ -22,10 +22,6 @@ import hashlib
 import time
 import glob
 import gc
-try:
-    import cv2 as _cv2
-except ImportError:
-    _cv2 = None
 
 # --- Dependency Imports with User-Friendly Error Handling ---
 
@@ -55,28 +51,49 @@ except ImportError as e:
         "Please ensure 'pto_mapper.py' is in the same directory as this script."
     ) from e
 
-try:
-    from stack import enhance_filter
-except ImportError as e:
-    raise ImportError(
-        "The 'stack.py' module was not found. "
-        "Please ensure 'stack.py' (containing the enhancement filter) is in the same directory."
-    ) from e
+# Lazy getters for heavy optional modules. Importing them at module load adds
+# ~0.5 s to image-stitch startup even though they are only used for video,
+# enhancement, or specific helpers.
+_stack_mod = None
 
-# The timestamp import is now deferred to the video processing function where it is needed.
+def _enhance_filter():
+    global _stack_mod
+    if _stack_mod is None:
+        try:
+            from stack import enhance_filter as _ef
+            _stack_mod = _ef
+        except ImportError as e:
+            raise ImportError(
+                "The 'stack.py' module was not found. "
+                "Please ensure 'stack.py' (containing the enhancement filter) is in the same directory."
+            ) from e
+    return _stack_mod
 
-try:
-    import av
-    av.logging.set_level(av.logging.ERROR)  # suppress "deprecated pixel format" warnings
-except ImportError:
-    print("Warning: 'PyAV' library not found. Video processing functionality will be unavailable.", file=sys.stderr)
-    av = None
+_av_mod = None
 
-try:
-    import scipy.ndimage as ndimage
-except ImportError:
-    print("Warning: 'scipy' not found. Noise estimation will be unavailable. Run 'pip install scipy'", file=sys.stderr)
-    ndimage = None
+def _av():
+    global _av_mod
+    if _av_mod is None:
+        try:
+            import av as _av_local
+            _av_local.logging.set_level(_av_local.logging.ERROR)
+            _av_mod = _av_local
+        except ImportError:
+            print("Warning: 'PyAV' library not found. Video processing functionality will be unavailable.", file=sys.stderr)
+            _av_mod = False
+    return _av_mod
+
+_cv2_mod = None
+
+def _cv2():
+    global _cv2_mod
+    if _cv2_mod is None:
+        try:
+            import cv2 as _cv2_local
+            _cv2_mod = _cv2_local
+        except ImportError:
+            _cv2_mod = False
+    return _cv2_mod
 
 # Import multiblend for blending functionality
 try:
@@ -687,7 +704,7 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
 # dimensions and seam flags. The result is an image-index assignment array
 # that can be reused across runs (image or video) when those inputs match,
 # avoiding the ~100-300 ms seaming cost on every invocation.
-_SEAM_CACHE_VERSION = 1
+_SEAM_CACHE_VERSION = 2
 
 def _get_seam_cache_path(pto_file, pad, padsides, is_video_output,
                          workwidth, workheight, reverse, simple_seam, content_seam):
@@ -737,7 +754,12 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
                           is_video_output=False,
                           reverse=False, simple_seam=False, content_seam=False,
                           verbosity=1, print_func=print):
-    """Compute seams and seam-mask pyramids, caching both on disk.
+    """Compute seam assignment and seam-mask pyramids, caching the assignment.
+
+    The mask pyramids are fully determined by the assignment and image
+    footprints, so only the assignment is stored on disk. Pyramids are rebuilt
+    on load; this is faster than decompressing many float32 arrays and makes
+    the cache much smaller.
 
     The cache is shared between image and video stitching runs as long as the
     PTO file, padding, output mode, work dimensions, levels and seam flags match.
@@ -758,11 +780,8 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
                 if (assignment.shape == (workheight, workwidth) and
                         len(seam_present) == len(images) and
                         n == len(images) and levels_loaded == levels):
-                    seam_mask_cache = {}
-                    for i in range(n):
-                        seam_mask_cache[i] = [
-                            _npz[f'mc_{i}_{l}'] for l in range(levels)
-                        ]
+                    seam_mask_cache = multiblend.build_seam_mask_cache(
+                        images, assignment, workwidth, workheight, levels)
                     if verbosity >= 1:
                         print_func("  loaded seams from cache.")
                     return assignment, seam_present, seam_mask_cache
@@ -794,9 +813,6 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
             'n': np.int64(len(images)),
             'levels': np.int64(levels),
         }
-        for i, pyrs in seam_mask_cache.items():
-            for l, m in enumerate(pyrs):
-                _payload[f'mc_{i}_{l}'] = np.ascontiguousarray(m)
         np.savez_compressed(_tmp_path, **_payload)
         os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path,
                    cache_path)
@@ -937,16 +953,18 @@ def estimate_noise(image_plane):
     Estimates the noise standard deviation of an image plane using the
     standard deviation of its Laplacian. Returns a value between 1.0 and 10.0.
     """
-    if ndimage is None:
+    try:
+        from scipy.ndimage import laplace
+    except ImportError:
         # Fallback to a default value if scipy is not installed
         return 4.0
 
     # The Laplacian filter is sensitive to high-frequency noise
-    laplacian = ndimage.laplace(image_plane.astype(np.float32))
-    
+    laplacian = laplace(image_plane.astype(np.float32))
+
     # The standard deviation of the Laplacian is a robust noise estimator
     noise_std = np.std(laplacian)
-    
+
     # Clamp the value to a reasonable range to avoid extreme results
     return np.clip(noise_std, 1.0, 10.0)
 
@@ -1179,9 +1197,9 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         if enhance:
             _print("Applying enhancement filter...")
             seed_y = int.from_bytes(os.urandom(4), 'little')
-            y_final = enhance_filter(y_final, t=12, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
-            u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-            v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+            y_final = _enhance_filter()(y_final, t=12, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+            u_final = _enhance_filter()(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+            v_final = _enhance_filter()(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
         if input_datetime is not None:
             _ts = datetime.datetime.strptime(input_datetime, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
@@ -1466,15 +1484,15 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
             ch_f[gap_fill] = ch_f[ri_gap, ci_gap]
             # Gaussian smooth at downscale.
             src_u8 = ch_f.clip(0, 255).astype(np.uint8)
-            if _cv2 is not None:
-                small = _cv2.resize(src_u8, (sw, sh), interpolation=_cv2.INTER_AREA).astype(np.float32)
+            if _cv2() is not None:
+                small = _cv2().resize(src_u8, (sw, sh), interpolation=_cv2().INTER_AREA).astype(np.float32)
             else:
                 from PIL import Image as _PIL2
                 small = np.array(_PIL2.fromarray(src_u8).resize((sw, sh), _PIL2.BOX)).astype(np.float32)
             blurred = gaussian_filter(small, sigma=sigma_s);  del small
             blurred_u8 = blurred.clip(0, 255).astype(np.uint8)
-            if _cv2 is not None:
-                full = _cv2.resize(blurred_u8, (W, H), interpolation=_cv2.INTER_LINEAR).astype(np.float32)
+            if _cv2() is not None:
+                full = _cv2().resize(blurred_u8, (W, H), interpolation=_cv2().INTER_LINEAR).astype(np.float32)
             else:
                 from PIL import Image as _PIL2
                 full = np.array(_PIL2.fromarray(blurred_u8).resize((W, H), _PIL2.BILINEAR)).astype(np.float32)
@@ -1505,9 +1523,9 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     if enhance:
         _print("Applying enhancement filter...")
         seed_y = int.from_bytes(os.urandom(4), 'little')
-        y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
-        u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-        v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+        y_final = _enhance_filter()(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+        u_final = _enhance_filter()(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+        v_final = _enhance_filter()(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
     # Apply fisheye circular mask directly to YUV planes before saving —
     # avoids a second JPEG encode/decode cycle via ImageMagick.
@@ -1654,13 +1672,13 @@ def _extract_timestamps_from_file(args):
     timestamps = []
 
     try:
-        with av.open(video_file) as container:
+        with _av().open(video_file) as container:
             stream = container.streams.video[0]
             time_base = stream.time_base
 
             # Check for a non-zero container start time (Unix timestamp in seconds).
             container_start = container.start_time
-            start_time_sec = container_start / av.time_base if container_start is not None else 0.0
+            start_time_sec = container_start / _av().time_base if container_start is not None else 0.0
 
             if start_time_sec > 0:
                 start_dt = datetime.datetime.fromtimestamp(start_time_sec, tz=datetime.timezone.utc)
@@ -1710,7 +1728,7 @@ def _extract_timestamps_from_file(args):
                 sys.stdout.write('\n')
                 sys.stdout.flush()
 
-    except (av.Error, IndexError) as e:
+    except (_av().Error, IndexError) as e:
         sys.stdout.write('\n')
         _print(f"Warning: Could not process video '{full_path}': {e}", file=sys.stderr)
 
@@ -2001,12 +2019,12 @@ def _build_timelapse_timeline(files, model=None):
 
     for file_idx, (file_path, _, _) in enumerate(files):
         try:
-            with av.open(file_path) as container:
+            with _av().open(file_path) as container:
                 stream = container.streams.video[0]
                 time_base = stream.time_base
 
                 container_start = container.start_time
-                start_time_sec = container_start / av.time_base if container_start is not None else 0.0
+                start_time_sec = container_start / _av().time_base if container_start is not None else 0.0
 
                 if start_time_sec > 0:
                     # Fast path: derive exact frame timestamps from packet PTS.
@@ -2256,7 +2274,7 @@ def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
 
 
 def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None):
-    if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
+    if not _av(): raise ImportError("PyAV is not installed, but video processing was requested.")
 
     num_images = len(camera_files)
     if num_images == 0:
@@ -2514,7 +2532,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     # -----------------------------------------------------------------------
     _print("\nStarting timelapse stitching process...")
 
-    out_container = av.open(output_file, mode='w')
+    out_container = _av().open(output_file, mode='w')
     out_stream = out_container.add_stream("libx264", rate=output_fps)
     out_stream.width, out_stream.height, out_stream.pix_fmt = out_w, out_h, 'yuv420p'
     out_stream.options = {"preset": preset, "crf": str(crf)}
@@ -2583,7 +2601,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                 return False
             file_path = self.files[file_idx][0]
             try:
-                self.container = av.open(file_path)
+                self.container = _av().open(file_path)
                 self.stream = self.container.streams.video[0]
                 self.stream.thread_type = 'AUTO'
                 self.frame_iter = self.container.decode(self.stream)
@@ -2628,7 +2646,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     camera_decoders = [_CameraDecoder(files) for files in camera_files]
 
     try:
-        out_frame = av.VideoFrame(width=out_w, height=out_h, format='yuv420p')
+        out_frame = _av().VideoFrame(width=out_w, height=out_h, format='yuv420p')
         if not out_frame.planes or not out_frame.planes[0]:
             raise RuntimeError()
     except Exception:
@@ -2641,14 +2659,14 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             np.clip(ch_f, 0, 255, out=ch_f)
             np.copyto(buf_u8, ch_f, casting='unsafe')
             buf_u8[geo_gap_idx] = ch_f[geo_ri_gap, geo_ci_gap].astype(np.uint8)
-            if _cv2 is not None:
-                small = _cv2.resize(buf_u8, (geo_sw, geo_sh), interpolation=_cv2.INTER_AREA).astype(np.float32)
+            if _cv2() is not None:
+                small = _cv2().resize(buf_u8, (geo_sw, geo_sh), interpolation=_cv2().INTER_AREA).astype(np.float32)
             else:
                 from PIL import Image as _PIL2
                 small = np.array(_PIL2.fromarray(buf_u8).resize((geo_sw, geo_sh), _PIL2.BOX)).astype(np.float32)
             blurred_u8 = gaussian_filter(small, sigma=geo_sigma_s).clip(0, 255).astype(np.uint8)
-            if _cv2 is not None:
-                full = _cv2.resize(blurred_u8, (W_geo, H_geo), interpolation=_cv2.INTER_LINEAR).astype(np.float32)
+            if _cv2() is not None:
+                full = _cv2().resize(blurred_u8, (W_geo, H_geo), interpolation=_cv2().INTER_LINEAR).astype(np.float32)
             else:
                 from PIL import Image as _PIL2
                 full = np.array(_PIL2.fromarray(blurred_u8).resize((W_geo, H_geo), _PIL2.BILINEAR)).astype(np.float32)
@@ -2785,9 +2803,9 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
             if enhance:
                 seed_y = int.from_bytes(os.urandom(4), 'little')
-                y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
-                u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-                v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                y_final = _enhance_filter()(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+                u_final = _enhance_filter()(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                v_final = _enhance_filter()(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
             # Apply fisheye circular mask
             if fisheye_mask:
@@ -2833,7 +2851,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
 
 def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None):
-    if av is None: raise ImportError("PyAV is not installed, but video processing was requested.")
+    if not _av(): raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
@@ -2865,18 +2883,18 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             _print(f"  rounding single-video output: {final_w}x{final_h} -> {dw}x{dh}")
 
         try:
-            in_container = av.open(input_path)
+            in_container = _av().open(input_path)
             in_stream = in_container.streams.video[0]
             in_stream.thread_type = 'AUTO'
             total_frames = in_stream.frames if in_stream.frames > 0 else 0
             if max_frames > 0 and (total_frames == 0 or total_frames > max_frames):
                 total_frames = max_frames
 
-            out_container = av.open(output_file, mode='w')
+            out_container = _av().open(output_file, mode='w')
             out_stream = out_container.add_stream("libx264", rate=in_stream.average_rate)
             out_stream.width, out_stream.height, out_stream.pix_fmt = dw, dh, 'yuv420p'
             out_stream.options = {"preset": preset, "crf": str(crf)}
-        except av.AVError as e:
+        except _av().AVError as e:
             raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
 
         # Precompute fisheye mask for single-video path
@@ -2906,7 +2924,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
         # --- Create output frame once to improve performance and stability ---
         try:
-            out_frame = av.VideoFrame(width=dw, height=dh, format='yuv420p')
+            out_frame = _av().VideoFrame(width=dw, height=dh, format='yuv420p')
             if not out_frame.planes or not out_frame.planes[0]:
                 raise RuntimeError() # Will be caught below
         except Exception:
@@ -2951,9 +2969,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         def _encode_yuv(y, u, v, pts):
             if enhance:
                 seed_y = int.from_bytes(os.urandom(4), 'little')
-                y = enhance_filter(y, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
-                u = enhance_filter(u, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-                v = enhance_filter(v, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                y = _enhance_filter()(y, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+                u = _enhance_filter()(u, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                v = _enhance_filter()(v, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
             out_frame.planes[0].update(y); out_frame.planes[1].update(u); out_frame.planes[2].update(v)
             out_frame.pts = pts
             for packet in out_stream.encode(out_frame):
@@ -3248,15 +3266,15 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     # --- Stitching Pass ---
     _print("\nStarting stitching process...")
     try:
-        in_containers = [av.open(f) for f in input_files]
+        in_containers = [_av().open(f) for f in input_files]
         in_streams = [c.streams.video[0] for c in in_containers]
         for s in in_streams: s.thread_type = 'AUTO'
 
-        out_container = av.open(output_file, mode='w')
+        out_container = _av().open(output_file, mode='w')
         out_stream = out_container.add_stream("libx264", rate=in_streams[0].average_rate)
         out_stream.width, out_stream.height, out_stream.pix_fmt = out_w, out_h, 'yuv420p'
         out_stream.options = {"preset": preset, "crf": str(crf)}
-    except av.AVError as e:
+    except _av().AVError as e:
         raise IOError(f"PyAV Error: Could not open video files for processing. Check paths and file integrity.\nDetails: {e}")
         
     total_frames = 0
@@ -3315,7 +3333,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     
     # --- Create output frame once to improve performance and stability ---
     try:
-        out_frame = av.VideoFrame(width=out_w, height=out_h, format='yuv420p')
+        out_frame = _av().VideoFrame(width=out_w, height=out_h, format='yuv420p')
         if not out_frame.planes or not out_frame.planes[0]:
             raise RuntimeError()
     except Exception:
@@ -3328,14 +3346,14 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             np.clip(ch_f, 0, 255, out=ch_f)
             np.copyto(buf_u8, ch_f, casting='unsafe')
             buf_u8[geo_gap_idx] = ch_f[geo_ri_gap, geo_ci_gap].astype(np.uint8)
-            if _cv2 is not None:
-                small = _cv2.resize(buf_u8, (geo_sw, geo_sh), interpolation=_cv2.INTER_AREA).astype(np.float32)
+            if _cv2() is not None:
+                small = _cv2().resize(buf_u8, (geo_sw, geo_sh), interpolation=_cv2().INTER_AREA).astype(np.float32)
             else:
                 from PIL import Image as _PIL2
                 small = np.array(_PIL2.fromarray(buf_u8).resize((geo_sw, geo_sh), _PIL2.BOX)).astype(np.float32)
             blurred_u8 = gaussian_filter(small, sigma=geo_sigma_s).clip(0, 255).astype(np.uint8)
-            if _cv2 is not None:
-                full = _cv2.resize(blurred_u8, (W_geo, H_geo), interpolation=_cv2.INTER_LINEAR).astype(np.float32)
+            if _cv2() is not None:
+                full = _cv2().resize(blurred_u8, (W_geo, H_geo), interpolation=_cv2().INTER_LINEAR).astype(np.float32)
             else:
                 from PIL import Image as _PIL2
                 full = np.array(_PIL2.fromarray(blurred_u8).resize((W_geo, H_geo), _PIL2.BILINEAR)).astype(np.float32)
@@ -3518,9 +3536,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
             if enhance:
                 seed_y = int.from_bytes(os.urandom(4), 'little')
-                y_final = enhance_filter(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
-                u_final = enhance_filter(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
-                v_final = enhance_filter(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                y_final = _enhance_filter()(y_final, t=8, log2sizex=5, log2sizey=5, dither=6, seed=seed_y)
+                u_final = _enhance_filter()(u_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
+                v_final = _enhance_filter()(v_final, t=16, log2sizex=4, log2sizey=4, dither=0, seed=0)
 
             if timestamp and ts_val is not None:
                 _draw_timestamp_yuv(y_final, u_final, v_final, ts_val)
@@ -3826,11 +3844,12 @@ def generate_pto_from_lens_files(input_files: list, projection: str,
             pass
         # Fallback for video files: use av if available
         try:
-            import av as _av
-            with _av.open(img_path) as _vc:
-                vs = _vc.streams.video[0]
-                actual_w, actual_h = vs.width, vs.height
-            break
+            _av_mod_local = _av()
+            if _av_mod_local:
+                with _av_mod_local.open(img_path) as _vc:
+                    vs = _vc.streams.video[0]
+                    actual_w, actual_h = vs.width, vs.height
+                break
         except Exception:
             continue
 
@@ -5864,7 +5883,7 @@ def main():
     # If output is image but inputs are videos, extract first frame from each video
     _temp_frame_files = []
     if is_image_output and any(f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')) for f in args.input_files):
-        if av is None:
+        if not _av():
             _print("Error: PyAV is required to extract frames from videos for image output.", file=sys.stderr); sys.exit(1)
         _print("Extracting first frame from video inputs...")
         for vid_path in args.input_files:
@@ -5874,7 +5893,7 @@ def main():
                 temp_frame.close()
                 _temp_frame_files.append(temp_frame.name)
                 try:
-                    container = av.open(vid_path)
+                    container = _av().open(vid_path)
                     frame = container.decode(video=0).__next__()
                     if frame.format.name != "rgb24":
                         frame = frame.reformat(format="rgb24")

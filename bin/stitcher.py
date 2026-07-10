@@ -892,12 +892,13 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
 # The EDT index maps and feather weights used for gap filling depend only on
 # the PTO geometry, padding and crop options. They can be precomputed once,
 # cached on disk, and reused across runs.
-_GAP_CACHE_VERSION = 4
+_GAP_CACHE_VERSION = 5
 
 
 def _get_gap_cache_path(pto_file, pad, padsides, is_video_output,
                         final_w, final_h, workwidth, workheight,
-                        min_left, min_top, fisheye_mask, crop_to_content):
+                        min_left, min_top, fisheye_mask, crop_to_content,
+                        cyclic_x=False):
     """Return deterministic cache path for gap-fill geometry."""
     with open(pto_file, 'rb') as _f:
         _pto_bytes = _f.read()
@@ -906,13 +907,14 @@ def _get_gap_cache_path(pto_file, pad, padsides, is_video_output,
     _key_src = (_pto_norm +
                 repr((_GAP_CACHE_VERSION, pad, sorted(padsides), is_video_output,
                       final_w, final_h, workwidth, workheight,
-                      min_left, min_top, fisheye_mask, crop_to_content)).encode())
+                      min_left, min_top, fisheye_mask, crop_to_content,
+                      cyclic_x)).encode())
     _key = hashlib.sha256(_key_src).hexdigest()[:24]
     _cache_dir = os.path.join(tempfile.gettempdir(), 'stitcher_gap_cache')
     return os.path.join(_cache_dir, f'gap_{_key}.npz'), _cache_dir
 
 
-def _compute_gap_geometry(gap: np.ndarray, S: int = 8, sigma_s: int = 4):
+def _compute_gap_geometry(gap: np.ndarray, S: int = 8, sigma_s: int = 4, cyclic_x: bool = False):
     """Precompute EDT index maps and feather weights for gap filling.
 
     Returns (ri, ci, blend_w, sw, sh, feather_radius). All returned arrays are
@@ -920,6 +922,11 @@ def _compute_gap_geometry(gap: np.ndarray, S: int = 8, sigma_s: int = 4):
     Index maps are stored as int16 when the canvas fits (<= 32767) to halve
     the memory footprint versus int32; feather weights are stored as uint16
     (scaled 0..65535) to halve versus float32.
+
+    When ``cyclic_x`` is True the horizontal axis is treated as periodic,
+    so the left and right edges are treated as adjacent (used for equirect
+    output). This affects both the nearest-source EDT index maps and the
+    feather-distance weights.
     """
     H, W = gap.shape
     sw, sh = max(1, W // S), max(1, H // S)
@@ -927,18 +934,45 @@ def _compute_gap_geometry(gap: np.ndarray, S: int = 8, sigma_s: int = 4):
 
     from scipy.ndimage import distance_transform_edt as _edt
 
-    ph = ((H + S - 1) // S) * S
-    pw = ((W + S - 1) // S) * S
-    gap_pad = np.zeros((ph, pw), dtype=bool)
-    gap_pad[:H, :W] = gap
-    gap_ds = gap_pad[::S, ::S]
-    ri_ds, ci_ds = _edt(gap_ds, return_distances=False, return_indices=True)
     # int16 is sufficient for current canvas sizes (<= 8192) and saves ~50%.
     _idx_dt = np.int16 if max(H, W) <= 32767 else np.int32
-    ri = np.repeat(np.repeat((ri_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
-    ci = np.repeat(np.repeat((ci_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
 
-    dist = _edt(~gap)
+    if cyclic_x:
+        # For a horizontally periodic (equirect) canvas, triple the gap mask
+        # horizontally and compute EDT on the central copy. This makes column
+        # 0 adjacent to column W-1 without implementing a periodic EDT.
+        ph = ((H + S - 1) // S) * S
+        pw = ((W + S - 1) // S) * S
+        gap_pad = np.zeros((ph, pw), dtype=bool)
+        gap_pad[:H, :W] = gap
+        gap_cyclic = np.concatenate([gap_pad, gap_pad, gap_pad], axis=1)
+        gap_ds = gap_cyclic[::S, ::S]
+        ri_ds, ci_ds = _edt(gap_ds, return_distances=False, return_indices=True)
+        w_ds = pw // S
+        # Map column indices from the tripled canvas back to the central copy,
+        # then into the [0, w_ds) range for the original image.
+        ci_ds = ((ci_ds - w_ds) % w_ds).astype(ci_ds.dtype)
+        ri = np.repeat(np.repeat((ri_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
+        ci = np.repeat(np.repeat((ci_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
+        # Make sure column indices stay within the original width.
+        np.mod(ci, W, out=ci)
+
+        # Feather weights from a periodic full-res distance transform.
+        gap_full_cyclic = np.concatenate([gap, gap, gap], axis=1)
+        dist_cyclic = _edt(~gap_full_cyclic)
+        dist = dist_cyclic[:, W:2 * W]
+    else:
+        ph = ((H + S - 1) // S) * S
+        pw = ((W + S - 1) // S) * S
+        gap_pad = np.zeros((ph, pw), dtype=bool)
+        gap_pad[:H, :W] = gap
+        gap_ds = gap_pad[::S, ::S]
+        ri_ds, ci_ds = _edt(gap_ds, return_distances=False, return_indices=True)
+        ri = np.repeat(np.repeat((ri_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
+        ci = np.repeat(np.repeat((ci_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
+
+        dist = _edt(~gap)
+
     blend_w = np.clip(dist / feather_radius, 0.0, 1.0)
     blend_w = (blend_w * 65535.0).astype(np.uint16)
 
@@ -949,7 +983,8 @@ def compute_or_load_gap_geometry(gap, pto_file, pad, padsides,
                                  final_w, final_h, workwidth, workheight,
                                  min_left, min_top,
                                  fisheye_mask, crop_to_content,
-                                 verbosity=1, print_func=print):
+                                 verbosity=1, print_func=print,
+                                 cyclic_x=False):
     """Compute or load cached gap-fill geometry (EDT maps + feather weights).
 
     The geometry depends only on the gap mask, which itself depends on the PTO
@@ -961,7 +996,8 @@ def compute_or_load_gap_geometry(gap, pto_file, pad, padsides,
         final_w=final_w, final_h=final_h,
         workwidth=workwidth, workheight=workheight,
         min_left=min_left, min_top=min_top,
-        fisheye_mask=fisheye_mask, crop_to_content=crop_to_content)
+        fisheye_mask=fisheye_mask, crop_to_content=crop_to_content,
+        cyclic_x=cyclic_x)
 
     H, W = gap.shape
     try:
@@ -985,7 +1021,7 @@ def compute_or_load_gap_geometry(gap, pto_file, pad, padsides,
         print_func(f"  gap cache load failed: {_e}", file=sys.stderr)
 
     from scipy.ndimage import distance_transform_edt as _edt, gaussian_filter
-    ri, ci, blend_w, sw, sh, feather_radius = _compute_gap_geometry(gap)
+    ri, ci, blend_w, sw, sh, feather_radius = _compute_gap_geometry(gap, cyclic_x=cyclic_x)
 
     try:
         os.makedirs(cache_dir, exist_ok=True)
@@ -1000,6 +1036,7 @@ def compute_or_load_gap_geometry(gap, pto_file, pad, padsides,
             'sw': np.int64(sw),
             'sh': np.int64(sh),
             'feather_radius': np.int64(feather_radius),
+            'cyclic_x': np.bool_(cyclic_x),
         }
         np.savez_compressed(_tmp_path, **_payload)
         os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path,
@@ -1216,6 +1253,9 @@ def _precompile_numba_functions():
 def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0, devignette=None, input_datetime: str = None):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
+    # Hugin projection code 2 is equirectangular; treat the horizontal axis
+    # as periodic so left/right edges wrap seamlessly.
+    cyclic_x = (int(global_options.get('f', 2)) == 2)
     num_images = len(mappings)
     if len(input_files) != num_images:
         raise ValueError(f"Number of input files ({len(input_files)}) does not match the number of images in the PTO file ({num_images}).")
@@ -1526,7 +1566,8 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
             gap, pto_file, pad, padsides,
             final_w, final_h, workwidth, workheight,
             min_left, min_top, fisheye_mask, crop_to_content,
-            verbosity=0 if _quiet else 1, print_func=_print)
+            verbosity=0 if _quiet else 1, print_func=_print,
+            cyclic_x=cyclic_x)
         H, W = gap.shape
         _print(f"  gap geometry ready ({time.perf_counter() - _t_geo:.2f}s)")
         _t_gap = time.perf_counter()
@@ -2402,6 +2443,9 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
+    # Hugin projection code 2 is equirectangular; treat the horizontal axis
+    # as periodic so left/right edges wrap seamlessly.
+    cyclic_x = (int(global_options.get('f', 2)) == 2)
     if final_w > 16384:
         raise ValueError(f"Output width {final_w} exceeds codec limits for H.264/libx264. PTO='{pto_file}'")
     if len(mappings) != num_images:
@@ -2571,16 +2615,37 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     geo_sw = max(1, W_geo // S_geo)
     geo_sh = max(1, H_geo // S_geo)
     geo_sigma_s = 4
-    ph_g = ((H_geo + S_geo - 1) // S_geo) * S_geo
-    pw_g = ((W_geo + S_geo - 1) // S_geo) * S_geo
-    gap_pad_g = np.zeros((ph_g, pw_g), dtype=bool)
-    gap_pad_g[:H_geo, :W_geo] = geo_gap
-    gap_ds_g = gap_pad_g[::S_geo, ::S_geo]; del gap_pad_g
-    ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True); del gap_ds_g
-    geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
-    geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
-    _print(f"  computing full-res EDT on {W_geo}x{H_geo} canvas...")
-    geo_dist = _geo_edt(~geo_gap)
+    if cyclic_x:
+        # For equirect, triple the gap mask horizontally so EDT treats the
+        # left and right edges as adjacent, then extract the central copy.
+        ph_g = ((H_geo + S_geo - 1) // S_geo) * S_geo
+        pw_g = ((W_geo + S_geo - 1) // S_geo) * S_geo
+        gap_pad_g = np.zeros((ph_g, pw_g), dtype=bool)
+        gap_pad_g[:H_geo, :W_geo] = geo_gap
+        gap_cyclic_g = np.concatenate([gap_pad_g, gap_pad_g, gap_pad_g], axis=1); del gap_pad_g
+        gap_ds_g = gap_cyclic_g[::S_geo, ::S_geo]; del gap_cyclic_g
+        ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True)
+        w_ds_g = gap_ds_g.shape[1] // 3
+        del gap_ds_g
+        ci_ds_g = ((ci_ds_g - w_ds_g) % w_ds_g).astype(ci_ds_g.dtype)
+        geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
+        geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
+        np.mod(geo_ci, W_geo, out=geo_ci)
+        _print(f"  computing full-res periodic EDT on {W_geo}x{H_geo} canvas...")
+        geo_full_cyclic = np.concatenate([geo_gap, geo_gap, geo_gap], axis=1)
+        geo_dist_cyclic = _geo_edt(~geo_full_cyclic)
+        geo_dist = geo_dist_cyclic[:, W_geo:2 * W_geo]; del geo_dist_cyclic
+    else:
+        ph_g = ((H_geo + S_geo - 1) // S_geo) * S_geo
+        pw_g = ((W_geo + S_geo - 1) // S_geo) * S_geo
+        gap_pad_g = np.zeros((ph_g, pw_g), dtype=bool)
+        gap_pad_g[:H_geo, :W_geo] = geo_gap
+        gap_ds_g = gap_pad_g[::S_geo, ::S_geo]; del gap_pad_g
+        ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True); del gap_ds_g
+        geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
+        geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
+        _print(f"  computing full-res EDT on {W_geo}x{H_geo} canvas...")
+        geo_dist = _geo_edt(~geo_gap)
     geo_blend_w = np.clip(geo_dist / feather_radius, 0.0, 1.0).astype(np.float32); del geo_dist
     geo_n_gap = int(geo_gap.sum())
     geo_gap_idx = np.where(geo_gap)
@@ -2919,6 +2984,9 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
+    # Hugin projection code 2 is equirectangular; treat the horizontal axis
+    # as periodic so left/right edges wrap seamlessly.
+    cyclic_x = (int(global_options.get('f', 2)) == 2)
     if final_w > 16384:
         raise ValueError(f"Output width {final_w} exceeds codec limits for H.264/libx264. PTO='{pto_file}'")
     num_images = len(mappings)
@@ -3289,17 +3357,39 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
     geo_sh = max(1, H_geo // S_geo)
     geo_sigma_s = 4
     # EDT index maps at 8× downscale for gap fill
-    ph_g = ((H_geo + S_geo - 1) // S_geo) * S_geo
-    pw_g = ((W_geo + S_geo - 1) // S_geo) * S_geo
-    gap_pad_g = np.zeros((ph_g, pw_g), dtype=bool)
-    gap_pad_g[:H_geo, :W_geo] = geo_gap
-    gap_ds_g = gap_pad_g[::S_geo, ::S_geo]; del gap_pad_g
-    ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True); del gap_ds_g
-    geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
-    geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
-    # Feather weights from full-res EDT
-    _print(f"  computing full-res EDT on {W_geo}x{H_geo} canvas...")
-    geo_dist = _geo_edt(~geo_gap)
+    if cyclic_x:
+        # For equirect, triple the gap mask horizontally so EDT treats the
+        # left and right edges as adjacent, then extract the central copy.
+        ph_g = ((H_geo + S_geo - 1) // S_geo) * S_geo
+        pw_g = ((W_geo + S_geo - 1) // S_geo) * S_geo
+        gap_pad_g = np.zeros((ph_g, pw_g), dtype=bool)
+        gap_pad_g[:H_geo, :W_geo] = geo_gap
+        gap_cyclic_g = np.concatenate([gap_pad_g, gap_pad_g, gap_pad_g], axis=1); del gap_pad_g
+        gap_ds_g = gap_cyclic_g[::S_geo, ::S_geo]; del gap_cyclic_g
+        ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True)
+        w_ds_g = gap_ds_g.shape[1] // 3
+        del gap_ds_g
+        ci_ds_g = ((ci_ds_g - w_ds_g) % w_ds_g).astype(ci_ds_g.dtype)
+        geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
+        geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
+        np.mod(geo_ci, W_geo, out=geo_ci)
+        # Feather weights from periodic full-res EDT
+        _print(f"  computing full-res periodic EDT on {W_geo}x{H_geo} canvas...")
+        geo_full_cyclic = np.concatenate([geo_gap, geo_gap, geo_gap], axis=1)
+        geo_dist_cyclic = _geo_edt(~geo_full_cyclic)
+        geo_dist = geo_dist_cyclic[:, W_geo:2 * W_geo]; del geo_dist_cyclic
+    else:
+        ph_g = ((H_geo + S_geo - 1) // S_geo) * S_geo
+        pw_g = ((W_geo + S_geo - 1) // S_geo) * S_geo
+        gap_pad_g = np.zeros((ph_g, pw_g), dtype=bool)
+        gap_pad_g[:H_geo, :W_geo] = geo_gap
+        gap_ds_g = gap_pad_g[::S_geo, ::S_geo]; del gap_pad_g
+        ri_ds_g, ci_ds_g = _geo_edt(gap_ds_g, return_distances=False, return_indices=True); del gap_ds_g
+        geo_ri = np.repeat(np.repeat(ri_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ri_ds_g
+        geo_ci = np.repeat(np.repeat(ci_ds_g * S_geo, S_geo, axis=0), S_geo, axis=1)[:H_geo, :W_geo]; del ci_ds_g
+        # Feather weights from full-res EDT
+        _print(f"  computing full-res EDT on {W_geo}x{H_geo} canvas...")
+        geo_dist = _geo_edt(~geo_gap)
     geo_blend_w = np.clip(geo_dist / feather_radius, 0.0, 1.0).astype(np.float32); del geo_dist
     geo_n_gap = int(geo_gap.sum())
     geo_gap_idx = np.where(geo_gap)  # precomputed tuple for fast per-frame fill

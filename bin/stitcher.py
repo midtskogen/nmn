@@ -728,13 +728,14 @@ def _prune_seam_cache(cache_dir):
 
 
 def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides,
+                          levels,
                           is_video_output=False,
                           reverse=False, simple_seam=False, content_seam=False,
                           verbosity=1, print_func=print):
-    """Compute seams, caching the result on disk keyed by PTO and geometry.
+    """Compute seams and seam-mask pyramids, caching both on disk.
 
     The cache is shared between image and video stitching runs as long as the
-    PTO file, padding, output mode, work dimensions and seam flags match.
+    PTO file, padding, output mode, work dimensions, levels and seam flags match.
     """
     cache_path, cache_dir = _get_seam_cache_path(
         pto_file, pad, padsides, is_video_output,
@@ -745,11 +746,19 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
             with np.load(cache_path) as _npz:
                 assignment = _npz['assignment']
                 seam_present = [bool(v) for v in _npz['seam_present']]
-            if (assignment.shape == (workheight, workwidth) and
-                    len(seam_present) == len(images)):
-                if verbosity >= 1:
-                    print_func("  loaded seams from cache.")
-                return assignment, seam_present
+                n = int(_npz['n'])
+                levels_loaded = int(_npz['levels'])
+                if (assignment.shape == (workheight, workwidth) and
+                        len(seam_present) == len(images) and
+                        n == len(images) and levels_loaded == levels):
+                    seam_mask_cache = {}
+                    for i in range(n):
+                        seam_mask_cache[i] = [
+                            _npz[f'mc_{i}_{l}'] for l in range(levels)
+                        ]
+                    if verbosity >= 1:
+                        print_func("  loaded seams from cache.")
+                    return assignment, seam_present, seam_mask_cache
     except Exception:
         pass
 
@@ -763,22 +772,29 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
         verbosity=verbosity,
         print_func=print_func,
     )
+    seam_mask_cache = multiblend.build_seam_mask_cache(
+        images, assignment, workwidth, workheight, levels)
 
     try:
         os.makedirs(cache_dir, exist_ok=True)
         _prune_seam_cache(cache_dir)
         _tmp_path = cache_path + f'.tmp{os.getpid()}'
-        np.savez_compressed(
-            _tmp_path,
-            assignment=np.ascontiguousarray(assignment),
-            seam_present=np.array(seam_present, dtype=np.uint8),
-        )
+        _payload = {
+            'assignment': np.ascontiguousarray(assignment),
+            'seam_present': np.array(seam_present, dtype=np.uint8),
+            'n': np.int64(len(images)),
+            'levels': np.int64(levels),
+        }
+        for i, pyrs in seam_mask_cache.items():
+            for l, m in enumerate(pyrs):
+                _payload[f'mc_{i}_{l}'] = np.ascontiguousarray(m)
+        np.savez_compressed(_tmp_path, **_payload)
         os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path,
                    cache_path)
     except Exception:
         pass
 
-    return assignment, seam_present
+    return assignment, seam_present, seam_mask_cache
 
 
 def estimate_noise(image_plane):
@@ -1180,13 +1196,14 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     _print(f"  {workwidth}x{workheight}, {levels} levels (tightened from {final_w}x{final_h})")
 
     _print("  seaming...")
-    assignment, _ = compute_or_load_seams(
+    assignment, _, seam_mask_cache = compute_or_load_seams(
         images=images,
         workwidth=workwidth,
         workheight=workheight,
         pto_file=pto_file,
         pad=pad,
         padsides=padsides,
+        levels=levels,
         is_video_output=force_video_dims,
         simple_seam=False,
         content_seam=False,
@@ -1206,6 +1223,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         saturation_correct=False,
         verbosity=0 if _quiet else 2,
         print_func=_print,
+        seam_mask_cache=seam_mask_cache,
     )
 
     # Compute coverage in the tightened workspace (image xpos/ypos are relative
@@ -2480,8 +2498,6 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             return result.astype(np.uint8)
 
     cached_exp_info = None
-    # Seam masks are static after the first frame; cache their pyramids in blend().
-    seam_mask_cache = {}
     # Valid-pixel bounding boxes per camera — reproject kernels skip dead regions.
     _map_bboxes_cams = [_mapping_bboxes(mappings[i], final_h, final_w) for i in range(num_images)]
     frame_count = 0
@@ -2537,13 +2553,14 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             if frame_count == 1:
                 _print("Computing seams with multiblend (first frame)...")
                 levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
-                assignment, _ = compute_or_load_seams(
+                assignment, _, seam_mask_cache = compute_or_load_seams(
                     images=images,
                     workwidth=workwidth,
                     workheight=workheight,
                     pto_file=pto_file,
                     pad=pad,
                     padsides=padsides,
+                    levels=levels,
                     is_video_output=True,
                     simple_seam=False,
                     content_seam=False,
@@ -3169,8 +3186,6 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
     # Cache exposure correction info to support --level-subsample.
     cached_exp_info = None
-    # Seam masks are static after the first frame; cache their pyramids in blend().
-    seam_mask_cache = {}
     # Valid-pixel bounding boxes per camera — reproject kernels skip dead regions.
     _map_bboxes_cams = [_mapping_bboxes(mappings[i], final_h, final_w) for i in range(num_images)]
 
@@ -3268,13 +3283,14 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             if frame_count == 1:
                 _print("Computing seams with multiblend (first frame)...")
                 levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
-                assignment, _ = compute_or_load_seams(
+                assignment, _, seam_mask_cache = compute_or_load_seams(
                     images=images,
                     workwidth=workwidth,
                     workheight=workheight,
                     pto_file=pto_file,
                     pad=pad,
                     padsides=padsides,
+                    levels=levels,
                     is_video_output=True,
                     simple_seam=False,
                     content_seam=False,

@@ -725,6 +725,36 @@ def compute_seams(images: List[ImageInfo], workwidth: int, workheight: int,
     return assignment, seam_present
 
 
+def build_seam_mask_cache(images: List[ImageInfo], assignment: np.ndarray,
+                          workwidth: int, workheight: int, levels: int) -> dict:
+    """Build per-image seam-mask pyramids for blend()'s seam_mask_cache.
+
+    The pyramids depend only on the (static) assignment and image footprints,
+    so they can be precomputed once and reused across frames and across runs.
+    """
+    if levels == 0:
+        return {}
+    pyr_shapes = pyramid_sizes(workwidth, workheight, levels)
+    mask_g = [np.empty(s, dtype=np.float32) for s in pyr_shapes]
+    if _NUMBA_OK:
+        mask_c = [None] * levels  # unused in the Numba path
+    else:
+        mask_c = [np.empty(s, dtype=np.float32) for s in pyr_shapes]
+    cache = {}
+    for i, img in enumerate(images):
+        if _NUMBA_OK:
+            _nb_assign_mask(assignment, np.uint8(i), mask_g[0])
+        else:
+            mask_g[0][:] = (assignment == np.uint8(i))
+        for l in range(levels - 1):
+            if _NUMBA_OK:
+                _nb_ds2(mask_g[l], mask_g[l + 1])
+            else:
+                _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
+        cache[i] = [m.copy() for m in mask_g]
+    return cache
+
+
 # ============================================================
 #  Blending (_blend)
 # ============================================================

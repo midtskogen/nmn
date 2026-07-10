@@ -50,7 +50,12 @@ fi
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
-exec >>/tmp/stitch_latest${OUT_SUFFIX}.log 2>&1
+LOGFILE=/tmp/stitch_latest${OUT_SUFFIX}.log
+if [ "$VERBOSE" = true ]; then
+    exec > >(tee -a "$LOGFILE") 2>&1
+else
+    exec >>"$LOGFILE" 2>&1
+fi
 echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)

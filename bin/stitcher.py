@@ -611,10 +611,14 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
     _MAP_CACHE_VERSION = 5
     cache_path = None
     try:
-        import hashlib
+        import hashlib, re
         with open(pto_file, 'rb') as _f:
             _pto_bytes = _f.read()
-        _key_src = _pto_bytes + repr((_MAP_CACHE_VERSION, pad, sorted(padsides), is_video_output)).encode()
+        # Projection maps depend only on lens/output geometry, not on the
+        # input image filenames. Strip the per-image n"..." / nfilename tokens
+        # so the cache key stays stable across different minutes/files.
+        _pto_norm = re.sub(rb'\s+n(?:"[^"]*"|[^\s"]+)', b'', _pto_bytes)
+        _key_src = _pto_norm + repr((_MAP_CACHE_VERSION, pad, sorted(padsides), is_video_output)).encode()
         _key = hashlib.sha256(_key_src).hexdigest()[:24]
         _cache_dir = os.path.join(tempfile.gettempdir(), 'stitcher_map_cache')
         cache_path = os.path.join(_cache_dir, f'maps_{_key}.npz')
@@ -767,7 +771,9 @@ def _get_seam_cache_path(pto_file, pad, padsides, is_video_output,
     """Return deterministic cache path for a seam assignment."""
     with open(pto_file, 'rb') as _f:
         _pto_bytes = _f.read()
-    _key_src = (_pto_bytes +
+    # Make key stable across input filenames; geometry depends on parameters only.
+    _pto_norm = re.sub(rb'\s+n(?:"[^"]*"|[^\s"]+)', b'', _pto_bytes)
+    _key_src = (_pto_norm +
                 repr((_SEAM_CACHE_VERSION, pad, sorted(padsides), is_video_output,
                       workwidth, workheight, reverse, simple_seam, content_seam)).encode())
     _key = hashlib.sha256(_key_src).hexdigest()[:24]
@@ -895,7 +901,9 @@ def _get_gap_cache_path(pto_file, pad, padsides, is_video_output,
     """Return deterministic cache path for gap-fill geometry."""
     with open(pto_file, 'rb') as _f:
         _pto_bytes = _f.read()
-    _key_src = (_pto_bytes +
+    # Make key stable across input filenames; geometry depends on parameters only.
+    _pto_norm = re.sub(rb'\s+n(?:"[^"]*"|[^\s"]+)', b'', _pto_bytes)
+    _key_src = (_pto_norm +
                 repr((_GAP_CACHE_VERSION, pad, sorted(padsides), is_video_output,
                       final_w, final_h, workwidth, workheight,
                       min_left, min_top, fisheye_mask, crop_to_content)).encode())

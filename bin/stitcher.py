@@ -95,6 +95,18 @@ def _cv2():
             _cv2_mod = False
     return _cv2_mod
 
+_zstd_mod = None
+
+def _zstd():
+    global _zstd_mod
+    if _zstd_mod is None:
+        try:
+            import zstandard as _zstd_local
+            _zstd_mod = _zstd_local
+        except ImportError:
+            _zstd_mod = False
+    return _zstd_mod
+
 # Import multiblend for blending functionality
 try:
     import multiblend
@@ -591,9 +603,12 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
     # cache them on disk so repeated runs with the same geometry skip the
     # expensive per-pixel trig (~2s for 7 cameras). Arrays are cropped to the
     # valid-pixel bounding box, index maps are delta-encoded (near-constant
-    # increments compress ~8x better), and everything is stored compressed;
+    # increments compress ~8x better), and everything is stored in an npz file;
     # full-size arrays are reconstructed on load. All transforms are lossless.
-    _MAP_CACHE_VERSION = 3
+    # If zstandard is installed the npz is zstd-compressed (smaller than
+    # uncompressed, faster decompression than zlib), otherwise it is stored
+    # uncompressed for raw read speed.
+    _MAP_CACHE_VERSION = 5
     cache_path = None
     try:
         import hashlib
@@ -603,14 +618,17 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
         _key = hashlib.sha256(_key_src).hexdigest()[:24]
         _cache_dir = os.path.join(tempfile.gettempdir(), 'stitcher_map_cache')
         cache_path = os.path.join(_cache_dir, f'maps_{_key}.npz')
-        if os.path.exists(cache_path):
-            def _undelta(d, shape):
-                """Invert np.diff(..., prepend=0) delta encoding (exact)."""
-                return np.cumsum(d.ravel(), dtype=np.int64).astype(np.int32).reshape(shape)
+        _zst_path = cache_path + '.zst'
+        _has_zstd = bool(_zstd())
 
-            with np.load(cache_path) as _npz:
+        def _undelta(d, shape):
+            """Invert np.diff(..., prepend=0) delta encoding (exact)."""
+            return np.cumsum(d.ravel(), dtype=np.int64).astype(np.int32).reshape(shape)
+
+        def _load_from_npz(_npz_path):
+            with np.load(_npz_path) as _npz:
                 n = int(_npz['n'])
-                all_mappings = []
+                _mappings = []
                 for i in range(n):
                     h, w, r0, c0 = (int(v) for v in _npz[f'ybox{i}'])
                     my_d = _npz[f'my{i}']
@@ -626,8 +644,26 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
                     uv_c = _undelta(uv_d, uv_d.shape)
                     uv = np.full((uh, uw), -1, dtype=np.int32)
                     uv[ur0:ur0 + uv_c.shape[0], uc0:uc0 + uv_c.shape[1]] = uv_c
-                    all_mappings.append((my, c01, c23, uv,
-                                         int(_npz[f'sw{i}']), int(_npz[f'sh{i}'])))
+                    _mappings.append((my, c01, c23, uv,
+                                    int(_npz[f'sw{i}']), int(_npz[f'sh{i}'])))
+            return n, _mappings
+
+        if _has_zstd and os.path.exists(_zst_path):
+            _tmp_load = cache_path + f'.load{os.getpid()}.npz'
+            try:
+                with open(_zst_path, 'rb') as _src, open(_tmp_load, 'wb') as _dst:
+                    _zstd().ZstdDecompressor().copy_stream(_src, _dst)
+                n, all_mappings = _load_from_npz(_tmp_load)
+                if n == len(images):
+                    _print("Loaded projection maps from cache (zstd).")
+                    return all_mappings, global_options
+            finally:
+                try:
+                    os.unlink(_tmp_load)
+                except OSError:
+                    pass
+        elif os.path.exists(cache_path):
+            n, all_mappings = _load_from_npz(cache_path)
             if n == len(images):
                 _print("Loaded projection maps from cache.")
                 return all_mappings, global_options
@@ -689,8 +725,28 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
                 _payload[f'uv{i}'] = _delta(np.ascontiguousarray(uv[ur0:ur1, uc0:uc1]))
                 _payload[f'sw{i}'] = np.int64(sw); _payload[f'sh{i}'] = np.int64(sh)
             _tmp_path = cache_path + f'.tmp{os.getpid()}'
-            np.savez_compressed(_tmp_path, **_payload)
-            os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path, cache_path)
+            np.savez(_tmp_path, **_payload)
+            _final_npz = _tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path
+            if _has_zstd:
+                _zst_tmp = _zst_path + f'.tmp{os.getpid()}'
+                try:
+                    with open(_final_npz, 'rb') as _src, _zstd().open(_zst_tmp, 'wb') as _dst:
+                        shutil.copyfileobj(_src, _dst)
+                    os.replace(_zst_tmp, _zst_path)
+                    # Prefer the zst file; remove the uncompressed duplicate to save space.
+                    try:
+                        os.unlink(_final_npz)
+                    except OSError:
+                        pass
+                except Exception:
+                    # If zstd compression fails for any reason, keep the uncompressed file.
+                    os.replace(_final_npz, cache_path)
+                    try:
+                        os.unlink(_zst_tmp)
+                    except OSError:
+                        pass
+            else:
+                os.replace(_final_npz, cache_path)
         except Exception:
             pass
 

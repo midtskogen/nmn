@@ -3,9 +3,11 @@
 # into /meteor/equirect.jpg and /meteor/fisheye.jpg (atomic replacement).
 #
 # Usage:
-#   stitch_latest.sh [--sd] [--ssh HOST] [-v|--verbose]
+#   stitch_latest.sh [--all] [--sd] [--ssh HOST] [-v|--verbose]
 #
 # Options:
+#   --all        Run both SD and HD modes (equivalent to one run without --sd
+#                and one with --sd). Uses lockfiles for both modes.
 #   --sd         Use mini_MM.jpg instead of full_MM.jpg
 #   --ssh HOST   Fetch inputs from and upload results to HOST via SSH
 #   -v, --verbose Print extra progress information and omit --quiet from stitcher.py
@@ -19,8 +21,10 @@ SSH_HOST=""
 EQ_SIZE_ARGS=()
 FE_SIZE_ARGS=()
 VERBOSE=false
+ALL=false
 while [ $# -gt 0 ]; do
     case "$1" in
+        --all) ALL=true; shift ;;
         --sd)
             PREFIX=mini; OUT_SUFFIX=""
             EQ_SIZE_ARGS=(--output-width 1280 --output-height 848)
@@ -40,11 +44,68 @@ else
     STITCHER_QUIET=(--quiet)
 fi
 
+# --- Lockfile handling ---
+# HD mode uses suffix _hd, SD mode uses no suffix.
+PIDFILE_HD=/tmp/stitch_latest_hd.pid
+PIDFILE_SD=/tmp/stitch_latest.pid
+
+# Return 0 if the lockfile exists and is older than 1 hour (stale).
+_lockfile_is_stale() {
+    local _file="$1"
+    [ -f "$_file" ] || return 1
+    local _now _mtime _age
+    _now=$(date +%s)
+    _mtime=$(stat -c %Y "$_file" 2>/dev/null || echo 0)
+    _age=$((_now - _mtime))
+    [ "$_age" -gt 3600 ]
+}
+
+SSH_ARGS=()
+if [ -n "$SSH_HOST" ]; then
+    SSH_ARGS=(--ssh "$SSH_HOST")
+fi
+
+# When running --all, hold both locks and delegate to two single-mode runs.
+if [ "$ALL" = true ]; then
+    for _pidfile in "$PIDFILE_HD" "$PIDFILE_SD"; do
+        if [ -f "$_pidfile" ]; then
+            if _lockfile_is_stale "$_pidfile"; then
+                echo "Lockfile $_pidfile is older than 1 hour, treating as stale and removing it." >&2
+                rm -f "$_pidfile"
+                continue
+            fi
+            _old_pid=$(cat "$_pidfile" 2>/dev/null || true)
+            if [ -n "$_old_pid" ] && [ "$_old_pid" != "$$" ] && [ "$_old_pid" != "$PPID" ] && kill -0 "$_old_pid" 2>/dev/null; then
+                echo "Another stitch_latest.sh is already running (lockfile $_pidfile holds PID $_old_pid). Exiting." >&2
+                exit 0
+            fi
+            rm -f "$_pidfile"
+        fi
+    done
+    echo $$ > "$PIDFILE_HD"
+    echo $$ > "$PIDFILE_SD"
+    trap 'rm -f "$PIDFILE_HD" "$PIDFILE_SD"' EXIT
+
+    # Run HD then SD, passing through --ssh and --verbose.
+    vlog "Running HD mode"
+    "$0" "${SSH_ARGS[@]}" ${VERBOSE:+-v}
+    vlog "Running SD mode"
+    "$0" --sd "${SSH_ARGS[@]}" ${VERBOSE:+-v}
+    exit 0
+fi
+
 PIDFILE=/tmp/stitch_latest${OUT_SUFFIX}.pid
 if [ -f "$PIDFILE" ]; then
-    OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
-    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-        exit 0
+    if _lockfile_is_stale "$PIDFILE"; then
+        echo "Lockfile $PIDFILE is older than 1 hour, treating as stale and removing it." >&2
+        rm -f "$PIDFILE"
+    else
+        OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
+        if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && [ "$OLD_PID" != "$PPID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+            echo "Another stitch_latest.sh is already running (lockfile $PIDFILE holds PID $OLD_PID). Exiting." >&2
+            exit 0
+        fi
+        rm -f "$PIDFILE"
     fi
 fi
 echo $$ > "$PIDFILE"

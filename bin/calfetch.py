@@ -5,6 +5,12 @@ files (lens.pto), parses them, and compiles the data into a single
 JSON file (cameras.json). It preserves existing data for any stations
 or cameras that cannot be reached during the run.
 
+Station metadata is read from stations.json; manually-maintained contact
+information is read from camera_contacts.json and merged into the output.
+
+cameras.json is a generated file and should not be edited by hand or tracked
+in version control. It can be regenerated at any time by running this script.
+
 Can also be used in an extraction mode to reconstruct a .pto file from
 the generated cameras.json file.
 """
@@ -43,6 +49,7 @@ if _PROJECT_DIR is not None:
 
 STATIONS_FILENAME = "stations.json"
 CAMERAS_FILENAME = "cameras.json"
+CAMERA_CONTACTS_FILENAME = "camera_contacts.json"
 REMOTE_CAM_PATH_TPL = "/meteor/cam{}/lens.pto"
 MAX_CAMERAS = 7
 PTO_TEMPLATE = """# hugin project file
@@ -338,6 +345,22 @@ def main():
     # Merge station info into output data
     for sid, s_info in stations_data.items():
         output_data.setdefault(sid, {}).update(s_info)
+
+    # Merge manually-maintained contact info into output data.
+    camera_contacts_path = os.path.join(args.directory, CAMERA_CONTACTS_FILENAME)
+    try:
+        with open(camera_contacts_path, 'r', encoding='utf-8') as f:
+            camera_contacts = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, IOError):
+        camera_contacts = {}
+        if not args.quiet:
+            print(f"{camera_contacts_path} not found or invalid. Continuing without manual contacts.")
+
+    for sid, c_info in camera_contacts.items():
+        if sid in output_data and isinstance(c_info, dict):
+            output_data[sid].setdefault('station', {}).update(c_info)
+        elif not args.quiet:
+            print(f"Warning: contact entry for '{sid}' has no matching station; skipping.")
 
     total_stations = len(stations_data)
     summary_stats = {'complete': 0, 'found': 0, 'missing': 0, 'errors': 0, 'total': total_stations}

@@ -3,11 +3,12 @@
 # into /meteor/equirect.jpg and /meteor/fisheye.jpg (atomic replacement).
 #
 # Usage:
-#   stitch_latest.sh [--sd] [--ssh HOST]
+#   stitch_latest.sh [--sd] [--ssh HOST] [-v|--verbose]
 #
 # Options:
 #   --sd         Use mini_MM.jpg instead of full_MM.jpg
 #   --ssh HOST   Fetch inputs from and upload results to HOST via SSH
+#   -v, --verbose Print extra progress information and omit --quiet from stitcher.py
 
 set -euo pipefail
 
@@ -17,6 +18,7 @@ OUT_SUFFIX=_hd
 SSH_HOST=""
 EQ_SIZE_ARGS=()
 FE_SIZE_ARGS=()
+VERBOSE=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --sd)
@@ -25,9 +27,18 @@ while [ $# -gt 0 ]; do
             FE_SIZE_ARGS=(--output-width 2048 --output-height 2048)
             shift ;;
         --ssh)   SSH_HOST="$2"; shift 2 ;;
+        -v|--verbose) VERBOSE=true; shift ;;
         *)       echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+vlog() { if [ "$VERBOSE" = true ]; then echo "$@"; fi }
+
+if [ "$VERBOSE" = true ]; then
+    STITCHER_QUIET=()
+else
+    STITCHER_QUIET=(--quiet)
+fi
 
 PIDFILE=/tmp/stitch_latest${OUT_SUFFIX}.pid
 if [ -f "$PIDFILE" ]; then
@@ -99,14 +110,17 @@ FINDEOF
 FIND_SCRIPT=${FIND_SCRIPT//__NCAMS__/$NCAMS}
 FIND_SCRIPT=${FIND_SCRIPT//XPREFX/$PREFIX}
 
+vlog "Searching for the latest complete set of ${PREFIX}_MM.jpg images..."
 FOUND=$(rcmd "$FIND_SCRIPT") || { echo "No complete set of images found"; exit 1; }
 read -ra PARTS <<< "$FOUND"
 FOUND_TS="${PARTS[0]/_/ }"
 REMOTE_FILES=("${PARTS[@]:1}")
 echo "Using inputs from $FOUND_TS: ${REMOTE_FILES[*]}"
+vlog "Found ${#REMOTE_FILES[@]} input files"
 
 # --- Fetch input files ---
 if [ -n "$SSH_HOST" ]; then
+    vlog "Fetching inputs from $SSH_HOST via SSH"
     TMPDIR=$(mktemp -d /tmp/stitch_inputs_XXXXXX)
     trap 'rm -rf "$TMPDIR" "$LOCAL_OUTDIR"; cleanup_ssh' EXIT
     # Mirror remote directory structure so stitcher can find lens.pto files.
@@ -124,16 +138,20 @@ if [ -n "$SSH_HOST" ]; then
     # Deduplicate lens.pto paths
     UNIQUE_LENS=($(printf '%s\n' "${LENS_SRCS[@]}" | sort -u))
     # Download lens.pto files
+    vlog "Downloading ${#UNIQUE_LENS[@]} lens.pto calibration files"
     for LP in "${UNIQUE_LENS[@]}"; do
         LOCAL_LP="${TMPDIR}${LP}"
         mkdir -p "$(dirname "$LOCAL_LP")"
         scp -o "ControlPath=$CTRL_SOCK" "$SSH_HOST:$LP" "$LOCAL_LP"
     done
     # Download image files
+    vlog "Downloading ${#REMOTE_FILES[@]} image files"
     for i in "${!REMOTE_FILES[@]}"; do
         scp -o "ControlPath=$CTRL_SOCK" "$SSH_HOST:${REMOTE_FILES[$i]}" "${INPUT_FILES[$i]}"
     done
+    vlog "Inputs ready in $TMPDIR"
 else
+    vlog "Using local input files"
     INPUT_FILES=("${REMOTE_FILES[@]}")
 fi
 
@@ -142,7 +160,8 @@ LOCAL_OUTDIR="${OUTDIR}"
 [ -n "$SSH_HOST" ] && LOCAL_OUTDIR=$(mktemp -d /tmp/stitch_out_XXXXXX)
 
 TMP_EQ=$(mktemp "${LOCAL_OUTDIR}/equirect.XXXXXX.jpg")
-if "$STITCHER" --equirect --quiet --devignette -0.20 "${EQ_SIZE_ARGS[@]}" --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_EQ"; then
+vlog "Stitching equirect: $TMP_EQ"
+if "$STITCHER" --equirect "${STITCHER_QUIET[@]}" --devignette -0.20 "${EQ_SIZE_ARGS[@]}" --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_EQ"; then
     mv -f "$TMP_EQ" "${LOCAL_OUTDIR}/equirect${OUT_SUFFIX}.jpg"
 else
     rm -f "$TMP_EQ"
@@ -152,7 +171,8 @@ fi
 
 # --- Stitch fisheye ---
 TMP_FE=$(mktemp "${LOCAL_OUTDIR}/fisheye.XXXXXX.jpg")
-if "$STITCHER" --fisheye --quiet --devignette -0.20 "${FE_SIZE_ARGS[@]}" --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_FE"; then
+vlog "Stitching fisheye: $TMP_FE"
+if "$STITCHER" --fisheye "${STITCHER_QUIET[@]}" --devignette -0.20 "${FE_SIZE_ARGS[@]}" --input-datetime "$FOUND_TS" "${INPUT_FILES[@]}" "$TMP_FE"; then
     mv -f "$TMP_FE" "${LOCAL_OUTDIR}/fisheye${OUT_SUFFIX}.jpg"
 else
     rm -f "$TMP_FE"
@@ -166,10 +186,12 @@ ARCH_HH=${FOUND_TS:11:2}
 ARCH_MM=${FOUND_TS:14:2}
 ARCH8="cam8/${ARCH_YYYYMMDD}/${ARCH_HH}/${PREFIX}_${ARCH_MM}.jpg"
 ARCH9="cam9/${ARCH_YYYYMMDD}/${ARCH_HH}/${PREFIX}_${ARCH_MM}.jpg"
+vlog "Archiving results to ${ARCH8} and ${ARCH9}"
 
 if [ -n "$SSH_HOST" ]; then
     # Upload equirect.jpg and fisheye.jpg as .tmp, then atomically move them
     # and create archive copies — all in one SSH round-trip.
+    vlog "Uploading results to $SSH_HOST"
     scp -o "ControlPath=$CTRL_SOCK" "${LOCAL_OUTDIR}/equirect${OUT_SUFFIX}.jpg" "$SSH_HOST:${OUTDIR}/equirect${OUT_SUFFIX}.jpg.tmp"
     scp -o "ControlPath=$CTRL_SOCK" "${LOCAL_OUTDIR}/fisheye${OUT_SUFFIX}.jpg"  "$SSH_HOST:${OUTDIR}/fisheye${OUT_SUFFIX}.jpg.tmp"
 

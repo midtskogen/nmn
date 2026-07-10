@@ -702,8 +702,8 @@ def _get_seam_cache_path(pto_file, pad, padsides, is_video_output,
     return os.path.join(_cache_dir, f'seams_{_key}.npz'), _cache_dir
 
 
-def _prune_seam_cache(cache_dir):
-    """Prune stale seam-cache entries (>10 days old) and cap at 3 newest."""
+def _prune_cache_dir(cache_dir, max_age_days=10, max_entries=3):
+    """Prune stale cache entries and cap at the newest N files."""
     try:
         _now = time.time()
         _entries = []
@@ -711,20 +711,25 @@ def _prune_seam_cache(cache_dir):
             _fp = os.path.join(cache_dir, _fn)
             try:
                 _mt = os.path.getmtime(_fp)
-                if _now - _mt > 10 * 86400:
+                if _now - _mt > max_age_days * 86400:
                     os.unlink(_fp)
                 else:
                     _entries.append((_mt, _fp))
             except OSError:
                 pass
         _entries.sort(reverse=True)
-        for _, _fp in _entries[3:]:
+        for _, _fp in _entries[max_entries:]:
             try:
                 os.unlink(_fp)
             except OSError:
                 pass
     except Exception:
         pass
+
+
+def _prune_seam_cache(cache_dir):
+    """Prune stale seam-cache entries (>10 days old) and cap at 3 newest."""
+    _prune_cache_dir(cache_dir, max_age_days=10, max_entries=3)
 
 
 def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides,
@@ -743,6 +748,8 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
 
     try:
         if os.path.exists(cache_path):
+            if verbosity >= 2:
+                print_func(f"  seam cache: trying {cache_path}")
             with np.load(cache_path) as _npz:
                 assignment = _npz['assignment']
                 seam_present = [bool(v) for v in _npz['seam_present']]
@@ -759,8 +766,10 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
                     if verbosity >= 1:
                         print_func("  loaded seams from cache.")
                     return assignment, seam_present, seam_mask_cache
-    except Exception:
-        pass
+                elif verbosity >= 2:
+                    print_func("  seam cache: shape/count/levels mismatch, rebuilding.")
+    except Exception as _e:
+        print_func(f"  seam cache load failed: {_e}", file=sys.stderr)
 
     assignment, seam_present = multiblend.compute_seams(
         images=images,
@@ -791,10 +800,136 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
         np.savez_compressed(_tmp_path, **_payload)
         os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path,
                    cache_path)
-    except Exception:
-        pass
+        if verbosity >= 2:
+            print_func(f"  seam cache saved: {cache_path}")
+    except Exception as _e:
+        print_func(f"  seam cache save failed: {_e}", file=sys.stderr)
 
     return assignment, seam_present, seam_mask_cache
+
+
+# ---------------------------------------------------------------------------
+# Gap geometry cache
+# ---------------------------------------------------------------------------
+# The EDT index maps and feather weights used for gap filling depend only on
+# the PTO geometry, padding and crop options. They can be precomputed once,
+# cached on disk, and reused across runs.
+_GAP_CACHE_VERSION = 4
+
+
+def _get_gap_cache_path(pto_file, pad, padsides, is_video_output,
+                        final_w, final_h, workwidth, workheight,
+                        min_left, min_top, fisheye_mask, crop_to_content):
+    """Return deterministic cache path for gap-fill geometry."""
+    with open(pto_file, 'rb') as _f:
+        _pto_bytes = _f.read()
+    _key_src = (_pto_bytes +
+                repr((_GAP_CACHE_VERSION, pad, sorted(padsides), is_video_output,
+                      final_w, final_h, workwidth, workheight,
+                      min_left, min_top, fisheye_mask, crop_to_content)).encode())
+    _key = hashlib.sha256(_key_src).hexdigest()[:24]
+    _cache_dir = os.path.join(tempfile.gettempdir(), 'stitcher_gap_cache')
+    return os.path.join(_cache_dir, f'gap_{_key}.npz'), _cache_dir
+
+
+def _compute_gap_geometry(gap: np.ndarray, S: int = 8, sigma_s: int = 4):
+    """Precompute EDT index maps and feather weights for gap filling.
+
+    Returns (ri, ci, blend_w, sw, sh, feather_radius). All returned arrays are
+    derived from the boolean gap mask only, so they can be cached and reused.
+    Index maps are stored as int16 when the canvas fits (<= 32767) to halve
+    the memory footprint versus int32; feather weights are stored as uint16
+    (scaled 0..65535) to halve versus float32.
+    """
+    H, W = gap.shape
+    sw, sh = max(1, W // S), max(1, H // S)
+    feather_radius = max(1, round(20 * W / 4096))
+
+    from scipy.ndimage import distance_transform_edt as _edt
+
+    ph = ((H + S - 1) // S) * S
+    pw = ((W + S - 1) // S) * S
+    gap_pad = np.zeros((ph, pw), dtype=bool)
+    gap_pad[:H, :W] = gap
+    gap_ds = gap_pad[::S, ::S]
+    ri_ds, ci_ds = _edt(gap_ds, return_distances=False, return_indices=True)
+    # int16 is sufficient for current canvas sizes (<= 8192) and saves ~50%.
+    _idx_dt = np.int16 if max(H, W) <= 32767 else np.int32
+    ri = np.repeat(np.repeat((ri_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
+    ci = np.repeat(np.repeat((ci_ds * S).astype(_idx_dt), S, axis=0), S, axis=1)[:H, :W]
+
+    dist = _edt(~gap)
+    blend_w = np.clip(dist / feather_radius, 0.0, 1.0)
+    blend_w = (blend_w * 65535.0).astype(np.uint16)
+
+    return ri, ci, blend_w, sw, sh, feather_radius
+
+
+def compute_or_load_gap_geometry(gap, pto_file, pad, padsides,
+                                 final_w, final_h, workwidth, workheight,
+                                 min_left, min_top,
+                                 fisheye_mask, crop_to_content,
+                                 verbosity=1, print_func=print):
+    """Compute or load cached gap-fill geometry (EDT maps + feather weights).
+
+    The geometry depends only on the gap mask, which itself depends on the PTO
+    geometry, padding and crop options. Cached files are stored under
+    /tmp/stitcher_gap_cache and pruned like the seam cache.
+    """
+    cache_path, cache_dir = _get_gap_cache_path(
+        pto_file, pad, padsides, is_video_output=False,
+        final_w=final_w, final_h=final_h,
+        workwidth=workwidth, workheight=workheight,
+        min_left=min_left, min_top=min_top,
+        fisheye_mask=fisheye_mask, crop_to_content=crop_to_content)
+
+    H, W = gap.shape
+    try:
+        if os.path.exists(cache_path):
+            if verbosity >= 2:
+                print_func(f"  gap cache: trying {cache_path}")
+            with np.load(cache_path) as _npz:
+                if (int(_npz['H']) == H and int(_npz['W']) == W):
+                    ri = _npz['ri']
+                    ci = _npz['ci']
+                    blend_w = _npz['blend_w']
+                    sw = int(_npz['sw'])
+                    sh = int(_npz['sh'])
+                    feather_radius = int(_npz['feather_radius'])
+                    if verbosity >= 1:
+                        print_func("  loaded gap geometry from cache.")
+                    return ri, ci, blend_w, sw, sh, feather_radius
+                elif verbosity >= 2:
+                    print_func("  gap cache: dimensions mismatch, rebuilding.")
+    except Exception as _e:
+        print_func(f"  gap cache load failed: {_e}", file=sys.stderr)
+
+    from scipy.ndimage import distance_transform_edt as _edt, gaussian_filter
+    ri, ci, blend_w, sw, sh, feather_radius = _compute_gap_geometry(gap)
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        _prune_cache_dir(cache_dir, max_age_days=10, max_entries=3)
+        _tmp_path = cache_path + f'.tmp{os.getpid()}'
+        _payload = {
+            'ri': np.ascontiguousarray(ri),
+            'ci': np.ascontiguousarray(ci),
+            'blend_w': np.ascontiguousarray(blend_w),
+            'H': np.int64(H),
+            'W': np.int64(W),
+            'sw': np.int64(sw),
+            'sh': np.int64(sh),
+            'feather_radius': np.int64(feather_radius),
+        }
+        np.savez_compressed(_tmp_path, **_payload)
+        os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path,
+                   cache_path)
+        if verbosity >= 2:
+            print_func(f"  gap cache saved: {cache_path}")
+    except Exception as _e:
+        print_func(f"  gap cache save failed: {_e}", file=sys.stderr)
+
+    return ri, ci, blend_w, sw, sh, feather_radius
 
 
 def estimate_noise(image_plane):
@@ -1090,6 +1225,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         outside_y = outside_uv = None
 
     _print("Reprojecting source images...")
+    _t_phase = time.perf_counter()
 
     # Shared single-camera canvas buffers — reused for each camera in turn.
     # Peak memory = 1× canvas (Y+U/2+V/2 uint8 + weight float32) instead of N×.
@@ -1187,15 +1323,15 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     images = [img for img in images if img is not None]
 
     del _buf_y, _buf_u, _buf_v, _buf_w
-    _print("Reprojection complete.")
+    _print(f"Reprojection complete. ({time.perf_counter() - _t_phase:.2f}s)")
 
     _print("Blending with multiblend (graph-cut seams + exposure correction)...")
+    _t_phase = time.perf_counter()
 
     min_left, min_top, workwidth, workheight = multiblend.tighten(images)
     levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
     _print(f"  {workwidth}x{workheight}, {levels} levels (tightened from {final_w}x{final_h})")
 
-    _print("  seaming...")
     assignment, _, seam_mask_cache = compute_or_load_seams(
         images=images,
         workwidth=workwidth,
@@ -1211,7 +1347,6 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         print_func=_print,
     )
 
-    _print("  blending...")
     rgb_channels = multiblend.blend(
         images=images,
         assignment=assignment,
@@ -1225,6 +1360,8 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         print_func=_print,
         seam_mask_cache=seam_mask_cache,
     )
+    _print(f"  blend done ({time.perf_counter() - _t_phase:.2f}s)")
+    _t_phase = time.perf_counter()
 
     # Compute coverage in the tightened workspace (image xpos/ypos are relative
     # to the tightened bbox after tighten() shifted them).
@@ -1277,42 +1414,56 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         gap = _gap_h
         rgb_channels = [np.pad(ch, ((0, max(0, new_h - final_h)), (0, max(0, new_w - final_w))), mode='edge') for ch in rgb_channels]
 
-    n_gap = int(gap.sum())
-    _print(f"  gap pixels: {n_gap}")
+    # For fisheye output the corners outside the inscribed circle are masked
+    # to black after fill. We can skip filling them, but the global Gaussian
+    # smooth needs valid content in a ring around the circle, so we keep a
+    # margin equal to ~3 sigma of the full-resolution blur.
+    S_geo = 8
+    sigma_s = 4
+    blur_margin = max(1, round(3 * sigma_s * S_geo))
+    if fisheye_mask:
+        H_gap, W_gap = gap.shape
+        cx, cy = W_gap // 2, H_gap // 2
+        r = min(cx, cy)
+        ys, xs = np.ogrid[:H_gap, :W_gap]
+        inside_fill_circle = (xs - cx) ** 2 + (ys - cy) ** 2 <= (r + blur_margin) ** 2
+        gap_fill = gap & inside_fill_circle
+        del inside_fill_circle
+    else:
+        gap_fill = gap
+
+    n_gap = int(gap_fill.sum())
 
     if n_gap > 0:
-        # Gap fill: EDT nearest-pixel + Gaussian smooth + feathered blend.
-        # Processed one channel at a time to avoid large HxWx3 allocations.
-        from scipy.ndimage import gaussian_filter, distance_transform_edt
+        _print(f"  gap pixels: {n_gap} (filling)")
+        _t_geo = time.perf_counter()
+        # Gap geometry (EDT index maps + feather weights) depends only on the
+        # boolean gap mask and is cached across runs. Use the full gap mask so
+        # feather weights inside the circle remain accurate.
+        ri, ci, blend_w, sw, sh, feather_radius = compute_or_load_gap_geometry(
+            gap, pto_file, pad, padsides,
+            final_w, final_h, workwidth, workheight,
+            min_left, min_top, fisheye_mask, crop_to_content,
+            verbosity=0 if _quiet else 1, print_func=_print)
         H, W = gap.shape
-        S = 8
-        sw, sh = max(1, W // S), max(1, H // S)
-        sigma_s = 4
-        feather_radius = max(1, round(20 * W / 4096))
+        _print(f"  gap geometry ready ({time.perf_counter() - _t_geo:.2f}s)")
+        _t_gap = time.perf_counter()
 
-        # Step 1: EDT index maps at 8x downscale (shared across all channels).
-        ph = ((H + S - 1) // S) * S
-        pw = ((W + S - 1) // S) * S
-        gap_pad = np.zeros((ph, pw), dtype=bool)
-        gap_pad[:H, :W] = gap
-        gap_ds = gap_pad[::S, ::S];  del gap_pad
-        ri_ds, ci_ds = distance_transform_edt(gap_ds, return_distances=False, return_indices=True)
-        del gap_ds
-        # int32 is sufficient: max canvas index < 4096² < 2³¹, saves ~128 MB vs int64.
-        ri = np.repeat(np.repeat((ri_ds * S).astype(np.int32), S, axis=0), S, axis=1)[:H, :W];  del ri_ds
-        ci = np.repeat(np.repeat((ci_ds * S).astype(np.int32), S, axis=0), S, axis=1)[:H, :W];  del ci_ds
+        # Convert index maps to int32 once; int16 is fine for storage but
+        # NumPy advanced indexing is faster with int32 coordinates.
+        ri_gap = ri[gap_fill].astype(np.int32, copy=False)
+        ci_gap = ci[gap_fill].astype(np.int32, copy=False)
+        del ri, ci
 
-        # Step 2: Feather weights from full-res EDT (shared across channels).
-        dist = distance_transform_edt(~gap)
-        blend_w = np.clip(dist / feather_radius, 0.0, 1.0).astype(np.float32);  del dist
-
-        # Step 3: Process each channel independently.
+        # Process each channel independently: nearest-pixel fill + Gaussian
+        # smooth at downscale + feathered blend.
+        from scipy.ndimage import gaussian_filter
         out_channels = []
         for ch in rgb_channels:
             ch_f = ch.astype(np.float32)
             # EDT fill in-place: gap pixels get nearest valid pixel colour.
             # No separate ch_fill copy needed — gap and non-gap pixels are disjoint.
-            ch_f[gap] = ch_f[ri[gap], ci[gap]]
+            ch_f[gap_fill] = ch_f[ri_gap, ci_gap]
             # Gaussian smooth at downscale.
             src_u8 = ch_f.clip(0, 255).astype(np.uint8)
             if _cv2 is not None:
@@ -1328,18 +1479,23 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
                 from PIL import Image as _PIL2
                 full = np.array(_PIL2.fromarray(blurred_u8).resize((W, H), _PIL2.BILINEAR)).astype(np.float32)
             del blurred, blurred_u8
-            # Feathered blend.
-            result = (ch_f * blend_w + full * (1.0 - blend_w))
+            # Feathered blend. blend_w is uint16 (0..65535) to save memory;
+            # scale to [0,1] inline without a full float32 copy.
+            result = ch_f - full
+            result *= blend_w
+            result /= 65535.0
+            result += full
             del ch_f, full
             np.clip(result, 0, 255, out=result)
             out_channels.append(result.astype(np.uint8));  del result
 
-        del ri, ci, blend_w
+        del blend_w
         rgb_channels = out_channels
-        _print(f"  gap fill done S={S} sigma_s={sigma_s} feather={feather_radius}px")
+        _print(f"  gap fill done ({time.perf_counter() - _t_gap:.2f}s)")
 
-    del gap
+    del gap, gap_fill
 
+    _t_phase = time.perf_counter()
     y_final, u_final, v_final = rgb_to_yuv(rgb_channels)
 
     if abs(saturation - 1.0) > 0.001:
@@ -1376,9 +1532,12 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         _ts = datetime.datetime.strptime(input_datetime, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
         _draw_timestamp_yuv(y_final, u_final, v_final, _ts)
 
+    _print(f"YUV conversion done ({time.perf_counter() - _t_phase:.2f}s)")
+
     _print("Saving final image...")
+    _t_phase = time.perf_counter()
     save_image_yuv420(y_final, u_final, v_final, output_file)
-    _print(f"✅ Success! Panoramic image saved to {output_file}")
+    _print(f"✅ Success! Panoramic image saved to {output_file} ({time.perf_counter() - _t_phase:.2f}s)")
 
 def _mapping_bboxes(mapping, dh, dw):
     """Bounding boxes of valid pixels in a projection mapping.
@@ -5600,6 +5759,8 @@ def main():
             _output_file_written[0] = True
         except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
             _print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
         except Exception as e:
             _print(f"\n❌ An unexpected critical error occurred:\n{e}", file=sys.stderr)
@@ -5745,6 +5906,8 @@ def main():
         _output_file_written[0] = True
     except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
         _print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
     except Exception as e:
         _print(f"\n❌ An unexpected critical error occurred:\n{e}", file=sys.stderr)

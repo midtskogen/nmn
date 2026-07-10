@@ -1145,63 +1145,6 @@ if _NUMBA_OK:
                 dst[row, col] = np.uint16(v)
 
     @_njit(parallel=True, cache=True)
-    def _nb_luma_gain_u8(r, g, b, gain_lo, gain_hi, maxv):
-        """Apply per-pixel gain interpolated between gain_lo (shadows) and
-        gain_hi (highlights) based on local luma.  Smooth sigmoid ramp from
-        luma=64 (all lo) to luma=192 (all hi).  Modifies r, g, b in-place."""
-        H = r.shape[0]; W = r.shape[1]
-        for row in _prange(H):
-            for col in range(W):
-                luma = (np.float32(r[row, col]) + np.float32(g[row, col]) +
-                        np.float32(b[row, col])) * np.float32(0.333333)
-                # smooth step between 64 and 192
-                t = (luma - np.float32(64.0)) * np.float32(1.0 / 128.0)
-                if   t < np.float32(0.0): t = np.float32(0.0)
-                elif t > np.float32(1.0): t = np.float32(1.0)
-                t = t * t * (np.float32(3.0) - np.float32(2.0) * t)  # smoothstep
-                gain = gain_lo + t * (gain_hi - gain_lo)
-                vr = np.float32(r[row, col]) * gain
-                vg = np.float32(g[row, col]) * gain
-                vb = np.float32(b[row, col]) * gain
-                if vr < np.float32(0.0): vr = np.float32(0.0)
-                elif vr > maxv: vr = maxv
-                if vg < np.float32(0.0): vg = np.float32(0.0)
-                elif vg > maxv: vg = maxv
-                if vb < np.float32(0.0): vb = np.float32(0.0)
-                elif vb > maxv: vb = maxv
-                r[row, col] = np.uint8(vr)
-                g[row, col] = np.uint8(vg)
-                b[row, col] = np.uint8(vb)
-
-    @_njit(parallel=True, cache=True)
-    def _nb_luma_gain_per_ch_u8(ch, r, g, b, gain_lo, gain_hi, maxv):
-        """Chroma-preserving luminance correction per channel.
-
-        For each pixel, grey = (R+G+B)/3.  The grey is scaled by a
-        luma-stratified gain; the chromatic deviation (ch - grey) is
-        left untouched.  Result: ch' = grey*gain + (ch - grey).
-
-        This prevents hue shifts on saturated colours (e.g. a yellow
-        building stays yellow even when the overall image is brightened
-        to match a bluer sky in the overlapping camera).
-        """
-        H = ch.shape[0]; W = ch.shape[1]
-        for row in _prange(H):
-            for col in range(W):
-                grey = (np.float32(r[row, col]) + np.float32(g[row, col]) +
-                        np.float32(b[row, col])) * np.float32(0.333333)
-                t = (grey - np.float32(64.0)) * np.float32(1.0 / 128.0)
-                if   t < np.float32(0.0): t = np.float32(0.0)
-                elif t > np.float32(1.0): t = np.float32(1.0)
-                t = t * t * (np.float32(3.0) - np.float32(2.0) * t)
-                gain = gain_lo + t * (gain_hi - gain_lo)
-                chroma_dev = np.float32(ch[row, col]) - grey
-                v = grey * gain + chroma_dev
-                if v < np.float32(0.0): v = np.float32(0.0)
-                elif v > maxv: v = maxv
-                ch[row, col] = np.uint8(v)
-
-    @_njit(parallel=True, cache=True)
     def _nb_seam_cost(ch0_i, ch0_j, ch1_i, ch1_j, ch2_i, ch2_j, cost):
         """Cost for content-aware seam: squared RGB diff + gradient-magnitude²
         from BOTH images (central differences, boundary-clamped).
@@ -1494,7 +1437,7 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
         return [{'gains': [1.0, 1.0, 1.0], 'gammas': [1.0, 1.0, 1.0],
                  'method': ['none', 'none', 'none'], 'capped': False} for _ in images]
 
-    edges = []  # (i, j, ch, log_ratio)
+    edges = []  # (i, j, ch, log_ratio)  where log_ratio = log(mean_i / mean_j)
     for i in range(n):
         img_i = images[i]
         r0_i, r1_i = img_i.ypos, img_i.ypos + img_i.height
@@ -1523,10 +1466,12 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
     if not edges:
         return
 
+    # Solve  x_i - x_j = log(mean_i/mean_j)  in log space, anchor x_0 = 0.
+    # Free variables: x_1 .. x_{n-1}.  Overdetermined system → lstsq.
     gains_log = np.zeros((n, 3), dtype=np.float64)
     for ch in range(3):
         ch_edges = [(i, j, lr) for i, j, c, lr in edges if c == ch]
-        if not ch_edges:
+        if len(ch_edges) == 0:
             continue
         A = np.zeros((len(ch_edges), n - 1), dtype=np.float64)
         b = np.zeros(len(ch_edges), dtype=np.float64)
@@ -1546,50 +1491,77 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
         dtype = img.channels[0].dtype
         maxv_f = float(0xffff if dtype == np.uint16 else 0xff)
 
-        # Chroma-preserving gain: grey = (R+G+B)/3 is scaled by the gain;
-        # the chromatic deviation (ch - grey) is left unchanged.
-        # Result: ch' = grey*gain + (ch - grey) = ch + grey*(gain-1).
-        # This prevents hue shifts on saturated colours (e.g. yellow building
-        # stays yellow when the image is brightened to match a blue-sky camera).
-        lin_gains = np.exp(gains_log[i])   # shape (3,)
+        # Per-channel correction strategy (hybrid):
+        #   gain <= 1 (darkening): apply linear gain — exact, never clips when darkening.
+        #   gain >  1 (brightening): apply gamma power curve — prevents highlight clipping.
+        #     gamma = log(target_mean) / log(source_mean)  so source_mean^gamma = target_mean.
+        #
+        # Using gamma for darkening channels too causes opposite-direction power curves on
+        # different channels (e.g. B gamma>1 while R/G gamma<1), which creates hue flips in
+        # the shadows that appear as increased colour saturation artefacts.
+        lin_gains = np.exp(gains_log[i])   # shape (3,) — used directly for gain<=1
         gammas    = np.ones(3, dtype=np.float64)
+        use_gamma = np.zeros(3, dtype=bool)
+        for ch in range(3):
+            if gains_log[i, ch] > 1e-7:   # brightening: use gamma
+                mean_norm = float(np.mean(img.channels[ch].astype(np.float64))) / maxv_f
+                if 1e-4 < mean_norm < 1.0 - 1e-4:
+                    target = float(np.clip(mean_norm * lin_gains[ch], 1e-4, 1.0 - 1e-4))
+                    gammas[ch] = np.clip(np.log(target) / np.log(mean_norm), 0.1, 10.0)
+                    use_gamma[ch] = True
 
         if verbosity >= 2:
+            raw = np.exp(capped[i])
             cap_tag = " (CAPPED)" if np.any(np.abs(capped[i]) > _MAX_STOPS) else ""
-            ch_strs = [f"{name}=chroma_pres({lin_gains[ch]:.3f})"
-                       for ch, name in enumerate('RGB') if abs(lin_gains[ch] - 1.0) > 1e-5]
+            ch_strs = []
+            for ch, name in enumerate('RGB'):
+                if use_gamma[ch]:
+                    ch_strs.append(f"{name}=gamma({gammas[ch]:.3f})")
+                elif abs(lin_gains[ch] - 1.0) > 1e-5:
+                    ch_strs.append(f"{name}=linear({lin_gains[ch]:.3f})")
             print_func(f"    exposure img {i}: {' '.join(ch_strs)}{cap_tag}")
 
-        method = ['chroma_pres' if abs(lin_gains[ch] - 1.0) > 1e-5 else 'none'
-                  for ch in range(3)]
+        method = []
+        for ch in range(3):
+            if use_gamma[ch]:
+                method.append('gamma')
+            elif abs(lin_gains[ch] - 1.0) > 1e-5:
+                method.append('linear')
+            else:
+                method.append('none')
         info.append({
-            'gains':  lin_gains.tolist(),
-            'gammas': gammas.tolist(),
-            'method': method,
-            'capped': bool(np.any(np.abs(capped[i]) > _MAX_STOPS)),
+            'gains':     lin_gains.tolist(),
+            'gammas':    gammas.tolist(),
+            'method':    method,
+            'capped':    bool(np.any(np.abs(capped[i]) > _MAX_STOPS)),
         })
 
-        if not np.any(np.abs(gains_log[i]) > 1e-7):
+        any_change = (np.any(use_gamma) or
+                      np.any(np.abs(gains_log[i]) > 1e-7))
+        if not any_change:
             continue
 
-        maxv_np = np.float32(maxv_f)
-        if _NUMBA_OK and dtype == np.uint8:
-            for ch in range(3):
-                g = np.float32(lin_gains[ch])
-                if abs(g - 1.0) > 1e-5:
-                    _nb_luma_gain_per_ch_u8(
-                        img.channels[ch],
-                        img.channels[0], img.channels[1], img.channels[2],
-                        g, g, np.float32(maxv_f))
+        if _NUMBA_OK:
+            if dtype == np.uint8:
+                for ch in range(3):
+                    if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
+                        _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+                    elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
+                        _nb_gain_clip_u8(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
+            else:
+                for ch in range(3):
+                    if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
+                        _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+                    elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
+                        _nb_gain_clip_u16(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
         else:
-            grey = (img.channels[0].astype(np.float32) +
-                    img.channels[1].astype(np.float32) +
-                    img.channels[2].astype(np.float32)) * np.float32(1.0 / 3.0)
+            maxv_np = np.float32(maxv_f)
             for ch in range(3):
-                g = float(lin_gains[ch])
-                if abs(g - 1.0) > 1e-5:
-                    ch_f = img.channels[ch].astype(np.float32)
-                    arr = grey * np.float32(g) + (ch_f - grey)
+                if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
+                    arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
+                    img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
+                elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
+                    arr = img.channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
                     img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
 
     return info
@@ -1610,45 +1582,25 @@ def _apply_exposure_info(images: List[ImageInfo], exp_info: List[dict]) -> None:
         maxv_f = float(0xffff if dtype == np.uint16 else 0xff)
         maxv_np = np.float32(maxv_f)
 
-        if any(m == 'chroma_pres' for m in method):
-            if _NUMBA_OK and dtype == np.uint8:
-                for ch in range(3):
-                    g = np.float32(lin_gains[ch])
-                    if abs(g - 1.0) > 1e-5:
-                        _nb_luma_gain_per_ch_u8(
-                            img.channels[ch],
-                            img.channels[0], img.channels[1], img.channels[2],
-                            g, g, np.float32(maxv_f))
-            else:
-                grey = (img.channels[0].astype(np.float32) +
-                        img.channels[1].astype(np.float32) +
-                        img.channels[2].astype(np.float32)) * np.float32(1.0 / 3.0)
-                for ch in range(3):
-                    g = float(lin_gains[ch])
-                    if abs(g - 1.0) > 1e-5:
-                        ch_f = img.channels[ch].astype(np.float32)
-                        arr = grey * np.float32(g) + (ch_f - grey)
-                        img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
-        else:
-            for ch in range(3):
-                if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
-                    if _NUMBA_OK:
-                        if dtype == np.uint8:
-                            _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
-                        else:
-                            _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+        for ch in range(3):
+            if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
+                if _NUMBA_OK:
+                    if dtype == np.uint8:
+                        _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
                     else:
-                        arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
-                        img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
-                elif method[ch] in ('linear', 'luma_stratified') and abs(lin_gains[ch] - 1.0) > 1e-5:
-                    if _NUMBA_OK:
-                        if dtype == np.uint8:
-                            _nb_gain_clip_u8(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
-                        else:
-                            _nb_gain_clip_u16(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
+                        _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
+                else:
+                    arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
+                    img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
+            elif method[ch] == 'linear' and abs(lin_gains[ch] - 1.0) > 1e-5:
+                if _NUMBA_OK:
+                    if dtype == np.uint8:
+                        _nb_gain_clip_u8(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
                     else:
-                        arr = img.channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
-                        img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
+                        _nb_gain_clip_u16(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
+                else:
+                    arr = img.channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
+                    img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
 
 
 def _saturation_correct(images: List[ImageInfo], verbosity: int = 1,

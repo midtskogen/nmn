@@ -38,6 +38,17 @@ done
 
 vlog() { if [ "$VERBOSE" = true ]; then echo "$@"; fi }
 
+# Write a status message to the log file. In verbose mode also print it to
+# the terminal. Used in the parent (before any exec redirection) so that
+# lock-related messages are logged without duplicating child output.
+log_msg() {
+    if [ "$VERBOSE" = true ]; then
+        echo "$@" | tee -a "$LOGFILE"
+    else
+        echo "$@" >> "$LOGFILE"
+    fi
+}
+
 if [ "$VERBOSE" = true ]; then
     STITCHER_QUIET=()
 else
@@ -64,19 +75,31 @@ SSH_ARGS=()
 if [ -n "$SSH_HOST" ]; then
     SSH_ARGS=(--ssh "$SSH_HOST")
 fi
+CHILD_VERBOSE=()
+if [ "$VERBOSE" = true ]; then
+    CHILD_VERBOSE=(-v)
+fi
+
+# Decide which log file this invocation owns. The --all parent uses its own
+# log; single-mode children (and standalone runs) use their mode-specific log.
+if [ "$ALL" = true ]; then
+    LOGFILE=/tmp/stitch_latest_all.log
+else
+    LOGFILE=/tmp/stitch_latest${OUT_SUFFIX}.log
+fi
 
 # When running --all, hold both locks and delegate to two single-mode runs.
 if [ "$ALL" = true ]; then
     for _pidfile in "$PIDFILE_HD" "$PIDFILE_SD"; do
         if [ -f "$_pidfile" ]; then
             if _lockfile_is_stale "$_pidfile"; then
-                echo "Lockfile $_pidfile is older than 1 hour, treating as stale and removing it." >&2
+                log_msg "Lockfile $_pidfile is older than 1 hour, treating as stale and removing it."
                 rm -f "$_pidfile"
                 continue
             fi
             _old_pid=$(cat "$_pidfile" 2>/dev/null || true)
             if [ -n "$_old_pid" ] && [ "$_old_pid" != "$$" ] && [ "$_old_pid" != "$PPID" ] && kill -0 "$_old_pid" 2>/dev/null; then
-                echo "Another stitch_latest.sh is already running (lockfile $_pidfile holds PID $_old_pid). Exiting." >&2
+                log_msg "Another stitch_latest.sh is already running (lockfile $_pidfile holds PID $_old_pid). Exiting."
                 exit 0
             fi
             rm -f "$_pidfile"
@@ -86,23 +109,24 @@ if [ "$ALL" = true ]; then
     echo $$ > "$PIDFILE_SD"
     trap 'rm -f "$PIDFILE_HD" "$PIDFILE_SD"' EXIT
 
+    log_msg "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
     # Run HD then SD, passing through --ssh and --verbose.
-    vlog "Running HD mode"
-    "$0" "${SSH_ARGS[@]}" ${VERBOSE:+-v}
-    vlog "Running SD mode"
-    "$0" --sd "${SSH_ARGS[@]}" ${VERBOSE:+-v}
+    log_msg "Running HD mode"
+    "$0" "${SSH_ARGS[@]}" "${CHILD_VERBOSE[@]}"
+    log_msg "Running SD mode"
+    "$0" --sd "${SSH_ARGS[@]}" "${CHILD_VERBOSE[@]}"
     exit 0
 fi
 
 PIDFILE=/tmp/stitch_latest${OUT_SUFFIX}.pid
 if [ -f "$PIDFILE" ]; then
     if _lockfile_is_stale "$PIDFILE"; then
-        echo "Lockfile $PIDFILE is older than 1 hour, treating as stale and removing it." >&2
+        log_msg "Lockfile $PIDFILE is older than 1 hour, treating as stale and removing it."
         rm -f "$PIDFILE"
     else
         OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
         if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && [ "$OLD_PID" != "$PPID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-            echo "Another stitch_latest.sh is already running (lockfile $PIDFILE holds PID $OLD_PID). Exiting." >&2
+            log_msg "Another stitch_latest.sh is already running (lockfile $PIDFILE holds PID $OLD_PID). Exiting."
             exit 0
         fi
         rm -f "$PIDFILE"
@@ -111,13 +135,15 @@ fi
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
-LOGFILE=/tmp/stitch_latest${OUT_SUFFIX}.log
+# From this point on, single-mode output goes to the per-mode log. Verbose mode
+# also copies it to the terminal via tee.
 if [ "$VERBOSE" = true ]; then
     exec > >(tee -a "$LOGFILE") 2>&1
 else
     exec >>"$LOGFILE" 2>&1
 fi
-echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
+
+vlog "--- $(date -u '+%Y-%m-%d %H:%M:%S') ---"
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 STITCHER="${SCRIPT_DIR}/stitcher.py"
@@ -133,7 +159,7 @@ if [ -n "$SSH_HOST" ]; then
     SSH_OPTS=(-o "ControlPath=$CTRL_SOCK")
     cleanup_ssh() { ssh -S "$CTRL_SOCK" -O exit "$SSH_HOST" 2>/dev/null || true; rm -f "$PIDFILE"; }
     trap cleanup_ssh EXIT
-    echo "SSH ControlMaster to $SSH_HOST established"
+    vlog "SSH ControlMaster to $SSH_HOST established"
 fi
 
 rcmd() {
@@ -181,7 +207,7 @@ FOUND=$(rcmd "$FIND_SCRIPT") || { echo "No complete set of images found"; exit 1
 read -ra PARTS <<< "$FOUND"
 FOUND_TS="${PARTS[0]/_/ }"
 REMOTE_FILES=("${PARTS[@]:1}")
-echo "Using inputs from $FOUND_TS: ${REMOTE_FILES[*]}"
+vlog "Using inputs from $FOUND_TS: ${REMOTE_FILES[*]}"
 vlog "Found ${#REMOTE_FILES[@]} input files"
 
 # --- Fetch input files ---

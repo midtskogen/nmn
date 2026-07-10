@@ -18,6 +18,7 @@ import json
 import re
 import shlex
 import tempfile
+import hashlib
 import time
 import glob
 import gc
@@ -678,6 +679,108 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
 
     return all_mappings, global_options
 
+
+# ---------------------------------------------------------------------------
+# Seam assignment cache
+# ---------------------------------------------------------------------------
+# compute_seams() is deterministic given the PTO geometry, padding, output
+# dimensions and seam flags. The result is an image-index assignment array
+# that can be reused across runs (image or video) when those inputs match,
+# avoiding the ~100-300 ms seaming cost on every invocation.
+_SEAM_CACHE_VERSION = 1
+
+def _get_seam_cache_path(pto_file, pad, padsides, is_video_output,
+                         workwidth, workheight, reverse, simple_seam, content_seam):
+    """Return deterministic cache path for a seam assignment."""
+    with open(pto_file, 'rb') as _f:
+        _pto_bytes = _f.read()
+    _key_src = (_pto_bytes +
+                repr((_SEAM_CACHE_VERSION, pad, sorted(padsides), is_video_output,
+                      workwidth, workheight, reverse, simple_seam, content_seam)).encode())
+    _key = hashlib.sha256(_key_src).hexdigest()[:24]
+    _cache_dir = os.path.join(tempfile.gettempdir(), 'stitcher_seam_cache')
+    return os.path.join(_cache_dir, f'seams_{_key}.npz'), _cache_dir
+
+
+def _prune_seam_cache(cache_dir):
+    """Prune stale seam-cache entries (>10 days old) and cap at 3 newest."""
+    try:
+        _now = time.time()
+        _entries = []
+        for _fn in os.listdir(cache_dir):
+            _fp = os.path.join(cache_dir, _fn)
+            try:
+                _mt = os.path.getmtime(_fp)
+                if _now - _mt > 10 * 86400:
+                    os.unlink(_fp)
+                else:
+                    _entries.append((_mt, _fp))
+            except OSError:
+                pass
+        _entries.sort(reverse=True)
+        for _, _fp in _entries[3:]:
+            try:
+                os.unlink(_fp)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides,
+                          is_video_output=False,
+                          reverse=False, simple_seam=False, content_seam=False,
+                          verbosity=1, print_func=print):
+    """Compute seams, caching the result on disk keyed by PTO and geometry.
+
+    The cache is shared between image and video stitching runs as long as the
+    PTO file, padding, output mode, work dimensions and seam flags match.
+    """
+    cache_path, cache_dir = _get_seam_cache_path(
+        pto_file, pad, padsides, is_video_output,
+        workwidth, workheight, reverse, simple_seam, content_seam)
+
+    try:
+        if os.path.exists(cache_path):
+            with np.load(cache_path) as _npz:
+                assignment = _npz['assignment']
+                seam_present = [bool(v) for v in _npz['seam_present']]
+            if (assignment.shape == (workheight, workwidth) and
+                    len(seam_present) == len(images)):
+                if verbosity >= 1:
+                    print_func("  loaded seams from cache.")
+                return assignment, seam_present
+    except Exception:
+        pass
+
+    assignment, seam_present = multiblend.compute_seams(
+        images=images,
+        workwidth=workwidth,
+        workheight=workheight,
+        reverse=reverse,
+        simple_seam=simple_seam,
+        content_seam=content_seam,
+        verbosity=verbosity,
+        print_func=print_func,
+    )
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        _prune_seam_cache(cache_dir)
+        _tmp_path = cache_path + f'.tmp{os.getpid()}'
+        np.savez_compressed(
+            _tmp_path,
+            assignment=np.ascontiguousarray(assignment),
+            seam_present=np.array(seam_present, dtype=np.uint8),
+        )
+        os.replace(_tmp_path + '.npz' if os.path.exists(_tmp_path + '.npz') else _tmp_path,
+                   cache_path)
+    except Exception:
+        pass
+
+    return assignment, seam_present
+
+
 def estimate_noise(image_plane):
     """
     Estimates the noise standard deviation of an image plane using the
@@ -1077,9 +1180,16 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     _print(f"  {workwidth}x{workheight}, {levels} levels (tightened from {final_w}x{final_h})")
 
     _print("  seaming...")
-    assignment, _ = multiblend.compute_seams(
-        images, workwidth, workheight,
-        simple_seam=False, content_seam=False,
+    assignment, _ = compute_or_load_seams(
+        images=images,
+        workwidth=workwidth,
+        workheight=workheight,
+        pto_file=pto_file,
+        pad=pad,
+        padsides=padsides,
+        is_video_output=force_video_dims,
+        simple_seam=False,
+        content_seam=False,
         verbosity=0 if _quiet else 1,
         print_func=_print,
     )
@@ -2427,10 +2537,14 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             if frame_count == 1:
                 _print("Computing seams with multiblend (first frame)...")
                 levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
-                assignment, _ = multiblend.compute_seams(
+                assignment, _ = compute_or_load_seams(
                     images=images,
                     workwidth=workwidth,
                     workheight=workheight,
+                    pto_file=pto_file,
+                    pad=pad,
+                    padsides=padsides,
+                    is_video_output=True,
                     simple_seam=False,
                     content_seam=False,
                     verbosity=0,
@@ -3154,10 +3268,14 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             if frame_count == 1:
                 _print("Computing seams with multiblend (first frame)...")
                 levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
-                assignment, _ = multiblend.compute_seams(
+                assignment, _ = compute_or_load_seams(
                     images=images,
                     workwidth=workwidth,
                     workheight=workheight,
+                    pto_file=pto_file,
+                    pad=pad,
+                    padsides=padsides,
+                    is_video_output=True,
                     simple_seam=False,
                     content_seam=False,
                     verbosity=0,

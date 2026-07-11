@@ -817,6 +817,16 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         controls.append(rewindBtn, frameBackBtn, playPauseBtn, frameForwardBtn, screenshotBtn, downloadBtn, fullscreenBtn);
     }
 
+    // Scrubber bar
+    const scrubberRow = createEl('div', { className: 'preview-scrubber-row' });
+    const scrubberTime = createEl('span', { className: 'preview-scrubber-time', textContent: '0:00' });
+    const scrubberDur  = createEl('span', { className: 'preview-scrubber-time', textContent: '0:00' });
+    const scrubber = createEl('input', {
+        type: 'range', min: '0', max: '100', step: '0.1', value: '0',
+        className: 'preview-scrubber'
+    });
+    scrubberRow.append(scrubberTime, scrubber, scrubberDur);
+
     // Filter controls - all on one line
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
 
@@ -977,7 +987,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     filterControls.append(resetFiltersBtn, speedWrapper, brightnessWrapper, contrastWrapper, saturationWrapper, checkboxesWrapper);
 
     // Assemble modal
-    modalContent.append(header, videoWrapper, controls, filterControls);
+    modalContent.append(header, videoWrapper, scrubberRow, controls, filterControls);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
 
@@ -1190,6 +1200,45 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             video.play();
             isPlaying = true;
             playPauseBtn.textContent = '⏸';
+        }
+    });
+
+    // Scrubber handlers
+    const fmtTime = (s) => {
+        if (!isFinite(s)) return '0:00';
+        const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+        return `${m}:${sec.toString().padStart(2, '0')}`;
+    };
+    let scrubbing = false, wasPlayingBeforeScrub = false;
+    video.addEventListener('loadedmetadata', () => {
+        if (isFinite(video.duration)) {
+            scrubber.max = video.duration;
+            scrubberDur.textContent = fmtTime(video.duration);
+        }
+    });
+    video.addEventListener('timeupdate', () => {
+        if (!scrubbing && isFinite(video.duration)) {
+            scrubber.value = video.currentTime;
+            scrubberTime.textContent = fmtTime(video.currentTime);
+        }
+    });
+    scrubber.addEventListener('mousedown', () => {
+        scrubbing = true;
+        wasPlayingBeforeScrub = isPlaying;
+        video.pause();
+    });
+    scrubber.addEventListener('input', () => {
+        video.currentTime = parseFloat(scrubber.value);
+        scrubberTime.textContent = fmtTime(video.currentTime);
+    });
+    scrubber.addEventListener('change', () => {
+        scrubbing = false;
+        video.currentTime = parseFloat(scrubber.value);
+        if (wasPlayingBeforeScrub) {
+            video.play();
+        } else {
+            isPlaying = false;
+            playPauseBtn.textContent = '▶';
         }
     });
 

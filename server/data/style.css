@@ -1354,6 +1354,28 @@ button:hover:not(:disabled) {
     border-radius: 8px;
 }
 
+.preview-scrubber-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0 6px;
+}
+
+.preview-scrubber {
+    flex: 1;
+    cursor: pointer;
+    accent-color: var(--primary-color);
+    height: 6px;
+}
+
+.preview-scrubber-time {
+    font-size: 11px;
+    color: #666;
+    white-space: nowrap;
+    min-width: 34px;
+    text-align: center;
+}
+
 .preview-controls {
     display: flex;
     align-items: center;

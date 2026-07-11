@@ -378,11 +378,16 @@ def _interpolate_track(track_points, max_interval_sec):
 
 
 class FileProcessor:
-    def __init__(self, task_id, station_id, station_code, cam, time_utc, file_type, all_pass_data, pto_data_cache, hevc_supported=False, translations=None, ssh_control_socket=None):
+    def __init__(self, task_id, station_id, station_code, cam, time_utc, file_type, all_pass_data, pto_data_cache, hevc_supported=False, translations=None, ssh_control_socket=None, status_file=None, current_step=0, total_steps=1, results_ref=None, errors_ref=None):
         self.task_id, self.station_id, self.station_code, self.cam, self.time_utc, self.file_type = task_id, station_id, station_code, cam, time_utc, file_type
         self.all_pass_data, self.pto_data_cache, self.hevc_supported = all_pass_data, pto_data_cache, hevc_supported
         self.translations = translations or {}
         self.ssh_control_socket = ssh_control_socket
+        self.status_file = status_file
+        self.current_step = current_step
+        self.total_steps = total_steps
+        self.results_ref = results_ref
+        self.errors_ref = errors_ref
         self.errors, self.total_bytes_downloaded, self.is_blending_job = [], 0, False
         self.relevant_pass = self._find_relevant_pass()
         self._determine_paths_and_types()
@@ -419,11 +424,47 @@ class FileProcessor:
         if self.ssh_control_socket and os.path.exists(self.ssh_control_socket):
             command += ["-o", f"ControlPath={self.ssh_control_socket}"]
         command += [f"{self.station_id}:{remote_path}", temp_path]
-        try:
-            subprocess.run(command, check=True, timeout=360, capture_output=True)
-        except subprocess.CalledProcessError as e:
+        # Best-effort: get remote file size for progress reporting
+        remote_size = 0
+        if self.status_file:
+            try:
+                sz_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+                if self.ssh_control_socket and os.path.exists(self.ssh_control_socket):
+                    sz_cmd += ["-o", f"ControlPath={self.ssh_control_socket}"]
+                sz_cmd += [self.station_id, f"stat -c%s {remote_path}"]
+                sz_out = subprocess.run(sz_cmd, capture_output=True, text=True, timeout=15)
+                remote_size = int(sz_out.stdout.strip())
+            except Exception:
+                pass
+        scp_exc = [None]
+        def _run():
+            try:
+                subprocess.run(command, check=True, timeout=360, capture_output=True)
+            except Exception as e:
+                scp_exc[0] = e
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        msg = f"status_processing_file_of_total|i={self.current_step+1},total={self.total_steps}"
+        while t.is_alive():
+            time.sleep(1)
+            if self.status_file and remote_size > 0:
+                try:
+                    part_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+                    file_pct = min(part_size / remote_size, 0.99)
+                    update_status(self.status_file, "progress", {
+                        "step": self.current_step + file_pct,
+                        "total": self.total_steps,
+                        "message": msg,
+                        "files": self.results_ref if self.results_ref is not None else {},
+                        "errors": self.errors_ref if self.errors_ref is not None else [],
+                    })
+                except Exception:
+                    pass
+        t.join()
+        if scp_exc[0] is not None:
+            e = scp_exc[0]
             if os.path.exists(temp_path): os.remove(temp_path)
-            stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ''
+            stderr = e.stderr.decode('utf-8', errors='ignore') if hasattr(e, 'stderr') and e.stderr else ''
             raise FileNotFoundError(f"Remote file not found: {self.station_id}:{remote_path} ({stderr.strip()})") from None
         os.rename(temp_path, local_path)
         self.total_bytes_downloaded += os.path.getsize(local_path)
@@ -821,7 +862,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             if current_file_item:
                 update_status(station_status_file, "progress", {"step": current_file_idx, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
                 
-                proc = FileProcessor(task_id, station_id, station_code, current_file_item['cam'], current_file_item['time'], data['file_type'], pass_data_list, pto_data_cache, data.get('hevc_supported', False), translations=translations, ssh_control_socket=ssh_control_socket)
+                proc = FileProcessor(task_id, station_id, station_code, current_file_item['cam'], current_file_item['time'], data['file_type'], pass_data_list, pto_data_cache, data.get('hevc_supported', False), translations=translations, ssh_control_socket=ssh_control_socket, status_file=station_status_file, current_step=current_file_idx, total_steps=total_steps, results_ref=results, errors_ref=errors)
                 job = proc.process()
                 
                 errors.extend(proc.errors)

@@ -523,6 +523,21 @@ class AS7Diagnostic:
                     cmd_rm = ['sudo', '-u', 'ams', 'rm', '-f', test_file]
                 subprocess.run(cmd_rm, capture_output=True)
 
+    def _backup_file(self, path):
+        """Copies a known-good file to <path>.bak, only if the backup is older or missing."""
+        backup_path = path + ".bak"
+        try:
+            src_mtime = os.path.getmtime(path)
+            if os.path.exists(backup_path) and os.path.getmtime(backup_path) >= src_mtime:
+                self.log_success(f"Backup is current: {backup_path}", indent=1)
+                return
+            shutil.copy2(path, backup_path)
+            self.log_success(f"Backed up to: {backup_path}", indent=1)
+        except PermissionError:
+            self.log_issue("PERMISSION_DENIED", {'check': f"backing up {path}"}, indent=1)
+        except Exception as e:
+            self.log_issue("PERMISSION_DENIED", {'check': f"backing up {path}: {e}"}, indent=1)
+
     def check_config_files(self):
         """Validates the existence, syntax, and content of critical JSON config files."""
         print("\n--- Checking Configuration Files ---")
@@ -538,6 +553,7 @@ class AS7Diagnostic:
                         data = json.load(json_file)
                         self.config_data[f] = data
                         validation_func(data)
+                        self._backup_file(f)
                 except json.JSONDecodeError:
                     self.log_issue("JSON_PARSE_ERROR", {'path': f})
                 except PermissionError:
@@ -553,7 +569,9 @@ class AS7Diagnostic:
             try:
                 with open(defaults_file, 'r') as f: content = f.read()
                 if "AMSXXX" in content: self.log_issue("DEFAULTS_PY_NOT_SET")
-                else: self.log_success("Station ID appears to be set in DEFAULTS.py.")
+                else:
+                    self.log_success("Station ID appears to be set in DEFAULTS.py.")
+                    self._backup_file(defaults_file)
             except PermissionError:
                 self.log_issue("PERMISSION_DENIED", {'check': f"reading {defaults_file}"})
             except Exception as e:
@@ -1713,6 +1731,10 @@ class AS7Diagnostic:
                 self.log_success(f"Elevation is valid: {elev}", indent=2)
         except (ValueError, configparser.NoOptionError):
             self.log_issue("NMN_CONFIG_ELEV_INVALID", {'elev': config.get('astronomy','elevation','?')}, indent=2)
+
+        # Config parsed and all sections/keys valid — back it up
+        if not any(e['code'].startswith('NMN_CONFIG') for e in self.logged_errors):
+            self._backup_file(cfg_path)
 
     def check_nmn_connectivity(self):
         """Checks connectivity to NMN servers on required ports."""

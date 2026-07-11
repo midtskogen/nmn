@@ -473,7 +473,26 @@ class FileProcessor:
         logging.info(f"Task {self.task_id} - Transcoding {os.path.basename(input_hevc_path)} to H.264...")
         temp_output = output_h264_path + ".part"
         try:
-            command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", input_hevc_path, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "copy", "-f", "mp4", "-y", temp_output]
+            # Probe source start_time (Unix PTS) so we can write it as creation_time
+            creation_time_arg = []
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", input_hevc_path],
+                    capture_output=True, text=True, timeout=15
+                )
+                fmt = json.loads(probe.stdout).get("format", {})
+                start_time_str = fmt.get("start_time") or fmt.get("tags", {}).get("creation_time")
+                if start_time_str:
+                    try:
+                        # start_time is a float Unix timestamp string like "1783641601.236016"
+                        ts = float(start_time_str)
+                        creation_time_arg = ["-metadata", f"creation_time={datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}Z"]
+                    except ValueError:
+                        # Already an ISO string (from tags.creation_time)
+                        creation_time_arg = ["-metadata", f"creation_time={start_time_str}"]
+            except Exception:
+                pass
+            command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", input_hevc_path, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "copy", "-map_metadata", "0"] + creation_time_arg + ["-f", "mp4", "-y", temp_output]
             subprocess.run(command, check=True, capture_output=True, timeout=600)
             os.rename(temp_output, output_h264_path)
             return True

@@ -1068,29 +1068,37 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     let isPlaying = true; // Video autoplays so start as playing
     let frameStep = 1 / 30; // Assume 30fps, will be updated when metadata loads
 
-    // Get current date once at initialization
-    const currentDateStr = new Date().toISOString().substr(0, 10);
+    // Base epoch from filename timestamp (e.g. 2026-07-10T22:42:00 UTC)
+    const videoBaseEpochMs = videoTimestamp ? Date.parse(videoTimestamp + 'Z') : null;
 
-    // Helper to format timestamp with actual video date
-    // When seconds is 0 (not started), use current date instead of epoch (1970)
+    // Helper: format a UTC Date as "YYYY-MM-DD HH:MM:SS.cc"
+    function formatUtcTimestamp(dateMs, subSecOffset) {
+        const d = new Date(dateMs);
+        const pad = (n, w=2) => String(n).padStart(w, '0');
+        const decimals = String(Math.floor((subSecOffset % 1) * 100)).padStart(2, '0');
+        return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ` +
+               `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${decimals}`;
+    }
+
+    // Helper to format timestamp overlay: base epoch + playback offset
     function getFormattedTimestamp(seconds) {
         const effectiveSeconds = seconds || 0;
-        // When video hasn't started, show current date with 00:00:00.00
-        if (effectiveSeconds === 0) {
-            return `${currentDateStr} 00:00:00.00`;
+        if (videoBaseEpochMs !== null) {
+            return formatUtcTimestamp(videoBaseEpochMs + effectiveSeconds * 1000, effectiveSeconds);
         }
-        // For playing video, use epoch time but only take the time portion
-        const date = new Date(effectiveSeconds * 1000);
-        const timeStr = date.toISOString().substr(11, 8); // HH:MM:SS
+        // Fallback: no base epoch, show playback offset only
+        const pad = (n) => String(n).padStart(2, '0');
+        const total = Math.floor(effectiveSeconds);
+        const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
         const decimals = String(Math.floor((effectiveSeconds % 1) * 100)).padStart(2, '0');
-        return `${currentDateStr} ${timeStr}.${decimals}`;
+        return `${pad(h)}:${pad(m)}:${pad(s)}.${decimals}`;
     }
 
     // Set initial timestamp immediately before video loads (hidden for timelapse)
     if (timelapseFull) {
         timestampOverlay.style.display = 'none';
     } else {
-        timestampOverlay.textContent = `${currentDateStr} 00:00:00.00`;
+        timestampOverlay.textContent = getFormattedTimestamp(0);
     }
 
     video.addEventListener('loadedmetadata', () => {

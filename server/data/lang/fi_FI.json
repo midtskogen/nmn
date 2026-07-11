@@ -205,5 +205,8 @@
     "sort_by_time": "aikaan",
     "sort_by_station": "asemaan",
     "sort_by_distance": "etäisyyteen",
-    "then_sort_by_label": "sitten:"
+    "then_sort_by_label": "sitten:",
+    "playback_speed": "Nopeus",
+    "playback_slowed": "Toisto hidastettu",
+    "video_load_error": "Videota ei voida toistaa — yritä ladata se suoraan."
 }

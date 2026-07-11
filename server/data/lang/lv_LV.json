@@ -237,5 +237,8 @@
     "sort_by_time": "Laika",
     "sort_by_station": "Stacijas",
     "sort_by_distance": "Attāluma",
-    "then_sort_by_label": "tad:"
+    "then_sort_by_label": "tad:",
+    "playback_speed": "Ātrums",
+    "playback_slowed": "Atskaņošana palēnināta līdz",
+    "video_load_error": "Video nevar atskaņot — mēģiniet lejupielādēt tieši."
 }

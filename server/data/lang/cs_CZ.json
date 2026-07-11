@@ -205,5 +205,8 @@
     "sort_by_time": "času",
     "sort_by_station": "stanice",
     "sort_by_distance": "vzdálenosti",
-    "then_sort_by_label": "pak:"
+    "then_sort_by_label": "pak:",
+    "playback_speed": "Rychlost",
+    "playback_slowed": "Přehrávání zpomaleno na",
+    "video_load_error": "Video nelze přehrát — zkuste přímé stažení."
 }

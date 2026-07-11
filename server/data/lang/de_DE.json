@@ -205,5 +205,8 @@
     "sort_by_time": "Zeit",
     "sort_by_station": "Station",
     "sort_by_distance": "Entfernung",
-    "then_sort_by_label": "dann:"
+    "then_sort_by_label": "dann:",
+    "playback_speed": "Geschwindigkeit",
+    "playback_slowed": "Wiedergabe verlangsamt auf",
+    "video_load_error": "Video konnte nicht abgespielt werden — versuche direkt herunterzuladen."
 }

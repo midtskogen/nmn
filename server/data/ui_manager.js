@@ -856,6 +856,21 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         id: 'saturation-slider'
     });
 
+    // Speed slider
+    const speedSlider = createEl('input', {
+        type: 'range',
+        min: '0.1',
+        max: '4',
+        step: '0.05',
+        value: '1',
+        className: 'preview-slider',
+        title: t('playback_speed', 'Playback Speed'),
+        id: 'speed-slider'
+    });
+    const speedLabel = createEl('label', { htmlFor: 'speed-slider', className: 'preview-filter-label', style: { whiteSpace: 'nowrap' } });
+    const updateSpeedLabel = (rate) => { speedLabel.textContent = `${t('playback_speed', 'Speed')} ${rate.toFixed(2).replace(/\.?0+$/, '')}\u00d7`; };
+    updateSpeedLabel(1);
+
     // Reset filters button
     const resetFiltersBtn = createEl('button', {
         className: 'preview-control-btn reset',
@@ -955,7 +970,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     if (boundsToggleContainer) checkboxesWrapper.append(boundsToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
 
-    filterControls.append(resetFiltersBtn, brightnessWrapper, contrastWrapper, saturationWrapper, checkboxesWrapper);
+    // Speed: combined label+value above slider
+    const speedWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
+    speedWrapper.append(speedLabel, speedSlider);
+
+    filterControls.append(resetFiltersBtn, speedWrapper, brightnessWrapper, contrastWrapper, saturationWrapper, checkboxesWrapper);
 
     // Assemble modal
     modalContent.append(header, videoWrapper, controls, filterControls);
@@ -1111,6 +1130,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         rateStepIdx++;
         const newRate = RATE_STEPS[rateStepIdx];
         video.playbackRate = newRate;
+        speedSlider.value = newRate;
+        updateSpeedLabel(newRate);
         stallStatusEl.textContent = `${t('playback_slowed', 'Playback slowed to')} ${Math.round(newRate * 100)}%`;
         stallStatusEl.style.display = 'block';
     };
@@ -1184,12 +1205,26 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     contrastSlider.addEventListener('input', updateFilters);
     saturationSlider.addEventListener('input', updateFilters);
 
+    // Speed slider handler — manual adjustment also freezes auto-reduction
+    speedSlider.addEventListener('input', () => {
+        const rate = parseFloat(speedSlider.value);
+        video.playbackRate = rate;
+        updateSpeedLabel(rate);
+        // Sync stall-reduction index so auto-steps continue from current rate
+        rateStepIdx = RATE_STEPS.reduce((best, r, i) => Math.abs(r - rate) < Math.abs(RATE_STEPS[best] - rate) ? i : best, 0);
+    });
+
     // Reset filters button handler
     resetFiltersBtn.addEventListener('click', () => {
         brightnessSlider.value = 1;
         contrastSlider.value = 1;
         saturationSlider.value = 1;
         updateFilters();
+        speedSlider.value = 1;
+        updateSpeedLabel(1);
+        video.playbackRate = 1;
+        rateStepIdx = 0;
+        stallStatusEl.style.display = 'none';
     });
 
     // Timestamp toggle handler

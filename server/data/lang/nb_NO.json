@@ -239,6 +239,7 @@
     "sort_by_station": "Stasjon",
     "sort_by_distance": "Avstand",
     "then_sort_by_label": "deretter:",
+    "playback_speed": "Hastighet",
     "playback_slowed": "Avspilling redusert til",
-    "video_load_error": "Videoen kunne ikke spilles av \u2014 pr\u00f8v \u00e5 laste ned direkte."
+    "video_load_error": "Videoen kunne ikke spilles av — prøv å laste ned direkte."
 }

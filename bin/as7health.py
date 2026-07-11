@@ -107,6 +107,12 @@ class ErrorCatalog:
         "DISK_CRITICAL": {"type": "failure", "description": "Disk space on {path} is critically low ({percent_free:.2f}% < 1% free).", "reason": "If the disk fills up completely, video recording will stop, and the system may become unstable.", "fix": "Delete old, unneeded files from '/mnt/ams2/SD/' and '/mnt/ams2/HD/'. Consider archiving old meteor data."},
         "DISK_LOW": {"type": "warning", "description": "Disk space on {path} is low ({percent_free:.2f}% < 3% free).", "reason": "The video storage drive is nearing capacity. Action should be taken soon.", "fix": "Proactively clean up old video files to prevent the disk from becoming full."},
         "DISK_INFO": {"type": "info", "description": "Disk space on {path} is getting low ({percent_free:.2f}% < 5% free).", "reason": "This is an early warning that the video storage drive is filling up.", "fix": "Monitor disk space and plan for cleanup or archiving."},
+        "ROOT_DISK_CRITICAL": {"type": "failure", "description": "Root filesystem (/) disk space is critically low ({percent_free:.2f}% < 1% free).", "reason": "A full root filesystem will prevent the OS from writing logs, temp files, or running new processes, causing system instability or crashes.", "fix": "Use 'df -h' and 'du -sh /*' to find large directories. Clean up logs, caches, or old packages with 'sudo apt-get clean' and 'sudo journalctl --vacuum-size=100M'."},
+        "ROOT_DISK_LOW": {"type": "warning", "description": "Root filesystem (/) disk space is low ({percent_free:.2f}% < 5% free).", "reason": "The root filesystem is nearing capacity. A full root disk causes system instability.", "fix": "Use 'df -h' and 'du -sh /*' to find large directories and clean up as needed."},
+        "ROOT_DISK_INFO": {"type": "info", "description": "Root filesystem (/) disk space is getting low ({percent_free:.2f}% < 10% free).", "reason": "This is an early warning that the root filesystem is filling up.", "fix": "Monitor with 'df -h /' and plan cleanup if the trend continues."},
+        # Bloated directories
+        "DIR_BLOATED_CRITICAL": {"type": "failure", "description": "Directory '{path}' is unusually large: {size_mb:.0f} MB (limit: {limit_mb} MB).", "reason": "This directory has grown far beyond its expected size and is likely consuming root filesystem space.", "fix": "Investigate with 'du -sh {path}/*'. Common causes: unrotated logs, accumulated mail, or leftover temp files. Clean up or rotate as appropriate."},
+        "DIR_BLOATED_WARN": {"type": "warning", "description": "Directory '{path}' is large: {size_mb:.0f} MB (warning at: {warn_mb} MB).", "reason": "This directory is larger than expected and may be filling up the root filesystem.", "fix": "Investigate with 'du -sh {path}/*' and clean up old files if appropriate."},
         # NTP
         "NTP_NO_SYNC": {"type": "warning", "description": "System clock is not synchronized with a time server (NTP).", "reason": "Accurate timing is absolutely critical for meteor observation. If the clock is wrong, the scientific data is useless.", "fix": "Ensure the system is connected to the internet. Run 'sudo timedatectl set-ntp true' and check 'timedatectl status'."},
         # Dependencies
@@ -320,6 +326,7 @@ class AS7Diagnostic:
         self.check_filesystem_health()
         self.check_syslog()
         self.check_disk_space()
+        self.check_bloated_directories()
         self.check_ntp_sync()
         self.check_dependencies()
         self.check_scan_stack_dependencies()
@@ -774,7 +781,7 @@ class AS7Diagnostic:
                     last_error = lines[-1]
                     self.log_issue(code, {'count': count, 'last_error': last_error})
 
-    def _check_disk_usage(self, path, err_crit, err_warn, err_info):
+    def _check_disk_usage(self, path, err_crit, err_warn, err_info, thresholds=(1, 3, 5)):
         """Helper function to check disk space on a given path."""
         if not os.path.exists(path):
             self.log_issue("DIR_MISSING", {'path': path})
@@ -790,13 +797,12 @@ class AS7Diagnostic:
                 return
                 
             percent_free = (bytes_available / bytes_total) * 100
-            
-            # Use thresholds: FAIL < 1%, WARN < 3%, INFO < 5%
-            if percent_free < 1:
+            t_crit, t_warn, t_info = thresholds
+            if percent_free < t_crit:
                 self.log_issue(err_crit, {'path': path, 'percent_free': percent_free})
-            elif percent_free < 3:
+            elif percent_free < t_warn:
                 self.log_issue(err_warn, {'path': path, 'percent_free': percent_free})
-            elif percent_free < 5:
+            elif percent_free < t_info:
                 self.log_issue(err_info, {'path': path, 'percent_free': percent_free})
             else:
                 self.log_success(f"Disk space on {path} is sufficient: {bytes_available/1e9:.2f}GB free ({percent_free:.2f}%).")
@@ -804,9 +810,50 @@ class AS7Diagnostic:
             self.log_issue("PERMISSION_DENIED", {'check': f"checking disk space for {path}: {e}"})
 
     def check_disk_space(self):
-        """Checks the available disk space on the primary video storage mount."""
+        """Checks the available disk space on the primary video storage mount and root filesystem."""
         print("\n--- Checking Disk Space ---")
+        self._check_disk_usage("/", "ROOT_DISK_CRITICAL", "ROOT_DISK_LOW", "ROOT_DISK_INFO", thresholds=(1, 5, 10))
         self._check_disk_usage("/mnt/ams2", "DISK_CRITICAL", "DISK_LOW", "DISK_INFO")
+
+    def check_bloated_directories(self):
+        """Checks well-known directories for unexpectedly large sizes that may fill the root filesystem."""
+        print("\n--- Checking for Bloated Directories ---")
+        # (path, warn_mb, critical_mb, description)
+        dirs_to_check = [
+            ("/var/log",        500,  2000, "System log directory"),
+            ("/var/mail",        50,   200, "System mail spool"),
+            ("/var/spool/mail",  50,   200, "User mail spool"),
+            ("/tmp",            500,  2000, "Temporary files"),
+            ("/var/tmp",        500,  2000, "Persistent temporary files"),
+            ("/root",           200,   500, "Root home directory"),
+            ("/home",          1000,  5000, "User home directories"),
+            ("/var/cache",      500,  2000, "Package/application cache"),
+            ("/var/lib/docker", 500,  5000, "Docker images/containers"),
+        ]
+        any_checked = False
+        for path, warn_mb, crit_mb, label in dirs_to_check:
+            if not os.path.exists(path):
+                continue
+            any_checked = True
+            try:
+                total = 0
+                for dirpath, dirnames, filenames in os.walk(path, onerror=lambda e: None):
+                    for f in filenames:
+                        try:
+                            total += os.path.getsize(os.path.join(dirpath, f))
+                        except OSError:
+                            pass
+                size_mb = total / (1024 * 1024)
+                if size_mb >= crit_mb:
+                    self.log_issue("DIR_BLOATED_CRITICAL", {'path': path, 'size_mb': size_mb, 'limit_mb': crit_mb})
+                elif size_mb >= warn_mb:
+                    self.log_issue("DIR_BLOATED_WARN", {'path': path, 'size_mb': size_mb, 'warn_mb': warn_mb})
+                else:
+                    self.log_success(f"{label} ({path}): {size_mb:.0f} MB — OK.")
+            except Exception as e:
+                self.log_issue("PERMISSION_DENIED", {'check': f"sizing {path}: {e}"})
+        if not any_checked:
+            self.log_success("No standard bloat-check directories found.")
 
     def check_ntp_sync(self):
         """Verifies that the system clock is synchronized via NTP."""

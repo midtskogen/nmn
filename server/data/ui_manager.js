@@ -1104,11 +1104,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
         // Try to detect frame rate from video or default to 30
         frameStep = 1 / 30;
-        // Advance one frame to get valid currentTime (avoid 1970 epoch issue)
-        video.currentTime = frameStep;
-        // Trigger timeupdate to refresh timestamp
-        const event = new Event('timeupdate');
-        video.dispatchEvent(event);
+        // Trigger timeupdate to refresh timestamp overlay at currentTime=0
+        video.dispatchEvent(new Event('timeupdate'));
     });
 
     video.addEventListener('timeupdate', () => {
@@ -1162,6 +1159,10 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     video.addEventListener('canplay', clearStall);
 
     video.addEventListener('error', () => {
+        const err = video.error;
+        // code 1 = MEDIA_ERR_ABORTED (seek/navigation abort) — not a real failure
+        // null error = spurious event fired during buffering; ignore both
+        if (!err || err.code === MediaError.MEDIA_ERR_ABORTED) return;
         loadingIndicator.textContent = t('video_load_error', 'Video could not be played — try downloading directly.');
         loadingIndicator.style.display = 'block';
         loadingIndicator.style.color = '#f87';

@@ -525,7 +525,13 @@ class FileProcessor:
                     codec = internal_probe_codec(video_filepath)
                     if codec == 'hevc':
                         os.rename(video_filepath, hevc_filepath)
+                        # Transcode to H.264 for browsers that don't support HEVC
+                        if not self.hevc_supported and not os.path.exists(video_filepath):
+                            self._transcode_to_h264_blocking(hevc_filepath, video_filepath)
 
+                # Ensure H.264 copy exists for non-HEVC browsers (may have been missed on a prior download)
+                if not self.hevc_supported and os.path.exists(hevc_filepath) and not os.path.exists(video_filepath):
+                    self._transcode_to_h264_blocking(hevc_filepath, video_filepath)
                 final_source_video = video_filepath if os.path.exists(video_filepath) else (hevc_filepath if os.path.exists(hevc_filepath) else None)
                 if final_source_video:
                     if os.path.exists(STACK_SCRIPT):

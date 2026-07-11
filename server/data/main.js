@@ -344,6 +344,10 @@ passData.passes : aircraftData.crossings;
         const equirectSwitch = document.getElementById('equirect-switch');
         if (fisheyeSwitch) fisheyeSwitch.checked = false;
         if (equirectSwitch) equirectSwitch.checked = false;
+        // Re-enable camera checkboxes in case they were disabled by a previous timelapse/stitch selection
+        const cameraGroup = document.getElementById('camera-checkbox-group');
+        if (cameraGroup) cameraGroup.style.opacity = '';
+        document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.disabled = false; });
 
         Object.keys(mapHandler.getStationMarkers()).forEach(stationId => {
             const baseIcon = getBaseIconForStation(stationId);
@@ -392,6 +396,10 @@ passData.passes : aircraftData.crossings;
             const equirectSwitch = document.getElementById('equirect-switch');
             if (fisheyeSwitch) fisheyeSwitch.checked = false;
             if (equirectSwitch) equirectSwitch.checked = false;
+            // Re-enable camera checkboxes in case they were disabled by a previous timelapse/stitch selection
+            const cameraGroup = document.getElementById('camera-checkbox-group');
+            if (cameraGroup) cameraGroup.style.opacity = '';
+            document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.disabled = false; });
             
             // Scroll to download form to make it visible
             dom.downloadForm.scrollIntoView({ behavior: 'smooth', block: 'center' });

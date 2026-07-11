@@ -237,5 +237,7 @@
     "sort_by_time": "Time",
     "sort_by_station": "Station",
     "sort_by_distance": "Distance",
-    "then_sort_by_label": "then:"
+    "then_sort_by_label": "then:",
+    "playback_slowed": "Playback slowed to",
+    "video_load_error": "Video could not be played \u2014 try downloading directly."
 }

@@ -871,9 +871,9 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     });
     timestampToggleContainer.append(timestampCheckbox, ' ', t('show_timestamp', 'Show timestamp'));
 
-    // Detect timelapse files: STATION_YYYYMMDD_teq.mp4 or STATION_YYYYMMDD_tfe.mp4
-    const timelapseFisheye = title.match(/^([A-Z]{2,4})_(\d{8})_tfe\.mp4$/);
-    const timelapseEquirect = title.match(/^([A-Z]{2,4})_(\d{8})_teq\.mp4$/);
+    // Detect timelapse files: STATION_YYYYMMDD_teq.mp4, _tfe.mp4, _teqh.mp4, _tfeh.mp4
+    const timelapseFisheye = title.match(/^([A-Z]{2,4})_(\d{8})_tfeh?\.mp4$/);
+    const timelapseEquirect = title.match(/^([A-Z]{2,4})_(\d{8})_teqh?\.mp4$/);
     const timelapseFull = timelapseFisheye || timelapseEquirect;
 
     // Parse station and camera from video filename (e.g., "GAU_cam1_20260429_2056_hires.mp4")
@@ -1096,6 +1096,44 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     video.addEventListener('ended', () => {
         isPlaying = false;
         playPauseBtn.textContent = '▶';
+    });
+
+    // Stall / decode-too-slow recovery: step down playbackRate on repeated stalls
+    const RATE_STEPS = [1.0, 0.75, 0.5, 0.25];
+    let rateStepIdx = 0;
+    let stallTimer = null;
+    const stallStatusEl = createEl('div', { className: 'preview-stall-status', style: { fontSize: '11px', color: '#f0c040', textAlign: 'center', display: 'none', padding: '2px 0' } });
+    // Insert just above the controls
+    modalContent.insertBefore(stallStatusEl, controls);
+
+    const applyRateStep = () => {
+        if (rateStepIdx >= RATE_STEPS.length - 1) return; // already at minimum
+        rateStepIdx++;
+        const newRate = RATE_STEPS[rateStepIdx];
+        video.playbackRate = newRate;
+        stallStatusEl.textContent = `${t('playback_slowed', 'Playback slowed to')} ${Math.round(newRate * 100)}%`;
+        stallStatusEl.style.display = 'block';
+    };
+
+    const onStall = () => {
+        // Debounce: only act if video has been stalled for >1.5 s
+        if (stallTimer) return;
+        stallTimer = setTimeout(() => {
+            stallTimer = null;
+            if (!video.paused && video.readyState < 3) applyRateStep();
+        }, 1500);
+    };
+    const clearStall = () => { if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; } };
+
+    video.addEventListener('stalled', onStall);
+    video.addEventListener('waiting', onStall);
+    video.addEventListener('playing', clearStall);
+    video.addEventListener('canplay', clearStall);
+
+    video.addEventListener('error', () => {
+        loadingIndicator.textContent = t('video_load_error', 'Video could not be played — try downloading directly.');
+        loadingIndicator.style.display = 'block';
+        loadingIndicator.style.color = '#f87';
     });
 
     // Control handlers
@@ -2020,7 +2058,29 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                     const mediaIndex = currentMediaList.findIndex(m => m.url === file.url && m.name === file.name);
                     const li = createEl('li');
                     const isVideo = file.url.endsWith('.mp4');
-                    
+
+                    const getShortName = (filename) => {
+                        if (filename.includes('_image_long_stacked.jpg')) return 'bhL';
+                        if (filename.includes('_image_lowres_long_stacked.jpg')) return 'blL';
+                        if (filename.includes('_hires_fisheye.jpg')) return 'fe';
+                        if (filename.includes('_lowres_fisheye.jpg')) return 'fe';
+                        if (filename.includes('_hires_equirect.jpg')) return 'eq';
+                        if (filename.includes('_lowres_equirect.jpg')) return 'eq';
+                        if (filename.endsWith('_teq.mp4')) return 'teq';
+                        if (filename.endsWith('_tfe.mp4')) return 'tfe';
+                        if (filename.endsWith('_teqh.mp4')) return 'teqh';
+                        if (filename.endsWith('_tfeh.mp4')) return 'tfeh';
+                        const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
+                        let baseType = filename;
+                        let isOverlay = false;
+                        if (baseType.includes('_flight_overlay')) { isOverlay = true; baseType = baseType.replace('_flight_overlay', ''); }
+                        else if (baseType.includes('_overlay')) { isOverlay = true; baseType = baseType.replace('_overlay', ''); }
+                        for (const key in typeMap) {
+                            if (baseType.endsWith(key)) return typeMap[key] + (isOverlay ? 's' : '');
+                        }
+                        return filename;
+                    };
+
                     if (file.thumb_url) {
                         const thumbContainer = createEl('div', { className: `thumbnail-container${isVideo ? ' video' : ''}` });
                         thumbContainer.appendChild(createEl('img', { src: file.thumb_url, alt: file.name, className: 'thumbnail-preview' }));
@@ -2036,33 +2096,14 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                         });
                         li.appendChild(thumbContainer);
                      } else {
-                        li.appendChild(createEl('a', { href: file.url, target: '_blank', textContent: file.name, title: file.name }));
+                        const fallbackShort = getShortName(file.name);
+                        li.appendChild(createEl('a', { href: file.url, target: '_blank', textContent: fallbackShort, title: file.name }));
                     }
 
                
                      const linksContainer = createEl('div', { className: 'alternate-links' });
                     const allFilesForThisThumb = [{ url: file.url, name: file.name }, ...(file.alternatives || [])];
                     const preferredLinks = {};
-                    
-                    const getShortName = (filename) => {
-                        if (filename.includes('_image_long_stacked.jpg')) return 'bhL';
-                        if (filename.includes('_image_lowres_long_stacked.jpg')) return 'blL';
-                        if (filename.includes('_hires_fisheye.jpg')) return 'fe';
-                        if (filename.includes('_lowres_fisheye.jpg')) return 'fe';
-                        if (filename.includes('_hires_equirect.jpg')) return 'eq';
-                        if (filename.includes('_lowres_equirect.jpg')) return 'eq';
-                        if (filename.endsWith('_teq.mp4')) return 'teq';
-                        if (filename.endsWith('_tfe.mp4')) return 'tfe';
-                        const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
-                        let baseType = filename;
-                        let isOverlay = false;
-                        if (baseType.includes('_flight_overlay')) { isOverlay = true; baseType = baseType.replace('_flight_overlay', ''); }
-                        else if (baseType.includes('_overlay')) { isOverlay = true; baseType = baseType.replace('_overlay', ''); }
-                        for (const key in typeMap) {
-                            if (baseType.endsWith(key)) return typeMap[key] + (isOverlay ? 's' : '');
-                        }
-                        return filename;
-                    };
 
                     allFilesForThisThumb.forEach(f => {
                         const shortName = getShortName(f.name);
@@ -2084,18 +2125,24 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                         }
                  
                    });
+                    const timelapseSuffixes = new Set(['teq', 'tfe', 'teqh', 'tfeh']);
                     Object.entries(preferredLinks).sort((a, b) => a[0].localeCompare(b[0])).forEach(([shortName, linkInfo]) => {
-                        const linkEl = createEl('a', { href: '#', textContent: shortName });
-                        linkEl.addEventListener('click', (e) => {
-                            e.preventDefault();
-                            // Find this link's index in media list
-                            const linkIndex = currentMediaList.findIndex(m => m.url === linkInfo.url && m.name === linkInfo.name);
-                            if (linkInfo.url.endsWith('.mp4')) {
-                                showVideoPreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
-                            } else {
-                                showImagePreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
-                            }
-                        });
+                        let linkEl;
+                        if (timelapseSuffixes.has(shortName)) {
+                            // Direct link to file — no player
+                            linkEl = createEl('a', { href: linkInfo.url, target: '_blank', textContent: shortName, title: linkInfo.name });
+                        } else {
+                            linkEl = createEl('a', { href: '#', textContent: shortName });
+                            linkEl.addEventListener('click', (e) => {
+                                e.preventDefault();
+                                const linkIndex = currentMediaList.findIndex(m => m.url === linkInfo.url && m.name === linkInfo.name);
+                                if (linkInfo.url.endsWith('.mp4')) {
+                                    showVideoPreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
+                                } else {
+                                    showImagePreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
+                                }
+                            });
+                        }
                         linksContainer.appendChild(linkEl);
                     });
                     if (linksContainer.hasChildNodes()) li.appendChild(linksContainer);

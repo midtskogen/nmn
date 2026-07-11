@@ -11,6 +11,7 @@ import time
 import shutil
 import re
 import signal
+import threading
 from datetime import datetime, timedelta, timezone
 from PIL import Image
 import numpy as np
@@ -37,8 +38,8 @@ MAX_STATIONS_PER_REQUEST = 10
 MAX_SEQUENCE_LENGTH = 60 
 MAX_SEQUENCE_INTERVAL = 60 
 MAX_FILE_SIZE_FOR_THUMBNAIL_MB = 200 
-FILE_TYPE_LIMITS = {'lowres': 300, 'hires': 100, 'image': 300, 'image_lowres': 600, 'image_long': 100, 'image_lowres_long': 300, 'timelapse': 50}
-AVG_FILE_SIZES_MB = {'lowres': 2, 'hires': 15, 'image': 1, 'image_lowres': 0.2, 'image_long': 1, 'image_lowres_long': 0.2, 'timelapse': 100}
+FILE_TYPE_LIMITS = {'lowres': 300, 'hires': 100, 'image': 300, 'image_lowres': 600, 'image_long': 100, 'image_lowres_long': 300, 'timelapse': 50, 'timelapse_hires': 20}
+AVG_FILE_SIZES_MB = {'lowres': 2, 'hires': 15, 'image': 1, 'image_lowres': 0.2, 'image_long': 1, 'image_lowres_long': 0.2, 'timelapse': 100, 'timelapse_hires': 400}
 STITCH_SCRIPT = os.path.join(BASE_DIR, 'stitch.py')
 STACK_SCRIPT = os.path.join(BASE_DIR, 'stack.py')
 TOTAL_QUOTA_LIMIT_MB = 2048 
@@ -584,7 +585,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         with open(STATIONS_FILE, 'r') as f: stations = json.load(f)
 
         # --- Timelapse early-return path ---
-        if data.get('file_type') == 'timelapse':
+        if data.get('file_type') in ('timelapse', 'timelapse_hires'):
             station_code = stations[station_id]['station']['code']
             start_date_str = data.get('date', '')  # YYYY-MM-DD
             num_days = max(1, int(data.get('length', 1)))
@@ -615,26 +616,61 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             step = 0
             for date_str, date_compact in dates:
                 for proj, cam_num in projections:
-                    proj_short = 'teq' if proj == 'equirect' else 'tfe'
+                    is_hires_tl = data.get('file_type') == 'timelapse_hires'
+                    proj_short = ('teqh' if proj == 'equirect' else 'tfeh') if is_hires_tl else ('teq' if proj == 'equirect' else 'tfe')
                     local_name = f"{station_code}_{date_compact}_{proj_short}.mp4"
                     local_path = os.path.join(DOWNLOAD_DIR, local_name)
-                    remote_path = f"/meteor/cam{cam_num}/{date_compact}/timelapse.mp4"
+                    remote_path = f"/meteor/cam{cam_num}/{date_compact}/timelapse{'_hires' if is_hires_tl else ''}.mp4"
                     if not os.path.exists(local_path):
                         temp_path = local_path + ".part"
                         cmd = ["scp", "-B", "-o", "ConnectTimeout=300"]
                         if ssh_control_socket and os.path.exists(ssh_control_socket):
                             cmd += ["-o", f"ControlPath={ssh_control_socket}"]
                         cmd += [f"{station_id}:{remote_path}", temp_path]
+                        # Get remote file size for progress reporting (best-effort)
+                        remote_size = 0
                         try:
-                            subprocess.run(cmd, check=True, timeout=360, capture_output=True)
-                            os.rename(temp_path, local_path)
-                            total_bytes += os.path.getsize(local_path)
-                        except subprocess.CalledProcessError:
+                            sz_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+                            if ssh_control_socket and os.path.exists(ssh_control_socket):
+                                sz_cmd += ["-o", f"ControlPath={ssh_control_socket}"]
+                            sz_cmd += [station_id, f"stat -c%s {remote_path}"]
+                            sz_out = subprocess.run(sz_cmd, capture_output=True, text=True, timeout=15)
+                            remote_size = int(sz_out.stdout.strip())
+                        except Exception:
+                            pass
+                        scp_result = [None]
+                        scp_exc = [None]
+                        def _run_scp():
+                            try:
+                                scp_result[0] = subprocess.run(cmd, check=True, timeout=360, capture_output=True)
+                            except Exception as e:
+                                scp_exc[0] = e
+                        scp_thread = threading.Thread(target=_run_scp, daemon=True)
+                        scp_thread.start()
+                        # Poll .part file size and emit intermediate progress
+                        while scp_thread.is_alive():
+                            time.sleep(1)
+                            if remote_size > 0:
+                                try:
+                                    part_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+                                    file_pct = min(part_size / remote_size, 0.99)
+                                    update_status(station_status_file, "progress", {
+                                        "step": step + file_pct,
+                                        "total": total_items,
+                                        "message": f"status_fetching_timelapse|station={station_code}",
+                                        "files": results, "errors": errors,
+                                    })
+                                except Exception:
+                                    pass
+                        scp_thread.join()
+                        if scp_exc[0] is not None:
                             if os.path.exists(temp_path): os.remove(temp_path)
                             errors.append(f"error_timelapse_not_found|date={date_str}")
                             logging.warning(f"Worker {task_id} - Timelapse not found: {station_id}:{remote_path}")
                             step += 1
                             continue
+                        os.rename(temp_path, local_path)
+                        total_bytes += os.path.getsize(local_path)
                     if os.path.exists(local_path):
                         thumb_kwargs = {"task_id": task_id, "path": local_path, "file_type": "lowres", "station_code": station_code, "cam_num": cam_num}
                         entry = {"url": f"download/{local_name}", "name": local_name, "utc_time_iso": f"{date_str}T00:00:00+00:00", "alternatives": []}
@@ -1095,7 +1131,7 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
             if file_type not in FILE_TYPE_LIMITS: raise ValueError(f"error_invalid_file_type|file_type={file_type}")
             
             limit = FILE_TYPE_LIMITS[file_type]
-            if file_type == 'timelapse':
+            if file_type in ('timelapse', 'timelapse_hires'):
                 num_days = max(1, int(data.get('length', 1)))
                 num_files = len(station_ids) * num_days * (int(bool(data.get('stitch_fisheye'))) + int(bool(data.get('stitch_equirect'))))
             elif active_pass_data:
@@ -1104,7 +1140,7 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
                 num_files = len(station_ids) * len(data.get('cameras', [])) * int(data.get('length', 1))
             if num_files > limit: raise ValueError(f"error_too_many_files|num_files={num_files},limit={limit}")
             
-            if not active_pass_data and file_type == 'timelapse':
+            if not active_pass_data and file_type in ('timelapse', 'timelapse_hires'):
                 if not (1 <= int(data.get('length', 0)) <= 100): raise ValueError(f"error_invalid_length|max=100")
                 if not (1 <= int(data.get('interval', 0)) <= 365): raise ValueError(f"error_invalid_interval|max=365")
             elif not active_pass_data:

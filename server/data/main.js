@@ -846,9 +846,9 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 [lengthPrevBtn, lengthNextBtn, intervalPrevBtn, intervalNextBtn].forEach(b => { if (b) { b.disabled = false; b.style.opacity = ''; } });
                 // Swap interval label to days
                 if (intervalLabelEl) intervalLabelEl.textContent = t('interval_label_days');
-                // Grey out high-res and long-int
-                if (highResLabel) highResLabel.style.opacity = '0.4';
-                document.getElementById('high-resolution-switch').disabled = true;
+                // Enable high-res for timelapse; grey out long-int only
+                if (highResLabel) highResLabel.style.opacity = '';
+                document.getElementById('high-resolution-switch').disabled = false;
                 if (longIntLabel) longIntLabel.style.display = 'none';
             } else {
                 // Restore hour/minute/length/interval
@@ -1197,7 +1197,7 @@ false, false);
             }
 
             const fileType = isTimelapse
-                ? 'timelapse'
+                ? (isHighRes ? 'timelapse_hires' : 'timelapse')
                 : (primaryType === 'video'
                     ? (isHighRes ? 'hires' : 'lowres')
                     : (isHighRes ? (isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres')));

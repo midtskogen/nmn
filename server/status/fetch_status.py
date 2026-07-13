@@ -525,7 +525,7 @@ def check_and_notify(station_id):
                 for issue in issues:
                     feil_beskrivelse += f"  - {issue.get('text', '')}\n"
         
-        subject = f"[NMN] Feil på {display_name} ({station_id})"
+        subject = f"[NMN] Feil ved {display_name} ({station_id})"
         body = (
             f"Hei,\n\n"
             f"Stasjon {display_name} ({station_id}) har nå feil som vedvarer "

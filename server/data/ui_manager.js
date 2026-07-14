@@ -743,10 +743,31 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Timestamp overlay with date (2 decimal precision) - lower right
     const timestampOverlay = createEl('div', { className: 'preview-timestamp', textContent: '' });
 
-    // Loading indicator
+    // Loading indicator and error overlay
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
+    const isHighResTimelapse = /_hires|hires|tfeh|teqh/i.test(videoUrl) || /_hires/i.test(title);
+    const errorOverlay = createEl('div', {
+        className: 'preview-error-overlay',
+        style: {
+            display: 'none',
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            background: 'rgba(0,0,0,0.85)',
+            color: '#fff',
+            justifyContent: 'center',
+            alignItems: 'center',
+            textAlign: 'center',
+            padding: '20px',
+            boxSizing: 'border-box',
+            zIndex: 20,
+            pointerEvents: 'none'
+        }
+    });
 
-    videoWrapper.append(video, gridOverlay, boundsOverlay, annotationOverlay, timestampOverlay, loadingIndicator);
+    videoWrapper.append(video, gridOverlay, boundsOverlay, annotationOverlay, timestampOverlay, loadingIndicator, errorOverlay);
 
     // Playback controls
     const controls = createEl('div', { className: 'preview-controls' });
@@ -1183,6 +1204,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     video.addEventListener('loadedmetadata', () => {
         loadingIndicator.style.display = 'none';
+        errorOverlay.style.display = 'none';
         // Clear fixed dimensions to allow natural video sizing
         if (initialDimensions) {
             modalContent.style.width = '';
@@ -1198,6 +1220,34 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         // Trigger timeupdate to refresh timestamp overlay at the current start time
         video.dispatchEvent(new Event('timeupdate'));
     });
+
+    video.addEventListener('error', () => {
+        loadingIndicator.style.display = 'none';
+        errorOverlay.style.display = 'flex';
+        const code = video.error?.code;
+        if (isHighResTimelapse && (code === 3 || code === 4)) {
+            errorOverlay.textContent = t('video_error_highres',
+                'Nettleseren kan ikke spille av denne høgoppløste timelapse-videoen (4096×4096). H.264-avkoding i nettlesere har en øvre oppløsningsgrense. Du kan laste ned filen for å se den i en ekstern spiller.');
+        } else {
+            errorOverlay.textContent = t('video_error_generic',
+                'Kunne ikke spille av videoen.') + (video.error?.message ? ` ${video.error.message}` : '');
+        }
+    });
+
+    // Some browsers show a black screen for very high-resolution H.264 files
+    // without firing an error event. Show the explanation if playback hasn't
+    // started a few seconds after opening.
+    if (isHighResTimelapse) {
+        setTimeout(() => {
+            if (errorOverlay.style.display === 'flex') return;
+            if (video.readyState < 2 && video.paused && !video.ended) {
+                loadingIndicator.style.display = 'none';
+                errorOverlay.style.display = 'flex';
+                errorOverlay.textContent = t('video_error_highres',
+                    'Nettleseren kan ikke spille av denne høgoppløste timelapse-videoen (4096×4096). H.264-avkoding i nettlesere har en øvre oppløsningsgrense. Du kan laste ned filen for å se den i en ekstern spiller.');
+            }
+        }, 3000);
+    }
 
     video.addEventListener('timeupdate', () => {
         // Update timestamp overlay with date and 2-decimal precision (lower right)
@@ -2157,7 +2207,6 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Fullscreen
     fullscreenBtn.addEventListener('click', () => {
-        imageWrapper.style.opacity = '0';
         if (imageWrapper.requestFullscreen) imageWrapper.requestFullscreen();
         else if (imageWrapper.webkitRequestFullscreen) imageWrapper.webkitRequestFullscreen();
     });
@@ -2165,28 +2214,23 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         if (!document.fullscreenElement) {
             minScale = 1; scale = 1; panX = 0; panY = 0;
             imageWrapper.style.opacity = '';
+            img.style.width = '';
+            img.style.height = '';
+            img.style.objectFit = '';
+            img.style.maxWidth = '';
+            img.style.maxHeight = '';
             updateTransform();
             syncOverlays();
         } else {
-            // Use a one-shot ResizeObserver to apply scale only once the wrapper
-            // has actually reached its final fullscreen dimensions.
-            const fsRo = new ResizeObserver(() => {
-                const rect = imageWrapper.getBoundingClientRect();
-                if (document.fullscreenElement === imageWrapper && rect.width >= screen.width * 0.9) {
-                    fsRo.disconnect();
-                    // Reset to scale=1 so getBoundingClientRect() returns unscaled size
-                    scale = 1; panX = 0; panY = 0;
-                    updateTransform();
-                    void img.offsetWidth; // force reflow
-                    minScale = computeFillScale();
-                    scale = minScale;
-                    panX = 0; panY = 0;
-                    updateTransform();
-                    syncOverlays();
-                    imageWrapper.style.opacity = '';
-                }
-            });
-            fsRo.observe(imageWrapper);
+            // Force the image to fill the fullscreen wrapper while preserving aspect ratio.
+            img.style.width = '100%';
+            img.style.height = '100%';
+            img.style.objectFit = 'contain';
+            img.style.maxWidth = 'none';
+            img.style.maxHeight = 'none';
+            scale = 1; minScale = 1; panX = 0; panY = 0;
+            updateTransform();
+            syncOverlays();
         }
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
         boundsOverlay.style.opacity = boundsCheckbox?.checked ? '0.8' : '0';

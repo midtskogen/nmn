@@ -1305,10 +1305,10 @@ button:hover:not(:disabled) {
 .preview-video-wrapper:fullscreen img.preview-video,
 .preview-video-wrapper:-webkit-full-screen img.preview-video,
 .preview-video-wrapper:-moz-full-screen img.preview-video {
-    width: auto !important;
+    width: 100% !important;
     height: 100% !important;
-    max-width: 100% !important;
-    max-height: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
     object-fit: contain !important;
 }
 

@@ -209,5 +209,7 @@
     "then_sort_by_label": "pak:",
     "playback_speed": "Rychlost",
     "playback_slowed": "Přehrávání zpomaleno na",
-    "video_load_error": "Video nelze přehrát — zkuste přímé stažení."
+    "video_load_error": "Video nelze přehrát — zkuste přímé stažení.",
+    "video_error_highres": "Prohlížeč nemůže přehrát toto časosběrné video ve vysokém rozlišení (4096×4096). Dekódování H.264 v prohlížečích má horní limit rozlišení. Můžete si soubor stáhnout a přehrát ho v externím přehrávači.",
+    "video_error_generic": "Video se nepodařilo přehrát."
 }

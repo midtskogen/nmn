@@ -209,5 +209,7 @@
     "then_sort_by_label": "sitten:",
     "playback_speed": "Nopeus",
     "playback_slowed": "Toisto hidastettu",
-    "video_load_error": "Videota ei voida toistaa — yritä ladata se suoraan."
+    "video_load_error": "Videota ei voida toistaa — yritä ladata se suoraan.",
+    "video_error_highres": "Selain ei voi toistaa tätä korkean resoluution timelapse-videota (4096×4096). H.264-dekoodauksella on selaimissa enimmäisresoluutioraja. Voit ladata tiedoston ja katsoa sen ulkoisessa soittimessa.",
+    "video_error_generic": "Videon toistaminen epäonnistui."
 }

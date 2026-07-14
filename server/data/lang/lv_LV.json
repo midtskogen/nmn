@@ -241,5 +241,7 @@
     "then_sort_by_label": "tad:",
     "playback_speed": "Ātrums",
     "playback_slowed": "Atskaņošana palēnināta līdz",
-    "video_load_error": "Video nevar atskaņot — mēģiniet lejupielādēt tieši."
+    "video_load_error": "Video nevar atskaņot — mēģiniet lejupielādēt tieši.",
+    "video_error_highres": "Pārlūks nevar atskaņot šo augstas izšķirtspējas timelapse video (4096×4096). H.264 dekodēšanai pārlūkos ir maksimālā izšķirtspējas robeža. Varat lejupielādēt failu, lai skatītu to ārējā atskaņotājā.",
+    "video_error_generic": "Neizdevās atskaņot video."
 }

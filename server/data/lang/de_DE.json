@@ -209,5 +209,7 @@
     "then_sort_by_label": "dann:",
     "playback_speed": "Geschwindigkeit",
     "playback_slowed": "Wiedergabe verlangsamt auf",
-    "video_load_error": "Video konnte nicht abgespielt werden — versuche direkt herunterzuladen."
+    "video_load_error": "Video konnte nicht abgespielt werden — versuche direkt herunterzuladen.",
+    "video_error_highres": "Der Browser kann dieses hochauflösende Timelapse-Video (4096×4096) nicht wiedergeben. Die H.264-Dekodierung im Browser hat eine maximale Auflösungsgrenze. Laden Sie die Datei herunter, um sie in einem externen Player anzusehen.",
+    "video_error_generic": "Das Video konnte nicht wiedergegeben werden."
 }

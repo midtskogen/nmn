@@ -720,6 +720,32 @@ class AS7Diagnostic:
             self.log_issue("PERMISSION_DENIED", {'check': f"getting system resources: {e}"})
 
 
+    def _fs_is_still_readonly(self, log_line):
+        """Check whether the device named in a read-only remount log line is
+        still mounted read-only now.
+
+        The kernel logs the device in parentheses, e.g. ``EXT4-fs (sdb): ...``.
+        We look for a matching entry in /proc/mounts with the ``ro`` option.
+        Returns the matching ``(device, mountpoint)`` tuple, or ``None`` if the
+        filesystem is not currently read-only (or not mounted).
+        """
+        match = re.search(r'\(([^)]+)\)', log_line)
+        if not match:
+            return None
+        dev_str = match.group(1)
+        try:
+            with open('/proc/mounts', 'r') as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    device, mountpoint, fstype, options = parts[:4]
+                    if dev_str in device and 'ro' in options.split(','):
+                        return (device, mountpoint)
+        except Exception:
+            pass
+        return None
+
     def check_filesystem_health(self):
         """Scans the kernel log for I/O errors indicating disk failure."""
         print("\n--- Checking Filesystem Health (dmesg) ---")
@@ -780,8 +806,15 @@ class AS7Diagnostic:
                     for line in f:
                         for code, pattern in checks.items():
                             if re.search(pattern, line, re.IGNORECASE):
+                                # A read-only remount is only a current failure if
+                                # the affected filesystem is still mounted read-only.
+                                # Old syslog entries remain forever, so without this
+                                # check the failure would never clear after recovery.
+                                if code == "FS_READ_ONLY":
+                                    if not self._fs_is_still_readonly(line):
+                                        continue
                                 # Limit stored line length
-                                found_issues[code].append(line.strip()[:200]) 
+                                found_issues[code].append(line.strip()[:200])
                                 break # Move to next line
             except Exception as e:
                 self.log_issue("PERMISSION_DENIED", {'check': f"reading {log_path}: {e}"})
@@ -836,31 +869,20 @@ class AS7Diagnostic:
     def check_bloated_directories(self):
         """Checks well-known directories for unexpectedly large sizes that may fill the root filesystem."""
         print("\n--- Checking for Bloated Directories ---")
-        # (path, limit_mb, description)
+        # (path, warn_mb, critical_mb, description)
         dirs_to_check = [
-            ("/var/log",         500, "System log directory"),
-            ("/var/mail",       3072, "System mail spool"),
-            ("/var/spool/mail", 3072, "User mail spool"),
-            ("/tmp",             500, "Temporary files"),
-            ("/var/tmp",         500, "Persistent temporary files"),
-            ("/root",           2048, "Root home directory"),
-            ("/home",          20480, "User home directories"),
-            ("/var/cache",       500, "Package/application cache"),
-            ("/var/lib/docker",  500, "Docker images/containers"),
+            ("/var/log",        500,  2000, "System log directory"),
+            ("/var/mail",        50,   200, "System mail spool"),
+            ("/var/spool/mail",  50,   200, "User mail spool"),
+            ("/tmp",            500,  2000, "Temporary files"),
+            ("/var/tmp",        500,  2000, "Persistent temporary files"),
+            ("/root",           200,   500, "Root home directory"),
+            ("/home",          1000,  5000, "User home directories"),
+            ("/var/cache",      500,  2000, "Package/application cache"),
+            ("/var/lib/docker", 500,  5000, "Docker images/containers"),
         ]
-
-        # Determine root filesystem fullness once for all checks
-        root_disk_full = False
-        try:
-            st = os.statvfs("/")
-            if st.f_blocks > 0:
-                percent_used = (1 - st.f_bavail / st.f_blocks) * 100
-                root_disk_full = percent_used >= 90
-        except Exception:
-            pass
-
         any_checked = False
-        for path, limit_mb, label in dirs_to_check:
+        for path, warn_mb, crit_mb, label in dirs_to_check:
             if not os.path.exists(path):
                 continue
             any_checked = True
@@ -873,13 +895,12 @@ class AS7Diagnostic:
                         except OSError:
                             pass
                 size_mb = total / (1024 * 1024)
-                if size_mb >= limit_mb:
-                    if root_disk_full:
-                        self.log_issue("DIR_BLOATED_CRITICAL", {'path': path, 'size_mb': size_mb, 'limit_mb': limit_mb})
+                if size_mb >= crit_mb:
+                    self.log_issue("DIR_BLOATED_CRITICAL", {'path': path, 'size_mb': size_mb, 'limit_mb': crit_mb})
+                elif size_mb >= warn_mb:
+                    self.log_issue("DIR_BLOATED_WARN", {'path': path, 'size_mb': size_mb, 'warn_mb': warn_mb})
                     else:
-                        self.log_issue("DIR_BLOATED_WARN", {'path': path, 'size_mb': size_mb, 'warn_mb': limit_mb})
-                else:
-                    self.log_success(f"{label} ({path}): {size_mb:.0f} MB — OK (limit: {limit_mb} MB).")
+                    self.log_success(f"{label} ({path}): {size_mb:.0f} MB — OK.")
             except Exception as e:
                 self.log_issue("PERMISSION_DENIED", {'check': f"sizing {path}: {e}"})
         if not any_checked:

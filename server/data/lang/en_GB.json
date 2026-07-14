@@ -24,6 +24,7 @@
     "hour_label": "Hour (0-23 UTC):",
     "minute_label": "Minute (0-59):",
     "length_label": "Count:",
+    "duration_label": "Duration (min):",
     "interval_label": "Interval:",
     "interval_label_days": "Interval (days):",
     "camera_legend": "Camera:",

@@ -82,6 +82,7 @@ function initializeApp() {
         minuteSelect: document.getElementById('minute'),
         lengthSelect: document.getElementById('length'),
         intervalSelect: document.getElementById('interval'),
+        durationSelect: document.getElementById('duration'),
         liveStreamControls: null
     };
     // --- Initialization ---
@@ -827,6 +828,10 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
             const intervalNextBtn = document.getElementById('interval-next-btn');
 
             const intervalLabelEl = document.getElementById('interval-label');
+            const durationGroup = document.getElementById('duration-group');
+            const lengthIntervalGroup = document.getElementById('length-interval-group');
+            const longIntSwitch = document.getElementById('long-integration-switch');
+            const isLongInt = !isVideo && !isTimelapse && longIntSwitch?.checked;
             if (isTimelapse) {
                 // Clamp date to yesterday if today or future (timelapse for today doesn't exist yet)
                 const todayStr = new Date().toISOString().slice(0, 10);
@@ -858,7 +863,13 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 if (highResLabel) highResLabel.style.opacity = '';
                 document.getElementById('high-resolution-switch').disabled = false;
                 if (longIntLabel) longIntLabel.style.display = 'none';
+                if (durationGroup) durationGroup.style.display = 'none';
+                if (lengthIntervalGroup) lengthIntervalGroup.style.display = '';
             } else {
+                // Show duration pulldown for video or image with long integration; otherwise length/interval.
+                const useDuration = isVideo || isLongInt;
+                if (durationGroup) durationGroup.style.display = useDuration ? '' : 'none';
+                if (lengthIntervalGroup) lengthIntervalGroup.style.display = useDuration ? 'none' : '';
                 // Restore hour/minute/length/interval
                 if (hourSelect) { hourSelect.disabled = false; hourSelect.style.opacity = ''; }
                 if (minuteSelect) { minuteSelect.disabled = false; minuteSelect.style.opacity = ''; }
@@ -892,6 +903,7 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
         document.querySelector('input[name="primary_file_type"][value="timelapse"]').addEventListener('change', updateTypeOptions);
         document.getElementById('fisheye-switch')?.addEventListener('change', updateTypeOptions);
         document.getElementById('equirect-switch')?.addEventListener('change', updateTypeOptions);
+        document.getElementById('long-integration-switch')?.addEventListener('change', updateTypeOptions);
         updateTypeOptions();
         
         document.getElementById('cloud-toggle').addEventListener('change', (e) => {
@@ -1209,13 +1221,16 @@ false, false);
                 : (primaryType === 'video'
                     ? (isHighRes ? 'hires' : 'lowres')
                     : (isHighRes ? (isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres')));
+            const duration = dom.durationSelect ? parseInt(dom.durationSelect.value, 10) : 1;
+            const isVideoOrLongInt = primaryType === 'video' || (primaryType === 'image' && isLongInt);
             const payload = {
                 stations: [...selectedStations],
                 date: dom.dateInput.value,
                 hour: dom.hourSelect.value,
                 minute: dom.minuteSelect.value,
-                length: dom.lengthSelect.value,
-                interval: dom.intervalSelect.value,
+                length: isVideoOrLongInt && duration > 1 ? duration : dom.lengthSelect.value,
+                interval: isVideoOrLongInt && duration > 1 ? 1 : dom.intervalSelect.value,
+                duration: duration,
                 cameras: isTimelapse ? [] : selectedCameras,
                 file_type: fileType,
                 hevc_supported: isHevcSupported(),

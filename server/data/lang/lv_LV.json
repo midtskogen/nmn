@@ -24,6 +24,7 @@
     "hour_label": "Stunda (0-23 UTC):",
     "minute_label": "Minūte (0-59):",
     "length_label": "Skaits:",
+    "duration_label": "Ilgums (min):",
     "interval_label": "Intervāls:",
     "interval_label_days": "Intervāls (dienas):",
     "camera_legend": "Kamera:",

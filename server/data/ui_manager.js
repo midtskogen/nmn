@@ -214,6 +214,7 @@ export function setDefaultFormValues() {
     dom.minuteSelect.value = 0;
     dom.lengthSelect.value = 1;
     dom.intervalSelect.value = 1;
+    if (dom.durationSelect) dom.durationSelect.value = 1;
     document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.checked = true; cb.disabled = false; });
     const imageRadio = document.querySelector('input[name="primary_file_type"][value="image"]');
     imageRadio.checked = true;
@@ -689,6 +690,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         ? mediaInfo.duration : null;
     const knownStartTime = (mediaInfo && typeof mediaInfo.start_time === 'number' && isFinite(mediaInfo.start_time))
         ? mediaInfo.start_time : null;
+
+    // Variables used for absolute-timeline detection (also needed by dynamic overlays).
+    let useAbsoluteTime = false;
+    let absoluteStartTime = 0;
+
     const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
     const modalContent = createEl('div', { id: 'video-modal-content', className: 'preview-modal' });
 
@@ -715,11 +721,12 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     // Video container with overlay for timestamp
     const videoWrapper = createEl('div', { className: 'preview-video-wrapper' });
+    const isMultiMinuteVideo = /_dur\d+_/.test(title);
     const video = createEl('video', {
         src: videoUrl,
         className: 'preview-video',
         controls: false,
-        preload: 'metadata',
+        preload: isMultiMinuteVideo ? 'auto' : 'metadata',
         autoplay: true,
         muted: true
     });
@@ -831,6 +838,17 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         className: 'preview-scrubber'
     });
     scrubberRow.append(scrubberTime, scrubber);
+
+    // Seed the scrubber with the known duration immediately so it does not
+    // start short and then grow while the browser refines its metadata.
+    if (knownDuration !== null && isFinite(knownDuration) && knownDuration > 0) {
+        scrubber.max = knownDuration;
+        if (knownStartTime && knownStartTime > 1e9) {
+            scrubberDur.textContent = getFormattedTimestamp(knownStartTime + knownDuration);
+        } else {
+            scrubberDur.textContent = fmtTime(knownDuration);
+        }
+    }
 
     // Filter controls - all on one line
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
@@ -1044,28 +1062,81 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
         if (!timelapseFull) {
         // Load annotation overlay - fetch JSON metadata first, then set image src
-        const annotationApiUrl = `index.php?action=fetch_archive_annotation&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(annotationTimestamp)}`;
-        fetch(annotationApiUrl)
-            .then(response => response.json())
-            .then(data => {
-                if (data.success && data.annotation_url) {
-                    annotationOverlay.src = data.annotation_url;
+        function setAnnotationOverlay(url) {
+            if (url && annotationOverlay.src !== url) annotationOverlay.src = url;
+        }
+
+        if (isMultiMinuteVideo && knownStartTime && knownDuration && knownDuration > 60) {
+            // Fetch the per-minute star annotations in the background so playback can
+            // start immediately, then enable the toggle as soon as the overlays are ready.
+            annotationToggleContainer.style.opacity = '0.5';
+            annotationCheckbox.disabled = true;
+            let minuteUrls = null;
+
+            const loadMinuteOverlays = async () => {
+                if (minuteUrls) return;
+                const minuteCount = Math.max(1, Math.ceil(knownDuration / 60));
+                const startMs = knownStartTime * 1000;
+                const promises = [];
+                for (let i = 0; i < minuteCount; i++) {
+                    const ts = new Date(startMs + i * 60000 + 30000);
+                    const tsStr = ts.toISOString().slice(0, 19);
+                    const url = `index.php?action=fetch_archive_annotation&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(tsStr)}`;
+                    promises.push(
+                        fetch(url)
+                            .then(r => r.json())
+                            .then(d => (d.success && d.annotation_url) ? d.annotation_url : null)
+                            .catch(() => null)
+                    );
+                }
+                const urls = await Promise.all(promises);
+                if (urls.some(Boolean)) {
+                    minuteUrls = urls;
                     annotationToggleContainer.style.opacity = '1';
                     annotationCheckbox.disabled = false;
-                } else {
+                    if (annotationCheckbox.checked) updateAnnotationOverlay();
+                }
+                // If no overlays are available, leave the control greyed out/disabled.
+            };
+
+            loadMinuteOverlays();
+
+            const updateAnnotationOverlay = () => {
+                if (!annotationCheckbox.checked || !minuteUrls) return;
+                const relTime = Math.max(0, useAbsoluteTime ? video.currentTime - absoluteStartTime : video.currentTime);
+                const idx = Math.min(minuteUrls.length - 1, Math.max(0, Math.floor(relTime / 60)));
+                setAnnotationOverlay(minuteUrls[idx]);
+            };
+
+            video.addEventListener('timeupdate', updateAnnotationOverlay);
+            annotationCheckbox.addEventListener('change', () => {
+                annotationOverlay.style.opacity = annotationCheckbox.checked && minuteUrls ? '0.6' : '0';
+                updateAnnotationOverlay();
+            });
+        } else {
+            const annotationApiUrl = `index.php?action=fetch_archive_annotation&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(annotationTimestamp)}`;
+            fetch(annotationApiUrl)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.annotation_url) {
+                        setAnnotationOverlay(data.annotation_url);
+                        annotationToggleContainer.style.opacity = '1';
+                        annotationCheckbox.disabled = false;
+                    } else {
+                        annotationToggleContainer.style.opacity = '0.5';
+                        annotationCheckbox.disabled = true;
+                    }
+                })
+                .catch(err => {
                     annotationToggleContainer.style.opacity = '0.5';
                     annotationCheckbox.disabled = true;
-                }
-            })
-            .catch(err => {
-                annotationToggleContainer.style.opacity = '0.5';
-                annotationCheckbox.disabled = true;
-            });
+                });
 
-        // Annotation toggle handler - toggle opacity (0.6)
-        annotationCheckbox.addEventListener('change', () => {
-            annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.6' : '0';
-        });
+            // Annotation toggle handler - toggle opacity (0.6)
+            annotationCheckbox.addEventListener('change', () => {
+                annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.6' : '0';
+            });
+        }
         } // end if (!timelapseFull)
     }
 
@@ -1075,11 +1146,6 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     // Base epoch from filename timestamp (e.g. 2026-07-10T22:42:00 UTC)
     const videoBaseEpochMs = videoTimestamp ? Date.parse(videoTimestamp + 'Z') : null;
-    // Some station videos use the Unix epoch as their media timeline start
-    // (currentTime is absolute seconds since 1970). Detect that at metadata load.
-    let useAbsoluteTime = false;
-    let absoluteStartTime = 0; // video.currentTime value at the start of the media
-
     // Helper: format a UTC Date as "YYYY-MM-DD HH:MM:SS.cc"
     function formatUtcTimestamp(dateMs, subSecOffset) {
         const d = new Date(dateMs);
@@ -1236,11 +1302,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     });
 
     // Scrubber handlers
-    const fmtTime = (s) => {
+    function fmtTime(s) {
         if (!isFinite(s)) return '0:00';
         const m = Math.floor(s / 60), sec = Math.floor(s % 60);
         return `${m}:${sec.toString().padStart(2, '0')}`;
-    };
+    }
     let scrubbing = false, wasPlayingBeforeScrub = false;
     let clipDuration = null, clipEndTime = null;
 
@@ -1275,6 +1341,9 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Some videos (especially downloaded MP4s with the moov atom at the end)
     // report their duration later than loadedmetadata; update when it changes.
     video.addEventListener('durationchange', () => {
+        // Force recomputation so an initial short duration is corrected.
+        clipDuration = null;
+        clipEndTime = null;
         computeClipBounds();
         if (isFinite(clipDuration)) {
             scrubber.max = clipDuration;
@@ -1285,26 +1354,32 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
     });
     // Detect absolute timeline lazily if loadedmetadata didn't catch it.
+    // Once detected, the start time must stay fixed so the scrubber doesn't drift
+    // as playback progresses.
+    let absoluteTimeDetected = false;
     const ensureAbsoluteTime = () => {
+        if (absoluteTimeDetected) return;
         if (knownStartTime !== null) {
-            if (!useAbsoluteTime) useAbsoluteTime = true;
+            useAbsoluteTime = true;
             absoluteStartTime = knownStartTime;
+            absoluteTimeDetected = true;
             return;
         }
-        let start = 0;
-        if (video.buffered.length > 0) {
-            start = video.buffered.start(0);
-        } else if (video.seekable.length > 0) {
+        let start = null;
+        if (video.seekable.length > 0) {
             start = video.seekable.start(0);
+        } else if (video.buffered.length > 0) {
+            start = video.buffered.start(0);
         }
-        if (start > 1e9) {
-            useAbsoluteTime = true;
-            absoluteStartTime = start;
-            return;
-        }
-        if (video.currentTime > 1e9 && !useAbsoluteTime) {
-            useAbsoluteTime = true;
-            absoluteStartTime = video.currentTime;
+        if (start !== null) {
+            if (start > 1e9) {
+                useAbsoluteTime = true;
+                absoluteStartTime = start;
+            } else {
+                useAbsoluteTime = false;
+                absoluteStartTime = 0;
+            }
+            absoluteTimeDetected = true;
         }
     };
 
@@ -2260,6 +2335,8 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                         name: file.name,
                         thumb_url: file.thumb_url,
                         isVideo: isVideo,
+                        duration: file.duration,
+                        start_time: file.start_time,
                         alternatives: file.alternatives || []
                     });
                 });
@@ -2303,6 +2380,10 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                         if (filename.endsWith('_tfe.mp4')) return 'tfe';
                         if (filename.endsWith('_teqh.mp4')) return 'teqh';
                         if (filename.endsWith('_tfeh.mp4')) return 'tfeh';
+                        const durVideoMatch = filename.match(/_dur(\d+)_(hires|lowres)\.mp4$/);
+                        if (durVideoMatch) return (durVideoMatch[2] === 'hires' ? 'vh' : 'vl') + durVideoMatch[1];
+                        const durImageMatch = filename.match(/_dur(\d+)_(image_long|image_lowres_long)\.jpg$/);
+                        if (durImageMatch) return (durImageMatch[2] === 'image_long' ? 'bhl' : 'bll') + durImageMatch[1];
                         const typeMap = { '_hires_hevc.mp4': 'vh', '_lowres_hevc.mp4': 'vl', '_hires.mp4': 'vh', '_lowres.mp4': 'vl', '_image_long.jpg': 'bhl', '_image_lowres_long.jpg': 'bll', '_image.jpg': 'bh', '_image_lowres.jpg': 'blr' };
                         let baseType = filename;
                         let isOverlay = false;

@@ -24,6 +24,7 @@
     "hour_label": "Time (0-23 UTC):",
     "minute_label": "Minutt (0-59):",
     "length_label": "Antall:",
+    "duration_label": "Varighet (min):",
     "interval_label": "Intervall (minutt):",
     "interval_label_days": "Intervall (dager):",
     "camera_legend": "Kamera:",

@@ -320,9 +320,12 @@ HTML_TEMPLATE = """
                 </div>
                 <div class="form-group time-group"><div><label for="hour">__{{hour_label}}__</label><div class="select-stepper"><button type="button" id="hour-prev-btn" class="date-nav-btn" aria-label="Previous hour">‹</button><select id="hour" name="hour" required><option value="" disabled selected>--</option></select><button type="button" id="hour-next-btn" class="date-nav-btn" aria-label="Next hour">›</button></div></div>
                 <div><label for="minute">__{{minute_label}}__</label><div class="select-stepper"><button type="button" id="minute-prev-btn" class="date-nav-btn" aria-label="Previous minute">‹</button><select id="minute" name="minute" required><option value="" disabled selected>--</option></select><button type="button" id="minute-next-btn" class="date-nav-btn" aria-label="Next minute">›</button></div></div></div>
-                <div class="form-group time-group">
+                <div class="form-group time-group" id="length-interval-group">
                     <div><label for="length">__{{length_label}}__</label><div class="select-stepper"><button type="button" id="length-prev-btn" class="date-nav-btn" aria-label="Previous length">‹</button><select id="length" name="length" required><option value="" disabled selected>--</option></select><button type="button" id="length-next-btn" class="date-nav-btn" aria-label="Next length">›</button></div></div>
                     <div><label for="interval" id="interval-label">__{{interval_label}}__</label><div class="select-stepper"><button type="button" id="interval-prev-btn" class="date-nav-btn" aria-label="Previous interval">‹</button><select id="interval" name="interval" required><option value="" disabled selected>--</option></select><button type="button" id="interval-next-btn" class="date-nav-btn" aria-label="Next interval">›</button></div></div>
+                </div>
+                <div class="form-group time-group" id="duration-group" style="display: none;">
+                    <div><label for="duration">__{{duration_label}}__</label><select id="duration" name="duration" required><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option></select></div>
                 </div>
                 <fieldset class="form-group">
                     <legend>__{{camera_legend}}__</legend>
@@ -406,13 +409,15 @@ def _interpolate_track(track_points, max_interval_sec):
 
 
 class FileProcessor:
-    def __init__(self, task_id, station_id, station_code, cam, time_utc, file_type, all_pass_data, pto_data_cache, hevc_supported=False, translations=None, ssh_control_socket=None, status_file=None, current_step=0, total_steps=1, results_ref=None, errors_ref=None):
+    def __init__(self, task_id, station_id, station_code, cam, time_utc, file_type, all_pass_data, pto_data_cache, hevc_supported=False, translations=None, ssh_control_socket=None, status_file=None, current_step=0, total_steps=1, results_ref=None, errors_ref=None, duration=1):
         self.task_id, self.station_id, self.station_code, self.cam, self.time_utc, self.file_type = task_id, station_id, station_code, cam, time_utc, file_type
+        self.duration = max(1, int(duration))
         self.all_pass_data, self.pto_data_cache, self.hevc_supported = all_pass_data, pto_data_cache, hevc_supported
         self.translations = translations or {}
         self.ssh_control_socket = ssh_control_socket
         self.status_file = status_file
         self.current_step = current_step
+        self.current_sub_step = 0
         self.total_steps = total_steps
         self.results_ref = results_ref
         self.errors_ref = errors_ref
@@ -435,7 +440,8 @@ class FileProcessor:
         self.is_image, self.is_long_integration, self.is_low_res = self.file_type.startswith('image'), self.file_type.endswith('_long'), 'lowres' in self.file_type
         t = self.time_utc
         base_name = f"{self.station_code}_cam{self.cam}_{t.strftime('%Y%m%d')}_{t.strftime('%H%M')}"
-        base_name_with_type = f"{base_name}_{self.file_type}"
+        duration_suffix = f"_dur{self.duration}" if self.duration > 1 and (not self.is_image or self.is_long_integration) else ""
+        base_name_with_type = f"{base_name}{duration_suffix}_{self.file_type}"
         if self.is_image:
             self.output_filepath = os.path.join(DOWNLOAD_DIR, f"{base_name_with_type}.jpg")
             self.overlay_filepath = os.path.join(DOWNLOAD_DIR, f"{base_name_with_type}{overlay_suffix}.jpg")
@@ -480,7 +486,7 @@ class FileProcessor:
                     part_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
                     file_pct = min(part_size / remote_size, 0.99)
                     update_status(self.status_file, "progress", {
-                        "step": self.current_step + file_pct,
+                        "step": self.current_step * self.duration + self.current_sub_step + file_pct,
                         "total": self.total_steps,
                         "message": msg,
                         "files": self.results_ref if self.results_ref is not None else {},
@@ -571,6 +577,142 @@ class FileProcessor:
                 os.remove(temp_path)
             return False
 
+    def _download_minute_video(self, t, video_path, hevc_path, force_h264=False):
+        """Download a single minute's source video and return an H.264 path."""
+        source_prefix = 'mini' if self.is_low_res else 'full'
+        remote_dir = f"/meteor/cam{self.cam}/{t.strftime('%Y%m%d')}/{t.strftime('%H')}"
+        temp_path = video_path + ".tmp"
+        self._scp_file(f"{remote_dir}/{source_prefix}_{t.strftime('%M')}.mp4", temp_path)
+        codec = internal_probe_codec(temp_path)
+        if codec == 'hevc':
+            os.rename(temp_path, hevc_path)
+            if (force_h264 or not self.hevc_supported) and not os.path.exists(video_path):
+                self._transcode_to_h264_blocking(hevc_path, video_path)
+            return video_path if os.path.exists(video_path) else (hevc_path if os.path.exists(hevc_path) else None)
+        else:
+            os.rename(temp_path, video_path)
+            return video_path
+
+    def _concat_videos(self, input_paths, output_path):
+        """Concatenate a list of MP4s (copy streams) into a single continuous MP4."""
+        list_path = output_path + ".concat_list.txt"
+        with open(list_path, 'w') as f:
+            for p in input_paths:
+                f.write(f"file '{p}'\n")
+        temp_path = output_path + ".part"
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0", "-i", list_path,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-f", "mp4", temp_path
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=600)
+            os.replace(temp_path, output_path)
+        finally:
+            if os.path.exists(list_path):
+                os.remove(list_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def _apply_absolute_timeline(self, input_path, output_path, start_ts):
+        """Shift a relative-timeline MP4 so its start time is the Unix-epoch start_ts."""
+        if not start_ts:
+            os.replace(input_path, output_path)
+            return
+        temp_path = output_path + ".abs.part"
+        creation_time = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", input_path,
+            "-c", "copy",
+            "-copyts",
+            "-output_ts_offset", str(start_ts),
+            "-video_track_timescale", "12800",
+            "-movflags", "+faststart",
+            "-metadata", f"creation_time={creation_time}",
+            "-f", "mp4", temp_path
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=120)
+            os.replace(temp_path, output_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def process_multi_minute(self):
+        """Download consecutive minute videos and produce one continuous output."""
+        if self.duration <= 1:
+            return self.process()
+        if self.is_image and not self.is_long_integration:
+            self.errors.append(f"error_for_camera|cam={self.cam},time={self.time_utc.strftime('%H:%M')}")
+            return None
+
+        times = [self.time_utc + timedelta(minutes=i) for i in range(self.duration)]
+        temp_dir = os.path.join(DOWNLOAD_DIR, f"{self.station_code}_cam{self.cam}_{self.time_utc.strftime('%Y%m%d')}_{self.time_utc.strftime('%H%M')}_{self.file_type}_dur{self.duration}_tmp")
+        os.makedirs(temp_dir, exist_ok=True)
+        minute_clips = []
+        try:
+            for i, t in enumerate(times):
+                self.current_sub_step = i
+                base = os.path.join(temp_dir, f"min_{t.strftime('%H%M')}")
+                video_path = base + ".mp4"
+                hevc_path = base + "_hevc.mp4"
+                try:
+                    final_source = self._download_minute_video(t, video_path, hevc_path, force_h264=True)
+                except Exception as e:
+                    logging.warning(f"Task {self.task_id} - Could not download minute {t.strftime('%H:%M')} for cam {self.cam}: {e}")
+                    final_source = None
+                if not final_source:
+                    self.errors.append(f"error_source_file|cam={self.cam},time={t.strftime('%H:%M')}")
+                    continue
+                minute_clips.append({'time': t, 'path': final_source})
+                if self.status_file:
+                    update_status(self.status_file, "progress", {
+                        "step": self.current_step * self.duration + i + 1,
+                        "total": self.total_steps,
+                        "message": f"status_processing_file_of_total|i={self.current_step+1},total={self.total_steps}",
+                        "files": self.results_ref if self.results_ref is not None else {},
+                        "errors": self.errors_ref if self.errors_ref is not None else []
+                    })
+
+            if not minute_clips:
+                self.errors.append(f"error_source_file|cam={self.cam},time={self.time_utc.strftime('%H:%M')}")
+                return None
+
+            actual_duration = len(minute_clips)
+            if actual_duration < self.duration:
+                logging.warning(f"Task {self.task_id} - Only {actual_duration}/{self.duration} minute files available for cam {self.cam}; producing dur{actual_duration} output.")
+                self.duration = actual_duration
+                self._determine_paths_and_types()
+
+            source_paths = [c['path'] for c in minute_clips]
+            first_start_ts = internal_probe_start_time(source_paths[0]) or self.time_utc.timestamp()
+            concat_path = os.path.join(temp_dir, "concat.mp4")
+            self._concat_videos(source_paths, concat_path)
+            if self.is_image:
+                if os.path.exists(STACK_SCRIPT):
+                    command = [sys.executable, STACK_SCRIPT, concat_path, "-o", self.output_filepath]
+                    subprocess.run(command, check=True, capture_output=True, text=True, timeout=1200)
+                else:
+                    logging.error(f"Stack script not found at {STACK_SCRIPT}")
+                    return None
+                final_path = self.output_filepath
+            else:
+                self._apply_absolute_timeline(concat_path, self.output_filepath_h264, first_start_ts)
+                final_path = self.output_filepath_h264
+
+            if not os.path.exists(final_path):
+                return None
+            return self.get_final_result(final_path, is_flight=self.relevant_pass and 'flight_info' in self.relevant_pass)
+        except Exception as e:
+            logging.error(f"Task {self.task_id} - Multi-minute processing failed for cam {self.cam}: {e}", exc_info=True)
+            self.errors.append(f"error_for_camera|cam={self.cam},time={self.time_utc.strftime('%H:%M')}")
+            return None
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def _ensure_base_media_exists(self):
         if self.is_image:
             if os.path.exists(self.output_filepath) or os.path.exists(self.overlay_filepath): return self.output_filepath
@@ -655,6 +797,8 @@ class FileProcessor:
             return self.output_filepath_h264 if os.path.exists(self.output_filepath_h264) else final_path
 
     def process(self):
+        if self.duration > 1 and (not self.is_image or self.is_long_integration):
+            return self.process_multi_minute()
         try:
             base_media_path = self._ensure_base_media_exists()
             if not base_media_path or not os.path.exists(base_media_path):
@@ -706,7 +850,14 @@ class FileProcessor:
         has_overlay = "_overlay" in final_filename
         base_name_part = '_'.join(final_filename.split('_')[:4])
         
-        alternatives = [{"url": f"download/{f}", "name": f} for f in os.listdir(DOWNLOAD_DIR) if f.startswith(base_name_part) and f != final_filename and '_thumb.' not in f and '_track.png' not in f]
+        def _is_alt_file(f):
+            if f == final_filename: return False
+            if not f.startswith(base_name_part): return False
+            if '_thumb.' in f or '_track.png' in f: return False
+            if f.endswith('.part') or f.endswith('.concat.mp4') or f.endswith('.concat_list.txt') or f.endswith('.faststart.tmp'): return False
+            if os.path.isdir(os.path.join(DOWNLOAD_DIR, f)): return False
+            return True
+        alternatives = [{"url": f"download/{f}", "name": f} for f in os.listdir(DOWNLOAD_DIR) if _is_alt_file(f)]
         result = {"url": f"download/{final_filename}", "name": final_filename, "utc_time_iso": self.time_utc.isoformat(), "alternatives": alternatives}
         # Include the real media duration and start_time so the frontend
         # scrubber/timestamp can work even when the browser reports absolute
@@ -861,6 +1012,9 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             except Exception as e:
                 logging.warning(f"Worker {task_id} - Could not load translations for lang '{lang_code}': {e}")
 
+        duration = max(1, int(data.get('duration', 1)))
+        is_multi_minute = duration > 1 and (data['file_type'] in ('lowres', 'hires') or data['file_type'].endswith('_long'))
+
         if 'camera_views' in data and data['camera_views']:
             for view in data['camera_views']:
                 start = datetime.fromisoformat(view['start_utc']).replace(second=0, microsecond=0)
@@ -868,6 +1022,10 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 while start <= end:
                     files_to_process.append({'time': start, 'cam': view['camera']})
                     start += timedelta(minutes=1)
+        elif is_multi_minute:
+            start_time = datetime.strptime(f"{data['date']} {data['hour']}:{data['minute']}", '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
+            for cam in data['cameras']:
+                files_to_process.append({'time': start_time, 'cam': int(cam)})
         else:
             start_time = datetime.strptime(f"{data['date']} {data['hour']}:{data['minute']}", '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
             for i in range(int(data['length'])):
@@ -963,7 +1121,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         stitch_jobs      = []   # [{process, t_key, t_iso, stdout_path}]
         stitch_done      = 0    # stitch outputs added to results so far
         stitch_output_count = (int(do_fisheye) + int(do_equirect)) * len(stitch_cams_expected) if do_stitch else 0
-        total_steps = len(files_to_process) + stitch_output_count
+        total_steps = (duration * len(files_to_process) if is_multi_minute else len(files_to_process)) + stitch_output_count
 
         master_lock_file = os.path.join(LOCK_DIR, f"{master_task_id}.lock")
         while not processing_done:
@@ -972,9 +1130,10 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 break
                 
             if current_file_item:
-                update_status(station_status_file, "progress", {"step": current_file_idx, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
+                start_step = (current_file_idx * duration) if is_multi_minute else current_file_idx
+                update_status(station_status_file, "progress", {"step": start_step, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
                 
-                proc = FileProcessor(task_id, station_id, station_code, current_file_item['cam'], current_file_item['time'], data['file_type'], pass_data_list, pto_data_cache, data.get('hevc_supported', False), translations=translations, ssh_control_socket=ssh_control_socket, status_file=station_status_file, current_step=current_file_idx, total_steps=total_steps, results_ref=results, errors_ref=errors)
+                proc = FileProcessor(task_id, station_id, station_code, current_file_item['cam'], current_file_item['time'], data['file_type'], pass_data_list, pto_data_cache, data.get('hevc_supported', False), translations=translations, ssh_control_socket=ssh_control_socket, status_file=station_status_file, current_step=current_file_idx, total_steps=total_steps, results_ref=results, errors_ref=errors, duration=duration)
                 job = proc.process()
                 
                 errors.extend(proc.errors)
@@ -985,7 +1144,8 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 elif job:
                     t_key_dl = current_file_item['time'].strftime('%H:%M')
                     results.setdefault(t_key_dl, []).append(job)
-                    update_status(station_status_file, "progress", {"step": current_file_idx + 1, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
+                    end_step = ((current_file_idx + 1) * duration) if is_multi_minute else (current_file_idx + 1)
+                    update_status(station_status_file, "progress", {"step": end_step, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
 
                     # Track downloaded image for stitch readiness check
                     if do_stitch:
@@ -1290,7 +1450,12 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
             elif active_pass_data:
                 num_files = sum(round((datetime.fromisoformat(v['end_utc']) - datetime.fromisoformat(v['start_utc'])).total_seconds() / 60) + 1 for v in active_pass_data.get('camera_views', []))
             else:
-                num_files = len(station_ids) * len(data.get('cameras', [])) * int(data.get('length', 1))
+                duration = int(data.get('duration', 1))
+                is_multi_minute = duration > 1 and (file_type in ('lowres', 'hires') or file_type.endswith('_long'))
+                if is_multi_minute:
+                    num_files = len(station_ids) * len(data.get('cameras', []))
+                else:
+                    num_files = len(station_ids) * len(data.get('cameras', [])) * int(data.get('length', 1))
             if num_files > limit: raise ValueError(f"error_too_many_files|num_files={num_files},limit={limit}")
             
             if not active_pass_data and file_type in ('timelapse', 'timelapse_hires'):
@@ -1319,7 +1484,12 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
                     total_usage_bytes = station_usage_today.get("total", 0)
                     site_usage_bytes = station_usage_today.get("sites", {}).get(user_ip, 0)
                     avg_size_bytes = AVG_FILE_SIZES_MB.get(file_type, 2) * 1024 * 1024
-                    num_files_for_station = sum(round((datetime.fromisoformat(v['end_utc']) - datetime.fromisoformat(v['start_utc'])).total_seconds() / 60) + 1 for v in active_pass_data.get('camera_views', []) if v['station_id'] == station_id) if active_pass_data else len(data.get('cameras', [])) * int(data.get('length', 1))
+                    if active_pass_data:
+                        num_files_for_station = sum(round((datetime.fromisoformat(v['end_utc']) - datetime.fromisoformat(v['start_utc'])).total_seconds() / 60) + 1 for v in active_pass_data.get('camera_views', []) if v['station_id'] == station_id)
+                    else:
+                        duration_q = int(data.get('duration', 1))
+                        is_multi_minute_q = duration_q > 1 and (file_type in ('lowres', 'hires') or file_type.endswith('_long'))
+                        num_files_for_station = len(data.get('cameras', [])) * (duration_q if is_multi_minute_q else int(data.get('length', 1)))
                     estimated_request_size = num_files_for_station * avg_size_bytes
                     if site_usage_bytes + estimated_request_size > per_site_quota_bytes:
                         aggregated_errors.setdefault(station_code, []).append(f"error_user_quota_exceeded|limit={PER_SITE_QUOTA_LIMIT_MB},station_code={station_code}"); continue

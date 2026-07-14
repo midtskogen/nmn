@@ -24,6 +24,7 @@
     "hour_label": "Tunti (0-23 UTC):",
     "minute_label": "Minuutti (0-59):",
     "length_label": "Lukumäärä:",
+    "duration_label": "Kesto (min):",
     "interval_label": "Intervalli:",
     "interval_label_days": "Intervalli (päivät):",
     "camera_legend": "Kamera:",

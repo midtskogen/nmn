@@ -24,6 +24,7 @@
     "hour_label": "Hodina (0-23 UTC):",
     "minute_label": "Minuta (0-59):",
     "length_label": "Počet:",
+    "duration_label": "Délka (min):",
     "interval_label": "Interval:",
     "interval_label_days": "Interval (dny):",
     "camera_legend": "Kamera:",

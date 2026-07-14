@@ -52,6 +52,34 @@ logging.basicConfig(level=logging.INFO,
 
 # --- Inline Helper: Robust Video Probing ---
 # Defined here to prevent ImportError crashes if media_processor.py is out of sync.
+def internal_probe_duration(filepath):
+    """Return video duration in seconds, or None if it cannot be determined."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+def internal_probe_start_time(filepath):
+    """Return container start_time in seconds, or None if it cannot be determined."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=start_time",
+             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
 def internal_probe_codec(filepath):
     try:
         command = [
@@ -473,8 +501,10 @@ class FileProcessor:
         logging.info(f"Task {self.task_id} - Transcoding {os.path.basename(input_hevc_path)} to H.264...")
         temp_output = output_h264_path + ".part"
         try:
-            # Probe source start_time (Unix PTS) so we can write it as creation_time
+            # Probe source start_time (Unix PTS) so the transcoded timeline starts
+            # at the same absolute timestamp. Also preserve it as creation_time metadata.
             creation_time_arg = []
+            output_ts_offset_arg = []
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", input_hevc_path],
@@ -486,19 +516,59 @@ class FileProcessor:
                     try:
                         # start_time is a float Unix timestamp string like "1783641601.236016"
                         ts = float(start_time_str)
+                        output_ts_offset_arg = ["-output_ts_offset", str(ts)]
                         creation_time_arg = ["-metadata", f"creation_time={datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}Z"]
                     except ValueError:
                         # Already an ISO string (from tags.creation_time)
                         creation_time_arg = ["-metadata", f"creation_time={start_time_str}"]
             except Exception:
                 pass
-            command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", input_hevc_path, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "copy", "-map_metadata", "0"] + creation_time_arg + ["-f", "mp4", "-y", temp_output]
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", input_hevc_path,
+            ] + output_ts_offset_arg + [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                # One-second GOP / fixed keyframe interval makes scrubbing responsive.
+                "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+                # Keep a fine timescale so the fractional start_time survives the muxer.
+                "-video_track_timescale", "12800",
+                "-c:a", "copy", "-map_metadata", "0", "-movflags", "+faststart"
+            ] + creation_time_arg + ["-f", "mp4", "-y", temp_output]
             subprocess.run(command, check=True, capture_output=True, timeout=600)
             os.rename(temp_output, output_h264_path)
             return True
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
             logging.error(f"Task {self.task_id} - H.264 transcoding failed: {e.stderr.decode('utf-8', errors='ignore') if hasattr(e, 'stderr') else e}")
             if os.path.exists(temp_output): os.remove(temp_output)
+            return False
+
+    def _ensure_faststart(self, input_path):
+        """Remux an MP4 so its metadata (moov atom) is at the start of the file.
+
+        Browsers need the moov atom up front to determine duration and allow
+        seeking/scrubbing before the entire file has downloaded. The input file
+        is replaced in-place. Returns True on success, False if remux failed.
+        """
+        temp_path = input_path + ".faststart.tmp"
+        try:
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", input_path,
+                # Preserve input timestamps so the absolute start_time from station
+                # files is not reset to zero during the faststart remux.
+                "-copyts",
+                "-c", "copy",
+                "-map_metadata", "0",
+                "-movflags", "+faststart",
+                "-f", "mp4",
+                temp_path,
+            ]
+            subprocess.run(command, check=True, capture_output=True, timeout=120)
+            os.replace(temp_path, input_path)
+            return True
+        except Exception as e:
+            logging.warning(f"Task {self.task_id} - Faststart remux failed for {input_path}: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
             return False
 
     def _ensure_base_media_exists(self):
@@ -516,17 +586,20 @@ class FileProcessor:
                     # Now the logic below will see _hevc exists but _h264 does not, and trigger transcode.
             
             # 2. Transcode Check (Hot-Request):
-            # If we need H.264, it's missing, but HEVC source exists: Transcode locally.
-            if not self.hevc_supported and os.path.exists(self.output_filepath_hevc) and not os.path.exists(self.output_filepath_h264):
+            # Browsers scrub/seek H.264 far more reliably than raw-station HEVC,
+            # especially with long GOPs. Always generate a web-optimized H.264
+            # copy when we have an HEVC source but no H.264 yet.
+            if os.path.exists(self.output_filepath_hevc) and not os.path.exists(self.output_filepath_h264):
                 if self._transcode_to_h264_blocking(self.output_filepath_hevc, self.output_filepath_h264):
                     return self.output_filepath_h264
                 else:
-                    # Transcode failed. Return HEVC if available so client gets something.
+                    # Transcode failed. Fall back to HEVC so the client gets something.
                     if os.path.exists(self.output_filepath_hevc): return self.output_filepath_hevc
 
             # 3. Standard Return:
-            if self.hevc_supported and os.path.exists(self.output_filepath_hevc): return self.output_filepath_hevc
             if os.path.exists(self.output_filepath_h264): return self.output_filepath_h264
+            # If only HEVC exists (e.g. transcode not yet run), return it as fallback.
+            if os.path.exists(self.output_filepath_hevc): return self.output_filepath_hevc
 
         # 4. Download from Station (if local file missing):
         t, source_prefix = self.time_utc, 'mini' if self.is_low_res else 'full'
@@ -571,11 +644,15 @@ class FileProcessor:
             codec = internal_probe_codec(temp_download_path)
             final_path = self.output_filepath_hevc if codec == 'hevc' else self.output_filepath_h264
             os.rename(temp_download_path, final_path)
-        
-            if codec == 'hevc' and not self.hevc_supported:
+            # Make sure downloaded MP4s are web-optimized (moov atom at start).
+            self._ensure_faststart(final_path)
+
+            # Always produce a web-optimized H.264 copy for reliable scrubbing,
+            # regardless of whether the client reports HEVC support.
+            if codec == 'hevc':
                 self._transcode_to_h264_blocking(final_path, self.output_filepath_h264)
-            
-            return self.output_filepath_hevc if self.hevc_supported and os.path.exists(self.output_filepath_hevc) else self.output_filepath_h264
+
+            return self.output_filepath_h264 if os.path.exists(self.output_filepath_h264) else final_path
 
     def process(self):
         try:
@@ -631,6 +708,16 @@ class FileProcessor:
         
         alternatives = [{"url": f"download/{f}", "name": f} for f in os.listdir(DOWNLOAD_DIR) if f.startswith(base_name_part) and f != final_filename and '_thumb.' not in f and '_track.png' not in f]
         result = {"url": f"download/{final_filename}", "name": final_filename, "utc_time_iso": self.time_utc.isoformat(), "alternatives": alternatives}
+        # Include the real media duration and start_time so the frontend
+        # scrubber/timestamp can work even when the browser reports absolute
+        # Unix-epoch timestamps for the timeline.
+        if not self.is_image:
+            duration = internal_probe_duration(final_filepath)
+            if duration is not None:
+                result["duration"] = duration
+            start_ts = internal_probe_start_time(final_filepath)
+            if start_ts is not None:
+                result["start_time"] = start_ts
         
         thumb_kwargs = {
             "task_id": self.task_id, "path": final_filepath, "file_type": self.file_type, "station_code": self.station_code, "cam_num": self.cam,

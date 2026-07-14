@@ -684,6 +684,11 @@ function showIframeModal(url, title) {
  * @param {Object} initialDimensions - Optional {width, height} to use until content loads.
  */
 export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex = -1, initialDimensions = null) {
+    const mediaInfo = mediaList && mediaIndex >= 0 ? mediaList[mediaIndex] : null;
+    const knownDuration = (mediaInfo && typeof mediaInfo.duration === 'number' && isFinite(mediaInfo.duration))
+        ? mediaInfo.duration : null;
+    const knownStartTime = (mediaInfo && typeof mediaInfo.start_time === 'number' && isFinite(mediaInfo.start_time))
+        ? mediaInfo.start_time : null;
     const modalBackdrop = createEl('div', { id: 'video-modal-backdrop' });
     const modalContent = createEl('div', { id: 'video-modal-content', className: 'preview-modal' });
 
@@ -825,7 +830,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         type: 'range', min: '0', max: '100', step: '0.1', value: '0',
         className: 'preview-scrubber'
     });
-    scrubberRow.append(scrubberTime, scrubber, scrubberDur);
+    scrubberRow.append(scrubberTime, scrubber);
 
     // Filter controls - all on one line
     const filterControls = createEl('div', { className: 'preview-filter-controls' });
@@ -892,7 +897,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const timestampToggleContainer = createEl('label', { className: 'preview-timestamp-toggle' });
     const timestampCheckbox = createEl('input', {
         type: 'checkbox',
-        checked: true
+        checked: false
     });
     timestampToggleContainer.append(timestampCheckbox, ' ', t('show_timestamp', 'Show timestamp'));
 
@@ -1070,6 +1075,10 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     // Base epoch from filename timestamp (e.g. 2026-07-10T22:42:00 UTC)
     const videoBaseEpochMs = videoTimestamp ? Date.parse(videoTimestamp + 'Z') : null;
+    // Some station videos use the Unix epoch as their media timeline start
+    // (currentTime is absolute seconds since 1970). Detect that at metadata load.
+    let useAbsoluteTime = false;
+    let absoluteStartTime = 0; // video.currentTime value at the start of the media
 
     // Helper: format a UTC Date as "YYYY-MM-DD HH:MM:SS.cc"
     function formatUtcTimestamp(dateMs, subSecOffset) {
@@ -1083,6 +1092,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Helper to format timestamp overlay: base epoch + playback offset
     function getFormattedTimestamp(seconds) {
         const effectiveSeconds = seconds || 0;
+        // Safety net: if the video timeline is Unix-epoch based, treat it as absolute.
+        if (useAbsoluteTime || effectiveSeconds > 1e9) {
+            // Media timeline itself is Unix-epoch seconds (e.g. raw station video).
+            return formatUtcTimestamp(effectiveSeconds * 1000, effectiveSeconds);
+        }
         if (videoBaseEpochMs !== null) {
             return formatUtcTimestamp(videoBaseEpochMs + effectiveSeconds * 1000, effectiveSeconds);
         }
@@ -1112,13 +1126,17 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
         // Try to detect frame rate from video or default to 30
         frameStep = 1 / 30;
-        // Trigger timeupdate to refresh timestamp overlay at currentTime=0
+        // Station videos often use Unix-epoch timestamps as their media timeline.
+        // Detect that so the overlay shows the actual UTC time, not filename time.
+        ensureAbsoluteTime();
+        // Trigger timeupdate to refresh timestamp overlay at the current start time
         video.dispatchEvent(new Event('timeupdate'));
     });
 
     video.addEventListener('timeupdate', () => {
         // Update timestamp overlay with date and 2-decimal precision (lower right)
         if (timelapseFull) return;
+        ensureAbsoluteTime();
         if (timestampCheckbox.checked) {
             timestampOverlay.textContent = getFormattedTimestamp(video.currentTime);
             timestampOverlay.style.display = 'block';
@@ -1182,6 +1200,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             video.pause();
             playPauseBtn.textContent = '▶';
         } else {
+            // If playback has already ended, explicitly seek back to the
+            // start so the scrubber and video both reset on replay.
+            if (video.ended) {
+                video.currentTime = absoluteStartTime;
+            }
             video.play();
             playPauseBtn.textContent = '⏸';
         }
@@ -1192,19 +1215,19 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         video.pause();
         isPlaying = false;
         playPauseBtn.textContent = '▶';
-        video.currentTime = Math.max(0, video.currentTime - frameStep);
+        video.currentTime = Math.max(absoluteStartTime, video.currentTime - frameStep);
     });
 
     frameForwardBtn.addEventListener('click', () => {
         video.pause();
         isPlaying = false;
         playPauseBtn.textContent = '▶';
-        video.currentTime = Math.min(video.duration, video.currentTime + frameStep);
+        video.currentTime = Math.min(absoluteStartTime + getVideoDuration(), video.currentTime + frameStep);
     });
 
     // Rewind button handler
     rewindBtn.addEventListener('click', () => {
-        video.currentTime = 0;
+        video.currentTime = absoluteStartTime;
         if (!isPlaying) {
             video.play();
             isPlaying = true;
@@ -1219,30 +1242,147 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         return `${m}:${sec.toString().padStart(2, '0')}`;
     };
     let scrubbing = false, wasPlayingBeforeScrub = false;
+    let clipDuration = null, clipEndTime = null;
+
+    // Compute the real clip duration/end once. The browser may update buffered ranges
+    // as it decodes, so never derive duration from buffered ranges.
+    const computeClipBounds = () => {
+        if (clipDuration !== null) return; // already computed
+        ensureAbsoluteTime();
+        let dur = null;
+        if (knownDuration !== null && isFinite(knownDuration) && knownDuration > 0) {
+            dur = knownDuration;
+        } else if (useAbsoluteTime && absoluteStartTime > 1e9 && video.duration > absoluteStartTime) {
+            // For Unix-epoch-timeline videos the browser reports the absolute end time.
+            dur = video.duration - absoluteStartTime;
+        } else {
+            dur = video.duration;
+        }
+        if (!isFinite(dur) || dur <= 0) dur = 0;
+        clipDuration = dur;
+        clipEndTime = useAbsoluteTime ? absoluteStartTime + dur : dur;
+    };
+
     video.addEventListener('loadedmetadata', () => {
-        if (isFinite(video.duration)) {
-            scrubber.max = video.duration;
-            scrubberDur.textContent = fmtTime(video.duration);
+        computeClipBounds();
+        if (isFinite(clipDuration)) {
+            scrubber.max = clipDuration;
+            scrubberDur.textContent = useAbsoluteTime
+                ? getFormattedTimestamp(clipEndTime)
+                : fmtTime(clipDuration);
         }
     });
-    video.addEventListener('timeupdate', () => {
-        if (!scrubbing && isFinite(video.duration)) {
-            scrubber.value = video.currentTime;
-            scrubberTime.textContent = fmtTime(video.currentTime);
+    // Some videos (especially downloaded MP4s with the moov atom at the end)
+    // report their duration later than loadedmetadata; update when it changes.
+    video.addEventListener('durationchange', () => {
+        computeClipBounds();
+        if (isFinite(clipDuration)) {
+            scrubber.max = clipDuration;
+            scrubberDur.textContent = useAbsoluteTime
+                ? getFormattedTimestamp(clipEndTime)
+                : fmtTime(clipDuration);
+            updateScrubber();
         }
     });
+    // Detect absolute timeline lazily if loadedmetadata didn't catch it.
+    const ensureAbsoluteTime = () => {
+        if (knownStartTime !== null) {
+            if (!useAbsoluteTime) useAbsoluteTime = true;
+            absoluteStartTime = knownStartTime;
+            return;
+        }
+        let start = 0;
+        if (video.buffered.length > 0) {
+            start = video.buffered.start(0);
+        } else if (video.seekable.length > 0) {
+            start = video.seekable.start(0);
+        }
+        if (start > 1e9) {
+            useAbsoluteTime = true;
+            absoluteStartTime = start;
+            return;
+        }
+        if (video.currentTime > 1e9 && !useAbsoluteTime) {
+            useAbsoluteTime = true;
+            absoluteStartTime = video.currentTime;
+        }
+    };
+
+    const getVideoDuration = () => {
+        if (clipDuration === null) computeClipBounds();
+        return clipDuration;
+    };
+
+    const updateScrubber = () => {
+        const dur = getVideoDuration();
+        if (!scrubbing && isFinite(dur)) {
+            ensureAbsoluteTime();
+            const relativeTime = Math.max(0, video.currentTime - absoluteStartTime);
+            scrubber.value = relativeTime;
+            scrubberTime.textContent = useAbsoluteTime
+                ? getFormattedTimestamp(video.currentTime)
+                : fmtTime(relativeTime);
+        }
+    };
+    video.addEventListener('timeupdate', updateScrubber);
+    // Ensure the scrubber snaps to the correct position on explicit seeks
+    // (rewind, frame step, replay after ended) in addition to normal playback.
+    video.addEventListener('seeked', updateScrubber);
+    // Fallback animation-frame loop for players/browsers that fire timeupdate
+    // too sparsely (e.g. some HEVC / long-GOP files) so the thumb still moves.
+    let scrubberRafId = null;
+    const scrubberFrameLoop = () => {
+        updateScrubber();
+        if (!video.paused && !video.ended) {
+            scrubberRafId = requestAnimationFrame(scrubberFrameLoop);
+        } else {
+            scrubberRafId = null;
+        }
+    };
+    video.addEventListener('play', () => {
+        if (!scrubberRafId) scrubberRafId = requestAnimationFrame(scrubberFrameLoop);
+    });
+    video.addEventListener('pause', () => {
+        if (scrubberRafId) {
+            cancelAnimationFrame(scrubberRafId);
+            scrubberRafId = null;
+        }
+        updateScrubber();
+    });
+    video.addEventListener('ended', () => {
+        if (scrubberRafId) {
+            cancelAnimationFrame(scrubberRafId);
+            scrubberRafId = null;
+        }
+        updateScrubber();
+    });
+    let scrubStartCurrentTime = 0, scrubStartScrubberValue = 0;
+    // When the absolute start_time wasn't supplied/detected, derive the base
+    // from the currentTime and scrubber position at the start of the drag.
+    const getScrubberBase = () => {
+        if (absoluteStartTime > 1e9) return absoluteStartTime;
+        if (scrubStartCurrentTime > 1e9) {
+            return scrubStartCurrentTime - scrubStartScrubberValue;
+        }
+        return 0;
+    };
     scrubber.addEventListener('mousedown', () => {
         scrubbing = true;
         wasPlayingBeforeScrub = isPlaying;
+        scrubStartCurrentTime = video.currentTime;
+        scrubStartScrubberValue = parseFloat(scrubber.value);
         video.pause();
     });
     scrubber.addEventListener('input', () => {
-        video.currentTime = parseFloat(scrubber.value);
-        scrubberTime.textContent = fmtTime(video.currentTime);
+        const relativeTime = parseFloat(scrubber.value);
+        video.currentTime = getScrubberBase() + relativeTime;
+        scrubberTime.textContent = useAbsoluteTime
+            ? getFormattedTimestamp(video.currentTime)
+            : fmtTime(relativeTime);
     });
     scrubber.addEventListener('change', () => {
         scrubbing = false;
-        video.currentTime = parseFloat(scrubber.value);
+        video.currentTime = getScrubberBase() + parseFloat(scrubber.value);
         if (wasPlayingBeforeScrub) {
             video.play();
         } else {

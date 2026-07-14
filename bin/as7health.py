@@ -1560,6 +1560,7 @@ class AS7Diagnostic:
         print("="*60)
         # No root check here, functions handle permissions individually
 
+        self.backup_nmn_camera_files()
         self.check_nmn_user_and_dirs()
         self.check_nmn_config()
         self.check_nmn_connectivity()
@@ -1568,6 +1569,71 @@ class AS7Diagnostic:
         self.check_nmn_processes_and_services()
         self.check_nmn_logs()
         self.check_nmn_disk_space()
+
+    def backup_nmn_camera_files(self):
+        """Backs up NMN camera calibration/config files to /home/meteor/backup.
+
+        Copies files matching /meteor/cam?/lens*pto, /meteor/cam?/grid*png, and
+        /meteor/cam?/metdetect.conf. Symlinks are preserved as symlinks and the
+        directory structure under /meteor is retained. The old backup is only
+        overwritten when the new backup contains at least one file.
+        """
+        print("\n--- Backing up NMN Camera Files ---")
+        backup_root = "/home/meteor/backup"
+        patterns = [
+            "/meteor/cam?/lens*pto",
+            "/meteor/cam?/grid*png",
+            "/meteor/cam?/metdetect.conf",
+        ]
+
+        try:
+            parent = os.path.dirname(backup_root) or "/"
+            os.makedirs(parent, exist_ok=True)
+        except Exception as e:
+            self.log_issue("PERMISSION_DENIED", {'check': f"creating backup parent dir: {e}"})
+            return
+
+        staging = os.path.join(parent, ".backup_staging")
+        if os.path.isdir(staging):
+            shutil.rmtree(staging, ignore_errors=True)
+
+        files_copied = 0
+        try:
+            os.makedirs(staging, exist_ok=True)
+            for pattern in patterns:
+                for src in glob.glob(pattern):
+                    rel = os.path.relpath(src, "/meteor")
+                    dst = os.path.join(staging, rel)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+                    if os.path.islink(src):
+                        link_target = os.readlink(src)
+                        if os.path.lexists(dst):
+                            os.remove(dst)
+                        os.symlink(link_target, dst)
+                    else:
+                        shutil.copy2(src, dst)
+                    files_copied += 1
+
+            if files_copied == 0:
+                print("No matching camera files found; existing backup left untouched.")
+                shutil.rmtree(staging, ignore_errors=True)
+                return
+
+            backup_old = backup_root + ".old"
+            if os.path.exists(backup_old):
+                shutil.rmtree(backup_old, ignore_errors=True)
+            if os.path.exists(backup_root):
+                os.rename(backup_root, backup_old)
+            os.rename(staging, backup_root)
+            if os.path.exists(backup_old):
+                shutil.rmtree(backup_old, ignore_errors=True)
+
+            self.log_success(f"Backed up {files_copied} file(s) to {backup_root}")
+        except Exception as e:
+            self.log_issue("PERMISSION_DENIED", {'check': f"backing up NMN camera files: {e}"})
+            if os.path.isdir(staging):
+                shutil.rmtree(staging, ignore_errors=True)
 
     def check_nmn_user_and_dirs(self):
         """Checks for 'meteor' user, home, nmn, and bin symlink."""

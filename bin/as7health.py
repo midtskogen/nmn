@@ -2033,7 +2033,7 @@ class AS7Diagnostic:
 
         try:
             # Ensure the directory itself is readable by meteor
-            cmd_read_dir = ['sudo', '-u', 'meteor', 'test', '-r', bin_path]
+            cmd_read_dir = ['runuser', '-u', 'meteor', '--', 'test', '-r', bin_path]
             subprocess.run(cmd_read_dir, check=True, capture_output=True, timeout=5)
             # List files as root
             py_files = glob.glob(os.path.join(bin_path, "*.py"))
@@ -2058,7 +2058,7 @@ class AS7Diagnostic:
         for f in py_files:
             try:
                 # Check readability as meteor first
-                cmd_read = ['sudo', '-u', 'meteor', 'test', '-r', f]
+                cmd_read = ['runuser', '-u', 'meteor', '--', 'test', '-r', f]
                 subprocess.run(cmd_read, check=True, capture_output=True, timeout=5)
 
                 # Read file content as root
@@ -2145,7 +2145,7 @@ class AS7Diagnostic:
                 # Construct the command to add the bin_path to sys.path before importing
                 safe_bin_path = bin_path.replace("'", "'\\''") # Basic escaping
                 import_command = f"import sys; sys.path.insert(0, '{safe_bin_path}'); import {pkg}"
-                cmd_import = ['sudo', '-u', 'meteor', 'python3', '-c', import_command]
+                cmd_import = ['runuser', '-u', 'meteor', '--', 'python3', '-c', import_command]
                 #print(f"DEBUG: Running command: {' '.join(cmd_import)}") # Keep for debugging
                 subprocess.run(cmd_import, check=True, capture_output=True, text=True, timeout=60)
                 self.log_success(f"Import OK: {pkg}", indent=1)
@@ -2155,8 +2155,8 @@ class AS7Diagnostic:
                 self.log_issue('NMN_PY_IMPORT_MISSING', {'pkg': pkg, 'stderr': stderr_output}, indent=1)
                 failed_imports += 1
             except FileNotFoundError:
-                 self.log_issue("SYS_PKG_MISSING", {'pkg': 'python3', 'pkg_name': 'python3'}, indent=1)
-                 return # Cannot continue if python3 is missing
+                 self.log_issue("SYS_PKG_MISSING", {'pkg': 'runuser', 'pkg_name': 'util-linux'}, indent=1)
+                 return # Cannot continue if runuser is missing
             except Exception as e:
                 self.log_issue("PERMISSION_DENIED", {'check': f"running import test for {pkg} as meteor: {e}"}, indent=1)
                 failed_imports += 1

@@ -100,7 +100,8 @@ class ErrorCatalog:
         "IO_ERROR_DETECTED": {"type": "warning", "description": "I/O errors detected in the kernel log.", "reason": "The operating system is reporting errors when reading from or writing to a storage device. This is a strong indicator of a failing disk.", "fix": "This is a critical hardware warning. Back up your data immediately. Use tools like 'smartctl' to diagnose the disk and prepare to replace it."},
         "FS_READ_ONLY": {"type": "failure", "description": "A filesystem was remounted as read-only.", "reason": "This is a critical kernel protection measure, usually triggered by severe filesystem corruption or disk failure. The system cannot write any new data.", "fix": "Check 'dmesg' for details. Reboot the system and run 'fsck' on the affected partition. Prepare to replace the disk."},
         "OOM_KILLER_ACTIVE": {"type": "warning", "description": "The Out-of-Memory (OOM) killer was activated.", "reason": "The system ran out of available RAM and was forced to kill processes to survive. This can silently stop video capture or processing.", "fix": "Use 'htop' or 'free -m' to check memory usage. Identify the memory-hungry process. The system may need a RAM upgrade or swap adjustment."},
-        "SEGFAULT_DETECTED": {"type": "warning", "description": "A segmentation fault was detected in the system log.", "reason": "A key program (like 'ffmpeg', 'python', or 's3fs') crashed due to a critical memory error. This indicates software instability or hardware issues.", "fix": "Note the program that segfaulted from the log line. Ensure your software is up to date. If it persists, it could be a sign of faulty RAM."},
+        "SEGFAULT_DETECTED": {"type": "warning", "description": "Multiple segmentation faults were detected in the system log.", "reason": "A key program (like 'ffmpeg', 'python', or 's3fs') crashed repeatedly due to a critical memory error. This indicates software instability or hardware issues.", "fix": "Note the program that segfaulted from the log line. Ensure your software is up to date. If it persists, it could be a sign of faulty RAM."},
+        "SEGFAULT_DETECTED_INFO": {"type": "info", "description": "A small number of segmentation faults were detected in the system log.", "reason": "One or a few isolated segfaults can happen and are not necessarily a sign of hardware failure.", "fix": "Monitor; if the count increases or becomes frequent, investigate the crashing program and RAM health."},
         "NTP_LOG_ERRORS": {"type": "info", "description": "NTP time synchronization errors found in the log.", "reason": "The log shows a history of failures to contact time servers, even if the system is currently synced. This indicates an unstable network connection or bad NTP config.", "fix": "Verify network connectivity. Check '/etc/systemd/timesyncd.conf' or 'ntp.conf' to ensure valid time servers are listed."},
         "USB_ERROR_DETECTED": {"type": "info", "description": "USB device errors detected in the log.", "reason": "The kernel is reporting errors communicating with a USB device (e.g., disconnects, failed enumeration). This can indicate faulty hardware, bad cables, or insufficient power.", "fix": "Check all USB connections and cables. If a USB hub is used, ensure it has its own power supply. Check 'dmesg' for more details."},
         # Disk Space
@@ -832,6 +833,9 @@ class AS7Diagnostic:
                 if lines:
                     count = len(lines)
                     last_error = lines[-1]
+                    # Few isolated segfaults are not treated as a warning.
+                    if code == "SEGFAULT_DETECTED" and count <= 5:
+                        code = "SEGFAULT_DETECTED_INFO"
                     self.log_issue(code, {'count': count, 'last_error': last_error})
 
     def _check_disk_usage(self, path, err_crit, err_warn, err_info, thresholds=(1, 3, 5)):

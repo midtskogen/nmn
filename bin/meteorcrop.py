@@ -409,7 +409,7 @@ def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: Li
 
     # Update PTO with rotation and crop parameters
     global_options["r"] = -angle_deg
-    global_options["S"] = f"{int(s_left)},{int(s_top)},{int(s_right)},{int(s_bottom)}"
+    global_options["S"] = f"{int(s_left)},{int(s_right)},{int(s_top)},{int(s_bottom)}"
     pto_mapper.write_pto_file((global_options, images), str(output_pto_path))
     print(f"Generated '{output_pto_path.name}' for direct rotation and cropping.")
     return final_w, final_h

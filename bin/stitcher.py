@@ -559,7 +559,7 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
     # Get crop coordinates. If 'S' line is missing, default to the full canvas size.
     crop_coords = global_options.get('S')
     if crop_coords:
-        # If 'S' line exists, use its values in Hugin's L, R, T, B order
+        # 'S' line is in nona/Hugin's left,right,top,bottom order
         left, right, top, bottom = crop_coords
     else:
         _print("INFO: No crop 'S' line found in PTO file. Using full canvas dimensions.")

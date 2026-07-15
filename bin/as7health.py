@@ -869,20 +869,31 @@ class AS7Diagnostic:
     def check_bloated_directories(self):
         """Checks well-known directories for unexpectedly large sizes that may fill the root filesystem."""
         print("\n--- Checking for Bloated Directories ---")
-        # (path, warn_mb, critical_mb, description)
+        # (path, limit_mb, description)
         dirs_to_check = [
-            ("/var/log",        500,  2000, "System log directory"),
-            ("/var/mail",        50,   200, "System mail spool"),
-            ("/var/spool/mail",  50,   200, "User mail spool"),
-            ("/tmp",            500,  2000, "Temporary files"),
-            ("/var/tmp",        500,  2000, "Persistent temporary files"),
-            ("/root",           200,   500, "Root home directory"),
-            ("/home",          1000,  5000, "User home directories"),
-            ("/var/cache",      500,  2000, "Package/application cache"),
-            ("/var/lib/docker", 500,  5000, "Docker images/containers"),
+            ("/var/log",         500, "System log directory"),
+            ("/var/mail",       3072, "System mail spool"),
+            ("/var/spool/mail", 3072, "User mail spool"),
+            ("/tmp",             500, "Temporary files"),
+            ("/var/tmp",         500, "Persistent temporary files"),
+            ("/root",           2048, "Root home directory"),
+            ("/home",          20480, "User home directories"),
+            ("/var/cache",       500, "Package/application cache"),
+            ("/var/lib/docker",  500, "Docker images/containers"),
         ]
+
+        # Determine root filesystem fullness once for all checks
+        root_disk_full = False
+        try:
+            st = os.statvfs("/")
+            if st.f_blocks > 0:
+                percent_used = (1 - st.f_bavail / st.f_blocks) * 100
+                root_disk_full = percent_used >= 90
+        except Exception:
+            pass
+
         any_checked = False
-        for path, warn_mb, crit_mb, label in dirs_to_check:
+        for path, limit_mb, label in dirs_to_check:
             if not os.path.exists(path):
                 continue
             any_checked = True
@@ -895,12 +906,13 @@ class AS7Diagnostic:
                         except OSError:
                             pass
                 size_mb = total / (1024 * 1024)
-                if size_mb >= crit_mb:
-                    self.log_issue("DIR_BLOATED_CRITICAL", {'path': path, 'size_mb': size_mb, 'limit_mb': crit_mb})
-                elif size_mb >= warn_mb:
-                    self.log_issue("DIR_BLOATED_WARN", {'path': path, 'size_mb': size_mb, 'warn_mb': warn_mb})
+                if size_mb >= limit_mb:
+                    if root_disk_full:
+                        self.log_issue("DIR_BLOATED_CRITICAL", {'path': path, 'size_mb': size_mb, 'limit_mb': limit_mb})
                     else:
-                    self.log_success(f"{label} ({path}): {size_mb:.0f} MB — OK.")
+                        self.log_issue("DIR_BLOATED_WARN", {'path': path, 'size_mb': size_mb, 'warn_mb': limit_mb})
+                else:
+                    self.log_success(f"{label} ({path}): {size_mb:.0f} MB — OK (limit: {limit_mb} MB).")
             except Exception as e:
                 self.log_issue("PERMISSION_DENIED", {'check': f"sizing {path}: {e}"})
         if not any_checked:

@@ -191,7 +191,9 @@ class ErrorCatalog:
         "NMN_METEOR_DISK_LOW": {"type": "warning", "description": "Disk space on {path} is low ({percent_free:.2f}% < 3% free).", "reason": "The video storage drive is nearing capacity. Action should be taken soon.", "fix": "Proactively clean up old video files to prevent the disk from becoming full."},
         "NMN_METEOR_DISK_INFO": {"type": "info", "description": "Disk space on {path} is getting low ({percent_free:.2f}% < 5% free).", "reason": "This is an early warning that the video storage drive is filling up.", "fix": "Monitor disk space and plan for cleanup or archiving."},
         "NMN_HOST_UNREACHABLE_80": {"type": "failure", "description": "Cannot connect to norskmeteornettverk.no on port 80 (HTTP).", "reason": "Connectivity to the main NMN web server is required for some services or indicates a general network issue.", "fix": "Check this station's internet connection, firewall rules, and DNS settings. Verify the host is online."},
-        "NMN_HOST_UNREACHABLE_22": {"type": "failure", "description": "Cannot connect to norskmeteornettverk.no on port 22 (SSH).", "reason": "Connectivity to the NMN SSH server is critical for the autossh reverse tunnel to function.", "fix": "Check this station's internet connection, firewall rules (especially outbound port 22), and DNS settings."}
+        "NMN_HOST_UNREACHABLE_22": {"type": "failure", "description": "Cannot connect to norskmeteornettverk.no on port 22 (SSH).", "reason": "Connectivity to the NMN SSH server is critical for the autossh reverse tunnel to function.", "fix": "Check this station's internet connection, firewall rules (especially outbound port 22), and DNS settings."},
+        "NMN_AMS_MAILBOX_CLEAN_FAILED": {"type": "failure", "description": "Cleaning old messages from '/var/spool/mail/ams' failed.", "reason": "The mailbox cleanup script returned an error.", "fix": "Check the script output and run 'sudo python3 /home/meteor/nmn/bin/clean_mailbox.py /var/spool/mail/ams --days 14' manually."},
+        "NMN_AMS_MAILBOX_CLEAN_TIMEOUT": {"type": "failure", "description": "Cleaning old messages from '/var/spool/mail/ams' timed out.", "reason": "The mailbox is very large and cleanup took too long.", "fix": "Run the cleanup manually or increase the timeout."}
     }
 
     def get_error(self, code):
@@ -1602,6 +1604,7 @@ class AS7Diagnostic:
         self.check_nmn_processes_and_services()
         self.check_nmn_logs()
         self.check_nmn_disk_space()
+        self.clean_ams_mailbox()
 
     def backup_nmn_camera_files(self):
         """Backs up NMN camera calibration/config files to /home/meteor/backup.
@@ -2297,6 +2300,33 @@ class AS7Diagnostic:
         """Checks the available disk space on the /meteor/ mount."""
         print("\n--- Checking NMN Disk Space ---")
         self._check_disk_usage("/meteor/", "NMN_METEOR_DISK_CRITICAL", "NMN_METEOR_DISK_LOW", "NMN_METEOR_DISK_INFO")
+
+    def clean_ams_mailbox(self):
+        """Cleans old messages from /var/spool/mail/ams when running as root."""
+        if not self.is_root:
+            return
+
+        mailbox_path = "/var/spool/mail/ams"
+        script_path = "/home/meteor/nmn/bin/clean_mailbox.py"
+
+        if not os.path.isfile(script_path):
+            return
+        if not os.path.exists(mailbox_path):
+            return
+
+        print("\n--- Cleaning old ams mailbox ---")
+        try:
+            cmd = ['python3', script_path, mailbox_path, '--days', '14']
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if res.returncode == 0:
+                self.log_success("Cleaned ams mailbox entries older than 14 days.")
+            else:
+                stderr_output = res.stderr.strip() if res.stderr else "No stderr"
+                self.log_issue("NMN_AMS_MAILBOX_CLEAN_FAILED", {'stderr': stderr_output[:500]}, indent=1)
+        except subprocess.TimeoutExpired:
+            self.log_issue("NMN_AMS_MAILBOX_CLEAN_TIMEOUT", {}, indent=1)
+        except Exception as e:
+            self.log_issue("PERMISSION_DENIED", {'check': f"cleaning ams mailbox: {e}"}, indent=1)
 
     def print_summary(self):
         """Prints a final summary of all successes, warnings, and failures."""

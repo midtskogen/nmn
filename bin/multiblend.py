@@ -696,6 +696,19 @@ def compute_seams(images: List[ImageInfo], workwidth: int, workheight: int,
 
     if seam_load_filename:
         assignment = _load_seams_png(seam_load_filename, workwidth, workheight, verbosity, print_func)
+        if assignment.shape != (workheight, workwidth):
+            raise ValueError(
+                f"Loaded seam PNG {seam_load_filename} has shape {assignment.shape}, "
+                f"expected {(workheight, workwidth)} (height, width)")
+        # Fill any unassigned (255) pixels using the first image that covers them,
+        # matching the cleanup done by the computed seam finders.
+        for i, img in enumerate(images):
+            r0 = img.ypos; r1 = r0 + img.height
+            c0 = img.xpos; c1 = c0 + img.width
+            band = assignment[r0:r1, c0:c1]
+            unassigned = (band == 255) & img.mask
+            if np.any(unassigned):
+                band[unassigned] = np.uint8(i)
     else:
         if verbosity >= 1:
             print_func("  seaming...")
@@ -1145,6 +1158,32 @@ if _NUMBA_OK:
                 dst[row, col] = np.uint16(v)
 
     @_njit(parallel=True, cache=True)
+    def _nb_luma_blend_u8(src, corrected, luma_norm, dst):
+        """Blend original and corrected pixel values by per-pixel luma weight.
+        dst = round(src + (corrected - src) * luma_norm)."""
+        H = src.shape[0]; W = src.shape[1]
+        for row in _prange(H):
+            for col in range(W):
+                s = np.float32(src[row, col])
+                c = np.float32(corrected[row, col])
+                w = luma_norm[row, col]
+                v = s + (c - s) * w
+                dst[row, col] = np.uint8(v + np.float32(0.5))
+
+    @_njit(parallel=True, cache=True)
+    def _nb_luma_blend_u16(src, corrected, luma_norm, dst):
+        """Blend original and corrected pixel values by per-pixel luma weight.
+        dst = round(src + (corrected - src) * luma_norm)."""
+        H = src.shape[0]; W = src.shape[1]
+        for row in _prange(H):
+            for col in range(W):
+                s = np.float32(src[row, col])
+                c = np.float32(corrected[row, col])
+                w = luma_norm[row, col]
+                v = s + (c - s) * w
+                dst[row, col] = np.uint16(v + np.float32(0.5))
+
+    @_njit(parallel=True, cache=True)
     def _nb_seam_cost(ch0_i, ch0_j, ch1_i, ch1_j, ch2_i, ch2_j, cost):
         """Cost for content-aware seam: squared RGB diff + gradient-magnitude²
         from BOTH images (central differences, boundary-clamped).
@@ -1423,7 +1462,87 @@ def _place_channels_3d(img: ImageInfo, workheight: int, workwidth: int, bgr: boo
     return ws
 
 
+def _apply_exposure_to_image(img: ImageInfo, lin_gains, gammas, method,
+                             maxv_f: float, luma_weighted: bool = True) -> None:
+    """Apply per-channel exposure correction to one image in-place.
+
+    When luma_weighted is True the strength of the correction is modulated by
+    the per-pixel luma: bright pixels receive the full correction, dark pixels
+    receive proportionally less.  This prevents colour-noise amplification in
+    the shadows.
+    """
+    dtype = img.channels[0].dtype
+    maxv = float(maxv_f)
+    channels = img.channels
+
+    if not luma_weighted:
+        # Original uniform application.
+        if _NUMBA_OK:
+            if dtype == np.uint8:
+                for ch in range(3):
+                    if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
+                        _nb_gamma_u8(channels[ch], np.float32(gammas[ch]), channels[ch])
+                    elif method[ch] == 'linear' and abs(lin_gains[ch] - 1.0) > 1e-5:
+                        _nb_gain_clip_u8(channels[ch], np.float32(lin_gains[ch]), channels[ch])
+            else:
+                for ch in range(3):
+                    if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
+                        _nb_gamma_u16(channels[ch], np.float32(gammas[ch]), channels[ch])
+                    elif method[ch] == 'linear' and abs(lin_gains[ch] - 1.0) > 1e-5:
+                        _nb_gain_clip_u16(channels[ch], np.float32(lin_gains[ch]), channels[ch])
+        else:
+            maxv_np = np.float32(maxv)
+            for ch in range(3):
+                if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
+                    arr = (channels[ch].astype(np.float64) / maxv) ** gammas[ch]
+                    channels[ch] = np.round(arr * maxv).astype(dtype)
+                elif method[ch] == 'linear' and abs(lin_gains[ch] - 1.0) > 1e-5:
+                    arr = channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
+                    channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
+        return
+
+    # Luma-weighted correction: compute per-pixel luma from the original RGB.
+    luma = (channels[0].astype(np.float32) * np.float32(0.299) +
+            channels[1].astype(np.float32) * np.float32(0.587) +
+            channels[2].astype(np.float32) * np.float32(0.114))
+    luma_norm = np.clip(luma / np.float32(maxv), 0.0, 1.0)
+    temp = np.empty_like(channels[0])
+
+    for ch in range(3):
+        if method[ch] == 'none':
+            continue
+        src = channels[ch]
+        if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
+            if _NUMBA_OK:
+                if dtype == np.uint8:
+                    _nb_gamma_u8(src, np.float32(gammas[ch]), temp)
+                else:
+                    _nb_gamma_u16(src, np.float32(gammas[ch]), temp)
+            else:
+                arr = (src.astype(np.float64) / maxv) ** gammas[ch]
+                temp[:] = np.round(arr * maxv).astype(dtype)
+        elif method[ch] == 'linear' and abs(lin_gains[ch] - 1.0) > 1e-5:
+            if _NUMBA_OK:
+                if dtype == np.uint8:
+                    _nb_gain_clip_u8(src, np.float32(lin_gains[ch]), temp)
+                else:
+                    _nb_gain_clip_u16(src, np.float32(lin_gains[ch]), temp)
+            else:
+                temp[:] = np.clip(src.astype(np.float32) * lin_gains[ch], 0, maxv).astype(dtype)
+        else:
+            continue
+        if _NUMBA_OK:
+            if dtype == np.uint8:
+                _nb_luma_blend_u8(src, temp, luma_norm, channels[ch])
+            else:
+                _nb_luma_blend_u16(src, temp, luma_norm, channels[ch])
+        else:
+            blended = src.astype(np.float32) + (temp.astype(np.float32) - src.astype(np.float32)) * luma_norm
+            channels[ch] = np.clip(np.round(blended), 0, maxv).astype(dtype)
+
+
 def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
+                      luma_weighted_exposure: bool = True,
                       print_func: Callable = print) -> List[dict]:
     """Per-channel multiplicative gain correction to normalise overlap-zone means.
 
@@ -1538,36 +1657,15 @@ def _exposure_correct(images: List[ImageInfo], verbosity: int = 1,
 
         any_change = (np.any(use_gamma) or
                       np.any(np.abs(gains_log[i]) > 1e-7))
-        if not any_change:
-            continue
-
-        if _NUMBA_OK:
-            if dtype == np.uint8:
-                for ch in range(3):
-                    if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
-                        _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
-                    elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
-                        _nb_gain_clip_u8(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
-            else:
-                for ch in range(3):
-                    if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
-                        _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
-                    elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
-                        _nb_gain_clip_u16(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
-        else:
-            maxv_np = np.float32(maxv_f)
-            for ch in range(3):
-                if use_gamma[ch] and abs(gammas[ch] - 1.0) > 1e-5:
-                    arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
-                    img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
-                elif not use_gamma[ch] and abs(lin_gains[ch] - 1.0) > 1e-5:
-                    arr = img.channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
-                    img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
+        if any_change:
+            _apply_exposure_to_image(img, lin_gains, gammas, method, maxv_f,
+                                     luma_weighted=luma_weighted_exposure)
 
     return info
 
 
-def _apply_exposure_info(images: List[ImageInfo], exp_info: List[dict]) -> None:
+def _apply_exposure_info(images: List[ImageInfo], exp_info: List[dict],
+                         luma_weighted_exposure: bool = True) -> None:
     """Apply previously computed exposure correction gains in-place.
 
     This is the second half of _exposure_correct: it takes the same info
@@ -1580,27 +1678,8 @@ def _apply_exposure_info(images: List[ImageInfo], exp_info: List[dict]) -> None:
         method = info['method']
         dtype = img.channels[0].dtype
         maxv_f = float(0xffff if dtype == np.uint16 else 0xff)
-        maxv_np = np.float32(maxv_f)
-
-        for ch in range(3):
-            if method[ch] == 'gamma' and abs(gammas[ch] - 1.0) > 1e-5:
-                if _NUMBA_OK:
-                    if dtype == np.uint8:
-                        _nb_gamma_u8(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
-                    else:
-                        _nb_gamma_u16(img.channels[ch], np.float32(gammas[ch]), img.channels[ch])
-                else:
-                    arr = (img.channels[ch].astype(np.float64) / maxv_f) ** gammas[ch]
-                    img.channels[ch] = np.round(arr * maxv_f).astype(dtype)
-            elif method[ch] == 'linear' and abs(lin_gains[ch] - 1.0) > 1e-5:
-                if _NUMBA_OK:
-                    if dtype == np.uint8:
-                        _nb_gain_clip_u8(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
-                    else:
-                        _nb_gain_clip_u16(img.channels[ch], np.float32(lin_gains[ch]), img.channels[ch])
-                else:
-                    arr = img.channels[ch].astype(np.float32) * np.float32(lin_gains[ch])
-                    img.channels[ch] = np.clip(arr, 0, maxv_np).astype(dtype)
+        _apply_exposure_to_image(img, lin_gains, gammas, method, maxv_f,
+                                 luma_weighted=luma_weighted_exposure)
 
 
 def _saturation_correct(images: List[ImageInfo], verbosity: int = 1,
@@ -1698,6 +1777,7 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
           bgr: bool = False, verbosity: int = 1,
           exposure_correct: bool = False,
           saturation_correct: bool = False,
+          luma_weighted_exposure: bool = True,
           out_info: Optional[dict] = None,
           print_func: Callable = print,
           exposure_info: Optional[List[dict]] = None,
@@ -1707,9 +1787,12 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
 
     if exposure_correct:
         if exposure_info is None:
-            exp_info = _exposure_correct(images, verbosity=verbosity, print_func=print_func)
+            exp_info = _exposure_correct(images, verbosity=verbosity,
+                                         luma_weighted_exposure=luma_weighted_exposure,
+                                         print_func=print_func)
         else:
-            _apply_exposure_info(images, exposure_info)
+            _apply_exposure_info(images, exposure_info,
+                                 luma_weighted_exposure=luma_weighted_exposure)
             exp_info = exposure_info
         if out_info is not None:
             out_info['exposure'] = exp_info
@@ -1971,6 +2054,7 @@ def go(input_files: List[str], output_file: Optional[str] = None,
        xor_filename: Optional[str] = None, timing: bool = False,
        no_output: bool = False, exposure_correct: bool = False,
        saturation_correct: bool = False,
+       luma_weighted_exposure: bool = True,
        verbosity: int = 1,
        print_func: Callable = print) -> dict:
 
@@ -2034,6 +2118,7 @@ def go(input_files: List[str], output_file: Optional[str] = None,
             levels=levels, workbpp=workbpp, bgr=bgr, verbosity=verbosity,
             exposure_correct=exposure_correct,
             saturation_correct=saturation_correct,
+            luma_weighted_exposure=luma_weighted_exposure,
             out_info=corrections, print_func=print_func)
         if timing:
             print_func(f"  blend: {time.perf_counter() - t1:.3f}s")
@@ -2098,6 +2183,7 @@ def _help():
     print("  --load-seams F  load seam map PNG from F")
     print("  --save-xor F    save coverage XOR map PNG to F")
     print("  --no-output     skip blend/write (use with --save-seams)")
+    print("  --no-luma-weight disable luma-weighted exposure correction")
     print("  --timing        print per-stage timings")
     print("  -q / --quiet    suppress progress output")
     print("  -v / --verbose  increase verbosity")
@@ -2148,6 +2234,7 @@ def main(argv=None):
     no_output        = False
     exposure_correct    = False
     saturation_correct  = False
+    luma_weighted_exposure = True
     content_seam        = False
 
     i = 0
@@ -2174,6 +2261,7 @@ def main(argv=None):
         elif arg == '--timing':      timing           = True
         elif arg == '--exposure':      exposure_correct    = True
         elif arg == '--saturation':    saturation_correct  = True
+        elif arg == '--no-luma-weight': luma_weighted_exposure = False
         elif arg == '--content-seam':  content_seam     = True
         elif arg == '--no-output':   no_output   = True
         elif arg in ('-v', '--verbose'): verbosity += 1
@@ -2232,7 +2320,9 @@ def main(argv=None):
             seam_save_filename=seam_save, seam_load_filename=seam_load,
             xor_filename=xor_save, timing=timing, no_output=no_output,
             exposure_correct=exposure_correct,
-            saturation_correct=saturation_correct, verbosity=verbosity,
+            saturation_correct=saturation_correct,
+            luma_weighted_exposure=luma_weighted_exposure,
+            verbosity=verbosity,
         )
     except (ValueError, RuntimeError, FileNotFoundError) as exc:
         sys.exit(str(exc))

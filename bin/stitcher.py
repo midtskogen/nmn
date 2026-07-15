@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import threading
+from typing import Optional, Callable
 import numpy as np
 import numba
 from numba import prange
@@ -558,16 +559,16 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
     # Get crop coordinates. If 'S' line is missing, default to the full canvas size.
     crop_coords = global_options.get('S')
     if crop_coords:
-        # If 'S' line exists, use its values in the correct L, T, R, B order
-        left, top, right, bottom = crop_coords
+        # If 'S' line exists, use its values in Hugin's L, R, T, B order
+        left, right, top, bottom = crop_coords
     else:
         _print("INFO: No crop 'S' line found in PTO file. Using full canvas dimensions.")
-        left, top, right, bottom = 0, 0, orig_w, orig_h
+        left, right, top, bottom = 0, orig_w, 0, orig_h
 
     # Calculate final dimensions based on crop and scale
     final_w = int(round((right - left) * pano_s))
     final_h = int(round((bottom - top) * pano_s))
-    
+
     # --- CRITICAL VALIDATION WITH DETAILED FEEDBACK ---
     if final_w <= 0 or final_h <= 0:
         error_details = (
@@ -811,10 +812,53 @@ def _prune_seam_cache(cache_dir):
     _prune_cache_dir(cache_dir, max_age_days=10, max_entries=3)
 
 
+def _prepare_loaded_seam(seam_load_filename: Optional[str],
+                          final_w: int, final_h: int,
+                          min_left: int, min_top: int,
+                          workwidth: int, workheight: int,
+                          verbosity: int = 1,
+                          print_func: Callable = print) -> Optional[str]:
+    """Crop a full-canvas seam PNG to the tightened work area if necessary.
+
+    stitcher.py tightens the workspace before blending, so a seam PNG that was
+    saved against the original full canvas (final_w x final_h) must be cropped
+    to (workwidth x workheight) using the same (min_left, min_top) offset.
+    """
+    if seam_load_filename is None:
+        return None
+    from PIL import Image
+    try:
+        img = Image.open(seam_load_filename).convert('P')
+    except Exception as e:
+        raise ValueError(f"Cannot open seam PNG {seam_load_filename}: {e}") from e
+
+    if img.size == (workwidth, workheight):
+        return seam_load_filename
+
+    if img.size == (final_w, final_h):
+        left = min_left
+        top = min_top
+        right = left + workwidth
+        bottom = top + workheight
+        cropped = img.crop((left, top, right, bottom))
+        fd, tmp_path = tempfile.mkstemp(suffix='.png', prefix='seams_')
+        os.close(fd)
+        cropped.save(tmp_path)
+        if verbosity >= 1:
+            print_func(f"  cropped seam PNG from {img.size} to ({workwidth},{workheight})")
+        return tmp_path
+
+    raise ValueError(
+        f"Seam PNG {seam_load_filename} has size {img.size}, "
+        f"expected either full canvas ({final_w},{final_h}) or "
+        f"tightened workspace ({workwidth},{workheight}).")
+
+
 def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides,
                           levels,
                           is_video_output=False,
                           reverse=False, simple_seam=False, content_seam=False,
+                          seam_load_filename=None,
                           verbosity=1, print_func=print):
     """Compute seam assignment and seam-mask pyramids, caching the assignment.
 
@@ -829,6 +873,21 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
     cache_path, cache_dir = _get_seam_cache_path(
         pto_file, pad, padsides, is_video_output,
         workwidth, workheight, reverse, simple_seam, content_seam)
+
+    if seam_load_filename is not None:
+        if verbosity >= 1:
+            print_func(f"  loading seams from {seam_load_filename}")
+        assignment, seam_present = multiblend.compute_seams(
+            images=images,
+            workwidth=workwidth,
+            workheight=workheight,
+            seam_load_filename=seam_load_filename,
+            verbosity=verbosity,
+            print_func=print_func,
+        )
+        seam_mask_cache = multiblend.build_seam_mask_cache(
+            images, assignment, workwidth, workheight, levels)
+        return assignment, seam_present, seam_mask_cache
 
     try:
         if os.path.exists(cache_path):
@@ -1213,7 +1272,7 @@ def _precompile_numba_functions():
 
     _print("Pre-compilation complete.")
 
-def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0, devignette=None, input_datetime: str = None):
+def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0, devignette=None, input_datetime: str = None, seam_load_filename: str = None):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
     num_images = len(mappings)
@@ -1414,6 +1473,11 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
     _print(f"  {workwidth}x{workheight}, {levels} levels (tightened from {final_w}x{final_h})")
 
+    if seam_load_filename is not None:
+        seam_load_filename = _prepare_loaded_seam(
+            seam_load_filename, final_w, final_h, min_left, min_top,
+            workwidth, workheight, verbosity=0 if _quiet else 1, print_func=_print)
+
     assignment, _, seam_mask_cache = compute_or_load_seams(
         images=images,
         workwidth=workwidth,
@@ -1425,6 +1489,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         is_video_output=force_video_dims,
         simple_seam=False,
         content_seam=False,
+        seam_load_filename=seam_load_filename,
         verbosity=0 if _quiet else 1,
         print_func=_print,
     )
@@ -1438,6 +1503,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         workbpp=8,
         exposure_correct=True,
         saturation_correct=False,
+        luma_weighted_exposure=True,
         verbosity=0 if _quiet else 2,
         print_func=_print,
         seam_mask_cache=seam_mask_cache,
@@ -2337,7 +2403,7 @@ def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
     v_plane[uy1:uy2, ux1:ux2] = (v_bg * (1.0 - bg_alpha) + 128.0 * bg_alpha).astype(np.uint8)
 
 
-def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None):
+def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None, seam_load_filename=None):
     if not _av(): raise ImportError("PyAV is not installed, but video processing was requested.")
 
     num_images = len(camera_files)
@@ -2792,6 +2858,11 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
             workwidth, workheight = geo_workwidth, geo_workheight
             if frame_count == 1:
+                if seam_load_filename is not None:
+                    seam_load_filename = _prepare_loaded_seam(
+                        seam_load_filename, final_w, final_h,
+                        geo_min_left, geo_min_top, workwidth, workheight,
+                        verbosity=0 if _quiet else 1, print_func=_print)
                 _print("Computing seams with multiblend (first frame)...")
                 levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
                 assignment, _, seam_mask_cache = compute_or_load_seams(
@@ -2805,6 +2876,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                     is_video_output=True,
                     simple_seam=False,
                     content_seam=False,
+                    seam_load_filename=seam_load_filename,
                     verbosity=0,
                     print_func=_print,
                 )
@@ -2820,6 +2892,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                 workbpp=8,
                 exposure_correct=True,
                 saturation_correct=False,
+                luma_weighted_exposure=True,
                 verbosity=0,
                 print_func=_print,
                 exposure_info=None if recompute_exposure else cached_exp_info,
@@ -2914,7 +2987,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
     _print(f"\n✅ Success! Timelapse video saved to {output_file}")
 
 
-def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None):
+def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padsides, use_sync=False, model=None, save_sync_file=None, load_sync_file=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None, seam_load_filename=None):
     if not _av(): raise ImportError("PyAV is not installed, but video processing was requested.")
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
@@ -3522,6 +3595,11 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
             workwidth, workheight = geo_workwidth, geo_workheight
             # Seam computation — only on first frame, then reuse
             if frame_count == 1:
+                if seam_load_filename is not None:
+                    seam_load_filename = _prepare_loaded_seam(
+                        seam_load_filename, final_w, final_h,
+                        geo_min_left, geo_min_top, workwidth, workheight,
+                        verbosity=0 if _quiet else 1, print_func=_print)
                 _print("Computing seams with multiblend (first frame)...")
                 levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
                 assignment, _, seam_mask_cache = compute_or_load_seams(
@@ -3535,6 +3613,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                     is_video_output=True,
                     simple_seam=False,
                     content_seam=False,
+                    seam_load_filename=seam_load_filename,
                     verbosity=0,
                     print_func=_print,
                 )
@@ -3551,6 +3630,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 workbpp=8,
                 exposure_correct=True,
                 saturation_correct=False,
+                luma_weighted_exposure=True,
                 verbosity=0,
                 print_func=_print,
                 exposure_info=None if recompute_exposure else cached_exp_info,
@@ -3630,7 +3710,8 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
            sync=False, model=None, save_sync=None, load_sync=None,
            quiet=False, num_cores=None, lens_files=None,
            output_width=None, output_height=None, crop_to_content: bool = True,
-           timestamp: bool = False, devignette=-0.20):
+           timestamp: bool = False, devignette=-0.20,
+           seam_load_filename=None):
     """Stitch images or videos into a panoramic image or video.
 
     This is the public API entry point for programs that import stitcher.py.
@@ -3777,7 +3858,8 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
         reproject_images(
             pto_file, input_files, output_file, pad, num_cores, padsides_set,
             enhance, force_video_dims=force_video_dims, fisheye_mask=fisheye_mask,
-            crop_to_content=crop_to_content, devignette=devignette
+            crop_to_content=crop_to_content, devignette=devignette,
+            seam_load_filename=seam_load_filename
         )
     else:
         if len(input_files) < 2 and sync:
@@ -3788,7 +3870,8 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
             save_sync_file=save_sync, load_sync_file=load_sync, enhance=enhance,
             fisheye_mask=fisheye_mask, max_frames=max_frames,
             level_subsample=level_subsample, timestamp=timestamp,
-            devignette=devignette
+            devignette=devignette,
+            seam_load_filename=seam_load_filename
         )
 
     if auto_generated_pto and os.path.exists(auto_generated_pto):
@@ -5704,6 +5787,8 @@ def main():
              "brightness(r) = 1 + k1*r² where r is normalised to the corner. "
              "Default: -0.20. Set to 0 to disable. "
              "Typical: --devignette=-0.5 (brightens corners ~33%%).")
+    parser.add_argument("--load-seams", "--load_seams", type=str, default=None, metavar="PNG",
+        help="Load a precomputed seam PNG instead of running the seam finder.")
     parser.add_argument("--station", type=str, default=None, metavar="HOST",
         help="Fetch input files from a remote host via SSH. The paths are interpreted on the remote host; the output is written locally.")
 
@@ -5742,6 +5827,18 @@ def main():
             # Move pto_file to the beginning of input_files
             args.input_files.insert(0, args.pto_file)
             args.pto_file = None
+
+    # --pto is documented for timelapse, but accept it globally as a synonym
+    # for the positional PTO file argument.
+    if args.pto is not None and not args.timelapse:
+        if args.pto_file is not None and args.pto_file.lower().endswith('.pto'):
+            _print("Warning: both --pto and a positional PTO file were given; using --pto.", file=sys.stderr)
+        elif args.pto_file is not None:
+            # A non-PTO file was consumed by the optional positional pto_file slot;
+            # move it back to the input list.
+            if not args.input_files or args.input_files[0] != args.pto_file:
+                args.input_files.insert(0, args.pto_file)
+        args.pto_file = args.pto
 
     # --- Argument Validation ---
     if args.save_sync and args.load_sync:
@@ -5843,7 +5940,8 @@ def main():
                 enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
                 level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
                 timestamp=args.timestamp, saturation=args.saturation,
-                devignette=devignette
+                devignette=devignette,
+                seam_load_filename=args.load_seams
             )
             _output_file_written[0] = True
         except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
@@ -5903,38 +6001,40 @@ def main():
     if not args.pto_file and not (args.fisheye or args.equirect):
         _print("Error: Either pto_file or --fisheye/--equirect must be specified.", file=sys.stderr); sys.exit(1)
 
-    # If --fisheye or --equirect is specified, generate PTO file from lens.pto files
+    # Expand glob patterns in input_files and sort by camera number when possible.
+    expanded_input_files = []
+    for pattern in args.input_files:
+        matches = glob.glob(pattern)
+        if matches:
+            expanded_input_files.extend(matches)
+        else:
+            # If no matches, keep the original pattern (might be a literal path)
+            expanded_input_files.append(pattern)
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_input_files = []
+    for f in expanded_input_files:
+        if f not in seen:
+            seen.add(f)
+            unique_input_files.append(f)
+
+    args.input_files = unique_input_files
+    # Sort input files by camera number to match PTO file order
+    try:
+        args.input_files = sorted(args.input_files, key=lambda f: extract_camera_number_from_path(f))
+    except ValueError:
+        # If any file doesn't have a camera number, keep original order
+        pass
+
+    # If --fisheye or --equirect is specified and no explicit PTO was given,
+    # generate a PTO file from lens.pto files.
     auto_generated_pto = None
-    if args.fisheye or args.equirect:
+    if (args.fisheye or args.equirect) and not args.pto_file:
         projection = 'fisheye' if args.fisheye else 'equirect'
-        
-        # Expand glob patterns in input_files
-        expanded_input_files = []
-        for pattern in args.input_files:
-            matches = glob.glob(pattern)
-            if matches:
-                expanded_input_files.extend(matches)
-            else:
-                # If no matches, keep the original pattern (might be a literal path)
-                expanded_input_files.append(pattern)
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_input_files = []
-        for f in expanded_input_files:
-            if f not in seen:
-                seen.add(f)
-                unique_input_files.append(f)
-        
-        args.input_files = unique_input_files
-        # Sort input files by camera number to match PTO file order
-        try:
-            args.input_files = sorted(args.input_files, key=lambda f: extract_camera_number_from_path(f))
-        except ValueError:
-            # If any file doesn't have a camera number, keep original order
-            pass
+
         _print(f"Expanded input files to {len(args.input_files)} files")
-        
+
         pto_file = generate_pto_from_lens_files(args.input_files, projection,
             w=args.output_width, h=args.output_height)
         if pto_file is None:
@@ -5978,7 +6078,7 @@ def main():
     try:
         padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
         if is_image_output:
-            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation, devignette=devignette, input_datetime=args.input_datetime)
+            reproject_images(args.pto_file, args.input_files, args.output_file, args.pad, num_cores, padsides, args.enhance, force_video_dims=args.force_video_dims, fisheye_mask=args.fisheye, saturation=args.saturation, devignette=devignette, input_datetime=args.input_datetime, seam_load_filename=args.load_seams)
         elif is_video_output:
             reproject_videos(
                 args.pto_file, args.input_files, args.output_file,
@@ -5987,7 +6087,8 @@ def main():
                 fisheye_mask=args.fisheye, max_frames=args.max_frames,
                 level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
                 timestamp=args.timestamp, saturation=args.saturation,
-                devignette=devignette
+                devignette=devignette,
+                seam_load_filename=args.load_seams
             )
         else:
             _print("Error: Output file must have a supported extension (.jpg/.jpeg/.png for images, .mp4/.mov/.avi/.mkv for videos).", file=sys.stderr)

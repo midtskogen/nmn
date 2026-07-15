@@ -432,7 +432,16 @@ def create_background_plate(event_dir: Path, pto_path: Path, source_video_path: 
 
     # 2. Stitch the first frame using the generated PTO file.
     stitcher_cmd_img = [sys.executable, str(stitcher_path), "--pad", "128", str(pto_path), str(first_frame_tmp), str(bg_plate_path)]
-    subprocess.run(stitcher_cmd_img, check=True, capture_output=True)
+    print(f"Running: {' '.join(stitcher_cmd_img)}")
+    try:
+        subprocess.run(stitcher_cmd_img, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: stitcher.py failed with exit code {e.returncode}")
+        if e.stdout:
+            print("stitcher.py stdout:\n", e.stdout)
+        if e.stderr:
+            print("stitcher.py stderr:\n", e.stderr)
+        raise
 
     # 3. Apply a fast, heavy blur to the stitched frame to create a clean background.
     with Image(filename=str(bg_plate_path)) as bg_img:

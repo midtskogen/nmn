@@ -3012,12 +3012,10 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         _print("INFO: Single video detected, taking optimized path.")
         input_path = input_files[0]
         mapping = mappings[0]
-        # Round down to multiples of 16 so the precomputed mapping still covers the
-        # smaller output rectangle without out-of-bounds access.
-        dw = (final_w // 16) * 16
-        dh = (final_h // 16) * 16
-        if dw != final_w or dh != final_h:
-            _print(f"  rounding single-video output: {final_w}x{final_h} -> {dw}x{dh}")
+        # The precomputed mapping matches final_w/final_h exactly (build_mappings
+        # already makes video dimensions codec-compatible).  Rounding here would
+        # reshape the mapping into the wrong dimensions.
+        dw, dh = final_w, final_h
 
         try:
             in_container = _av().open(input_path)

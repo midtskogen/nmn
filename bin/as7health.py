@@ -873,7 +873,7 @@ class AS7Diagnostic:
         print("\n--- Checking for Bloated Directories ---")
         # (path, limit_mb, description)
         dirs_to_check = [
-            ("/var/log",         500, "System log directory"),
+            ("/var/log",        4096, "System log directory"),
             ("/var/mail",       3072, "System mail spool"),
             ("/var/spool/mail", 3072, "User mail spool"),
             ("/tmp",             500, "Temporary files"),

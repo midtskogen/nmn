@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Remove messages older than a given number of days from an mbox-format mailbox.
+Compacts the file in-place, so it works even when the disk is nearly full.
 Preserves original ownership and permissions.
 
 Usage:
@@ -10,16 +11,140 @@ Usage:
 
 import argparse
 import datetime
+import email
+import fcntl
 import os
-import shutil
 import sys
-from mailbox import mbox
 from email.utils import parsedate_to_datetime
+
+
+def parse_date_from_bytes(header_bytes):
+    """Return datetime for the Date header, or None."""
+    try:
+        msg = email.message_from_bytes(header_bytes)
+        date_hdr = msg.get('Date')
+        if date_hdr:
+            return parsedate_to_datetime(date_hdr)
+    except Exception:
+        pass
+    return None
+
+
+def message_older_than(headers_bytes, cutoff):
+    """Return True if message Date is parseable and older than cutoff.
+    Return False (keep) if Date is missing or unparseable."""
+    dt = parse_date_from_bytes(headers_bytes)
+    if dt is None:
+        return False
+    return dt < cutoff
+
+
+def compact_mailbox_in_place(path, cutoff, dry_run=False):
+    st = os.stat(path)
+
+    with open(path, 'r+b') as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            pass
+
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(0)
+
+        read_pos = 0
+        write_pos = 0
+        message_count = 0
+        removed_count = 0
+        kept_count = 0
+        bytes_read = 0
+        last_report_bytes = 0
+
+        # Skip any preamble before the first "From " line.
+        while read_pos < file_size:
+            f.seek(read_pos)
+            line = f.readline()
+            if not line:
+                break
+            if line.startswith(b'From '):
+                break
+            bytes_read += len(line)
+            read_pos += len(line)
+
+        while read_pos < file_size:
+            # Parse the next message.
+            msg_start = read_pos
+            msg_lines = []
+            header_bytes = None
+            in_headers = True
+
+            while True:
+                f.seek(read_pos)
+                line = f.readline()
+                if not line:
+                    break
+                # A new message starts with "From " at the beginning of a line.
+                if line.startswith(b'From ') and read_pos > msg_start:
+                    break
+                msg_lines.append(line)
+                if in_headers:
+                    if line == b'\n' or line == b'\r\n':
+                        in_headers = False
+                        header_bytes = b''.join(msg_lines)
+                read_pos += len(line)
+
+            message_count += 1
+            msg_bytes = b''.join(msg_lines)
+
+            if header_bytes is None:
+                header_bytes = msg_bytes
+            old = message_older_than(header_bytes, cutoff)
+
+            if old:
+                removed_count += 1
+            else:
+                kept_count += 1
+                if not dry_run and msg_bytes and write_pos != msg_start:
+                    f.seek(write_pos)
+                    f.write(msg_bytes)
+                    f.flush()
+                write_pos += len(msg_bytes)
+
+            bytes_read += len(msg_bytes)
+
+            # Progress report every ~10% or every 10000 messages
+            hit_byte = file_size and (bytes_read - last_report_bytes) >= file_size / 10
+            hit_count = message_count > 0 and message_count % 10000 == 0
+            if (hit_byte or hit_count) and bytes_read != last_report_bytes:
+                pct = bytes_read / file_size * 100 if file_size else 0
+                print(f"  Progress: {pct:.1f}% ({bytes_read // (1024*1024)} MB), messages: {message_count}, removed: {removed_count}, kept: {kept_count}", flush=True)
+                last_report_bytes = bytes_read
+
+        if dry_run:
+            print(f"{path}: {message_count} messages total, {removed_count} older than cutoff, {kept_count} kept (dry run)")
+            return
+
+        # Truncate to the new size.
+        f.seek(0, 2)
+        old_size = f.tell()
+        if write_pos < old_size:
+            f.truncate(write_pos)
+        f.flush()
+
+    # Restore ownership/permissions in case truncate touched them.
+    os.chmod(path, st.st_mode)
+    try:
+        os.chown(path, st.st_uid, st.st_gid)
+    except PermissionError:
+        pass
+
+    print(f"{path}: {message_count} messages total, {removed_count} removed, {kept_count} kept")
+    print(f"Size: {old_size} -> {write_pos} bytes ({write_pos / old_size * 100:.1f}% remaining)")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Remove messages older than N days from an mbox mailbox."
+        description="Remove messages older than N days from an mbox mailbox (in-place, low disk usage)."
     )
     parser.add_argument("mailbox", help="Path to the mbox file (e.g. /var/spool/mail/ams)")
     parser.add_argument(
@@ -28,7 +153,7 @@ def main():
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Show how many messages would be removed without changing the file"
+        help="Count how many messages would be removed without changing the file"
     )
     args = parser.parse_args()
 
@@ -37,54 +162,10 @@ def main():
         print(f"Mailbox not found: {path}")
         sys.exit(0)
 
-    # Record original metadata before rewriting
-    st = os.stat(path)
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days)
+    print(f"Cutoff: {cutoff.isoformat()} (keeping messages newer than {args.days} days)")
 
-    mb = mbox(path)
-    mb.lock()
-    try:
-        keys_to_remove = []
-        total = 0
-        for key in mb.iterkeys():
-            total += 1
-            msg = mb[key]
-            date_header = msg.get("Date")
-            remove = False
-            if date_header:
-                try:
-                    dt = parsedate_to_datetime(date_header)
-                    if dt < cutoff:
-                        remove = True
-                except Exception:
-                    # Unparseable Date header: keep the message to be safe
-                    pass
-            # No Date header: keep to be safe
-            if remove:
-                keys_to_remove.append(key)
-
-        print(f"{path}: {total} messages total, {len(keys_to_remove)} older than {args.days} days")
-
-        if args.dry_run:
-            return
-
-        for key in keys_to_remove:
-            del mb[key]
-
-        mb.flush()
-    finally:
-        mb.unlock()
-        mb.close()
-
-    # mailbox.mbox writes a new temp file and renames it into place, which can
-    # reset ownership/permissions. Restore them.
-    if os.path.exists(path):
-        os.chmod(path, st.st_mode)
-        os.chown(path, st.st_uid, st.st_gid)
-        new_st = os.stat(path)
-        print(f"Kept {total - len(keys_to_remove)} messages. File size: {st.st_size} -> {new_st.st_size} bytes")
-    else:
-        print("Warning: mailbox file disappeared after rewrite")
+    compact_mailbox_in_place(path, cutoff, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

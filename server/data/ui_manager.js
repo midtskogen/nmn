@@ -1915,9 +1915,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Parse station and camera from image filename (e.g., "GAU_cam1_20260429_2056_image.jpg")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_(\d{8})_(\d{4})/);
-    // Detect stitched panorama filenames (e.g. "GAU_20260429_2056_hires_equirect.jpg")
+    // Detect stitched panorama filenames (e.g. "GAU_20260429_2056_hires_equirect.jpg" or "..._hires_long_equirect.jpg")
     // Match against imageUrl since title may be a short display name like 'eqh'
-    const stitchMatch = imageUrl.match(/_(hires|lowres)_(equirect|fisheye)\.jpg(?:[?#].*)?$/i);
+    const stitchMatch = imageUrl.match(/_(hires|lowres)(?:_long)?_(equirect|fisheye)\.jpg(?:[?#].*)?$/i);
     let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null;
     let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null;
 

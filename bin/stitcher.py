@@ -2,6 +2,8 @@
 
 import sys
 import os
+import atexit
+import signal
 import shutil
 import subprocess
 import threading
@@ -118,6 +120,28 @@ except ImportError as e:
 
 # Global quiet flag. When True, all normal text output is suppressed.
 _quiet = False
+_active_temp_dirs = set()
+
+
+def _cleanup_active_temp_dirs():
+    for path in tuple(_active_temp_dirs):
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        finally:
+            _active_temp_dirs.discard(path)
+
+
+def _register_temp_dir(path):
+    _active_temp_dirs.add(path)
+    return path
+
+
+def _handle_termination_signal(signum, frame):
+    _cleanup_active_temp_dirs()
+    raise KeyboardInterrupt
+
+
+atexit.register(_cleanup_active_temp_dirs)
 
 
 def _print(*args, **kwargs):
@@ -2136,6 +2160,213 @@ def _discover_timelapse_files(base_pattern, start_time, end_time, quality, stati
     return camera_files
 
 
+def _split_time_range(start_time, end_time, chunk_seconds=600):
+    """Split [start_time, end_time) into chunks of chunk_seconds."""
+    chunks = []
+    current = start_time
+    while current < end_time:
+        nxt = min(current + datetime.timedelta(seconds=chunk_seconds), end_time)
+        chunks.append((current, nxt))
+        current = nxt
+    return chunks
+
+
+def _files_for_time_range(camera_files, range_start, range_end):
+    """Return a camera_files subset whose time ranges overlap [range_start, range_end)."""
+    result = []
+    for files in camera_files:
+        subset = [(p, s, e) for p, s, e in files
+                  if e > range_start and s < range_end]
+        result.append(subset)
+    return result
+
+
+def _concat_video_files(input_paths, output_file):
+    """Concatenate a list of video files with compatible codecs using ffmpeg."""
+    if not input_paths:
+        raise ValueError("No input files to concatenate.")
+    if len(input_paths) == 1:
+        shutil.copy2(input_paths[0], output_file)
+        return
+    concat_dir = os.path.dirname(output_file) or "."
+    list_path = os.path.join(concat_dir, ".concat_list.txt")
+    try:
+        with open(list_path, "w") as f:
+            for p in input_paths:
+                f.write(f"file '{p}'\n")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+             "-c", "copy", output_file],
+            check=True, capture_output=True, text=True
+        )
+    finally:
+        try:
+            os.unlink(list_path)
+        except Exception:
+            pass
+
+
+def _reproject_timelapse_chunked(station, camera_files_remote, start_time, end_time,
+                                 output_file, pto_file_or_none, projection,
+                                 args, num_cores, padsides, devignette,
+                                 remote_temp_dir, chunk_seconds=120, overlap_seconds=60):
+    """Fetch, stitch, and delete remote timelapse data in time chunks.
+
+    For each chunk we fetch only the source files needed for that window, run
+    reproject_timelapse on a temporary output, delete files that are no longer
+    needed, then concatenate the chunk outputs.  This keeps local storage small
+    and lets stitching begin after the first chunk is downloaded.
+    """
+    chunks = _split_time_range(start_time, end_time, chunk_seconds)
+    total_chunks = len(chunks)
+    if total_chunks == 0:
+        raise ValueError("No timelapse chunks to process.")
+
+    _print(f"Processing timelapse in {total_chunks} chunk(s) of {chunk_seconds // 60} minutes...")
+
+    def _overall_bar(done, total):
+        bar_len = 40
+        pct = done / total if total else 1.0
+        filled = min(int(bar_len * pct), bar_len)
+        bar = '[' + '#' * filled + '-' * (bar_len - filled) + ']'
+        _print(f"\rTimelapse: {bar} {done}/{total} chunks ({pct * 100:.1f}%)", end='', flush=True)
+
+    _overall_bar(0, total_chunks)
+
+    local_cache = {}  # remote_path -> local_path
+    chunk_outputs = []
+    auto_generated_pto = None
+    blend_state = {}
+
+    # Fetch lens calibration files once so generate_pto_from_lens_files can find them.
+    if not pto_file_or_none:
+        all_remote_files = [f for files in camera_files_remote for f, _, _ in files]
+        lens_paths = _collect_remote_lens_pto_paths(all_remote_files)
+        _fetch_remote_files_over_ssh(station, lens_paths, remote_temp_dir, progress_prefix="Fetching lens files", quiet=True)
+
+    def _fetch(remote_paths, prefix):
+        if not remote_paths:
+            return
+        _fetch_remote_files_over_ssh(station, remote_paths, remote_temp_dir, progress_prefix=prefix, quiet=True)
+        for rp in remote_paths:
+            local_cache[rp] = os.path.join(remote_temp_dir, rp.lstrip('/'))
+
+    def _remote_to_local(camera_files_remote_subset):
+        return [[(local_cache[p], s, e) for p, s, e in cam_files if p in local_cache]
+                for cam_files in camera_files_remote_subset]
+
+    def _prefetch(remote_paths):
+        if remote_paths:
+            _fetch_remote_files_over_ssh(
+                station, remote_paths, remote_temp_dir,
+                progress_prefix="Prefetching", quiet=True)
+        return remote_paths
+
+    if pto_file_or_none:
+        auto_generated_pto = pto_file_or_none
+    else:
+        first_chunk_remote_files = _files_for_time_range(
+            camera_files_remote, chunks[0][0], chunks[0][1])
+        representative_remote_files = [files[0][0] for files in first_chunk_remote_files]
+        _fetch(representative_remote_files, "Fetching representative files")
+        representative_files = [local_cache[path] for path in representative_remote_files]
+        auto_generated_pto = generate_pto_from_lens_files(representative_files, projection)
+        if auto_generated_pto is None:
+            raise ValueError("Failed to generate PTO file from lens.pto files.")
+        _print(f"Generated PTO file: {auto_generated_pto}")
+
+    def _delete_if_safe(remote_path):
+        local_path = local_cache.pop(remote_path, None)
+        if local_path and os.path.exists(local_path):
+            try:
+                os.unlink(local_path)
+            except Exception:
+                pass
+
+    prefetch_future = None
+    with ThreadPoolExecutor(max_workers=1) as prefetch_executor:
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
+            if prefetch_future is not None:
+                for remote_path in prefetch_future.result():
+                    local_cache[remote_path] = os.path.join(remote_temp_dir, remote_path.lstrip('/'))
+                prefetch_future = None
+
+            # Overlap gives boundary frames a chance to find synchronized frames.
+            fetch_start = chunk_start - datetime.timedelta(seconds=overlap_seconds) if chunk_idx > 0 else chunk_start
+            fetch_end = chunk_end + datetime.timedelta(seconds=overlap_seconds) if chunk_idx < total_chunks - 1 else chunk_end
+            chunk_remote_files = _files_for_time_range(camera_files_remote, fetch_start, fetch_end)
+            if any(not files for files in chunk_remote_files):
+                missing = [i + 1 for i, files in enumerate(chunk_remote_files) if not files]
+                raise ValueError(f"No remote files for chunk {chunk_idx + 1} cameras {missing}")
+
+            missing_remote = [
+                rp for cam_files in chunk_remote_files for rp, _, _ in cam_files
+                if rp not in local_cache
+            ]
+            _fetch(list(dict.fromkeys(missing_remote)), f"Fetching chunk {chunk_idx + 1}/{total_chunks}")
+            chunk_local_files = _remote_to_local(chunk_remote_files)
+
+            if chunk_idx + 1 < total_chunks:
+                next_start, next_end = chunks[chunk_idx + 1]
+                next_fetch_start = next_start - datetime.timedelta(seconds=overlap_seconds)
+                next_fetch_end = next_end + datetime.timedelta(seconds=overlap_seconds) if chunk_idx + 2 < total_chunks else next_end
+                next_chunk_remote_files = _files_for_time_range(
+                    camera_files_remote, next_fetch_start, next_fetch_end)
+                next_missing_remote = list(dict.fromkeys(
+                    rp for cam_files in next_chunk_remote_files for rp, _, _ in cam_files
+                    if rp not in local_cache))
+                prefetch_future = prefetch_executor.submit(_prefetch, next_missing_remote)
+
+            chunk_output = os.path.join(remote_temp_dir, f"chunk_{chunk_idx:04d}.mp4")
+            chunk_outputs.append(chunk_output)
+
+            global _quiet
+            old_quiet = _quiet
+            _quiet = True
+            try:
+                reproject_timelapse(
+                    auto_generated_pto, chunk_local_files, chunk_output,
+                    chunk_start, chunk_end, args.timelapse_speed, args.timelapse_framerate,
+                    args.pad, num_cores, padsides, model=args.model,
+                    enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
+                    level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
+                    timestamp=args.timestamp, saturation=args.saturation,
+                    devignette=devignette,
+                    seam_load_filename=args.load_seams,
+                    blend_state=blend_state
+                )
+            finally:
+                _quiet = old_quiet
+
+            # Delete files that cannot be needed by any future chunk.
+            if chunk_idx < total_chunks - 1:
+                next_fetch_start = chunks[chunk_idx + 1][0] - datetime.timedelta(seconds=overlap_seconds)
+            else:
+                next_fetch_start = end_time
+            for cam_files in camera_files_remote:
+                for rp, _, fe in cam_files:
+                    if fe <= next_fetch_start:
+                        _delete_if_safe(rp)
+
+            _overall_bar(chunk_idx + 1, total_chunks)
+
+    _print()
+    # Delete any remaining source files before concatenation.
+    for cam_files in camera_files_remote:
+        for rp, _, _ in cam_files:
+            _delete_if_safe(rp)
+
+    _print("Concatenating chunk outputs...")
+    _concat_video_files(chunk_outputs, output_file)
+    for p in chunk_outputs:
+        try:
+            os.unlink(p)
+        except Exception:
+            pass
+
+    return auto_generated_pto
+
+
 def _build_timelapse_timeline(files, model=None):
     """Build a timeline of frame timestamps for a single camera.
 
@@ -2225,12 +2456,12 @@ def _collect_remote_lens_pto_paths(paths):
     return sorted(lens_paths)
 
 
-def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_prefix="Fetching", batch_size=300, max_attempts=3):
+def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_prefix="Fetching", batch_size=300, max_attempts=3, quiet=False):
     """Fetch remote files via batched tar-over-ssh sessions.
 
     remote_paths must be absolute paths on the remote host. The remote
     directory structure is preserved under local_dir. A progress bar
-    showing the number of transferred files is printed.
+    showing the number of transferred files is printed unless quiet=True.
 
     Files are fetched in batches so a single network hiccup only requires
     retrying a small batch instead of restarting a multi-gigabyte transfer.
@@ -2249,6 +2480,8 @@ def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_pref
     lock = threading.Lock()
 
     def _update_progress(n=1):
+        if quiet:
+            return
         with lock:
             transferred[0] += n
             count = transferred[0]
@@ -2307,15 +2540,17 @@ def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_pref
             except IOError as e:
                 last_error = str(e)
                 if attempt < max_attempts:
-                    _print(f"\n{progress_prefix}: batch {batch_start // batch_size + 1} failed (attempt {attempt}/{max_attempts}), retrying...", file=sys.stderr)
+                    if not quiet:
+                        _print(f"\n{progress_prefix}: batch {batch_start // batch_size + 1} failed (attempt {attempt}/{max_attempts}), retrying...", file=sys.stderr)
                 else:
                     raise IOError(f"SSH fetch failed from {station} after {max_attempts} attempts: {last_error}")
 
     # Ensure the final bar shows the total.
-    bar_len = 40
-    bar = '[' + '#' * bar_len + ']'
-    _print(f"\r{progress_prefix}: {bar} {total_files}/{total_files}", end='', flush=True)
-    _print()
+    if not quiet:
+        bar_len = 40
+        bar = '[' + '#' * bar_len + ']'
+        _print(f"\r{progress_prefix}: {bar} {total_files}/{total_files}", end='', flush=True)
+        _print()
     return [os.path.join(local_dir, p.lstrip('/')) for p in remote_paths]
 
 
@@ -2431,7 +2666,7 @@ def _draw_timestamp_yuv(y_plane, u_plane, v_plane, unix_ts):
     v_plane[uy1:uy2, ux1:ux2] = (v_bg * (1.0 - bg_alpha) + 128.0 * bg_alpha).astype(np.uint8)
 
 
-def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None, seam_load_filename=None):
+def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_time, speed_factor, output_fps, pad, num_cores, padsides, model=None, enhance=False, fisheye_mask=False, max_frames=0, level_subsample=1, crf="28", preset="ultrafast", timestamp=False, saturation=1.0, devignette=None, seam_load_filename=None, blend_state=None):
     if not _av(): raise ImportError("PyAV is not installed, but video processing was requested.")
 
     num_images = len(camera_files)
@@ -2832,7 +3067,8 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             np.clip(result, 0, 255, out=result)
             return result.astype(np.uint8)
 
-    cached_exp_info = None
+    cached_exp_info = blend_state.get('exposure_info') if blend_state is not None else None
+    processed_frames_before = blend_state.get('processed_frames', 0) if blend_state is not None else 0
     # Valid-pixel bounding boxes per camera — reproject kernels skip dead regions.
     _map_bboxes_cams = [_mapping_bboxes(mappings[i], final_h, final_w) for i in range(num_images)]
     frame_count = 0
@@ -2886,30 +3122,44 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
             workwidth, workheight = geo_workwidth, geo_workheight
             if frame_count == 1:
-                if seam_load_filename is not None:
-                    seam_load_filename = _prepare_loaded_seam(
-                        seam_load_filename, final_w, final_h,
-                        geo_min_left, geo_min_top, workwidth, workheight,
-                        verbosity=0 if _quiet else 1, print_func=_print)
-                _print("Computing seams with multiblend (first frame)...")
                 levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
-                assignment, _, seam_mask_cache = compute_or_load_seams(
-                    images=images,
-                    workwidth=workwidth,
-                    workheight=workheight,
-                    pto_file=pto_file,
-                    pad=pad,
-                    padsides=padsides,
-                    levels=levels,
-                    is_video_output=True,
-                    simple_seam=False,
-                    content_seam=False,
-                    seam_load_filename=seam_load_filename,
-                    verbosity=0,
-                    print_func=_print,
-                )
+                if blend_state is not None and blend_state.get('assignment') is not None:
+                    if (blend_state['workwidth'], blend_state['workheight'], blend_state['levels']) != (workwidth, workheight, levels):
+                        raise ValueError("Chunk geometry does not match the initial timelapse chunk.")
+                    assignment = blend_state['assignment']
+                    seam_mask_cache = blend_state['seam_mask_cache']
+                else:
+                    if seam_load_filename is not None:
+                        seam_load_filename = _prepare_loaded_seam(
+                            seam_load_filename, final_w, final_h,
+                            geo_min_left, geo_min_top, workwidth, workheight,
+                            verbosity=0 if _quiet else 1, print_func=_print)
+                    _print("Computing seams with multiblend (first frame)...")
+                    assignment, _, seam_mask_cache = compute_or_load_seams(
+                        images=images,
+                        workwidth=workwidth,
+                        workheight=workheight,
+                        pto_file=pto_file,
+                        pad=pad,
+                        padsides=padsides,
+                        levels=levels,
+                        is_video_output=True,
+                        simple_seam=False,
+                        content_seam=False,
+                        seam_load_filename=seam_load_filename,
+                        verbosity=0,
+                        print_func=_print,
+                    )
+                    if blend_state is not None:
+                        blend_state.update({
+                            'assignment': assignment,
+                            'seam_mask_cache': seam_mask_cache,
+                            'workwidth': workwidth,
+                            'workheight': workheight,
+                            'levels': levels,
+                        })
 
-            recompute_exposure = (frame_count - 1) % level_subsample == 0
+            recompute_exposure = (processed_frames_before + frame_count - 1) % level_subsample == 0
             blend_out_info = {}
             rgb_blended = multiblend.blend(
                 images=images,
@@ -2929,6 +3179,8 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
             )
             if recompute_exposure and 'exposure' in blend_out_info:
                 cached_exp_info = blend_out_info['exposure']
+                if blend_state is not None:
+                    blend_state['exposure_info'] = cached_exp_info
 
             _canvas_r.fill(0); _canvas_g.fill(0); _canvas_b.fill(0)
             t, l = geo_min_top, geo_min_left
@@ -3010,6 +3262,8 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
     for packet in out_stream.encode(): out_container.mux(packet)
     out_container.close()
+    if blend_state is not None:
+        blend_state['processed_frames'] = processed_frames_before + frame_count
     for decoder in camera_decoders:
         decoder.close()
     _print(f"\n✅ Success! Timelapse video saved to {output_file}")
@@ -5732,6 +5986,9 @@ def main():
         launch_gui()
         return
 
+    for _signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(_signal, _handle_termination_signal)
+
     parser = argparse.ArgumentParser(
         description="Reproject and stitch images or videos into a panorama based on a Hugin .pto file.",
         formatter_class=argparse.RawTextHelpFormatter,
@@ -5832,6 +6089,7 @@ def main():
     timelapse_group.add_argument("--timelapse-speed", type=float, default=None, help="Timelapse speed-up factor (e.g., 60 for 60x).")
     timelapse_group.add_argument("--timelapse-framerate", type=int, default=30, help="Output timelapse frame rate (default: 30).")
     timelapse_group.add_argument("--timelapse-quality", type=str, default='sd', help="Source quality: 'sd'/'SD' for mini_mm.mp4 or 'hd'/'HD' for full_mm.mp4 (default: sd).")
+    timelapse_group.add_argument("--chunksize", type=int, default=2, metavar="MINUTES", help="Remote timelapse chunk duration in minutes (default: 2).")
     timelapse_group.add_argument("--timelapse-pattern", type=str, default='/meteor/cam?', help="Glob pattern used to find camera directories (default: /meteor/cam?).")
     timelapse_group.add_argument("--pto", type=str, default=None, metavar="FILE",
         help="Override the auto-generated PTO file for timelapse (use a custom lens calibration).")
@@ -5895,6 +6153,8 @@ def main():
             _print("Error: --timelapse requires --timelapse-start.", file=sys.stderr); sys.exit(1)
         if args.timelapse_speed is None or args.timelapse_speed <= 0:
             _print("Error: --timelapse requires a positive --timelapse-speed.", file=sys.stderr); sys.exit(1)
+        if args.chunksize <= 0:
+            _print("Error: --chunksize must be a positive number of minutes.", file=sys.stderr); sys.exit(1)
         if args.timelapse_end and args.timelapse_duration:
             _print("Error: --timelapse-end and --timelapse-duration cannot be used together.", file=sys.stderr); sys.exit(1)
         if not args.timelapse_end and not args.timelapse_duration:
@@ -5933,43 +6193,42 @@ def main():
             if not files:
                 _print(f"Error: Camera {i} has no video files in the timelapse range.", file=sys.stderr); sys.exit(1)
 
-        if args.station:
-            remote_temp_dir = tempfile.mkdtemp(prefix='stitcher_remote_')
-            _print(f"Fetching timelapse files from {args.station}...")
-            all_remote_files = [f for files in camera_files for f, _, _ in files]
-            lens_paths = _collect_remote_lens_pto_paths(all_remote_files)
-            _print(f"Discovered {len(all_remote_files)} remote timelapse files and {len(lens_paths)} lens.pto files")
-            _fetch_remote_files_over_ssh(args.station, all_remote_files + lens_paths, remote_temp_dir, progress_prefix="Fetching timelapse files")
-            camera_files = [
-                [(os.path.join(remote_temp_dir, f.lstrip('/')), start, end) for f, start, end in files]
-                for files in camera_files
-            ]
-
-        # Generate PTO from the first file of each camera.
         projection = 'fisheye' if args.fisheye else 'equirect'
-        representative_files = [files[0][0] for files in camera_files]
-        if args.pto:
-            auto_generated_pto = args.pto
-            _print(f"Using custom PTO file: {auto_generated_pto}")
-        else:
-            auto_generated_pto = generate_pto_from_lens_files(representative_files, projection)
-            if auto_generated_pto is None:
-                _print("Error: Failed to generate PTO file from lens.pto files.", file=sys.stderr); sys.exit(1)
-            _print(f"Generated PTO file: {auto_generated_pto}")
+        padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
+        auto_generated_pto = None
 
         try:
-            padsides = set(s.strip() for s in args.padsides.split(',') if s.strip()) if args.padsides else ({'top','bottom','left','right'} if args.pad > 0 else set())
-            reproject_timelapse(
-                auto_generated_pto, camera_files, args.output_file,
-                start_time, end_time, args.timelapse_speed, args.timelapse_framerate,
-                args.pad, num_cores, padsides, model=args.model,
-                enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
-                level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
-                timestamp=args.timestamp, saturation=args.saturation,
-                devignette=devignette,
-                seam_load_filename=args.load_seams
-            )
-            _output_file_written[0] = True
+            if args.station:
+                remote_temp_dir = _register_temp_dir(tempfile.mkdtemp(prefix='stitcher_remote_'))
+                auto_generated_pto = _reproject_timelapse_chunked(
+                    args.station, camera_files, start_time, end_time, args.output_file,
+                    args.pto, projection, args, num_cores, padsides, devignette, remote_temp_dir,
+                    chunk_seconds=args.chunksize * 60, overlap_seconds=60
+                )
+                _output_file_written[0] = True
+            else:
+                # Generate PTO from the first file of each camera.
+                representative_files = [files[0][0] for files in camera_files]
+                if args.pto:
+                    auto_generated_pto = args.pto
+                    _print(f"Using custom PTO file: {auto_generated_pto}")
+                else:
+                    auto_generated_pto = generate_pto_from_lens_files(representative_files, projection)
+                    if auto_generated_pto is None:
+                        _print("Error: Failed to generate PTO file from lens.pto files.", file=sys.stderr); sys.exit(1)
+                    _print(f"Generated PTO file: {auto_generated_pto}")
+
+                reproject_timelapse(
+                    auto_generated_pto, camera_files, args.output_file,
+                    start_time, end_time, args.timelapse_speed, args.timelapse_framerate,
+                    args.pad, num_cores, padsides, model=args.model,
+                    enhance=args.enhance, fisheye_mask=args.fisheye, max_frames=args.max_frames,
+                    level_subsample=args.level_subsample, crf=args.crf, preset=args.preset,
+                    timestamp=args.timestamp, saturation=args.saturation,
+                    devignette=devignette,
+                    seam_load_filename=args.load_seams
+                )
+                _output_file_written[0] = True
         except (ValueError, FileNotFoundError, ImportError, IOError, RuntimeError, KeyboardInterrupt) as e:
             _print(f"\n❌ An error occurred during processing:\n{e}", file=sys.stderr)
             import traceback
@@ -5987,7 +6246,7 @@ def main():
                     _print(f"Cleaned up partial output file: {args.output_file}", file=sys.stderr)
                 except Exception:
                     pass
-            if auto_generated_pto and os.path.exists(auto_generated_pto):
+            if auto_generated_pto and os.path.exists(auto_generated_pto) and auto_generated_pto != args.pto:
                 try:
                     os.unlink(auto_generated_pto)
                     _print(f"Cleaned up temporary PTO file: {auto_generated_pto}")
@@ -6007,7 +6266,7 @@ def main():
     if args.station:
         if not args.input_files:
             _print("Error: --station requires input file patterns to be specified.", file=sys.stderr); sys.exit(1)
-        remote_temp_dir = tempfile.mkdtemp(prefix='stitcher_remote_')
+        remote_temp_dir = _register_temp_dir(tempfile.mkdtemp(prefix='stitcher_remote_'))
         _print(f"Fetching input files from {args.station}...")
         remote_input_files = _expand_remote_input_patterns(args.station, args.input_files)
         if not remote_input_files:

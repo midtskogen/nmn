@@ -2225,68 +2225,96 @@ def _collect_remote_lens_pto_paths(paths):
     return sorted(lens_paths)
 
 
-def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_prefix="Fetching"):
-    """Fetch remote files via a single tar-over-ssh session.
+def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_prefix="Fetching", batch_size=300, max_attempts=3):
+    """Fetch remote files via batched tar-over-ssh sessions.
 
     remote_paths must be absolute paths on the remote host. The remote
     directory structure is preserved under local_dir. A progress bar
     showing the number of transferred files is printed.
+
+    Files are fetched in batches so a single network hiccup only requires
+    retrying a small batch instead of restarting a multi-gigabyte transfer.
+    SSH keepalive packets are enabled to avoid idle timeouts.
     """
     if not remote_paths:
         return []
     os.makedirs(local_dir, exist_ok=True)
     total_files = len(remote_paths)
-    file_list = '\n'.join(remote_paths) + '\n'
-    ssh_cmd = ['ssh', '-o', 'BatchMode=yes', station, 'tar', '-cvhf', '-', '-T', '/dev/stdin']
-    tar_cmd = ['tar', '-xf', '-', '-C', local_dir]
-    ssh_proc = subprocess.Popen(ssh_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    ssh_proc.stdin.write(file_list.encode())
-    ssh_proc.stdin.close()
-    tar_proc = subprocess.Popen(tar_cmd, stdin=ssh_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    ssh_proc.stdout.close()
+
+    ssh_base = ['ssh', '-o', 'BatchMode=yes',
+                '-o', 'ServerAliveInterval=60',
+                '-o', 'ServerAliveCountMax=3']
 
     transferred = [0]
     lock = threading.Lock()
-    stderr_lines = []
-    expected_basenames = set(os.path.basename(p) for p in remote_paths)
-    def _read_stderr():
-        try:
-            for raw_line in ssh_proc.stderr:
-                try:
-                    line = raw_line.decode().strip()
-                except UnicodeDecodeError:
-                    continue
-                stderr_lines.append(line)
-                if line and not line.startswith('tar:') and os.path.basename(line) in expected_basenames:
-                    with lock:
-                        transferred[0] += 1
-                        count = transferred[0]
-                    pct = min(count / total_files, 1.0)
-                    bar_len = 40
-                    filled = min(int(bar_len * pct), bar_len)
-                    bar = '[' + '#' * filled + '-' * (bar_len - filled) + ']'
-                    _print(f"\r{progress_prefix}: {bar} {count}/{total_files}", end='', flush=True)
-        except Exception:
-            pass
 
-    stderr_thread = threading.Thread(target=_read_stderr)
-    stderr_thread.start()
-    tar_err = tar_proc.communicate()[1]
-    ssh_proc.wait()
-    stderr_thread.join()
+    def _update_progress(n=1):
+        with lock:
+            transferred[0] += n
+            count = transferred[0]
+        pct = min(count / total_files, 1.0)
+        bar_len = 40
+        filled = min(int(bar_len * pct), bar_len)
+        bar = '[' + '#' * filled + '-' * (bar_len - filled) + ']'
+        _print(f"\r{progress_prefix}: {bar} {count}/{total_files}", end='', flush=True)
 
-    if ssh_proc.returncode != 0:
-        error_tail = ' | '.join(stderr_lines[-10:]) if stderr_lines else '(no stderr)'
-        raise IOError(f"SSH fetch failed from {station}: {error_tail}")
-    if tar_proc.returncode != 0:
-        raise IOError(f"Tar extraction failed: {tar_err.decode().strip()}")
-    # Ensure the final bar shows at least the total, but never exceeds the capped bar.
+    def _fetch_batch(batch):
+        file_list = '\n'.join(batch) + '\n'
+        ssh_cmd = ssh_base + [station, 'tar', '-cvhf', '-', '-T', '/dev/stdin']
+        tar_cmd = ['tar', '-xf', '-', '-C', local_dir]
+
+        expected_basenames = set(os.path.basename(p) for p in batch)
+        stderr_lines = []
+
+        ssh_proc = subprocess.Popen(ssh_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ssh_proc.stdin.write(file_list.encode())
+        ssh_proc.stdin.close()
+        tar_proc = subprocess.Popen(tar_cmd, stdin=ssh_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ssh_proc.stdout.close()
+
+        def _read_stderr():
+            try:
+                for raw_line in ssh_proc.stderr:
+                    try:
+                        line = raw_line.decode().strip()
+                    except UnicodeDecodeError:
+                        continue
+                    stderr_lines.append(line)
+                    if line and not line.startswith('tar:') and os.path.basename(line) in expected_basenames:
+                        _update_progress(1)
+            except Exception:
+                pass
+
+        stderr_thread = threading.Thread(target=_read_stderr)
+        stderr_thread.start()
+        tar_err = tar_proc.communicate()[1]
+        ssh_proc.wait()
+        stderr_thread.join()
+
+        if ssh_proc.returncode != 0:
+            error_tail = ' | '.join(stderr_lines[-10:]) if stderr_lines else '(no stderr)'
+            raise IOError(f"SSH fetch failed from {station}: {error_tail}")
+        if tar_proc.returncode != 0:
+            raise IOError(f"Tar extraction failed: {tar_err.decode().strip()}")
+
+    for batch_start in range(0, total_files, batch_size):
+        batch = remote_paths[batch_start:batch_start + batch_size]
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                _fetch_batch(batch)
+                break
+            except IOError as e:
+                last_error = str(e)
+                if attempt < max_attempts:
+                    _print(f"\n{progress_prefix}: batch {batch_start // batch_size + 1} failed (attempt {attempt}/{max_attempts}), retrying...", file=sys.stderr)
+                else:
+                    raise IOError(f"SSH fetch failed from {station} after {max_attempts} attempts: {last_error}")
+
+    # Ensure the final bar shows the total.
     bar_len = 40
-    with lock:
-        final_count = min(transferred[0], total_files)
-    filled = bar_len
-    bar = '[' + '#' * filled + '-' * (bar_len - filled) + ']'
-    _print(f"\r{progress_prefix}: {bar} {final_count}/{total_files}", end='', flush=True)
+    bar = '[' + '#' * bar_len + ']'
+    _print(f"\r{progress_prefix}: {bar} {total_files}/{total_files}", end='', flush=True)
     _print()
     return [os.path.join(local_dir, p.lstrip('/')) for p in remote_paths]
 

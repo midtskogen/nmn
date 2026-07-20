@@ -372,6 +372,30 @@ class AS7Diagnostic:
         except Exception:
             return []
 
+    def _get_top_cpu_processes(self):
+        """Identifies the top 5 processes using CPU."""
+        if not self.psutil:
+            return []
+        try:
+            procs = []
+            for proc in self.psutil.process_iter(['pid', 'name']):
+                try:
+                    procs.append((proc, proc.cpu_percent(interval=None)))
+                except (self.psutil.NoSuchProcess, self.psutil.AccessDenied):
+                    continue
+            time.sleep(0.1)
+            results = []
+            for proc, _ in procs:
+                try:
+                    cpu = proc.cpu_percent(interval=None)
+                    if cpu is not None:
+                        results.append({'name': proc.info.get('name', 'unknown'), 'cpu_percent': cpu})
+                except (self.psutil.NoSuchProcess, self.psutil.AccessDenied):
+                    continue
+            return sorted(results, key=lambda x: x['cpu_percent'], reverse=True)[:5]
+        except Exception:
+            return []
+
     def check_user(self):
         """Verifies the current user and the existence of the 'ams' user."""
         print("\n--- Checking User & Permissions ---")
@@ -711,14 +735,22 @@ class AS7Diagnostic:
             cpu_cores = os.cpu_count() or 1 # Default to 1 core if detection fails
             load_avg = self.psutil.getloadavg()
             load = load_avg[1] # Use 5-minute load average
+            issue = None
             if load > (cpu_cores * 4):
-                self.log_issue("HIGH_LOAD_AVG_FAIL", {'load': load, 'cores': cpu_cores, 'cores_x4': cpu_cores*4})
+                issue = "HIGH_LOAD_AVG_FAIL"
+                context = {'load': load, 'cores': cpu_cores, 'cores_x4': cpu_cores*4,
+                           'top_cpu': self._get_top_cpu_processes()}
             elif load > (cpu_cores * 2):
-                self.log_issue("HIGH_LOAD_AVG_WARN", {'load': load, 'cores': cpu_cores, 'cores_x2': cpu_cores*2})
+                issue = "HIGH_LOAD_AVG_WARN"
+                context = {'load': load, 'cores': cpu_cores, 'cores_x2': cpu_cores*2}
             elif load > cpu_cores:
-                self.log_issue("HIGH_LOAD_AVG", {'load': load, 'cores': cpu_cores})
+                issue = "HIGH_LOAD_AVG"
+                context = {'load': load, 'cores': cpu_cores}
             else:
                 self.log_success(f"System load average is normal ({load:.2f} on {cpu_cores} cores).")
+
+            if issue:
+                self.log_issue(issue, context)
         except Exception as e:
             self.log_issue("PERMISSION_DENIED", {'check': f"getting system resources: {e}"})
 
@@ -2388,6 +2420,13 @@ class AS7Diagnostic:
                         print("     - Could not determine top swap processes.")
                     for proc in top_swappers:
                         print(f"     - {proc['name']}: {proc['swap_mb']:.2f} MB")
+                elif code == "HIGH_LOAD_AVG_FAIL":
+                    print("   - Top CPU Consumers:")
+                    top_cpu = contexts[0].get('top_cpu', [])
+                    if not top_cpu:
+                        print("     - Could not determine top CPU processes.")
+                    for proc in top_cpu:
+                        print(f"     - {proc['name']}: {proc['cpu_percent']:.1f}%")
                 elif len(contexts) == 1:
                      ctx = contexts[0]
                      if code not in ["IO_ERROR_DETECTED", "SWAP_ACTIVE"]:

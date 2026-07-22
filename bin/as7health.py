@@ -911,7 +911,7 @@ class AS7Diagnostic:
         
         checks = {
             "FS_READ_ONLY": r'Remounting filesystem read-only',
-            "OOM_KILLER_ACTIVE": r'(Out of memory: Kill process|oom-killer)',
+            "OOM_KILLER_ACTIVE": r'(Out of memory: Kill(?:ed)? process|oom-killer)',
             "SEGFAULT_DETECTED": r'segfault at',
             "NTP_LOG_ERRORS": r'(ntpd|systemd-timesyncd|chrony).*(fail|timeout|error)',
             "USB_ERROR_DETECTED": r'usb .*: (error|disconnect|failed enumeration)',

@@ -15,8 +15,10 @@ only be approximated:
   * x_poly / y_poly / x_poly_fwd / y_poly_fwd are approximated by sampling the
     PTO mapping and fitting the 15-term AMS polynomials. They will not be
     identical to the original calibration polynomials.
-  * cat_image_stars / close_stars / user_stars / residual errors are not stored
-    in a .pto and are therefore omitted or set to empty/default values.
+  * cat_image_stars is synthesized from the bundled star catalog and the PTO
+    mapping so the JSON can be converted back to a PTO by amscalib2lens.py.
+  * close_stars / user_stars / residual errors are not stored in a .pto and are
+    therefore empty/default.
 
 Usage:
     pto2amscalib.py <lens.pto> <output-calparams.json>
@@ -54,7 +56,8 @@ if _PROJECT_DIR is not None:
             if _ps not in sys.path:
                 sys.path.insert(0, _ps)
 
-from pto_mapper import parse_pto_file, map_image_to_pano
+from pto_mapper import parse_pto_file, map_image_to_pano, map_pano_to_image
+import stars
 
 
 def _find_config_path(args):
@@ -295,10 +298,14 @@ def gnomonic_xy(ra, dec, ra_center, dec_center, pos_angle):
     return ad_deg * math.cos(theta), ad_deg * math.sin(theta)
 
 
-def poly_design_fwd(x_det, y_det):
-    """Design matrix for the 12-term forward polynomial in detector coordinates."""
+def poly_design_fwd(x_det, y_det, swap_radial=False):
+    """Design matrix for the 12-term forward polynomial in detector coordinates.
+
+    The AMS convention for the y polynomial swaps the two radial terms
+    (y*r is index 10 and x*r is index 11) compared to the x polynomial.
+    """
     r = math.sqrt(x_det * x_det + y_det * y_det)
-    return [
+    terms = [
         1.0,
         x_det,
         y_det,
@@ -309,15 +316,18 @@ def poly_design_fwd(x_det, y_det):
         x_det * x_det * y_det,
         x_det * y_det * y_det,
         y_det ** 3,
-        x_det * r,
-        y_det * r,
     ]
+    if swap_radial:
+        terms.extend([y_det * r, x_det * r])
+    else:
+        terms.extend([x_det * r, y_det * r])
+    return terms
 
 
-def poly_design_rev(X, Y):
+def poly_design_rev(X, Y, swap_radial=False):
     """Design matrix for the 12-term reverse polynomial in gnomonic (X, Y) space."""
     r = math.sqrt(X * X + Y * Y)
-    return [
+    terms = [
         1.0,
         X,
         Y,
@@ -328,18 +338,22 @@ def poly_design_rev(X, Y):
         X * X * Y,
         X * Y * Y,
         Y ** 3,
-        X * r,
-        Y * r,
     ]
+    if swap_radial:
+        terms.extend([Y * r, X * r])
+    else:
+        terms.extend([X * r, Y * r])
+    return terms
 
 
 def fit_polys(samples, observer, ra_center, dec_center, pos_angle, pixscale, w, h):
     """Fit forward and reverse AMS 15-term polynomials from PTO samples."""
     F_scale = 3600.0 / pixscale
 
-    # Build target data
-    rev_A, rev_bx, rev_by = [], [], []
-    fwd_A, fwd_bx, fwd_by = [], [], []
+    # Build target data with separate x and y design matrices because the
+    # AMS convention swaps the two radial terms in the y polynomial.
+    rev_Ax, rev_Ay, rev_bx, rev_by = [], [], [], []
+    fwd_Ax, fwd_Ay, fwd_bx, fwd_by = [], [], [], []
 
     for x, y, az, el in samples:
         ra, dec = azel_to_radec(az, el, observer)
@@ -351,35 +365,37 @@ def fit_polys(samples, observer, ra_center, dec_center, pos_angle, pixscale, w, 
         y_det = y - h / 2.0
 
         # Forward: x_det + dx = X_pix, y_det + dy = Y_pix
-        fwd_A.append(poly_design_fwd(x_det, y_det))
+        # Constant term is omitted so (0,0) in detector maps to the gnomonic origin.
+        fwd_Ax.append(poly_design_fwd(x_det, y_det)[1:])
         fwd_bx.append(X_pix - x_det)
+        fwd_Ay.append(poly_design_fwd(x_det, y_det, swap_radial=True)[1:])
         fwd_by.append(Y_pix - y_det)
 
         # Reverse: X_pix - dX + w/2 = x, Y_pix - dY + h/2 = y
-        rev_A.append(poly_design_rev(X_pix, Y_pix))
+        rev_Ax.append(poly_design_rev(X_pix, Y_pix)[1:])
         rev_bx.append(X_pix + w / 2.0 - x)
+        rev_Ay.append(poly_design_rev(X_pix, Y_pix, swap_radial=True)[1:])
         rev_by.append(Y_pix + h / 2.0 - y)
 
-    if not rev_A:
+    if not rev_Ax:
         return None, None, None, None
 
-    fwd_A = np.array(fwd_A)
-    fwd_bx = np.linalg.lstsq(fwd_A, np.array(fwd_bx), rcond=None)[0]
-    fwd_by = np.linalg.lstsq(fwd_A, np.array(fwd_by), rcond=None)[0]
+    fwd_bx = np.linalg.lstsq(np.array(fwd_Ax), np.array(fwd_bx), rcond=None)[0]
+    fwd_by = np.linalg.lstsq(np.array(fwd_Ay), np.array(fwd_by), rcond=None)[0]
 
-    rev_A = np.array(rev_A)
-    rev_bx = np.linalg.lstsq(rev_A, np.array(rev_bx), rcond=None)[0]
-    rev_by = np.linalg.lstsq(rev_A, np.array(rev_by), rcond=None)[0]
+    rev_bx = np.linalg.lstsq(np.array(rev_Ax), np.array(rev_bx), rcond=None)[0]
+    rev_by = np.linalg.lstsq(np.array(rev_Ay), np.array(rev_by), rcond=None)[0]
 
     x_poly_fwd = np.zeros(15)
     y_poly_fwd = np.zeros(15)
-    x_poly_fwd[:12] = fwd_bx
-    y_poly_fwd[:12] = fwd_by
+    # Coefficient 0 is the (unused) constant; store the 11 fitted terms in 1..11.
+    x_poly_fwd[1:12] = fwd_bx
+    y_poly_fwd[1:12] = fwd_by
 
     x_poly = np.zeros(15)
     y_poly = np.zeros(15)
-    x_poly[:12] = rev_bx
-    y_poly[:12] = rev_by
+    x_poly[1:12] = rev_bx
+    y_poly[1:12] = rev_by
 
     return x_poly.tolist(), y_poly.tolist(), x_poly_fwd.tolist(), y_poly_fwd.tolist()
 
@@ -408,7 +424,7 @@ def compute_residuals(pto_data, image_index, x_poly, y_poly, x_poly_fwd, y_poly_
         X = math.degrees(ad) * math.cos(math.radians(theta)) * F_scale
         Y = math.degrees(ad) * math.sin(math.radians(theta)) * F_scale
         dX = sum(c * t for c, t in zip(xpoly[:12], poly_design_rev(X, Y)))
-        dY = sum(c * t for c, t in zip(ypoly[:12], poly_design_rev(X, Y)))
+        dY = sum(c * t for c, t in zip(ypoly[:12], poly_design_rev(X, Y, swap_radial=True)))
         return X - dX + w / 2.0, Y - dY + h / 2.0
 
     # Forward: pixel -> RA/dec -> pixel via distort_xy_new
@@ -473,6 +489,58 @@ def _root_from_lens_pto(pto_path, cams_id):
         dt = mdt
     root = dt.strftime('%Y_%m_%d_%H_%M_%S_000_') + cams_id
     return root, dt.timestamp()
+
+
+def _generate_cat_image_stars(pto_data, observer, mag_limit=5.5):
+    """Create a synthetic cat_image_stars list from the star catalog and PTO.
+
+    Each star is projected from J2000 RA/dec through the observer to az/alt,
+    then mapped back into the source image using the PTO geometry.  This lets
+    amscalib2lens.py regenerate a .pto from a JSON produced by this script.
+    """
+    cat_image_stars = []
+    for ra_h, pmra, dec_d, pmdec, mag, name in stars.cat:
+        if float(mag) > mag_limit:
+            continue
+        body = ephem.FixedBody()
+        body._ra = str(ra_h)
+        body._pmra = pmra
+        body._dec = str(dec_d)
+        body._pmdec = pmdec
+        body._epoch = ephem.J2000
+        body.compute(observer)
+        alt_deg = math.degrees(float(body.alt))
+        if alt_deg < 1.0:
+            continue
+        az_deg = math.degrees(float(body.az)) % 360.0
+        pano_x = az_deg * 100.0
+        pano_y = (90.0 - alt_deg) * 100.0
+        mapped = map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=True)
+        if mapped is None:
+            continue
+        _, six, siy = mapped
+        ra_deg = float(ra_h) * 15.0
+        star_tuple = (
+            name,               # 0  dcname
+            float(mag),         # 1  mag
+            ra_deg,             # 2  ra
+            float(dec_d),       # 3  dec
+            ra_deg,             # 4  (unused)
+            float(dec_d),       # 5  (unused)
+            0.0,                # 6  match_dist
+            0.0,                # 7
+            0.0,                # 8
+            0.0,                # 9
+            0.0,                # 10
+            0.0,                # 11
+            0.0,                # 12
+            float(six),         # 13 six
+            float(siy),         # 14 siy
+            0.0,                # 15
+            0.0,                # 16
+        )
+        cat_image_stars.append(star_tuple)
+    return cat_image_stars
 
 
 def convert_pto_file(args):
@@ -606,7 +674,7 @@ def convert_pto_file(args):
         'user_stars': [],
         'crop_box': [0, 0, w, h],
         'close_stars': [],
-        'cat_image_stars': [],
+        'cat_image_stars': _generate_cat_image_stars(pto_data, observer),
     }
 
     os.makedirs(Path(args.outfile).parent, exist_ok=True)

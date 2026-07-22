@@ -281,7 +281,50 @@ class AS7Diagnostic:
         if error_code == "AS6_JSON_BAD_IP": return f"Camera '{context.get('cam_key')}' has an invalid IP"
         if error_code == "AS6_JSON_LAT_LNG_OUT_OF_RANGE": return f"Lat/Lng for station is out of range ({context.get('lat')}, {context.get('lng')})"
         
-        if error_code in ["FS_READ_ONLY", "OOM_KILLER_ACTIVE", "NTP_LOG_ERRORS", "USB_ERROR_DETECTED"]:
+        if error_code == "OOM_KILLER_ACTIVE":
+            details = context.get('oom_details', {})
+            killed = details.get('killed', {})
+            invokers = details.get('invokers', {})
+            events = details.get('events', context.get('count', 0))
+
+            def _fmt_mem(kb):
+                if kb >= 1024 * 1024:
+                    return f"{kb / (1024 * 1024):.2f} GB"
+                elif kb >= 1024:
+                    return f"{kb / 1024:.2f} MB"
+                else:
+                    return f"{kb} kB"
+
+            killed_parts = []
+            for name, cnt in killed.items():
+                mem = details.get('memory', {}).get(name, {})
+                anon_kb_list = mem.get('anon_kb', [])
+                if anon_kb_list:
+                    peak = max(anon_kb_list)
+                    mem_str = f", {_fmt_mem(peak)} anon-rss"
+                else:
+                    mem_str = ""
+                if cnt > 1:
+                    killed_parts.append(f"{name} ({cnt} kills{mem_str})")
+                else:
+                    killed_parts.append(f"{name} (1 kill{mem_str})")
+
+            invoker_parts = [f"{name} ({cnt})" for name, cnt in invokers.items()]
+
+            parts = []
+            if killed_parts:
+                parts.append("killed " + ", ".join(killed_parts))
+            if invoker_parts:
+                parts.append("invoked by " + ", ".join(invoker_parts))
+
+            if parts:
+                detail_str = "; ".join(parts)
+            else:
+                detail_str = "details unavailable"
+
+            return f"Found {events} OOM activation(s): {detail_str}. Last: \"{context.get('last_error', '')}\""
+
+        if error_code in ["FS_READ_ONLY", "NTP_LOG_ERRORS", "USB_ERROR_DETECTED"]:
              return f"Found {context.get('count', 0)} log entries. Last: \"{context.get('last_error', '')}\""
 
         if error_code in ["SEGFAULT_DETECTED", "SEGFAULT_DETECTED_INFO"]:
@@ -922,6 +965,8 @@ class AS7Diagnostic:
                         context['programs'] = self._extract_segfault_programs(lines)
                         if count <= 5:
                             code = "SEGFAULT_DETECTED_INFO"
+                    if code == "OOM_KILLER_ACTIVE":
+                        context['oom_details'] = self._extract_oom_details(lines)
                     self.log_issue(code, context)
 
     def _extract_segfault_programs(self, lines):
@@ -940,6 +985,34 @@ class AS7Diagnostic:
             else:
                 counts['unknown'] += 1
         return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
+
+    def _extract_oom_details(self, lines):
+        """Parses OOM killer log lines and returns killed/invoker counts plus memory usage."""
+        killed = Counter()
+        invokers = Counter()
+        memory = {}
+        for line in lines:
+            match = re.search(r'Killed process\s+\d+\s+\((\S+?)\).*?total-vm:(\d+)kB.*?anon-rss:(\d+)kB', line, re.IGNORECASE)
+            if match:
+                name = match.group(1)
+                total_kb = int(match.group(2))
+                anon_kb = int(match.group(3))
+                killed[name] += 1
+                if name not in memory:
+                    memory[name] = {'total_kb': [], 'anon_kb': []}
+                memory[name]['total_kb'].append(total_kb)
+                memory[name]['anon_kb'].append(anon_kb)
+                continue
+            match = re.search(r'(\S+?)\s+invoked oom-killer:', line, re.IGNORECASE)
+            if match:
+                invokers[match.group(1)] += 1
+        events = max(sum(killed.values()), sum(invokers.values()))
+        return {
+            'events': events,
+            'killed': dict(sorted(killed.items(), key=lambda x: x[1], reverse=True)),
+            'invokers': dict(sorted(invokers.items(), key=lambda x: x[1], reverse=True)),
+            'memory': memory,
+        }
 
     def _check_disk_usage(self, path, err_crit, err_warn, err_info, thresholds=(1, 3, 5)):
         """Helper function to check disk space on a given path."""

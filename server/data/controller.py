@@ -1013,7 +1013,9 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 logging.warning(f"Worker {task_id} - Could not load translations for lang '{lang_code}': {e}")
 
         duration = max(1, int(data.get('duration', 1)))
-        is_multi_minute = duration > 1 and (data['file_type'] in ('lowres', 'hires') or data['file_type'].endswith('_long'))
+        file_type = data['file_type']
+        is_video_multi = duration > 1 and file_type in ('lowres', 'hires')
+        is_long = file_type.endswith('_long')
 
         if 'camera_views' in data and data['camera_views']:
             for view in data['camera_views']:
@@ -1022,15 +1024,20 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 while start <= end:
                     files_to_process.append({'time': start, 'cam': view['camera']})
                     start += timedelta(minutes=1)
-        elif is_multi_minute:
+        elif is_video_multi:
             start_time = datetime.strptime(f"{data['date']} {data['hour']}:{data['minute']}", '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
             for cam in data['cameras']:
-                files_to_process.append({'time': start_time, 'cam': int(cam)})
+                files_to_process.append({'time': start_time, 'cam': int(cam), 'duration': duration})
         else:
             start_time = datetime.strptime(f"{data['date']} {data['hour']}:{data['minute']}", '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
-            for i in range(int(data['length'])):
+            seq_length = int(data['length'])
+            seq_interval = int(data['interval'])
+            for i in range(seq_length):
                 for cam in data['cameras']:
-                    files_to_process.append({'time': start_time + timedelta(minutes=i*int(data['interval'])), 'cam': int(cam)})
+                    item = {'time': start_time + timedelta(minutes=i*seq_interval), 'cam': int(cam)}
+                    if is_long:
+                        item['duration'] = duration
+                    files_to_process.append(item)
 
         station_code = stations[station_id]['station']['code']
 
@@ -1039,10 +1046,14 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         # local paths, saving ~1 s on a fully-cached request.
         ssh_control_socket = os.path.join(LOCK_DIR, f"ssh_ctl_{task_id}_{station_id}")
         ssh_master_proc = None
-        need_ssh = not data['file_type'].startswith('image') or any(
-            not os.path.exists(os.path.join(DOWNLOAD_DIR,
+        def _expected_image_path(fi):
+            dur = fi.get('duration', 1)
+            suffix = f"_dur{dur}" if dur > 1 and is_long else ""
+            return os.path.join(DOWNLOAD_DIR,
                 f"{station_code}_cam{fi['cam']}_{fi['time'].strftime('%Y%m%d')}"
-                f"_{fi['time'].strftime('%H%M')}_{data['file_type']}.jpg"))
+                f"_{fi['time'].strftime('%H%M')}{suffix}_{data['file_type']}.jpg")
+        need_ssh = not data['file_type'].startswith('image') or any(
+            not os.path.exists(_expected_image_path(fi))
             for fi in files_to_process
         )
         if need_ssh:
@@ -1121,21 +1132,23 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         stitch_jobs      = []   # [{process, t_key, t_iso, stdout_path}]
         stitch_done      = 0    # stitch outputs added to results so far
         stitch_output_count = (int(do_fisheye) + int(do_equirect)) * len(stitch_cams_expected) if do_stitch else 0
-        total_steps = (duration * len(files_to_process) if is_multi_minute else len(files_to_process)) + stitch_output_count
+        total_steps = sum(fi.get('duration', 1) for fi in files_to_process) + stitch_output_count
 
         master_lock_file = os.path.join(LOCK_DIR, f"{master_task_id}.lock")
+        step_offset = 0
         while not processing_done:
             if not os.path.exists(master_lock_file):
                 logging.warning(f"Worker {task_id} - Master task lock file not found. Terminating.")
                 break
-                
+
             if current_file_item:
-                start_step = (current_file_idx * duration) if is_multi_minute else current_file_idx
+                item_duration = current_file_item.get('duration', 1)
+                start_step = step_offset
                 update_status(station_status_file, "progress", {"step": start_step, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
-                
-                proc = FileProcessor(task_id, station_id, station_code, current_file_item['cam'], current_file_item['time'], data['file_type'], pass_data_list, pto_data_cache, data.get('hevc_supported', False), translations=translations, ssh_control_socket=ssh_control_socket, status_file=station_status_file, current_step=current_file_idx, total_steps=total_steps, results_ref=results, errors_ref=errors, duration=duration)
+
+                proc = FileProcessor(task_id, station_id, station_code, current_file_item['cam'], current_file_item['time'], data['file_type'], pass_data_list, pto_data_cache, data.get('hevc_supported', False), translations=translations, ssh_control_socket=ssh_control_socket, status_file=station_status_file, current_step=current_file_idx, total_steps=total_steps, results_ref=results, errors_ref=errors, duration=item_duration)
                 job = proc.process()
-                
+
                 errors.extend(proc.errors)
                 total_bytes += proc.total_bytes_downloaded
                 if proc.is_blending_job and job:
@@ -1144,7 +1157,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 elif job:
                     t_key_dl = current_file_item['time'].strftime('%H:%M')
                     results.setdefault(t_key_dl, []).append(job)
-                    end_step = ((current_file_idx + 1) * duration) if is_multi_minute else (current_file_idx + 1)
+                    end_step = step_offset + item_duration
                     update_status(station_status_file, "progress", {"step": end_step, "total": total_steps, "message": f"status_processing_file_of_total|i={current_file_idx+1},total={total_steps}", "files": results, "errors": errors})
 
                     # Track downloaded image for stitch readiness check
@@ -1259,6 +1272,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                                 else:
                                     logging.info(f"Worker {task_id} STITCH-DEBUG: all stitch outputs cached for {t_key_s}, skipping subprocess")
 
+                step_offset += item_duration
                 current_file_idx, current_file_item = next(files_iterator, (None, None))
 
             remaining_blending_jobs = []
@@ -1451,8 +1465,8 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
                 num_files = sum(round((datetime.fromisoformat(v['end_utc']) - datetime.fromisoformat(v['start_utc'])).total_seconds() / 60) + 1 for v in active_pass_data.get('camera_views', []))
             else:
                 duration = int(data.get('duration', 1))
-                is_multi_minute = duration > 1 and (file_type in ('lowres', 'hires') or file_type.endswith('_long'))
-                if is_multi_minute:
+                is_video_multi = duration > 1 and file_type in ('lowres', 'hires')
+                if is_video_multi:
                     num_files = len(station_ids) * len(data.get('cameras', []))
                 else:
                     num_files = len(station_ids) * len(data.get('cameras', [])) * int(data.get('length', 1))
@@ -1488,8 +1502,8 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
                         num_files_for_station = sum(round((datetime.fromisoformat(v['end_utc']) - datetime.fromisoformat(v['start_utc'])).total_seconds() / 60) + 1 for v in active_pass_data.get('camera_views', []) if v['station_id'] == station_id)
                     else:
                         duration_q = int(data.get('duration', 1))
-                        is_multi_minute_q = duration_q > 1 and (file_type in ('lowres', 'hires') or file_type.endswith('_long'))
-                        num_files_for_station = len(data.get('cameras', [])) * (duration_q if is_multi_minute_q else int(data.get('length', 1)))
+                        is_video_multi_q = duration_q > 1 and file_type in ('lowres', 'hires')
+                        num_files_for_station = len(data.get('cameras', [])) * (duration_q if is_video_multi_q else int(data.get('length', 1)))
                     estimated_request_size = num_files_for_station * avg_size_bytes
                     if site_usage_bytes + estimated_request_size > per_site_quota_bytes:
                         aggregated_errors.setdefault(station_code, []).append(f"error_user_quota_exceeded|limit={PER_SITE_QUOTA_LIMIT_MB},station_code={station_code}"); continue

@@ -866,10 +866,18 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 if (durationGroup) durationGroup.style.display = 'none';
                 if (lengthIntervalGroup) lengthIntervalGroup.style.display = '';
             } else {
-                // Show duration pulldown for video or image with long integration; otherwise length/interval.
-                const useDuration = isVideo || isLongInt;
-                if (durationGroup) durationGroup.style.display = useDuration ? '' : 'none';
-                if (lengthIntervalGroup) lengthIntervalGroup.style.display = useDuration ? 'none' : '';
+                if (isVideo) {
+                    // Video uses the duration pulldown as the clip length.
+                    if (durationGroup) durationGroup.style.display = '';
+                    if (lengthIntervalGroup) lengthIntervalGroup.style.display = 'none';
+                } else if (isLongInt) {
+                    // Long exposure: duration is integration length, antall/intervall still control spacing.
+                    if (durationGroup) durationGroup.style.display = '';
+                    if (lengthIntervalGroup) lengthIntervalGroup.style.display = '';
+                } else {
+                    if (durationGroup) durationGroup.style.display = 'none';
+                    if (lengthIntervalGroup) lengthIntervalGroup.style.display = '';
+                }
                 // Restore hour/minute/length/interval
                 if (hourSelect) { hourSelect.disabled = false; hourSelect.style.opacity = ''; }
                 if (minuteSelect) { minuteSelect.disabled = false; minuteSelect.style.opacity = ''; }
@@ -1222,14 +1230,15 @@ false, false);
                     ? (isHighRes ? 'hires' : 'lowres')
                     : (isHighRes ? (isLongInt ? 'image_long' : 'image') : (isLongInt ? 'image_lowres_long' : 'image_lowres')));
             const duration = dom.durationSelect ? parseInt(dom.durationSelect.value, 10) : 1;
-            const isVideoOrLongInt = primaryType === 'video' || (primaryType === 'image' && isLongInt);
+            const isVideo = primaryType === 'video';
             const payload = {
                 stations: [...selectedStations],
                 date: dom.dateInput.value,
                 hour: dom.hourSelect.value,
                 minute: dom.minuteSelect.value,
-                length: isVideoOrLongInt && duration > 1 ? duration : dom.lengthSelect.value,
-                interval: isVideoOrLongInt && duration > 1 ? 1 : dom.intervalSelect.value,
+                // Video duration overrides antall/intervall; long exposure keeps all three.
+                length: isVideo ? duration : dom.lengthSelect.value,
+                interval: isVideo ? 1 : dom.intervalSelect.value,
                 duration: duration,
                 cameras: isTimelapse ? [] : selectedCameras,
                 file_type: fileType,

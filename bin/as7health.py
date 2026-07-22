@@ -485,31 +485,30 @@ class AS7Diagnostic:
                 if not self.is_root and current_user != 'ams':
                     self.log_issue("PERMISSION_DENIED", {'check': f"verifying mount status of '{archive_path}'. Run as root or ams."})
                     return
+                if self._remount_cloud_archive(archive_path, unmount=False):
+                    if self._archive_is_responsive(archive_path):
+                        self.log_success(f"Cloud archive '{archive_path}' was remounted and is responsive.")
+                    else:
+                        self.log_issue("ARCHIVE_HUNG")
+                        return
                 else:
-                    self.log_issue("ARCHIVE_NOT_MOUNTED")
+                    self.log_issue("ARCHIVE_HUNG")
                     return
         except (subprocess.CalledProcessError, FileNotFoundError, PermissionError):
              self.log_issue("PERMISSION_DENIED", {'check': "running 'df' command, possibly as 'ams' user"})
              return
 
-        try:
-            cmd = ['ls', archive_path]
-            if self.is_root:
-                cmd = ['sudo', '-u', 'ams', 'ls', archive_path]
-            
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
+        if self._archive_is_responsive(archive_path):
             self.log_success(f"Cloud archive '{archive_path}' is mounted and responsive.")
-        except subprocess.TimeoutExpired:
-            self.log_issue("ARCHIVE_HUNG")
-            return
-        except subprocess.CalledProcessError as e:
-            if "Input/output error" in e.stderr:
-                self.log_issue("ARCHIVE_HUNG")
+        else:
+            if self._remount_cloud_archive(archive_path, unmount=True):
+                if self._archive_is_responsive(archive_path):
+                    self.log_success(f"Cloud archive '{archive_path}' was recovered and is responsive.")
+                else:
+                    self.log_issue("ARCHIVE_HUNG")
+                    return
             else:
-                self.log_issue("PERMISSION_DENIED", {'check': f"listing contents of {archive_path}. Run as root or ams."})
-            return
-        except Exception:
-            self.log_issue("ARCHIVE_HUNG")
+                self.log_issue("ARCHIVE_HUNG")
             return
 
         as6_data = self.config_data.get("/home/ams/amscams/conf/as6.json")
@@ -554,6 +553,45 @@ class AS7Diagnostic:
                 if self.is_root:
                     cmd_rm = ['sudo', '-u', 'ams', 'rm', '-f', test_file]
                 subprocess.run(cmd_rm, capture_output=True)
+
+    def _archive_is_responsive(self, archive_path):
+        """Return True if /mnt/archive.allsky.tv can be listed within 15 seconds."""
+        try:
+            cmd = ['ls', archive_path]
+            if self.is_root:
+                cmd = ['sudo', '-u', 'ams', 'ls', archive_path]
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
+            return True
+        except Exception:
+            return False
+
+    def _remount_cloud_archive(self, archive_path, unmount=True):
+        """Attempt to recover the Wasabi archive mount by forced unmount and s3fs remount as ams."""
+        try:
+            try:
+                current_user = pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                current_user = None
+            if not self.is_root and current_user != 'ams':
+                return False
+
+            if unmount:
+                print("  Cloud archive appears hung; attempting forced unmount and remount...")
+                subprocess.run(['umount', '-l', archive_path], capture_output=True, timeout=15)
+            else:
+                print("  Cloud archive not mounted; attempting to mount...")
+
+            if self.is_root:
+                cmd = ['sudo', '-u', 'ams', 'python3', '/home/ams/amscams/pythonv2/wasabi.py', 'mnt']
+            else:
+                cmd = ['python3', '/home/ams/amscams/pythonv2/wasabi.py', 'mnt']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd='/home/ams/amscams/pythonv2')
+            if result.returncode != 0:
+                return False
+            time.sleep(2)
+            return True
+        except Exception:
+            return False
 
     def _backup_file(self, path):
         """Copies a known-good file to <path>.bak, only if the backup is older or missing."""

@@ -281,8 +281,16 @@ class AS7Diagnostic:
         if error_code == "AS6_JSON_BAD_IP": return f"Camera '{context.get('cam_key')}' has an invalid IP"
         if error_code == "AS6_JSON_LAT_LNG_OUT_OF_RANGE": return f"Lat/Lng for station is out of range ({context.get('lat')}, {context.get('lng')})"
         
-        if error_code in ["FS_READ_ONLY", "OOM_KILLER_ACTIVE", "SEGFAULT_DETECTED", "NTP_LOG_ERRORS", "USB_ERROR_DETECTED"]:
+        if error_code in ["FS_READ_ONLY", "OOM_KILLER_ACTIVE", "NTP_LOG_ERRORS", "USB_ERROR_DETECTED"]:
              return f"Found {context.get('count', 0)} log entries. Last: \"{context.get('last_error', '')}\""
+
+        if error_code in ["SEGFAULT_DETECTED", "SEGFAULT_DETECTED_INFO"]:
+            programs = context.get('programs', {})
+            if programs:
+                program_counts = ', '.join(f"{name} ({count})" for name, count in programs.items())
+            else:
+                program_counts = 'unknown'
+            return f"Found {context.get('count', 0)} segfault(s): {program_counts}. Last: \"{context.get('last_error', '')}\""
         
         if error_code == "PYTHON_PKG_MISSING": return f"Python package is missing: {context.get('pkg')}"
         if error_code == "PYTHON_PKG_MISSING_WARN": return f"Recommended Python package is missing: {context.get('pkg')}"
@@ -908,10 +916,30 @@ class AS7Diagnostic:
                 if lines:
                     count = len(lines)
                     last_error = lines[-1]
+                    context = {'count': count, 'last_error': last_error}
                     # Few isolated segfaults are not treated as a warning.
-                    if code == "SEGFAULT_DETECTED" and count <= 5:
-                        code = "SEGFAULT_DETECTED_INFO"
-                    self.log_issue(code, {'count': count, 'last_error': last_error})
+                    if code == "SEGFAULT_DETECTED":
+                        context['programs'] = self._extract_segfault_programs(lines)
+                        if count <= 5:
+                            code = "SEGFAULT_DETECTED_INFO"
+                    self.log_issue(code, context)
+
+    def _extract_segfault_programs(self, lines):
+        """Parses segfault log lines and returns a dict of program name -> count, sorted by count descending."""
+        counts = Counter()
+        for line in lines:
+            # e.g. "python[1234]: segfault at ..." or "kernel: [timestamp] python[1234]: segfault at ..."
+            match = re.search(r'(\S+?)\[\d+\].*segfault\s+at', line, re.IGNORECASE)
+            if match:
+                counts[match.group(1)] += 1
+                continue
+            # Fallback: capture from "in <program>[...]" or "in <program> (deleted)"
+            match = re.search(r'\sin\s+(\S+?)(?:\[|\s|\b)', line, re.IGNORECASE)
+            if match:
+                counts[match.group(1)] += 1
+            else:
+                counts['unknown'] += 1
+        return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
     def _check_disk_usage(self, path, err_crit, err_warn, err_info, thresholds=(1, 3, 5)):
         """Helper function to check disk space on a given path."""

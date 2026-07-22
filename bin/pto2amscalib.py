@@ -25,6 +25,7 @@ Usage:
 
 import argparse
 import configparser
+import copy
 import json
 import math
 import os
@@ -57,19 +58,50 @@ from pto_mapper import parse_pto_file, map_image_to_pano
 
 
 def _find_config_path(args):
-    """Select configuration file: -c if given, otherwise /etc/meteor.cfg if readable."""
+    """Select configuration file: -c if given, otherwise /etc/meteor.cfg,
+    otherwise the amscams as6.json if it exists."""
     if args.config:
         return args.config
     default = '/etc/meteor.cfg'
     if os.path.isfile(default) and os.access(default, os.R_OK):
         return default
+    fallback_json = '/home/ams/amscams/conf/as6.json'
+    if os.path.isfile(fallback_json) and os.access(fallback_json, os.R_OK):
+        return fallback_json
     return None
 
 
 def _read_config(config_path):
-    """Read the selected config file, or return an empty ConfigParser."""
+    """Read the selected config file, or return an empty ConfigParser.
+
+    INI files are parsed with configparser. JSON files (e.g. as6.json)
+    are translated into a ConfigParser with the relevant site fields
+    placed in an [astronomy] section.
+    """
     config = configparser.ConfigParser()
-    if config_path and os.path.exists(config_path):
+    if not config_path or not os.path.exists(config_path):
+        return config
+    if config_path.endswith('.json'):
+        try:
+            with open(config_path) as f:
+                data = json.load(f)
+            if 'site' in data:
+                site = data['site']
+                if not config.has_section('astronomy'):
+                    config.add_section('astronomy')
+                if 'device_lat' in site:
+                    config.set('astronomy', 'latitude', str(site['device_lat']))
+                if 'device_lng' in site:
+                    config.set('astronomy', 'longitude', str(site['device_lng']))
+                if 'device_alt' in site:
+                    config.set('astronomy', 'elevation', str(site['device_alt']))
+                if not config.has_option('astronomy', 'temperature'):
+                    config.set('astronomy', 'temperature', '10')
+                if not config.has_option('astronomy', 'pressure'):
+                    config.set('astronomy', 'pressure', '1010')
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Warning: could not parse JSON config '{config_path}': {e}", file=sys.stderr)
+    else:
         config.read(config_path)
     return config
 
@@ -161,6 +193,10 @@ def setup_observer(args, config):
     obs.lon = str(lon_val)
     obs.elevation = float(ele_val)
 
+    if config is not None and config.has_section('astronomy'):
+        obs.temp = config.getfloat('astronomy', 'temperature', fallback=10.0)
+        obs.pressure = config.getfloat('astronomy', 'pressure', fallback=1010.0)
+
     timestamp = _get_timestamp(args)
     dt = datetime.fromtimestamp(float(timestamp), timezone.utc)
     obs.date = dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -182,38 +218,27 @@ def local_sidereal_deg(jd, lon_deg):
     return (gmst + lon_deg) % 360.0
 
 
-def azel_to_radec(az_deg, el_deg, lat_deg, lon_deg, jd):
-    """Convert azimuth/altitude (standard astronomical convention) to RA/dec."""
-    az = math.radians(az_deg)
-    el = math.radians(el_deg)
-    lat = math.radians(lat_deg)
+def azel_to_radec(az_deg, el_deg, observer):
+    """Convert azimuth/altitude (standard astronomical convention) to apparent RA/dec.
 
-    sin_dec = math.sin(lat) * math.sin(el) + math.cos(lat) * math.cos(el) * math.cos(az)
-    dec = math.asin(sin_dec)
-    cos_dec = math.cos(dec)
-
-    if abs(cos_dec) < 1e-12:
-        ha = 0.0
-    else:
-        sin_ha = -math.sin(az) * math.cos(el) / cos_dec
-        cos_ha = (math.sin(el) - math.sin(lat) * sin_dec) / (math.cos(lat) * cos_dec)
-        ha = math.atan2(sin_ha, cos_ha)
-
-    lst = math.radians(local_sidereal_deg(jd, lon_deg))
-    ra = (math.degrees(lst - ha)) % 360.0
-    return ra, math.degrees(dec)
+    Uses the ephem.Observer (which already contains location, date/time and
+    atmospheric settings) so the result matches the forward conversion in
+    amscalib2lens.py.
+    """
+    ra, dec = observer.radec_of(math.radians(az_deg), math.radians(el_deg))
+    return math.degrees(ra) % 360.0, math.degrees(dec)
 
 
 def pano_to_az_el(pano_x, pano_y, pano_w, pano_h):
     """Convert equirectangular panorama pixel coordinates to az/el.
 
-    az = 0 at pano_x = w/2 (panorama centre, which the Hugin .pto treats as
-    the camera optical axis).  This matches the convention used by
-    pto_mapper.map_image_to_pano.
+    Hugin's equirectangular panorama spans az = [0, 360] over pano_x = [0, w],
+    and el = [90, -90] over pano_y = [0, h].  This matches the convention used
+    by amscalib2lens.py (pano_x = az * 100).
     """
-    az = math.degrees((pano_x / pano_w - 0.5) * 2.0 * math.pi)
-    el = math.degrees(-(pano_y / pano_h - 0.5) * math.pi)
-    return az, el
+    az = (pano_x / pano_w) * 360.0
+    el = -(pano_y / pano_h - 0.5) * 180.0
+    return az % 360.0, el
 
 
 def sample_pto_mapping(pto_data, image_index, n=32):
@@ -311,16 +336,13 @@ def poly_design_rev(X, Y):
 def fit_polys(samples, observer, ra_center, dec_center, pos_angle, pixscale, w, h):
     """Fit forward and reverse AMS 15-term polynomials from PTO samples."""
     F_scale = 3600.0 / pixscale
-    jd = jd_from_unix(observer.date.datetime().replace(tzinfo=timezone.utc).timestamp())
-    lat = math.degrees(observer.lat)
-    lon = math.degrees(observer.lon)
 
     # Build target data
     rev_A, rev_bx, rev_by = [], [], []
     fwd_A, fwd_bx, fwd_by = [], [], []
 
     for x, y, az, el in samples:
-        ra, dec = azel_to_radec(az, el, lat, lon, jd)
+        ra, dec = azel_to_radec(az, el, observer)
         X_deg, Y_deg = gnomonic_xy(ra, dec, ra_center, dec_center, pos_angle)
         X_pix = X_deg * F_scale
         Y_pix = Y_deg * F_scale
@@ -369,9 +391,6 @@ def compute_residuals(pto_data, image_index, x_poly, y_poly, x_poly_fwd, y_poly_
     F_scale = 3600.0 / pixscale
     w = pto_data[1][image_index].get('w')
     h = pto_data[1][image_index].get('h')
-    lat = math.degrees(observer.lat)
-    lon = math.degrees(observer.lon)
-    jd = jd_from_unix(observer.date.datetime().replace(tzinfo=timezone.utc).timestamp())
 
     err_x, err_y, err_x_fwd, err_y_fwd = [], [], [], []
 
@@ -395,7 +414,7 @@ def compute_residuals(pto_data, image_index, x_poly, y_poly, x_poly_fwd, y_poly_
     # Forward: pixel -> RA/dec -> pixel via distort_xy_new
     samples = sample_pto_mapping(pto_data, image_index, n=24)
     for x, y, az, el in samples:
-        ra, dec = azel_to_radec(az, el, lat, lon, jd)
+        ra, dec = azel_to_radec(az, el, observer)
         px, py = distort_xy_new(ra, dec, x_poly, y_poly)
         err_x.append(px - x)
         err_y.append(py - y)
@@ -410,23 +429,57 @@ def compute_residuals(pto_data, image_index, x_poly, y_poly, x_poly_fwd, y_poly_
     return rms_x, rms_y, rms_x, rms_y
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Convert a Hugin .pto lens file into an AMS calparams JSON file.'
-    )
-    parser.add_argument('ptofile', help='Input Hugin .pto file (e.g. lens.pto)')
-    parser.add_argument('outfile', help='Output AMS calparams JSON file')
-    parser.add_argument('-c', '--config', help='Meteor config file (default: /etc/meteor.cfg)')
-    parser.add_argument('-T', '--timestamp', type=float, help='Unix timestamp (UTC) for RA/dec calculation')
-    parser.add_argument('-x', '--longitude', type=float, help='Observer longitude (decimal degrees, east positive)')
-    parser.add_argument('-y', '--latitude', type=float, help='Observer latitude (decimal degrees)')
-    parser.add_argument('-e', '--elevation', type=float, help='Observer elevation (m)')
-    parser.add_argument('-N', '--samples', type=int, default=32,
-                        help='Grid size for polynomial sampling (default: 32)')
-    parser.add_argument('--no-polys', action='store_true', help='Do not fit x/y polynomials')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Show detailed output')
-    args = parser.parse_args()
+def _load_as6_json(args):
+    """Load the amscams as6.json for camera/cams_id mapping and site info.
 
+    Uses the -c argument if it points to a JSON file, otherwise tries the
+    default amscams configuration path.
+    """
+    path = None
+    if args.config and args.config.endswith('.json') and os.path.exists(args.config):
+        path = args.config
+    if path is None:
+        default = '/home/ams/amscams/conf/as6.json'
+        if os.path.exists(default):
+            path = default
+    if path is None:
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Warning: could not load as6.json from '{path}': {e}", file=sys.stderr)
+    return None
+
+
+def _root_from_lens_pto(pto_path, cams_id):
+    """Derive a freecal directory root and Unix timestamp from a camera lens.pto.
+
+    The symlink target lens-YYYYMMDD.pto supplies the date; the target file's
+    mtime supplies the time. If the target has no date in its name, the mtime
+    is used for the whole root.
+    """
+    real_path = os.path.realpath(pto_path)
+    if not os.path.exists(real_path):
+        return None, None
+    mtime = os.path.getmtime(real_path)
+    mdt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+    basename = os.path.basename(real_path)
+    m = re.match(r'lens-(\d{4})(\d{2})(\d{2})\.pto$', basename)
+    if m:
+        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                      mdt.hour, mdt.minute, mdt.second, tzinfo=timezone.utc)
+    else:
+        dt = mdt
+    root = dt.strftime('%Y_%m_%d_%H_%M_%S_000_') + cams_id
+    return root, dt.timestamp()
+
+
+def convert_pto_file(args):
+    """Convert a single Hugin .pto file to an AMS calparams JSON file.
+
+    Reads ptofile/outfile/timestamp from the args namespace.
+    """
     if not os.path.exists(args.ptofile):
         print(f"Error: PTO file not found: {args.ptofile}", file=sys.stderr)
         sys.exit(1)
@@ -486,10 +539,7 @@ def main():
 
     # RA/dec of the field centre (requires observer)
     if observer is not None:
-        lat = math.degrees(observer.lat)
-        lon = math.degrees(observer.lon)
-        jd = jd_from_unix(observer.date.datetime().replace(tzinfo=timezone.utc).timestamp())
-        ra_center, dec_center = azel_to_radec(center_az, center_el, lat, lon, jd)
+        ra_center, dec_center = azel_to_radec(center_az, center_el, observer)
     else:
         ra_center = dec_center = None
         if not args.no_polys:
@@ -534,8 +584,8 @@ def main():
         'orig_pos_ang': position_angle,
         'pixscale': pixscale,
         'orig_pixscale': pixscale,
-        'imagew': str(w),
-        'imageh': str(h),
+        'imagew': int(w),
+        'imageh': int(h),
         'cal_date': now,
         'cal_params_file': str(Path(args.outfile).resolve()),
         'x_poly': x_poly,
@@ -569,6 +619,131 @@ def main():
         print(f"  center_az={center_az:.4f}, center_el={center_el:.4f}, position_angle={position_angle:.4f}")
         if ra_center is not None:
             print(f"  ra_center={ra_center:.4f}, dec_center={dec_center:.4f}")
+
+
+def _find_existing_json_for_camera(cams_id):
+    """Return one existing calibration JSON path for a given cams_id, or None.
+
+    Looks in /mnt/ams2/cal/freecal for any directory that ends with the
+    cams_id and contains a *-stacked-calparams.json (or *-calparams.json).
+    """
+    base = '/mnt/ams2/cal/freecal'
+    if not os.path.isdir(base):
+        return None
+    candidates = []
+    for root in os.listdir(base):
+        if not root.endswith('_' + cams_id):
+            continue
+        dir_path = os.path.join(base, root)
+        if not os.path.isdir(dir_path):
+            continue
+        for suffix in ('-stacked-calparams.json', '-calparams.json'):
+            json_file = os.path.join(dir_path, root + suffix)
+            if os.path.exists(json_file) and os.path.getsize(json_file) > 0:
+                candidates.append(json_file)
+    return candidates[0] if candidates else None
+
+
+def fix_missing_calibrations(args):
+    """Detect cameras missing any calibration JSON and create them from lens.pto files."""
+    as6 = _load_as6_json(args)
+    if as6 is None or 'cameras' not in as6:
+        print("Error: --fix-missing requires as6.json to map camera numbers to cams_id.", file=sys.stderr)
+        sys.exit(1)
+
+    created = 0
+    missing = 0
+    existing = 0
+    skipped = 0
+
+    for cam_key in sorted(as6['cameras'].keys()):
+        cam_info = as6['cameras'][cam_key]
+        cams_id = cam_info.get('cams_id')
+        if not cams_id:
+            continue
+        cam_match = re.search(r'\d+', cam_key)
+        if not cam_match:
+            continue
+        cam_num = int(cam_match.group())
+
+        pto_path = f'/meteor/cam{cam_num}/lens.pto'
+        if not os.path.exists(pto_path):
+            if args.verbose:
+                print(f"  {cam_key}: no lens.pto at {pto_path}")
+            skipped += 1
+            continue
+
+        # A camera is considered "calibrated" if any freecal JSON exists for it.
+        existing_json = _find_existing_json_for_camera(cams_id)
+        if existing_json:
+            existing += 1
+            if args.verbose:
+                print(f"  {cam_key}: calibration already exists at {existing_json}")
+            continue
+
+        root, timestamp = _root_from_lens_pto(pto_path, cams_id)
+        if root is None:
+            print(f"  {cam_key}: could not determine timestamp from {pto_path}", file=sys.stderr)
+            skipped += 1
+            continue
+
+        freecal_dir = f'/mnt/ams2/cal/freecal/{root}'
+        json_path = f'{freecal_dir}/{root}-stacked-calparams.json'
+
+        missing += 1
+        if args.dryrun:
+            print(f"Would create {json_path} from {pto_path}")
+            continue
+
+        camera_args = copy.copy(args)
+        camera_args.ptofile = pto_path
+        camera_args.outfile = json_path
+        camera_args.timestamp = timestamp
+        os.makedirs(freecal_dir, exist_ok=True)
+        print(f"Creating {json_path} from {pto_path}")
+        try:
+            convert_pto_file(camera_args)
+            created += 1
+        except Exception as e:
+            print(f"Error creating {json_path}: {e}", file=sys.stderr)
+
+    action = "would create" if args.dryrun else "created"
+    print(f"\nSummary: {missing} missing, {existing} already exist, {skipped} skipped, {created if not args.dryrun else missing} {action}.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Convert a Hugin .pto lens file into an AMS calparams JSON file.'
+    )
+    parser.add_argument('ptofile', nargs='?', help='Input Hugin .pto file (e.g. lens.pto)')
+    parser.add_argument('outfile', nargs='?', help='Output AMS calparams JSON file')
+    parser.add_argument('-c', '--config', help='Meteor config file (default: /etc/meteor.cfg, or /home/ams/amscams/conf/as6.json as fallback)')
+    parser.add_argument('-T', '--timestamp', type=float, help='Unix timestamp (UTC) for RA/dec calculation')
+    parser.add_argument('-x', '--longitude', type=float, help='Observer longitude (decimal degrees, east positive)')
+    parser.add_argument('-y', '--latitude', type=float, help='Observer latitude (decimal degrees)')
+    parser.add_argument('-e', '--elevation', type=float, help='Observer elevation (m)')
+    parser.add_argument('-N', '--samples', type=int, default=32,
+                        help='Grid size for polynomial sampling (default: 32)')
+    parser.add_argument('--no-polys', action='store_true', help='Do not fit x/y polynomials')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Show detailed output')
+    parser.add_argument('--fix-missing', action='store_true', dest='fix_missing',
+                        help='Detect missing per-camera calibration JSONs and create them from /meteor/camX/lens.pto')
+    parser.add_argument('--dryrun', action='store_true',
+                        help='With --fix-missing, only print which files would be created')
+    args = parser.parse_args()
+
+    if args.fix_missing:
+        if args.ptofile or args.outfile:
+            print("Error: --fix-missing does not take ptofile or outfile arguments.", file=sys.stderr)
+            sys.exit(1)
+        fix_missing_calibrations(args)
+        return
+
+    if not args.ptofile or not args.outfile:
+        parser.print_usage(sys.stderr)
+        sys.exit(1)
+
+    convert_pto_file(args)
 
 
 if __name__ == '__main__':

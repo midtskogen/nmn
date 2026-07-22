@@ -157,6 +157,7 @@ class ErrorCatalog:
         "NMN_HOME_BAD_OWNER": {"type": "failure", "description": "Directory '/home/meteor' is not owned by 'meteor'.", "reason": "Incorrect ownership will cause permission errors for the NMN software.", "fix": "Run 'sudo chown meteor:meteor /home/meteor'"},
         "NMN_NMN_DIR_MISSING": {"type": "failure", "description": "Directory '/home/meteor/nmn' is missing.", "reason": "This directory contains the NMN software.", "fix": "Restore the NMN software, likely from a git clone."},
         "NMN_NMN_DIR_NOT_WRITABLE": {"type": "failure", "description": "Directory '/home/meteor/nmn' is not writable by 'meteor'.", "reason": "The 'meteor' user must be able to write to this directory.", "fix": "Check permissions and run 'sudo chown -R meteor:meteor /home/meteor/nmn'"},
+        "NMN_REPO_LOCAL_MODS": {"type": "warning", "description": "The NMN git repository has local modifications.", "reason": "Local changes can be overwritten or conflict on the next git pull and may cause unexpected behaviour.", "fix": "Run 'cd /home/meteor/nmn && git diff' to review, then commit, stash, or reset the changes."},
         "NMN_BIN_NOT_SYMLINK": {"type": "failure", "description": "'/home/meteor/bin' is not a symlink.", "reason": "The 'bin' directory should be a symlink to '/home/meteor/nmn/bin'.", "fix": "Run 'sudo -u meteor ln -s /home/meteor/nmn/bin /home/meteor/bin' (after removing the existing file/dir)."},
         "NMN_BIN_WRONG_SYMLINK": {"type": "failure", "description": "'/home/meteor/bin' symlink points to the wrong target ('{target}').", "reason": "The symlink must point to '/home/meteor/nmn/bin' or 'nmn/bin'.", "fix": "Recreate the symlink: 'sudo -u meteor ln -sfn nmn/bin /home/meteor/bin'"},
         "NMN_PY_IMPORT_MISSING": {"type": "failure", "description": "A required Python package for NMN is missing.", "reason": "A script in '/home/meteor/nmn/bin/' imports a package that is not installed for the 'meteor' user.", "fix": "Install the missing package using pip: 'sudo python3 -m pip install {pkg}' or potentially 'sudo -u meteor python3 -m pip install {pkg}'."},
@@ -312,6 +313,10 @@ class AS7Diagnostic:
                            "NMN_SNAPSHOT_STALE", "NMN_CAM_NO_DATE_DIRS"]:
             return f"{self.error_catalog.get_error(error_code)['description'].format(**context)}"
         if error_code == "NMN_CAM_STALE_DATE_DIRS": return f"Most recent date dir in {context.get('path')} is '{context.get('latest_dir')}', which is not current."
+        if error_code == "NMN_REPO_LOCAL_MODS":
+            files = context.get('files', [])
+            file_list = ', '.join(files[:5]) + (', ...' if len(files) > 5 else '')
+            return f"NMN repo at '{context.get('path')}' has {context.get('count')} locally modified file(s): {file_list}"
 
         info = self.error_catalog.get_error(error_code)
         return info['description'].format(**context)
@@ -1633,6 +1638,7 @@ class AS7Diagnostic:
 
         self.backup_nmn_camera_files()
         self.check_nmn_user_and_dirs()
+        self.check_nmn_git_status()
         self.check_nmn_config()
         self.check_nmn_connectivity()
         self.check_nmn_cam_dirs()
@@ -1762,6 +1768,42 @@ class AS7Diagnostic:
                 self.log_issue("PERMISSION_DENIED", {'check': f"reading symlink {bin_path}"})
             except Exception as e:
                 self.log_issue("PERMISSION_DENIED", {'check': f"reading symlink {bin_path}: {e}"})
+
+    def check_nmn_git_status(self):
+        """Warn if the NMN git repository at /home/meteor/nmn contains local modifications."""
+        nmn_path = "/home/meteor/nmn"
+        if not os.path.isdir(nmn_path) or not os.path.isdir(os.path.join(nmn_path, ".git")):
+            return
+
+        print("\n--- Checking NMN Git Repository ---")
+        try:
+            try:
+                current_user = pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                current_user = None
+
+            if self.is_root and current_user != 'meteor':
+                cmd = ['sudo', '-u', 'meteor', 'git', '-C', nmn_path, 'status', '--short', '--untracked-files=no']
+            else:
+                cmd = ['git', '-C', nmn_path, 'status', '--short', '--untracked-files=no']
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                err = result.stderr.strip()
+                if 'not a git repository' in err.lower():
+                    self.log_success(f"No git repository at {nmn_path}.")
+                else:
+                    self.log_issue("PERMISSION_DENIED", {'check': f"git status in {nmn_path}: {err}"}, indent=1)
+                return
+
+            lines = [l for l in result.stdout.splitlines() if l.strip()]
+            if not lines:
+                self.log_success(f"No local modifications in {nmn_path}.")
+            else:
+                files = [l[3:].strip() for l in lines]
+                self.log_issue("NMN_REPO_LOCAL_MODS", {'path': nmn_path, 'count': len(lines), 'files': files}, indent=1)
+        except Exception as e:
+            self.log_issue("PERMISSION_DENIED", {'check': f"git status in {nmn_path}: {e}"}, indent=1)
 
     def _check_file_readable_by(self, path, user_name, error_code, indent=0):
         """Helper to check if a file is readable by a specific user."""

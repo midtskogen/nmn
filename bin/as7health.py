@@ -2365,7 +2365,7 @@ class AS7Diagnostic:
                 # Construct the command to add the bin_path to sys.path before importing
                 safe_bin_path = bin_path.replace("'", "'\\''") # Basic escaping
                 import_command = f"import sys; sys.path.insert(0, '{safe_bin_path}'); import {pkg}"
-                cmd_import = ['runuser', '-u', 'meteor', '--', 'python3', '-c', import_command]
+                cmd_import = ['runuser', '-u', 'meteor', '--', sys.executable, '-c', import_command]
                 #print(f"DEBUG: Running command: {' '.join(cmd_import)}") # Keep for debugging
                 subprocess.run(cmd_import, check=True, capture_output=True, text=True, timeout=60)
                 self.log_success(f"Import OK: {pkg}", indent=1)

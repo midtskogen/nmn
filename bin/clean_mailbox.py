@@ -36,6 +36,11 @@ def message_older_than(headers_bytes, cutoff):
     dt = parse_date_from_bytes(headers_bytes)
     if dt is None:
         return False
+    # parsedate_to_datetime may return a naive datetime when the header
+    # lacks a timezone. Treat naive dates as UTC so they can be compared
+    # with the UTC cutoff.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
     return dt < cutoff
 
 

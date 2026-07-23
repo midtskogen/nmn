@@ -144,7 +144,10 @@ def compact_mailbox_in_place(path, cutoff, dry_run=False):
         pass
 
     print(f"{path}: {message_count} messages total, {removed_count} removed, {kept_count} kept")
-    print(f"Size: {old_size} -> {write_pos} bytes ({write_pos / old_size * 100:.1f}% remaining)")
+    if old_size:
+        print(f"Size: {old_size} -> {write_pos} bytes ({write_pos / old_size * 100:.1f}% remaining)")
+    else:
+        print(f"Size: {old_size} -> {write_pos} bytes (empty file)")
 
 
 def main():

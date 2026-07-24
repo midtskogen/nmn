@@ -2072,12 +2072,12 @@ class AS7Diagnostic:
         print("\n--- Checking NMN Network Connectivity ---")
         host = "norskmeteornettverk.no"
         
-        if self._check_port_open(host, 80):
+        if any(self._check_port_open(host, 80, timeout=10) for _ in range(3)):
             self.log_success(f"Successfully connected to {host} on port 80 (HTTP).")
         else:
             self.log_issue("NMN_HOST_UNREACHABLE_80")
 
-        if self._check_port_open(host, 22):
+        if any(self._check_port_open(host, 22, timeout=10) for _ in range(3)):
             self.log_success(f"Successfully connected to {host} on port 22 (SSH).")
         else:
             self.log_issue("NMN_HOST_UNREACHABLE_22")
@@ -2253,7 +2253,7 @@ class AS7Diagnostic:
 
         try:
             # Ensure the directory itself is readable by meteor
-            cmd_read_dir = ['runuser', '-l', '-u', 'meteor', '--', 'test', '-r', bin_path]
+            cmd_read_dir = ['runuser', '-u', 'meteor', '--', 'test', '-r', bin_path]
             subprocess.run(cmd_read_dir, check=True, capture_output=True, timeout=5)
             # List files as root
             py_files = glob.glob(os.path.join(bin_path, "*.py"))
@@ -2278,7 +2278,7 @@ class AS7Diagnostic:
         for f in py_files:
             try:
                 # Check readability as meteor first
-                cmd_read = ['runuser', '-l', '-u', 'meteor', '--', 'test', '-r', f]
+                cmd_read = ['runuser', '-u', 'meteor', '--', 'test', '-r', f]
                 subprocess.run(cmd_read, check=True, capture_output=True, timeout=5)
 
                 # Read file content as root
@@ -2365,9 +2365,9 @@ class AS7Diagnostic:
                 # Construct the command to add the bin_path to sys.path before importing
                 safe_bin_path = bin_path.replace("'", "'\\''") # Basic escaping
                 import_command = f"import sys; sys.path.insert(0, '{safe_bin_path}'); import {pkg}"
-                cmd_import = ['runuser', '-l', '-u', 'meteor', '--', 'python3', '-c', import_command]
+                cmd_import = ['runuser', '-u', 'meteor', '--', sys.executable, '-c', import_command]
                 #print(f"DEBUG: Running command: {' '.join(cmd_import)}") # Keep for debugging
-                subprocess.run(cmd_import, check=True, capture_output=True, text=True, timeout=60)
+                subprocess.run(cmd_import, check=True, capture_output=True, text=True, timeout=60, cwd=self.meteor_pwd.pw_dir)
                 self.log_success(f"Import OK: {pkg}", indent=1)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 stderr_output = e.stderr.strip() if hasattr(e, 'stderr') and e.stderr else "No stderr"

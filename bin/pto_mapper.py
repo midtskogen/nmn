@@ -732,6 +732,315 @@ i w1920 h1080 f0 v58 y0 p0 r0"""
             report = "\n".join(failures[:10])
             self.fail(f"{len(failures)} round-trip mapping failures occurred:\n{report}")
 
+def parse_ams_calparams_json(json_path):
+    """Parse an AMS-style calparams JSON file.
+
+    Supports three shapes:
+      * a single calparams dict (one camera),
+      * a list of calparams dicts,
+      * a project dict with {"pano": {...}, "calibrations": [...]}.
+
+    Returns either a single normalized calibration dict or a project dict
+    with {"pano": {...}, "calibrations": [...]}.
+    """
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    if isinstance(data, list):
+        return {'pano': {}, 'calibrations': [parse_ams_calparams_json_single(d) for d in data]}
+    if isinstance(data, dict) and 'calibrations' in data:
+        return {
+            'pano': data.get('pano', {}),
+            'calibrations': [parse_ams_calparams_json_single(d) for d in data['calibrations']]
+        }
+    return parse_ams_calparams_json_single(data)
+
+
+def parse_ams_calparams_json_single(calib_data):
+    """Normalize a single AMS calparams dict for the reprojection code."""
+    required = ['imagew', 'imageh', 'ra_center', 'dec_center',
+                'position_angle', 'pixscale', 'x_poly', 'y_poly']
+    missing = [k for k in required if k not in calib_data]
+    if missing:
+        raise ValueError(f"AMS calparams JSON missing required fields: {missing}")
+
+    def _as_float(v):
+        return float(v) if v is not None else 0.0
+
+    parsed = {
+        'imagew': int(float(calib_data['imagew'])),
+        'imageh': int(float(calib_data['imageh'])),
+        'ra_center': _as_float(calib_data['ra_center']),
+        'dec_center': _as_float(calib_data['dec_center']),
+        'position_angle': _as_float(calib_data['position_angle']),
+        'pixscale': _as_float(calib_data['pixscale']),
+        'site_lat': _as_float(calib_data.get('site_lat', 0)),
+        'site_lng': _as_float(calib_data.get('site_lng', 0)),
+        'site_alt': _as_float(calib_data.get('site_alt', 0)),
+        'cal_date': calib_data.get('cal_date', None),
+    }
+
+    x_poly = np.asarray(calib_data['x_poly'], dtype=np.float64)
+    y_poly = np.asarray(calib_data['y_poly'], dtype=np.float64)
+    if len(x_poly) < 12 or len(y_poly) < 12:
+        raise ValueError(
+            f"AMS x_poly/y_poly must have at least 12 coefficients, "
+            f"got {len(x_poly)}/{len(y_poly)}")
+    if len(x_poly) < 15:
+        x_poly = np.concatenate([x_poly, np.zeros(15 - len(x_poly), dtype=np.float64)])
+    if len(y_poly) < 15:
+        y_poly = np.concatenate([y_poly, np.zeros(15 - len(y_poly), dtype=np.float64)])
+
+    parsed['x_poly'] = x_poly
+    parsed['y_poly'] = y_poly
+    return parsed
+
+
+def _ams_observer(calib_data, date_str=None):
+    """Create an ephem.Observer for the calibration site and date."""
+    import ephem
+    from datetime import datetime, timezone
+
+    obs = ephem.Observer()
+    obs.lat = str(calib_data['site_lat'])
+    obs.lon = str(calib_data['site_lng'])
+    obs.elevation = float(calib_data.get('site_alt', 0))
+    obs.temp = 10.0
+    obs.pressure = 1010.0
+
+    if date_str is None:
+        date_str = calib_data.get('cal_date', None)
+
+    if date_str:
+        dt = None
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f',
+                    '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d'):
+            try:
+                dt = datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            try:
+                ts = float(date_str)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            except (ValueError, OSError):
+                dt = None
+        if dt is not None:
+            obs.date = dt
+    return obs
+
+
+def ams_lst_radians(calib_data, date_str=None):
+    """Return the local apparent sidereal time (radians) for an AMS calibration."""
+    obs = _ams_observer(calib_data, date_str)
+    return float(obs.sidereal_time())
+
+
+@numba.njit(fastmath=True, cache=True)
+def _ams_undistort(ra_deg, dec_deg, ra_center, dec_center, pos_angle,
+                   pixscale, sw, sh, x_poly, y_poly):
+    """Map apparent RA/DEC to source image pixel coordinates using the AMS
+    15-term polynomial distortion model. This is the numba equivalent of
+    caliblib.distort_xy_new() using the reverse (sky -> pixel) polynomials."""
+    F_scale = 3600.0 / pixscale
+
+    ra_c = ra_center + (x_poly[12] * 100.0) + (y_poly[12] * 100.0)
+    dec_c = dec_center + (x_poly[13] * 100.0) + (y_poly[13] * 100.0)
+
+    ra1 = math.radians(ra_c)
+    dec1 = math.radians(dec_c)
+    ra2 = math.radians(ra_deg)
+    dec2 = math.radians(dec_deg)
+
+    arg = (math.sin(dec1) * math.sin(dec2) +
+           math.cos(dec1) * math.cos(dec2) * math.cos(ra2 - ra1))
+    if arg > 1.0:
+        arg = 1.0
+    elif arg < -1.0:
+        arg = -1.0
+    ad = math.acos(arg)
+
+    if abs(math.sin(ad)) < 1e-15:
+        return sw / 2.0, sh / 2.0
+
+    radius = math.degrees(ad)
+    sinA = math.cos(dec2) * math.sin(ra2 - ra1) / math.sin(ad)
+    cosA = (math.sin(dec2) - math.sin(dec1) * math.cos(ad)) / (math.cos(dec1) * math.sin(ad))
+    theta = -math.degrees(math.atan2(sinA, cosA)) + pos_angle - 90.0 + x_poly[14]
+
+    X1 = radius * math.cos(math.radians(theta)) * F_scale
+    Y1 = radius * math.sin(math.radians(theta)) * F_scale
+    r = math.sqrt(X1 * X1 + Y1 * Y1)
+
+    dX = (x_poly[0]
+          + x_poly[1] * X1
+          + x_poly[2] * Y1
+          + x_poly[3] * X1 * X1
+          + x_poly[4] * X1 * Y1
+          + x_poly[5] * Y1 * Y1
+          + x_poly[6] * X1 * X1 * X1
+          + x_poly[7] * X1 * X1 * Y1
+          + x_poly[8] * X1 * Y1 * Y1
+          + x_poly[9] * Y1 * Y1 * Y1
+          + x_poly[10] * X1 * r
+          + x_poly[11] * Y1 * r)
+
+    new_x = X1 - dX + sw / 2.0
+
+    dY = (y_poly[0]
+          + y_poly[1] * X1
+          + y_poly[2] * Y1
+          + y_poly[3] * X1 * X1
+          + y_poly[4] * X1 * Y1
+          + y_poly[5] * Y1 * Y1
+          + y_poly[6] * X1 * X1 * X1
+          + y_poly[7] * X1 * X1 * Y1
+          + y_poly[8] * X1 * Y1 * Y1
+          + y_poly[9] * Y1 * Y1 * Y1
+          + y_poly[10] * Y1 * r
+          + y_poly[11] * X1 * r)
+
+    new_y = Y1 - dY + sh / 2.0
+    return new_x, new_y
+
+
+@numba.njit(parallel=True, fastmath=True, cache=True)
+def calculate_source_coords_ams(coords_y, final_w, final_h, orig_w, orig_h,
+                                crop_offset_x, crop_offset_y,
+                                pano_proj_f, pano_hfov, pano_r, pano_s,
+                                sw, sh, site_lat_rad, lst_rad,
+                                ra_center, dec_center, pos_angle, pixscale,
+                                x_poly, y_poly):
+    """JIT-compiled reprojection from panorama pixel to AMS source pixel.
+
+    The output panorama is interpreted as an azimuth/altitude (horizontal)
+    projection. Each output pixel is converted to a 3D unit vector, then to
+    apparent RA/DEC via a rotation by site latitude and LST, and finally passed
+    through the AMS polynomial distortion model to obtain the source image
+    pixel. Atmospheric refraction is not modeled here; the polynomial fit is
+    assumed to absorb any small residual.
+    """
+    INVALID_COORD = -99999.0
+    pano_hfov_rad = math.radians(pano_hfov)
+    pano_focal = ((orig_w / 2.0) / math.tan(pano_hfov_rad / 2.0)
+                  if pano_hfov_rad > 0 else 1.0)
+    has_rotation = pano_r != 0.0
+    if has_rotation:
+        pano_r_rad = math.radians(-pano_r)
+        cos_r = math.cos(pano_r_rad)
+        sin_r = math.sin(pano_r_rad)
+        center_x = orig_w / 2.0
+        center_y = orig_h / 2.0
+
+    sin_lat = math.sin(site_lat_rad)
+    cos_lat = math.cos(site_lat_rad)
+    two_pi = 2.0 * math.pi
+
+    for y_dest in prange(final_h):
+        for x_dest in range(final_w):
+            pano_x = (x_dest / pano_s) + crop_offset_x
+            pano_y = (y_dest / pano_s) + crop_offset_y
+
+            if has_rotation:
+                translated_x = pano_x - center_x
+                translated_y = pano_y - center_y
+                rotated_x = translated_x * cos_r - translated_y * sin_r
+                rotated_y = translated_x * sin_r + translated_y * cos_r
+                pano_x = rotated_x + center_x
+                pano_y = rotated_y + center_y
+
+            vx, vy, vz = 0.0, 0.0, 0.0
+            valid = True
+            if pano_proj_f == 2:  # equirectangular
+                pano_yaw = (pano_x / orig_w - 0.5) * pano_hfov_rad
+                # Equirect vertical range is always 180 degrees (full sphere).
+                pitch = -(pano_y / orig_h - 0.5) * math.pi
+                cos_pitch = math.cos(pitch)
+                vx = cos_pitch * math.sin(pano_yaw)
+                vy = math.sin(pitch)
+                vz = -cos_pitch * math.cos(pano_yaw)
+            elif pano_proj_f == 0:  # rectilinear
+                x_norm = pano_x - orig_w / 2.0
+                y_norm = -(pano_y - orig_h / 2.0)
+                norm = math.sqrt(x_norm * x_norm + y_norm * y_norm + pano_focal * pano_focal)
+                if norm == 0.0:
+                    norm = 1.0
+                vx = x_norm / norm
+                vy = y_norm / norm
+                vz = -pano_focal / norm
+            elif pano_proj_f == 3:  # fisheye
+                x_norm = pano_x - orig_w / 2.0
+                y_norm = -(pano_y - orig_h / 2.0)
+                r = math.sqrt(x_norm * x_norm + y_norm * y_norm)
+                fisheye_f = ((orig_w / 2.0) / (pano_hfov_rad / 2.0)
+                             if pano_hfov_rad > 0 else 1.0)
+                if r > fisheye_f * math.pi:
+                    valid = False
+                else:
+                    theta = r / fisheye_f
+                    phi = math.atan2(y_norm, x_norm)
+                    sin_theta = math.sin(theta)
+                    vx = sin_theta * math.cos(phi)
+                    vy = sin_theta * math.sin(phi)
+                    vz = -math.cos(theta)
+            else:
+                valid = False
+
+            if not valid:
+                coords_y[y_dest, x_dest, 0] = INVALID_COORD
+                coords_y[y_dest, x_dest, 1] = INVALID_COORD
+                continue
+
+            # 3D vector -> physical azimuth/altitude.
+            # Coordinate system used by pto_mapper: x=East, y=Up, z=South
+            # (so -vz points North).
+            alt = math.asin(vy)
+            az = math.atan2(vx, -vz)
+            if az < 0.0:
+                az += two_pi
+
+            # az/alt -> apparent RA/DEC using analytic spherical astronomy.
+            sin_alt = math.sin(alt)
+            cos_alt = math.cos(alt)
+            cos_az = math.cos(az)
+            sin_az = math.sin(az)
+
+            sin_dec = sin_alt * sin_lat + cos_alt * cos_lat * cos_az
+            if sin_dec > 1.0:
+                sin_dec = 1.0
+            elif sin_dec < -1.0:
+                sin_dec = -1.0
+            dec = math.asin(sin_dec)
+            cos_dec = math.cos(dec)
+
+            # Hour angle H, positive westward.
+            cos_H = (sin_alt - sin_lat * sin_dec) / (cos_lat * cos_dec)
+            sin_H = -cos_alt * sin_az / cos_dec
+            if cos_H > 1.0:
+                cos_H = 1.0
+            elif cos_H < -1.0:
+                cos_H = -1.0
+            if sin_H > 1.0:
+                sin_H = 1.0
+            elif sin_H < -1.0:
+                sin_H = -1.0
+            H = math.atan2(sin_H, cos_H)
+            ra = lst_rad - H
+            if ra < 0.0:
+                ra += two_pi
+            elif ra >= two_pi:
+                ra -= two_pi
+
+            ra_deg = math.degrees(ra)
+            dec_deg = math.degrees(dec)
+
+            sx, sy = _ams_undistort(ra_deg, dec_deg, ra_center, dec_center,
+                                    pos_angle, pixscale, sw, sh, x_poly, y_poly)
+            coords_y[y_dest, x_dest, 0] = sx
+            coords_y[y_dest, x_dest, 1] = sy
+
+
 def print_usage():
     """Prints the command-line usage instructions."""
     script_name = os.path.basename(sys.argv[0])

@@ -562,11 +562,63 @@ def _map_one_image(args):
     return (map_y_idx, c01, c23, map_uv_idx, sw, sh)
 
 
+def _map_one_image_ams(args):
+    (calib, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y,
+     pano_proj_f, pano_hfov, pano_r, pano_s, padsides,
+     site_lat_rad, lst_rad) = args
+
+    sw, sh = calib['imagew'], calib['imageh']
+    coords_y = np.empty((final_h, final_w, 2), dtype=np.float32)
+
+    pto_mapper.calculate_source_coords_ams(
+        coords_y, final_w, final_h, orig_w, orig_h,
+        crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s,
+        sw, sh, site_lat_rad, lst_rad,
+        calib['ra_center'], calib['dec_center'], calib['position_angle'], calib['pixscale'],
+        calib['x_poly'], calib['y_poly'])
+
+    pad_t = pad if 'top' in padsides else 0
+    pad_b = pad if 'bottom' in padsides else 0
+    pad_l = pad if 'left' in padsides else 0
+    pad_r = pad if 'right' in padsides else 0
+
+    map_y_idx, c01, c23 = compute_map_and_weights(coords_y, sw, sh, pad_t, pad_b, pad_l, pad_r)
+    coords_uv = coords_y[::2, ::2] / 2.0
+    map_uv_idx = compute_uv_map(coords_uv, sw // 2, sh // 2, pad_t // 2, pad_b // 2, pad_l // 2, pad_r // 2)
+
+    return (map_y_idx, c01, c23, map_uv_idx, sw, sh)
+
+
 def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
-    try:
-        global_options, images = pto_mapper.parse_pto_file(pto_file)
-    except Exception as e:
-        raise ValueError(f"Failed to parse PTO file '{pto_file}'. Reason: {e}")
+    is_json = isinstance(pto_file, str) and pto_file.lower().endswith('.json')
+    if is_json:
+        try:
+            project = pto_mapper.parse_ams_calparams_json(pto_file)
+        except Exception as e:
+            raise ValueError(f"Failed to parse AMS calibration JSON '{pto_file}'. Reason: {e}")
+
+        if isinstance(project, dict) and 'calibrations' in project:
+            pano = project.get('pano', {})
+            images = project['calibrations']
+        else:
+            pano = {}
+            images = [project]
+
+        global_options = {
+            'w': int(pano.get('w', 4096)),
+            'h': int(pano.get('h', 2160)),
+            'f': int(pano.get('f', 2)),
+            'v': float(pano.get('v', 360)),
+            'r': float(pano.get('r', 0.0)),
+            's': float(pano.get('s', 1.0)),
+        }
+        if 'S' in pano:
+            global_options['S'] = tuple(int(v) for v in pano['S'])
+    else:
+        try:
+            global_options, images = pto_mapper.parse_pto_file(pto_file)
+        except Exception as e:
+            raise ValueError(f"Failed to parse PTO file '{pto_file}'. Reason: {e}")
 
     orig_w, orig_h = global_options.get('w'), global_options.get('h')
     if orig_w is None or orig_h is None: raise ValueError("PTO 'p' line must contain canvas width 'w' and height 'h'.")
@@ -586,7 +638,7 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
         # 'S' line is in nona/Hugin's left,right,top,bottom order
         left, right, top, bottom = crop_coords
     else:
-        _print("INFO: No crop 'S' line found in PTO file. Using full canvas dimensions.")
+        _print("INFO: No crop 'S' line found in calibration. Using full canvas dimensions.")
         left, right, top, bottom = 0, orig_w, 0, orig_h
 
     # Calculate final dimensions based on crop and scale
@@ -622,7 +674,17 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
 
     global_options['final_w'], global_options['final_h'] = final_w, final_h
 
-    task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s, padsides) for img in images]
+    if is_json:
+        task_args = []
+        for calib in images:
+            lst_rad = pto_mapper.ams_lst_radians(calib)
+            site_lat_rad = math.radians(calib['site_lat'])
+            task_args.append((calib, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y,
+                              pano_proj_f, pano_hfov, pano_r, pano_s, padsides, site_lat_rad, lst_rad))
+        _map = _map_one_image_ams
+    else:
+        task_args = [(img, pad, final_w, final_h, orig_w, orig_h, crop_offset_x, crop_offset_y, pano_proj_f, pano_hfov, pano_r, pano_s, padsides) for img in images]
+        _map = _map_one_image
 
     # Projection maps are deterministic given the PTO content and parameters —
     # cache them on disk so repeated runs with the same geometry skip the
@@ -643,7 +705,10 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
         # input image filenames. Strip the per-image n"..." / nfilename tokens
         # so the cache key stays stable across different minutes/files.
         _pto_norm = re.sub(rb'\s+n(?:"[^"]*"|[^\s"]+)', b'', _pto_bytes)
-        _key_src = _pto_norm + repr((_MAP_CACHE_VERSION, pad, sorted(padsides), is_video_output)).encode()
+        if is_json:
+            _key_src = _pto_bytes + repr((_MAP_CACHE_VERSION, pad, sorted(padsides), is_video_output, orig_w, orig_h, pano_proj_f, pano_hfov, pano_r, pano_s)).encode()
+        else:
+            _key_src = _pto_norm + repr((_MAP_CACHE_VERSION, pad, sorted(padsides), is_video_output)).encode()
         _key = hashlib.sha256(_key_src).hexdigest()[:24]
         _cache_dir = os.path.join(tempfile.gettempdir(), 'stitcher_map_cache')
         cache_path = os.path.join(_cache_dir, f'maps_{_key}.npz')
@@ -700,7 +765,7 @@ def build_mappings(pto_file, pad, num_workers, padsides, is_video_output=False):
         cache_path = None
 
     _print("Building projection maps...")
-    all_mappings = [_map_one_image(args) for args in task_args]
+    all_mappings = [_map(args) for args in task_args]
 
     if cache_path is not None:
         try:
@@ -4005,8 +4070,9 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
     output_file : str
         Path for the output panorama.
     pto_file : str, optional
-        Path to a Hugin .pto project file. If None, a PTO is generated from
-        lens.pto files found relative to the inputs using ``projection``.
+        Path to a Hugin .pto project file or an AMS .json calibration file. If
+        None, a PTO/JSON project is generated from lens.pto or lens.json files
+        found relative to the inputs using ``projection``.
     projection : {'equirect', 'fisheye'}, optional
         Projection used when generating a PTO (default: 'equirect').
     pad : int, optional
@@ -4036,10 +4102,10 @@ def stitch(input_files, output_file, *, pto_file=None, projection='equirect',
     num_cores : int or None, optional
         Number of CPU cores to use. None uses all available cores.
     lens_files : dict or None, optional
-        Mapping of camera number to lens.pto path. When provided, these
-        calibrations are used instead of discovering lens.pto files from the
-        input paths. Useful when the inputs are local copies that no longer
-        live under /meteor/cam*/.
+        Mapping of camera number to lens.pto or AMS .json calibration path.
+        When provided, these calibrations are used instead of discovering
+        lens.pto or lens.json files from the input paths. Useful when the
+        inputs are local copies that no longer live under /meteor/cam*/.
     output_width : int or None, optional
         Force the generated PTO output canvas width. Defaults to the standard
         size for the chosen projection.
@@ -4173,19 +4239,21 @@ def extract_camera_number_from_path(path: str) -> int:
 
 
 def find_lens_pto_for_image(image_path: str) -> str:
-    """Find lens.pto file two directories up from the image path.
+    """Find lens calibration file two directories up from the image path.
     
     For /meteor/cam1/20260621/07/full_00.jpg, look for /meteor/cam1/lens.pto
+    or /meteor/cam1/lens.json.
     """
     # Get the directory containing the image
     image_dir = os.path.dirname(os.path.abspath(image_path))
     # Go up two directories
     parent_dir = os.path.dirname(image_dir)
     grandparent_dir = os.path.dirname(parent_dir)
-    # Look for lens.pto in the grandparent directory
-    lens_pto = os.path.join(grandparent_dir, "lens.pto")
-    if os.path.exists(lens_pto):
-        return lens_pto
+    # Look for lens.pto or lens.json in the grandparent directory
+    for name in ("lens.pto", "lens.json"):
+        lens_path = os.path.join(grandparent_dir, name)
+        if os.path.exists(lens_path):
+            return lens_path
     return None
 
 
@@ -4208,19 +4276,21 @@ def build_pto_header(w: int, h: int, projection: str) -> str:
 def generate_pto_from_lens_files(input_files: list, projection: str,
                                  lens_files: dict = None,
                                  w: int = None, h: int = None) -> str:
-    """Generate a PTO file from lens.pto files found relative to input files.
-    
+    """Generate a PTO or AMS JSON project file from lens calibration files
+    found relative to input files.
+
     Args:
         input_files: List of input image file paths
         projection: 'fisheye' or 'equirect'
-        lens_files: Optional dict mapping camera number to lens.pto path. If
-            provided, these are used instead of searching relative to the inputs.
+        lens_files: Optional dict mapping camera number to lens.pto or AMS
+            .json calibration path. If provided, these are used instead of
+            searching relative to the inputs.
         w: Optional output canvas width. Defaults to the standard size for the
             projection.
         h: Optional output canvas height.
-    
+
     Returns:
-        Path to the generated PTO file, or None on failure
+        Path to the generated PTO or JSON project file, or None on failure
     """
     # Define output dimensions based on projection
     explicit_size = w is not None and h is not None
@@ -4259,9 +4329,56 @@ def generate_pto_from_lens_files(input_files: list, projection: str,
         # Verify the explicitly supplied lens files exist.
         missing = [cam for cam, path in lens_files.items() if not os.path.exists(path)]
         if missing:
-            _print(f"Error: lens.pto files not found for cameras {missing}. Cannot proceed without all calibration files.", file=sys.stderr)
+            _print(f"Error: lens calibration files not found for cameras {missing}. Cannot proceed without all calibration files.", file=sys.stderr)
             return None
     
+    # If all calibrations are AMS JSON, generate a JSON project directly.
+    has_json = any(str(p).lower().endswith('.json') for p in lens_files.values())
+    has_pto = any(not str(p).lower().endswith('.json') for p in lens_files.values())
+    if has_json and has_pto:
+        _print("Error: Mixed PTO and JSON lens files are not supported.", file=sys.stderr)
+        return None
+    if has_json:
+        calibrations = []
+        for cam_num in sorted(lens_files.keys()):
+            lens_path = lens_files[cam_num]
+            try:
+                calib = pto_mapper.parse_ams_calparams_json(lens_path)
+                if isinstance(calib, dict) and 'calibrations' in calib:
+                    calibrations.extend(calib['calibrations'])
+                else:
+                    calibrations.append(calib)
+            except Exception as e:
+                _print(f"Warning: Could not parse AMS JSON calibration '{lens_path}' for camera {cam_num}: {e}", file=sys.stderr)
+                continue
+        if not calibrations:
+            _print("Error: No valid AMS JSON calibrations found.", file=sys.stderr)
+            return None
+        pano_f = 3 if projection == 'fisheye' else 2
+        pano_v = 190 if projection == 'fisheye' else 360
+        json_w = (w + 15) & ~15
+        json_h = (h + 15) & ~15
+        # Convert numpy arrays to plain lists for JSON serialization.
+        serializable_calibrations = []
+        for calib in calibrations:
+            c = dict(calib)
+            c['x_poly'] = c['x_poly'].tolist()
+            c['y_poly'] = c['y_poly'].tolist()
+            serializable_calibrations.append(c)
+        project = {
+            'pano': {'f': pano_f, 'w': json_w, 'h': json_h, 'v': pano_v, 'r': 0.0, 's': 1.0},
+            'calibrations': serializable_calibrations,
+        }
+        json_fd, json_path = tempfile.mkstemp(suffix='.json', prefix='auto_')
+        try:
+            with os.fdopen(json_fd, 'w') as f:
+                json.dump(project, f, indent=2)
+            _print(f"Generated JSON project file with {len(calibrations)} camera(s)")
+            return json_path
+        except Exception as e:
+            _print(f"Error: Failed to write JSON project file: {e}", file=sys.stderr)
+            return None
+
     # Build PTO header
     header = build_pto_header(w, h, projection)
     
@@ -5974,6 +6091,89 @@ def launch_gui():
     root.mainloop()
 
 
+def _combine_calibration_files(calib_files, projection='equirect', w=None, h=None):
+    """Combine multiple AMS JSON or Hugin PTO calibration files into a single
+    temporary project file.  For a single file the original path is returned.
+    Returns the path to the combined project (or the original single file).
+    """
+    if not calib_files:
+        return None
+    if len(calib_files) == 1:
+        return calib_files[0]
+
+    json_files = [f for f in calib_files if f.lower().endswith('.json')]
+    pto_files = [f for f in calib_files if f.lower().endswith('.pto')]
+    if json_files and pto_files:
+        raise ValueError("Cannot mix .json and .pto calibration files on the command line.")
+
+    if json_files:
+        calibrations = []
+        pano = None
+        for cf in calib_files:
+            c = pto_mapper.parse_ams_calparams_json(cf)
+            if isinstance(c, dict) and 'calibrations' in c:
+                calibrations.extend(c['calibrations'])
+                if pano is None:
+                    pano = c.get('pano')
+            else:
+                calibrations.append(c)
+
+        pano_f = 3 if projection == 'fisheye' else 2
+        pano_v = 190 if projection == 'fisheye' else 360
+        if w is None or h is None:
+            if projection == 'fisheye':
+                w, h = 4096, 4096
+            else:
+                w, h = 4096, 2160
+        w = (int(w) + 15) & ~15
+        h = (int(h) + 15) & ~15
+        if pano:
+            pano_f = int(pano.get('f', pano_f))
+            pano_v = float(pano.get('v', pano_v))
+            w = int(pano.get('w', w))
+            h = int(pano.get('h', h))
+
+        project = {
+            'pano': {'f': pano_f, 'w': w, 'h': h, 'v': pano_v, 'r': 0.0, 's': 1.0},
+            'calibrations': []
+        }
+        for c in calibrations:
+            c2 = dict(c)
+            c2['x_poly'] = c2['x_poly'].tolist()
+            c2['y_poly'] = c2['y_poly'].tolist()
+            project['calibrations'].append(c2)
+
+        fd, path = tempfile.mkstemp(suffix='.json', prefix='auto_combined_')
+        with os.fdopen(fd, 'w') as f:
+            json.dump(project, f, indent=2)
+        return path
+
+    if pto_files:
+        merged_global = None
+        merged_images = []
+        for cf in calib_files:
+            go, imgs = pto_mapper.parse_pto_file(cf)
+            if merged_global is None:
+                merged_global = dict(go)
+            merged_images.extend(imgs)
+        if w is not None:
+            merged_global['w'] = (int(w) + 15) & ~15
+        if h is not None:
+            merged_global['h'] = (int(h) + 15) & ~15
+        if projection == 'fisheye':
+            merged_global['f'] = 3
+            merged_global['v'] = 190
+        else:
+            merged_global['f'] = 2
+            merged_global['v'] = 360
+        fd, path = tempfile.mkstemp(suffix='.pto', prefix='auto_combined_')
+        os.close(fd)
+        pto_mapper.write_pto_file((merged_global, merged_images), path)
+        return path
+
+    raise ValueError("Calibration files must be .json or .pto files")
+
+
 def main():
     try:
         num_cores = len(os.sched_getaffinity(0))
@@ -5990,7 +6190,7 @@ def main():
         signal.signal(_signal, _handle_termination_signal)
 
     parser = argparse.ArgumentParser(
-        description="Reproject and stitch images or videos into a panorama based on a Hugin .pto file.",
+        description="Reproject and stitch images or videos into a panorama based on a Hugin .pto file or an AMS .json calibration.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""Examples:
 
@@ -6039,11 +6239,11 @@ def main():
       --timelapse-speed=60
 """
     )
-    parser.add_argument("pto_file", nargs='?', help="Path to the Hugin PTO project file. Required unless --fisheye or --equirect is specified.")
+    parser.add_argument("pto_file", nargs='?', help="Path to the Hugin PTO project file or an AMS JSON calibration file. Required unless --fisheye or --equirect is specified.")
     parser.add_argument("input_files", nargs='*', help="One or more input image or video files (must all be same type). Required unless --timelapse is used.")
     parser.add_argument("output_file", help="Path for the output panoramic image or video.")
-    parser.add_argument("--fisheye", action='store_true', help="Generate fisheye panorama (8192x8192). Automatically creates PTO from lens.pto files found two directories up from input files.")
-    parser.add_argument("--equirect", action='store_true', help="Generate equirectangular panorama (3380x2240). Automatically creates PTO from lens.pto files found two directories up from input files.")
+    parser.add_argument("--fisheye", action='store_true', help="Generate fisheye panorama (8192x8192). Automatically creates PTO/JSON from lens.pto or lens.json files found two directories up from input files.")
+    parser.add_argument("--equirect", action='store_true', help="Generate equirectangular panorama (3380x2240). Automatically creates PTO/JSON from lens.pto or lens.json files found two directories up from input files.")
     parser.add_argument("--enhance", action='store_true', help="Apply an adaptive enhancement filter to reduce noise and artifacts.")
     parser.add_argument("--timestamp", action='store_true', help="Overlay a UTC timestamp (YYYY-MM-DD hh:mm:ss.ff) in the lower-left corner of each video frame.")
     parser.add_argument("--force-video-dims", action='store_true', help="Force codec-safe output dimensions (video rules) even when input files are images.")
@@ -6092,7 +6292,7 @@ def main():
     timelapse_group.add_argument("--chunksize", type=int, default=2, metavar="MINUTES", help="Remote timelapse chunk duration in minutes (default: 2).")
     timelapse_group.add_argument("--timelapse-pattern", type=str, default='/meteor/cam?', help="Glob pattern used to find camera directories (default: /meteor/cam?).")
     timelapse_group.add_argument("--pto", type=str, default=None, metavar="FILE",
-        help="Override the auto-generated PTO file for timelapse (use a custom lens calibration).")
+        help="Override the auto-generated PTO/JSON file for timelapse (use a custom lens calibration).")
 
     parser.add_argument("--input-datetime", type=str, default=None, metavar="DT",
         help="Hint: UTC datetime of the input frames (YYYY-MM-DD HH:MM:SS). Informational only.")
@@ -6100,29 +6300,53 @@ def main():
     args = parser.parse_args()
 
     global _quiet
+    auto_generated_pto = None
     _quiet = args.quiet
 
     _print(f"INFO: Detected {num_cores} available CPU cores.")
 
     # If --fisheye or --equirect is used, shift arguments: pto_file should be None and the first input file should be moved from pto_file to input_files
     if (args.fisheye or args.equirect) and args.pto_file is not None:
-        # Check if pto_file looks like an image file (not a .pto file)
-        if not args.pto_file.lower().endswith('.pto'):
+        # Check if pto_file looks like an image file (not a .pto/.json calibration file)
+        if not args.pto_file.lower().endswith(('.pto', '.json')):
             # Move pto_file to the beginning of input_files
             args.input_files.insert(0, args.pto_file)
             args.pto_file = None
 
     # --pto is documented for timelapse, but accept it globally as a synonym
-    # for the positional PTO file argument.
+    # for the positional PTO/JSON file argument.
     if args.pto is not None and not args.timelapse:
-        if args.pto_file is not None and args.pto_file.lower().endswith('.pto'):
-            _print("Warning: both --pto and a positional PTO file were given; using --pto.", file=sys.stderr)
+        if args.pto_file is not None and args.pto_file.lower().endswith(('.pto', '.json')):
+            _print("Warning: both --pto and a positional PTO/JSON file were given; using --pto.", file=sys.stderr)
         elif args.pto_file is not None:
             # A non-PTO file was consumed by the optional positional pto_file slot;
             # move it back to the input list.
             if not args.input_files or args.input_files[0] != args.pto_file:
                 args.input_files.insert(0, args.pto_file)
         args.pto_file = args.pto
+
+    # Allow multiple leading .json/.pto calibration files on the command line.
+    # Positional order is: [calib1 calib2 ...] input1 input2 ... output.
+    # argparse has split them into pto_file / input_files / output_file already.
+    all_positionals = ([args.pto_file] if args.pto_file is not None else []) + args.input_files + [args.output_file]
+    calib_files = []
+    i = 0
+    while i < len(all_positionals) and all_positionals[i].lower().endswith(('.pto', '.json')):
+        calib_files.append(all_positionals[i])
+        i += 1
+    if len(calib_files) > 1:
+        projection = 'fisheye' if args.fisheye else 'equirect'
+        try:
+            combined_pto = _combine_calibration_files(
+                calib_files, projection=projection,
+                w=args.output_width, h=args.output_height)
+        except Exception as e:
+            _print(f"Error: Failed to combine calibration files: {e}", file=sys.stderr)
+            sys.exit(1)
+        args.pto_file = combined_pto
+        auto_generated_pto = combined_pto
+        args.input_files = all_positionals[i:-1]
+        args.output_file = all_positionals[-1]
 
     # --- Argument Validation ---
     if args.save_sync and args.load_sync:
@@ -6314,7 +6538,6 @@ def main():
 
     # If --fisheye or --equirect is specified and no explicit PTO was given,
     # generate a PTO file from lens.pto files.
-    auto_generated_pto = None
     if (args.fisheye or args.equirect) and not args.pto_file:
         projection = 'fisheye' if args.fisheye else 'equirect'
 

@@ -606,12 +606,12 @@ class AS7Diagnostic:
                 subprocess.run(cmd_rm, capture_output=True)
 
     def _archive_is_responsive(self, archive_path):
-        """Return True if /mnt/archive.allsky.tv can be listed within 60 seconds."""
+        """Return True if /mnt/archive.allsky.tv can be listed within 120 seconds."""
         try:
             cmd = ['ls', archive_path]
             if self.is_root:
                 cmd = ['sudo', '-u', 'ams', 'ls', archive_path]
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=120)
             return True
         except Exception:
             return False
@@ -628,7 +628,7 @@ class AS7Diagnostic:
 
             if unmount:
                 print("  Cloud archive appears hung; attempting forced unmount and remount...")
-                subprocess.run(['umount', '-l', archive_path], capture_output=True, timeout=15)
+                subprocess.run(['umount', '-l', archive_path], capture_output=True, timeout=120)
             else:
                 print("  Cloud archive not mounted; attempting to mount...")
 

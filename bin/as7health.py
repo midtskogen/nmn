@@ -2367,7 +2367,7 @@ class AS7Diagnostic:
                 import_command = f"import sys; sys.path.insert(0, '{safe_bin_path}'); import {pkg}"
                 cmd_import = ['runuser', '-u', 'meteor', '--', sys.executable, '-c', import_command]
                 #print(f"DEBUG: Running command: {' '.join(cmd_import)}") # Keep for debugging
-                subprocess.run(cmd_import, check=True, capture_output=True, text=True, timeout=60, cwd=self.meteor_pwd.pw_dir)
+                subprocess.run(cmd_import, check=True, capture_output=True, text=True, timeout=120, cwd=self.meteor_pwd.pw_dir)
                 self.log_success(f"Import OK: {pkg}", indent=1)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 stderr_output = e.stderr.strip() if hasattr(e, 'stderr') and e.stderr else "No stderr"

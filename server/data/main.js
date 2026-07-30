@@ -804,6 +804,9 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
         dom.lengthSelect.addEventListener('change', refreshTimeUiState);
         dom.intervalSelect.addEventListener('change', refreshTimeUiState);
         refreshTimeUiState();
+        // Holds the camera selection while timelapse/stitch modes override the
+        // checkboxes, so it can be restored afterwards. Null when not overridden.
+        let overriddenCameraSelection = null;
         const updateTypeOptions = () => {
             const primaryType = document.querySelector('input[name="primary_file_type"]:checked')?.value;
             const isVideo = primaryType === 'video';
@@ -846,9 +849,12 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 if (equirectSwitch) { equirectSwitch.disabled = false; if (!fisheyeSwitch?.checked && !equirectSwitch.checked) equirectSwitch.checked = true; }
                 if (fisheyeLabel) fisheyeLabel.style.opacity = '';
                 if (equirectLabel) equirectLabel.style.opacity = '';
-                // Grey out cameras 1-7
+                // Grey out cameras 1-7 (save the user's selection first so it can be restored)
                 const cameraGroup = document.getElementById('camera-checkbox-group');
                 if (cameraGroup) cameraGroup.style.opacity = '0.4';
+                if (!overriddenCameraSelection) {
+                    overriddenCameraSelection = new Map([...document.querySelectorAll('input[name="cameras"]')].map(cb => [cb.value, cb.checked]));
+                }
                 document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.checked = false; cb.disabled = true; });
                 // Grey out hour and minute only (length/interval used for multi-day)
                 if (hourSelect) { hourSelect.disabled = true; hourSelect.style.opacity = '0.4'; }
@@ -896,14 +902,24 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 if (equirectSwitch) { equirectSwitch.disabled = isVideo; if (isVideo) equirectSwitch.checked = false; }
                 if (fisheyeLabel) fisheyeLabel.style.opacity = isVideo ? '0.4' : '';
                 if (equirectLabel) equirectLabel.style.opacity = isVideo ? '0.4' : '';
-                // Cameras 1-7: re-enable (and re-check if restoring from timelapse)
+                // Cameras 1-7: re-enable. Stitch mode requires all cameras, so force-check
+                // them (saving the user's selection first). Otherwise restore any selection
+                // saved by timelapse/stitch mode, or leave the user's checkboxes untouched.
                 const cameraGroup = document.getElementById('camera-checkbox-group');
                 if (cameraGroup) cameraGroup.style.opacity = '';
                 const stitchActive = !isVideo && ((fisheyeSwitch?.checked) || (equirectSwitch?.checked));
-                document.querySelectorAll('input[name="cameras"]').forEach(cb => {
-                    if (stitchActive) { cb.checked = true; cb.disabled = true; }
-                    else { cb.disabled = false; if (!cb.checked) cb.checked = true; }
-                });
+                if (stitchActive) {
+                    if (!overriddenCameraSelection) {
+                        overriddenCameraSelection = new Map([...document.querySelectorAll('input[name="cameras"]')].map(cb => [cb.value, cb.checked]));
+                    }
+                    document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.checked = true; cb.disabled = true; });
+                } else {
+                    document.querySelectorAll('input[name="cameras"]').forEach(cb => {
+                        cb.disabled = false;
+                        if (overriddenCameraSelection) cb.checked = overriddenCameraSelection.get(cb.value) ?? cb.checked;
+                    });
+                    overriddenCameraSelection = null;
+                }
             }
         };
         document.querySelector('input[name="primary_file_type"][value="video"]').addEventListener('change', updateTypeOptions);

@@ -144,6 +144,13 @@ function initializeApp() {
             mapHandler.setMeteorCounts(meteorCountsByStation);
             mapHandler.setLightningData(lightning);
 
+            // Refresh station markers now that meteor counts are available
+            Object.entries(mapHandler.getStationMarkers()).forEach(([id, marker]) => {
+                if (!selectedStations.has(id)) {
+                    marker.setIcon(getBaseIconForStation(id));
+                }
+            });
+
             if (kpData && !kpData.error) {
                 const formattedKpData = formatKpData(kpData);
                 const chartCtx = document.getElementById('aurora-chart').getContext('2d');
@@ -161,7 +168,7 @@ function initializeApp() {
     uiManager.setUIState('ready');
 
     const stationHasRecentMeteors = (stationId) => {
-        if (!meteorCountsByStation) return true;
+        if (!meteorCountsByStation) return false;
         const counts = meteorCountsByStation[stationId];
         if (typeof counts === 'number') return counts > 0;
         if (counts && typeof counts === 'object') return (counts.total || 0) > 0;

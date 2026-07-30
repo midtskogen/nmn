@@ -172,7 +172,7 @@ function initializeApp() {
         const stationHasInfrasound = stationsData?.[stationId]?.station?.infrasound_id;
         const hasMeteors = stationHasRecentMeteors(stationId);
         if (!hasMeteors) return mapHandler.greyIcon;
-        return stationHasInfrasound ? mapHandler.darkBlueIcon : mapHandler.blueIcon;
+        return stationHasInfrasound ? mapHandler.greenIcon : mapHandler.blueIcon;
     };
 
     // --- Event Handlers & Callbacks ---

@@ -30,17 +30,8 @@ CAMERAS_FILE = os.path.join(BASE_DIR, 'cameras.json')
 EARTH_RADIUS_KM = 6371.0
 
 
-def update_status(status_file, status, data={}):
-    """
-    Writes a status update to a JSON file for a given task.
-    This allows the frontend to poll for the progress of a long-running background process.
-    """
-    if status_file:
-        try:
-            with open(status_file, 'w') as f:
-                json.dump({"status": status, **data}, f)
-        except IOError as e:
-            logging.error(f"Could not write to status file {status_file}: {e}")
+# Re-export the shared atomic implementation so existing imports keep working.
+from shared_utils import update_status
 
 
 def haversine_distance(lat1, lon1, lat2, lon2):

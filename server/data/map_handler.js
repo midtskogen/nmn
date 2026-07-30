@@ -17,7 +17,7 @@ export const redIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointh
 export const yellowIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 export const greyIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-grey.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 // Add the new Dark Blue Icon
-export const darkBlueIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' }); 
+export const darkBlueIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 const createLightningIcon = (color, size) => L.divIcon({ className: `lightning-icon lightning-icon-${color} icon-size-${size}`, html: '⚡', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
 /**

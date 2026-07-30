@@ -399,6 +399,19 @@ switch ($action) {
         echo json_encode(['success' => true, 'message' => 'Stop signal sent.']);
         break;
 
+    case 'request_transcode':
+        header('Content-Type: application/json');
+        $task_id = $_GET['task_id'] ?? null;
+        if (!$task_id || !preg_match('/^stream_[a-zA-Z0-9_.-]+$/', $task_id)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid or missing task_id']);
+            exit;
+        }
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' request_transcode ' . escapeshellarg($task_id);
+        echo shell_exec($command);
+        break;
+
     case 'fetch_grid':
         header('Content-Type: application/json');
         $stream_task_id = $_GET['stream_task_id'] ?? null;
@@ -448,8 +461,8 @@ switch ($action) {
             echo json_encode(['error' => 'Invalid parameters']);
             exit;
         }
-        $grid_file = "grid_{$projection}_hd.png";
-        $grid_path = __DIR__ . '/' . $grid_file;
+        $grid_file = "grid_{$projection}_" . ($resolution === 'lowres' ? 'sd' : 'hd') . ".png";
+        $grid_path = $BASE_DIR . '/' . $grid_file;
         if (file_exists($grid_path)) {
             echo json_encode(['success' => true, 'grid_url' => $grid_file]);
         } else {
@@ -521,7 +534,8 @@ switch ($action) {
         $image = $_GET['image'] ?? null;
         $threshold = $_GET['threshold'] ?? '0';
 
-        if (!$image || !ctype_digit($threshold)) {
+        // Only simple filenames inside the download directory are allowed.
+        if (!$image || !preg_match('#^download/[A-Za-z0-9_.-]+\.(jpg|jpeg|png)$#i', $image) || !ctype_digit($threshold)) {
             http_response_code(400);
             echo json_encode(['error' => 'Invalid or missing parameters']);
             exit;

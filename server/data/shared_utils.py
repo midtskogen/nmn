@@ -22,11 +22,55 @@ def uniqid(prefix=''):
     return prefix + f"{time.time():.8f}".replace('.', '')
 
 
+def atomic_json_write(file_path, data, indent=None):
+    """
+    Atomically writes data as JSON to a file by writing to a temporary file
+    first and then renaming it into place. This ensures concurrent readers
+    always see either the old or the new complete file, never a truncated one.
+    """
+    tmp_path = f"{file_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, 'w') as f:
+            json.dump(data, f, indent=indent)
+        os.rename(tmp_path, file_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except OSError: pass
+
+
+def pid_cmdline_matches(pid, patterns):
+    """
+    Verifies that a process ID still belongs to an expected process by matching
+    its /proc cmdline against the given substrings. Used to avoid killing an
+    unrelated process that has reused a stale PID recorded in a state file.
+    """
+    try:
+        with open(f'/proc/{int(pid)}/cmdline', 'rb') as f:
+            cmdline = f.read().replace(b'\0', b' ').decode('utf-8', 'replace')
+        return any(p in cmdline for p in patterns)
+    except (IOError, OSError, ValueError):
+        return False
+
+
+def read_json_file(file_path, default=None):
+    """
+    Tolerantly reads a JSON file. Returns `default` if the file is missing
+    or contains invalid JSON, so a corrupt cache never crashes the caller.
+    """
+    try:
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        logging.warning(f"Could not read JSON file {os.path.basename(file_path)}: {e}")
+        return default
+
+
 def update_status(status_file, status, data={}):
     """
     Writes a status update to a JSON file for a given task.
     This allows the frontend to poll for the progress and result of a long-running background process.
-    
+
     Args:
         status_file (str): The full path to the status JSON file.
         status (str): The current status (e.g., 'progress', 'complete', 'error').
@@ -34,8 +78,7 @@ def update_status(status_file, status, data={}):
     """
     if status_file:
         try:
-            with open(status_file, 'w') as f:
-                json.dump({"status": status, **data}, f)
+            atomic_json_write(status_file, {"status": status, **data})
         except IOError as e:
             logging.error(f"Could not write to status file {status_file}: {e}")
 
@@ -81,8 +124,7 @@ def atomic_json_rw(file_path, task_id_for_log=""):
         yield data
 
         # After the `with` block completes, write the (potentially modified) data back to the file.
-        with open(file_path, 'w') as f:
-            json.dump(data, f, indent=2)
+        atomic_json_write(file_path, data, indent=2)
             
     except Exception as e:
         logging.error(f"Task {task_id_for_log} - FAILED to perform atomic update on {os.path.basename(file_path)}: {e}")

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 # Import from our new shared utility library
 # Imports utility functions shared across multiple backend scripts.
-from shared_utils import atomic_json_rw, update_status, uniqid
+from shared_utils import atomic_json_rw, update_status, uniqid, read_json_file, pid_cmdline_matches
 
 # --- Configuration (specific to streaming) ---
 # Establishes base paths for all necessary directories and configuration files.
@@ -599,9 +599,10 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
                 logging.error(f"{log_prefix} Failed to fetch lens.pto: {result.stderr}")
                 return {"success": False, "error": "error_annotation_pto_not_found"}
 
-        # Parse timestamp to Unix epoch
+        # Parse timestamp to Unix epoch. Keep the datetime timezone-aware so
+        # .timestamp() is interpreted as UTC regardless of server local time.
         try:
-            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00').replace('+00:00', ''))
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
             epoch_time = int(dt.timestamp())
         except:
             epoch_time = int(time.time())
@@ -649,12 +650,13 @@ def _get_timeout_for_station(station_id, resolution, stations_data):
 def _check_stream_time_quota(user_ip, station_id, resolution, stations_data):
     """Checks if a user has exceeded their daily streaming time quota for a station."""
     try:
-        with atomic_json_rw(STREAM_TIME_TRACKER_FILE) as tracker:
-            today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-            station_usage = tracker.get(today_str, {}).get(user_ip, {}).get(station_id, {})
-         
-            lowres_used = station_usage.get('total_lowres_seconds', 0)
-            hires_used = station_usage.get('total_hires_seconds', 0)
+        # Read-only check: no need to take the write lock or rewrite the tracker.
+        tracker = read_json_file(STREAM_TIME_TRACKER_FILE, default={}) or {}
+        today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        station_usage = tracker.get(today_str, {}).get(user_ip, {}).get(station_id, {})
+
+        lowres_used = station_usage.get('total_lowres_seconds', 0)
+        hires_used = station_usage.get('total_hires_seconds', 0)
     except Exception as e:
         logging.error(f"Failed to check stream time quota for IP {user_ip}: {e}")
         return True, "" # Fail open (allow stream if quota check fails)
@@ -686,6 +688,41 @@ def _update_stream_time_tracker(user_ip, station_id, resolution, duration_second
     logging.info(f"Logged {duration_seconds:.1f}s of {resolution} streaming for IP {user_ip} on station {station_id}.")
 
 
+# Expected cmdline markers for processes recorded in stream state files. Used
+# to verify a PID has not been reused by an unrelated process before killing it.
+_PID_CMDLINE_MARKERS = {'ssh_pid': ('ssh',), 'ffmpeg_pid': ('ffmpeg',)}
+
+def _kill_recorded_pid(pid_name, pid, log_prefix):
+    """Kills a PID recorded in a state file only if it still looks like the expected process."""
+    markers = _PID_CMDLINE_MARKERS.get(pid_name)
+    if not markers or not pid_cmdline_matches(pid, markers):
+        logging.warning(f"{log_prefix} Skipping kill of {pid_name} (PID: {pid}): process identity mismatch (stale or reused PID).")
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+        logging.info(f"{log_prefix} Killed {pid_name} (PID: {pid}).")
+    except OSError:
+        logging.info(f"{log_prefix} {pid_name} (PID: {pid}) was already gone.")
+
+
+def request_stream_transcode(task_id):
+    """
+    Sets the hot-swap command in an active stream's status file, asking the
+    stream's monitor loop to restart FFmpeg with H.264 transcoding.
+    """
+    status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
+    if not os.path.exists(status_file):
+        return {"success": False, "error": "stream_not_found"}
+    try:
+        with atomic_json_rw(status_file) as s_data:
+            s_data['command'] = 'switch_to_h264'
+        logging.info(f"Transcode to H.264 requested for stream task {task_id}.")
+        return {"success": True}
+    except Exception as e:
+        logging.error(f"Failed to request transcode for task {task_id}: {e}")
+        return {"success": False, "error": "error_internal"}
+
+
 def stop_stream_relay(task_id):
     """
     Stops all processes associated with a stream task and cleans up all related files.
@@ -700,13 +737,10 @@ def stop_stream_relay(task_id):
         except (IOError, json.JSONDecodeError) as e:
             logging.error(f"Error reading status file for stopping task {task_id}: {e}")
     
-    # Kills the SSH tunnel and ffmpeg processes by their PIDs.
+    # Kills the SSH tunnel and ffmpeg processes by their PIDs, after verifying
+    # each PID still belongs to the expected process (guard against PID reuse).
     for pid_name, pid in data.get("pids", {}).items():
-        try:
-            os.kill(pid, signal.SIGKILL)
-            logging.info(f"Killed {pid_name} (PID: {pid}) for task {task_id}.")
-        except OSError:
-            logging.info(f"{pid_name} (PID: {pid}) for task {task_id} was already gone.")
+        _kill_recorded_pid(pid_name, pid, f"Task {task_id} -")
             
     # Deletes the temporary grid file (but never delete the cached grid).
     if grid_path := data.get("grid_local_path"):
@@ -747,11 +781,7 @@ def _cleanup_stale_stream_locks(log_prefix):
                     with open(file_path, 'r') as f: lock_data = json.load(f)
                     # Attempts to kill any lingering processes associated with the stale lock.
                     for pid_name, pid in lock_data.get("pids", {}).items():
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                            logging.info(f"{log_prefix} Killed stale {pid_name} (PID: {pid}).")
-         
-                        except OSError: pass
+                        _kill_recorded_pid(pid_name, pid, log_prefix)
                     os.remove(file_path)
             except (IOError, OSError, json.JSONDecodeError) as e:
                 logging.error(f"{log_prefix} Error during stale lock cleanup for {filename}: {e}")
@@ -1074,14 +1104,16 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
         # or a process dies or is stopped externally.
         end_time = time.time() + timeout_seconds
         while time.time() < end_time:
-            # 1. Check for Hot-Swap Command
+            # 1. Check for Hot-Swap Command. Read without the write lock on
+            # every poll; only rewrite the status file when a command is found.
             should_switch = False
             try:
-                with atomic_json_rw(status_file) as s_data:
-                    if s_data.get('command') == 'switch_to_h264':
-                        logging.info(f"{log_prefix} Hot-swap requested. Restarting FFmpeg...")
-                        del s_data['command']
-                        should_switch = True
+                if (read_json_file(status_file, default={}) or {}).get('command') == 'switch_to_h264':
+                    with atomic_json_rw(status_file) as s_data:
+                        if s_data.get('command') == 'switch_to_h264':
+                            logging.info(f"{log_prefix} Hot-swap requested. Restarting FFmpeg...")
+                            del s_data['command']
+                            should_switch = True
             except Exception: pass
 
             if should_switch:

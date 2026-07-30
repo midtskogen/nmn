@@ -28,6 +28,7 @@ from prediction_utils import (
     PTO_MAPPER_AVAILABLE,
     BASE_DIR, LOG_DIR, LOCK_DIR, CACHE_DIR, STATIONS_FILE, CAMERAS_FILE
 )
+from shared_utils import atomic_json_write, read_json_file
 
 # --- Try to import pto_mapper.py ---
 # The PTO_MAPPER_AVAILABLE flag, imported from prediction_utils, determines if
@@ -104,7 +105,7 @@ def get_tle_data(ts):
     cached_data = None
     # Check if a recent and complete TLE cache file exists.
     if os.path.exists(TLE_FILE) and (datetime.now().timestamp() - os.path.getmtime(TLE_FILE)) / 3600 < TLE_UPDATE_INTERVAL_HOURS:
-        with open(TLE_FILE, 'r') as f: cached_data = json.load(f)
+        cached_data = read_json_file(TLE_FILE, default={})
         if all(sat_name in cached_data for sat_name in SATELLITES_OF_INTEREST): return cached_data
     
     logging.info("Cache is stale or incomplete. Forcing fresh TLE download.")
@@ -137,7 +138,7 @@ def get_tle_data(ts):
             logging.error(f"Could not process TLE from {source_url}: {e}")
             if cached_data: return cached_data # Return stale data if fresh download fails.
             else: return {"error": f"Failed to download TLE data: {e}"}
-    with open(TLE_FILE, 'w') as f: json.dump(tle_data, f)
+    atomic_json_write(TLE_FILE, tle_data)
     return tle_data
 
 
@@ -435,8 +436,7 @@ def find_all_passes(task_id):
         update_status(status_file, "progress", {"step": 95, "total": 100, "message": "status_grouping_results"})
         final_passes = _group_and_finalize_passes(all_passes_found)
         result_data = {"passes": final_passes}
-        with open(PASS_CACHE_FILE, 'w') as f:
-            json.dump({"satellites_in_cache": list(SATELLITES_OF_INTEREST.keys()), "data": result_data}, f, indent=2)
+        atomic_json_write(PASS_CACHE_FILE, {"satellites_in_cache": list(SATELLITES_OF_INTEREST.keys()), "data": result_data}, indent=2)
         logging.info(f"Finished prediction for task {task_id}. Found {len(final_passes)} passes.")
         update_status(status_file, "complete", {"data": result_data})
     except Exception as e:

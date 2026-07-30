@@ -183,13 +183,13 @@ def enhance_filter(plane: np.ndarray, t: int, log2sizex: int, log2sizey: int,
 
 def apply_enhance_filter(image_path: str, threshold: int) -> str:
     """Apply enhance filter to an image and return base64 encoded result."""
-    # Convert URL path to file system path
-    # The image_path is expected to be like "download/some_file.jpg"
-    # We need to convert it to an absolute path relative to BASE_DIR
-    if image_path.startswith('download/'):
-        image_path = os.path.join(BASE_DIR, image_path)
-    elif not os.path.isabs(image_path):
-        image_path = os.path.join(BASE_DIR, image_path)
+    # Only images inside the download directory may be processed. Resolve the
+    # path and verify containment to prevent path traversal outside of it.
+    rel_path = image_path[len('download/'):] if image_path.startswith('download/') else image_path
+    download_root = os.path.realpath(DOWNLOAD_DIR)
+    image_path = os.path.realpath(os.path.join(download_root, rel_path))
+    if not image_path.startswith(download_root + os.sep):
+        raise ValueError(f"Invalid image path: {image_path}")
 
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -227,7 +227,8 @@ def apply_enhance_filter(image_path: str, threshold: int) -> str:
 # --- Imports with Error Catching ---
 try:
     from shared_utils import (
-        uniqid, update_status, update_quota_tracker, trim_log_file, cleanup_old_files
+        uniqid, update_status, update_quota_tracker, trim_log_file, cleanup_old_files,
+        read_json_file, pid_cmdline_matches
     )
     # Import media_processor but safeguard against missing probe function
     import media_processor
@@ -236,7 +237,8 @@ try:
         PTO_MAPPER_AVAILABLE
     )
     from live_streamer import (
-        start_stream_relay, stop_stream_relay, fetch_grid_file, fetch_annotation_file,
+        start_stream_relay, stop_stream_relay, request_stream_transcode,
+        fetch_grid_file, fetch_annotation_file,
         get_archive_grid_overlay, get_archive_annotation_overlay,
         get_stitch_cam_boundaries
     )
@@ -715,7 +717,9 @@ class FileProcessor:
 
     def _ensure_base_media_exists(self):
         if self.is_image:
-            if os.path.exists(self.output_filepath) or os.path.exists(self.overlay_filepath): return self.output_filepath
+            if os.path.exists(self.output_filepath): return self.output_filepath
+            # If only the overlay variant survived cleanup, serve it directly.
+            if os.path.exists(self.overlay_filepath): return self.overlay_filepath
         else:
             # 1. Sanity Check for Self-Healing:
             # If the user needs H.264, but we have a file named .mp4 that is actually HEVC (from a previous failed probe),
@@ -994,7 +998,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
 
         pass_data_list = [data[p] for p in ['pass_data', 'flight_pass_data'] if p in data and data[p]]
         if not pass_data_list and data.get('satellite_panel_enabled', False) and os.path.exists(PASS_CACHE_FILE):
-            with open(PASS_CACHE_FILE, 'r') as f: pass_data_list = json.load(f).get("data", {}).get("passes", [])
+            pass_data_list = (read_json_file(PASS_CACHE_FILE, default={}) or {}).get("data", {}).get("passes", [])
 
         results, errors, blending_jobs, pto_data_cache, total_bytes = {}, [], [], {}, 0
         files_to_process = []
@@ -1121,11 +1125,12 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         do_stitch   = (do_fisheye or do_equirect) and os.path.exists(STITCH_SCRIPT)
 
         # Pre-compute expected camera count per timestamp for stitch triggering
-        stitch_cams_expected = {}  # t_key -> set of cam nums
+        stitch_cams_expected = {}  # t_key -> {'dt': source datetime, 'cams': set of cam nums}
         if do_stitch:
             for fi in files_to_process:
                 t_key = fi['time'].strftime('%H:%M')
-                stitch_cams_expected.setdefault(t_key, set()).add(int(fi['cam']))
+                entry = stitch_cams_expected.setdefault(t_key, {'dt': fi['time'], 'cams': set()})
+                entry['cams'].add(int(fi['cam']))
 
         stitch_ready     = {}   # t_key -> {cam: abs_path}  (downloaded so far)
         stitch_launched  = set()  # t_keys already handed to stitch.py
@@ -1176,13 +1181,15 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                             pass
 
                         # Launch stitch as soon as all cameras for a timestamp are ready
-                        for t_key_s, expected_cams in stitch_cams_expected.items():
+                        for t_key_s, expected in stitch_cams_expected.items():
                             if t_key_s in stitch_launched:
                                 continue
                             ready_cams = stitch_ready.get(t_key_s, {})
-                            if expected_cams.issubset(ready_cams.keys()):
+                            if expected['cams'].issubset(ready_cams.keys()):
                                 stitch_launched.add(t_key_s)
-                                t_obj = datetime.strptime(f"{data['date']} {t_key_s}", '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
+                                # Use the actual datetime of the source files so sequences
+                                # crossing midnight are named with the correct date.
+                                t_obj = expected['dt']
                                 base_name = f"{station_code}_{t_obj.strftime('%Y%m%d')}_{t_obj.strftime('%H%M')}"
                                 res_suffix = ("hires" if is_hires else "lowres") + ("_long" if is_long else "")
 
@@ -1671,7 +1678,7 @@ def main():
             "get_stations": lambda: print(open(STATIONS_FILE).read()),
             "get_camera_fovs": lambda: print(json.dumps(get_camera_fovs())),
             "get_kp_data": lambda: print(get_kp_data()),
-            "get_lightning_data": lambda: print(json.dumps(get_lightning_data(sys.argv[2] if len(sys.argv) > 2 else datetime.utcnow().strftime('%Y-%m-%d')))),
+            "get_lightning_data": lambda: print(json.dumps(get_lightning_data(sys.argv[2] if len(sys.argv) > 2 else datetime.now(timezone.utc).strftime('%Y-%m-%d')))),
             "get_meteor_data": lambda: print(json.dumps(get_meteor_data())),
             "get_station_stats": lambda: print(json.dumps(get_station_stats(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None, sys.argv[4] if len(sys.argv) > 4 else None))),
             "fetch_grid": lambda: print(json.dumps(fetch_grid_file(sys.argv[2], sys.argv[3], sys.argv[4]))),
@@ -1688,6 +1695,7 @@ def main():
             "_internal_download_station": lambda: download_for_single_station(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]),
             "_internal_start_stream": handle_start_stream,
             "stop_stream": lambda: stop_stream_relay(sys.argv[2]),
+            "request_transcode": lambda: print(json.dumps(request_stream_transcode(sys.argv[2]))),
             "_internal_blend_overlay": lambda: sys.exit(0 if apply_ffmpeg_overlay(sys.argv[2], sys.argv[3], sys.argv[4]) else 1)
         }
 
@@ -1703,8 +1711,13 @@ def main():
                 if os.path.exists(pid_file):
                     try:
                         with open(pid_file, 'r') as f: pid = int(f.read().strip())
-                        logging.info(f"Task {master_task_id} - Cancellation requested. Killing coordinator PID: {pid}")
-                        os.kill(pid, signal.SIGTERM)
+                        # Verify the PID still belongs to a coordinator process before
+                        # signalling it, in case the PID was reused after a crash.
+                        if pid_cmdline_matches(pid, ('controller.py',)):
+                            logging.info(f"Task {master_task_id} - Cancellation requested. Killing coordinator PID: {pid}")
+                            os.kill(pid, signal.SIGTERM)
+                        else:
+                            logging.warning(f"Task {master_task_id} - Skipping kill of PID {pid}: not a controller process (stale or reused PID).")
                     except (IOError, ValueError, ProcessLookupError) as e:
                         logging.warning(f"Task {master_task_id} - Could not kill coordinator process: {e}")
             

@@ -36,6 +36,7 @@ from prediction_utils import (
     BASE_DIR, LOG_DIR, LOCK_DIR, CACHE_DIR, STATIONS_FILE, CAMERAS_FILE
 )
 from data_fetchers import get_air_pressure
+from shared_utils import atomic_json_write, read_json_file
 
 # --- Try to import pto_mapper.py ---
 # The PTO_MAPPER_AVAILABLE flag, imported from prediction_utils, determines if
@@ -244,7 +245,8 @@ def get_flight_track(task_id, icao24, time_within_flight, access_token):
     cache_file = os.path.join(TRACK_CACHE_DIR, f"{icao24}-{time_within_flight}.json")
     if os.path.exists(cache_file):
         if (time.time() - os.path.getmtime(cache_file)) < (TRACK_CACHE_HOURS * 3600):
-            with open(cache_file, 'r') as f: return json.load(f)
+            if cached := read_json_file(cache_file):
+                return cached
     url = f"https://opensky-network.org/api/tracks/all?icao24={icao24}&time={time_within_flight}"
     headers = {"Authorization": f"Bearer {access_token}"}
     for attempt in range(REQUEST_RETRY_COUNT):
@@ -273,9 +275,8 @@ def get_flight_track(task_id, icao24, time_within_flight, access_token):
                     else:
                         point.append(None)
 
-            # Write the augmented data to the cache file with pretty-printing (indent=4).
-            with open(cache_file, 'w') as f:
-                json.dump(data, f, indent=4)
+            # Write the augmented data to the cache file atomically with pretty-printing (indent=4).
+            atomic_json_write(cache_file, data, indent=4)
 
             return data
         except requests.exceptions.RequestException as e:
@@ -599,14 +600,15 @@ def fetch_and_process_track(args):
                         logging.warning(f"Worker {os.getpid()}: Using standard pressure 1013.25 hPa as fallback for {flight_info['icao24']}.")
                         warned_about_fallback = True
 
-                    # Apply barometric altitude correction using the barometric formula
-                    # h = (RT/g) * ln(P0/P) where R=287.058 J/(kg·K), T=288.15K (15°C), g=9.80665 m/s²
-                    # This gives RT/g ≈ 8430m. For standard conditions, this is more accurate than simple linear approximation.
+                    # Apply barometric altitude correction using the barometric formula.
+                    # Aircraft report pressure altitude referenced to standard pressure 1013.25 hPa.
+                    # Geometric altitude = pressure altitude + (RT/g) * ln(QNH/1013.25),
+                    # where R=287.058 J/(kg·K), T=288.15K (15°C), g=9.80665 m/s² gives RT/g ≈ 8430m.
                     try:
-                        altitude_correction = 8430.0 * math.log(1013.25 / pressure_to_use)
+                        altitude_correction = 8430.0 * math.log(pressure_to_use / 1013.25)
                     except (ValueError, ZeroDivisionError):
                         # Fallback to simple linear approximation if log fails
-                        altitude_correction = (1013.25 - pressure_to_use) * 8.23
+                        altitude_correction = (pressure_to_use - 1013.25) * 8.23
                     p_alt_for_plot = baro_alt + altitude_correction
 
                     if pressure_hpa is not None:
@@ -906,15 +908,7 @@ def find_all_crossings(task_id):
         # Atomically write to the main cache file to prevent race conditions.
         # Write to a temporary file first, then rename it to the final destination.
         # This ensures that any process reading the cache file will always get a complete JSON.
-        temp_cache_file = AIRCRAFT_CACHE_FILE + f".{os.getpid()}.tmp"
-        try:
-            with open(temp_cache_file, 'w') as f:
-                json.dump(result_data, f)
-            os.rename(temp_cache_file, AIRCRAFT_CACHE_FILE)
-        finally:
-            # Ensure the temporary file is removed if it still exists (e.g., on error)
-            if os.path.exists(temp_cache_file):
-                os.remove(temp_cache_file)
+        atomic_json_write(AIRCRAFT_CACHE_FILE, result_data)
 
         update_status(status_file, "complete", result_data)
  

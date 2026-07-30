@@ -22,6 +22,8 @@ try:
 except ImportError:
     PTO_MAPPER_AVAILABLE = False
 
+from shared_utils import atomic_json_write, read_json_file
+
 # --- Configuration ---
 # Establishes base paths for all necessary directories and configuration files.
 BASE_DIR = os.environ.get('NMN_DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
@@ -244,7 +246,7 @@ def get_lightning_data(end_date_str):
         current_date = end_date - timedelta(days=i)
         current_date_str = current_date.strftime('%Y-%m-%d')
         raw_cache_file = os.path.join(CACHE_DIR, f"lightning_raw_cache_{current_date_str}.json")
-        is_today = current_date_str == datetime.utcnow().strftime('%Y-%m-%d')
+        is_today = current_date_str == datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
         # Determines if a fresh fetch is needed based on cache existence and age.
         should_fetch = not os.path.exists(raw_cache_file) or (is_today and (time.time() - os.path.getmtime(raw_cache_file) > 3600))
@@ -259,14 +261,16 @@ def get_lightning_data(end_date_str):
                 with urllib.request.urlopen(req, timeout=30) as response:
                     lines = response.read().decode('utf-8').strip().splitlines()
                     day_strikes_parts = [line.split() for line in lines]
-                    # Caches the raw fetched data to a file.
-                    with open(raw_cache_file, 'w') as f: json.dump(day_strikes_parts, f)
+                    # Caches the raw fetched data to a file atomically.
+                    atomic_json_write(raw_cache_file, day_strikes_parts)
                     all_raw_strikes_parts.extend(day_strikes_parts)
             except Exception as e:
                 logging.error(f"Failed to fetch lightning data for {current_date_str}: {e}")
         else:
-            # If cache is valid, load data from the file.
-            with open(raw_cache_file, 'r') as f: all_raw_strikes_parts.extend(json.load(f))
+            # If cache is valid, load data from the file. A corrupt cache file
+            # yields None and that day is skipped instead of crashing the request.
+            if cached_day := read_json_file(raw_cache_file):
+                all_raw_strikes_parts.extend(cached_day)
 
     # Parse and de-duplicate the raw strike data.
     parsed_strikes = []
@@ -586,7 +590,7 @@ def get_camera_fovs():
     # Checks if the cache file is newer than the source camera calibration file.
     if os.path.exists(CAMERA_FOV_CACHE_FILE) and os.path.exists(CAMERAS_FILE):
         if os.path.getmtime(CAMERA_FOV_CACHE_FILE) >= os.path.getmtime(CAMERAS_FILE):
-             with open(CAMERA_FOV_CACHE_FILE, 'r') as f: return json.load(f)
+             if cached := read_json_file(CAMERA_FOV_CACHE_FILE): return cached
 
     # Returns empty if the required pto_mapper library is not available.
     if not PTO_MAPPER_AVAILABLE:
@@ -634,8 +638,8 @@ def get_camera_fovs():
                 logging.warning(f"Could not calculate FOV for {station_id}/{cam_name}: {e}")
                 continue
     
-    # Writes the calculated data to the cache file.
-    with open(CAMERA_FOV_CACHE_FILE, 'w') as f: json.dump(fov_data, f)
+    # Writes the calculated data to the cache file atomically.
+    atomic_json_write(CAMERA_FOV_CACHE_FILE, fov_data)
     logging.info("Finished generating camera FOV cache.")
     return fov_data
 

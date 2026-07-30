@@ -64,6 +64,17 @@ $quota_file   = $BASE_DIR . '/quota_tracker.json';
 $access_file  = $BASE_DIR . '/access_log.json';
 $geoip_cache  = $BASE_DIR . '/cache/geoip_cache.json';
 
+function mask_ip($ip) {
+    // Mask the last octet/segment so full visitor IPs are never displayed.
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        return preg_replace('/\.\d+$/', '.x', $ip);
+    }
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        return preg_replace('/:[^:]*$/', ':x', $ip);
+    }
+    return $ip;
+}
+
 function read_json($path) {
     if (!file_exists($path)) return [];
     $data = json_decode(file_get_contents($path), true);
@@ -88,7 +99,8 @@ function resolve_geoip($ips, $cache_file) {
     $unknown = array_filter($ips, fn($ip) => !isset($cache[$ip]));
     if ($unknown) {
         // Write unknown IPs to a temp file and resolve in the background
-        $tmp = $cache_file . '.pending';
+        // Unique pending file per request so concurrent page loads don't clobber each other.
+        $tmp = $cache_file . '.pending.' . getmypid() . '.' . bin2hex(random_bytes(4));
         @file_put_contents($tmp, implode("\n", $unknown));
         $script = __DIR__ . '/geoip_resolve.php';
         @shell_exec("php {$script} " . escapeshellarg($cache_file) . " " . escapeshellarg($tmp) . " > /dev/null 2>&1 &");
@@ -437,7 +449,7 @@ $total_ips          = count($all_ips);
   foreach ($top_ips as $ip => $secs) {
       $country_en = $geoip[$ip]['country'] ?? '';
       $country_disp = ($lang_code === 'nb_NO' && isset($COUNTRY_NO[$country_en])) ? $COUNTRY_NO[$country_en] : $country_en;
-      $label   = $country_disp ?: $ip;
+      $label   = $country_disp ?: mask_ip($ip);
       $country_totals_php[$label] = ($country_totals_php[$label] ?? 0) + $secs;
   }
   arsort($country_totals_php);
@@ -464,7 +476,7 @@ $total_ips          = count($all_ips);
           }
       ?>
       <tr>
-        <td><?= htmlspecialchars($ip) ?></td>
+        <td><?= htmlspecialchars(mask_ip($ip)) ?></td>
         <td class="country-cell"><?= $flag ? $flag . ' ' : '' ?><?= htmlspecialchars($country ?: ($geoip[$ip] ?? null ? '?' : '…')) ?></td>
         <td><?= fmt_duration($total_s, $lang_code) ?></td>
         <td><?= isset($ip_bytes[$ip]) ? fmt_bytes($ip_bytes[$ip]) : '—' ?></td>

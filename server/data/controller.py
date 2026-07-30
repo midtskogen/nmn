@@ -1415,6 +1415,50 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
         logging.exception(f"Worker {task_id} crashed.")
         update_status(station_status_file, "error", {"message": error_msg})
 
+def cleanup_lock_dir(lock_dir, age_in_days, task_id):
+    """Prune stale task status/control files from LOCK_DIR.
+
+    Persistent flock '.lock' files (see shared_utils.atomic_json_rw) are only
+    removed when older than a day AND not currently locked by a live process,
+    to avoid the unlink-while-locked split-brain race.
+    """
+    import fcntl
+    now = time.time()
+    age_limit_seconds = age_in_days * 86400
+    try:
+        for filename in os.listdir(lock_dir):
+            file_path = os.path.join(lock_dir, filename)
+            if not os.path.isfile(file_path):
+                continue
+            age = now - os.path.getmtime(file_path)
+            if filename.endswith('.lock'):
+                if age < 86400:
+                    continue
+                try:
+                    fd = os.open(file_path, os.O_RDONLY)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        os.close(fd)
+                        continue  # locked by a live process
+                    try:
+                        os.remove(file_path)
+                        logging.info(f"Task {task_id} - Deleted stale lock file: {file_path}")
+                    finally:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+                except OSError as e:
+                    logging.error(f"Task {task_id} - Error deleting stale lock file {file_path}: {e}")
+            elif age > age_limit_seconds:
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Task {task_id} - Deleted old file: {file_path}")
+                except OSError as e:
+                    logging.error(f"Task {task_id} - Error deleting file {file_path}: {e}")
+    except FileNotFoundError:
+        pass
+
+
 def main_download_coordinator(master_task_id, json_payload, user_ip):
     status_file = os.path.join(LOCK_DIR, f"{master_task_id}.json")
     pid_file = os.path.join(LOCK_DIR, f"{master_task_id}.pid")
@@ -1431,6 +1475,7 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
         open(lock_file, 'w').close()
         trim_log_file(LOG_FILE, MAX_LOG_LINES, master_task_id)
         for d in [DOWNLOAD_DIR, LOG_DIR, CACHE_DIR]: cleanup_old_files(d, CLEANUP_AGE_DAYS, master_task_id, [os.path.basename(LOG_FILE)] if d == LOG_DIR else [])
+        cleanup_lock_dir(LOCK_DIR, CLEANUP_AGE_DAYS, master_task_id)
         
         data = json.loads(json_payload)
         if 'crossing_data' in data: data['flight_pass_data'] = data.pop('crossing_data')

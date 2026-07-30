@@ -22,13 +22,25 @@ if (!is_dir($LOCK_DIR)) { mkdir($LOCK_DIR, 0775, true); }
  * @return string The user's IP address.
  */
 function get_user_ip() {
-    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-        return trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+    // Only trust proxy headers when the immediate peer is a trusted proxy;
+    // otherwise a client can spoof X-Forwarded-For to bypass per-IP quotas.
+    $trusted_proxies = ['127.0.0.1', '::1'];
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+    if (in_array($remote, $trusted_proxies, true)) {
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $candidate = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+            if (filter_var($candidate, FILTER_VALIDATE_IP)) {
+                return $candidate;
+            }
+        }
+        if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+            $candidate = trim($_SERVER['HTTP_X_REAL_IP']);
+            if (filter_var($candidate, FILTER_VALIDATE_IP)) {
+                return $candidate;
+            }
+        }
     }
-    if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
-        return trim($_SERVER['HTTP_X_REAL_IP']);
-    }
-    return $_SERVER['REMOTE_ADDR'] ?? 'unknown_ip';
+    return $remote !== '' ? $remote : 'unknown_ip';
 }
 
 /**

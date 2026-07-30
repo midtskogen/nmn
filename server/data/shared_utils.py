@@ -56,22 +56,16 @@ def atomic_json_rw(file_path, task_id_for_log=""):
               'with' block, and it will be automatically written back upon exit.
     """
     lock_path = file_path + '.lock'
-    STALE_LOCK_TIMEOUT = 60  # 1 minute
-
-    # Proactively check for and remove stale lock files left behind by crashed processes.
-    if os.path.exists(lock_path):
-        try:
-            lock_age = time.time() - os.path.getmtime(lock_path)
-            if lock_age > STALE_LOCK_TIMEOUT:
-                logging.warning(f"Task {task_id_for_log} - Removing stale lock file {os.path.basename(lock_path)} (age: {lock_age:.1f}s).")
-                os.remove(lock_path)
-        except OSError as e:
-            logging.error(f"Task {task_id_for_log} - Error checking/removing stale lock file: {e}")
 
     lock_file_handle = None
     try:
-        # Acquire an exclusive lock on the associated .lock file.
-        lock_file_handle = open(lock_path, 'w')
+        # Acquire an exclusive lock on the associated .lock file. The lock file
+        # is persistent: it must never be unlinked, because a process blocked on
+        # flock() of an unlinked inode would hold a lock on a deleted file while
+        # a new process locks a freshly created inode (split-brain writers).
+        # flock() is released automatically by the OS if the holder dies, so no
+        # stale-lock cleanup is needed.
+        lock_file_handle = open(lock_path, 'a')
         fcntl.flock(lock_file_handle, fcntl.LOCK_EX)
         
         data = {}
@@ -94,15 +88,11 @@ def atomic_json_rw(file_path, task_id_for_log=""):
         logging.error(f"Task {task_id_for_log} - FAILED to perform atomic update on {os.path.basename(file_path)}: {e}")
         raise
     finally:
-        # Always release the lock and remove the lock file on exit, even if errors occurred.
+        # Always release the lock on exit, even if errors occurred. The lock
+        # file itself is left in place (see comment above).
         if lock_file_handle:
             fcntl.flock(lock_file_handle, fcntl.LOCK_UN)
             lock_file_handle.close()
-        if os.path.exists(lock_path):
-            try:
-                os.remove(lock_path)
-            except OSError as e:
-                logging.error(f"Task {task_id_for_log} - Could not remove lock file {lock_path}: {e}")
 
 
 def update_quota_tracker(updates, task_id, user_ip, quota_tracker_file):

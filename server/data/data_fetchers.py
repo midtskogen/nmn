@@ -42,7 +42,7 @@ def _load_frost_api_creds():
     if FROST_API_CREDS is not None:
         return FROST_API_CREDS
     try:
-        with open(os.path.join(BASE_DIR, 'config.json'), 'r') as f:
+        with open(os.environ.get('NMN_CONFIG_FILE', os.path.join(BASE_DIR, 'config.json')), 'r') as f:
             config = json.load(f)
         FROST_API_CREDS = (config['frost_api']['client_id'], config['frost_api']['client_secret'])
         return FROST_API_CREDS

@@ -54,4 +54,5 @@ foreach ($ips as $ip) {
 file_put_contents($cache_file, json_encode($cache, JSON_PRETTY_PRINT));
 flock($lf, LOCK_UN);
 fclose($lf);
-@unlink($lock);
+// Do NOT unlink the lock file: a process blocked on flock of the unlinked inode
+// would hold a lock on a deleted file while a new process locks a fresh inode.

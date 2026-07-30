@@ -49,7 +49,7 @@ if PTO_MAPPER_AVAILABLE:
 
 # --- Configuration specific to this script ---
 TRACK_CACHE_DIR = os.path.join(CACHE_DIR, 'flight_tracks')
-CREDENTIALS_FILE = os.path.join(BASE_DIR, 'credentials.json')
+CREDENTIALS_FILE = os.environ.get('NMN_CREDENTIALS_FILE', os.path.join(BASE_DIR, 'credentials.json'))
 LOG_FILE = os.path.join(LOG_DIR, 'find_aircraft.log')
 TOKEN_CACHE_FILE = os.path.join(CACHE_DIR, 'opensky_token.json')
 AIRPORT_DB_FILE = os.path.join(CACHE_DIR, 'airports.json')

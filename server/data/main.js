@@ -111,6 +111,11 @@ function initializeApp() {
     initEventListeners();
     // Fetch all the initial data needed to render the application.
     // Fetch stations first to show markers quickly, then fetch remaining data in parallel
+    const safeJson = (url, fallback = {}) => fetch(url)
+        .then(r => r.text())
+        .then(txt => { try { return JSON.parse(txt); } catch { return fallback; } })
+        .catch(() => fallback);
+
     fetch('index.php?action=get_stations')
         .then(r => r.json())
         .then(stations => {
@@ -123,10 +128,10 @@ function initializeApp() {
             });
             // Fetch remaining data in parallel
             return Promise.all([
-                fetch('index.php?action=get_camera_fovs').then(r => r.json()),
-                fetch('index.php?action=get_meteor_data').then(r => r.json()),
-                fetch('index.php?action=get_kp_data').then(r => r.json()),
-                fetch('index.php?action=get_lightning_data').then(r => r.json())
+                safeJson('index.php?action=get_camera_fovs', {}),
+                safeJson('index.php?action=get_meteor_data', { tracks: [], counts: {} }),
+                safeJson('index.php?action=get_kp_data', { error: 'kp_unavailable' }),
+                safeJson('index.php?action=get_lightning_data', { error: 'lightning_unavailable' })
             ]);
         })
         .then(([fovs, meteors, kpData, lightning]) => {

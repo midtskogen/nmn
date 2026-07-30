@@ -54,15 +54,47 @@ def _load_frost_api_creds():
 
 def get_kp_data():
     """
-    Fetches the planetary Kp-index data from the NOAA Space Weather Prediction Center.
-    The Kp-index is a measure of global geomagnetic activity, which correlates with aurora visibility.
+    Fetches the planetary Kp-index data and returns it as a JSON string in the
+    same array-of-arrays format that the NOAA SWPC API used to serve:
+        [["time_tag", "Kp"], ["2026-07-30T00:00:00Z", "1.000"], ...]
+
+    The NOAA endpoint (services.swpc.noaa.gov) is now behind AWS WAF which
+    blocks non-browser clients with a JavaScript challenge. We fetch from
+    GFZ Potsdam instead (CC BY 4.0) and convert the fixed-width text format
+    to the expected JSON structure.
     """
-    url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+    url = "https://kp.gfz-potsdam.de/app/files/Kp_ap_Ap_SN_F107_nowcast.txt"
     try:
-        # A User-Agent is specified to identify the application making the request.
         req = urllib.request.Request(url, headers={'User-Agent': 'NorskMeteornettverk-Interface/1.0'})
         with urllib.request.urlopen(req, timeout=15) as response:
-            return response.read().decode('utf-8')
+            text = response.read().decode('utf-8')
+
+        rows = [["time_tag", "Kp"]]
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) < 15:
+                continue
+            try:
+                year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+            except ValueError:
+                continue
+            # parts[7..14] are the 8 three-hourly Kp values (00-03, 03-06, ..., 21-24 UTC)
+            for i in range(8):
+                kp_str = parts[7 + i]
+                kp_val = float(kp_str)
+                if kp_val < 0:
+                    continue  # -1.000 means missing data
+                hour = i * 3
+                ts = f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:00:00Z"
+                rows.append([ts, kp_str])
+
+        if len(rows) <= 1:
+            return json.dumps({"error": "No Kp data available from GFZ Potsdam"})
+
+        return json.dumps(rows)
     except Exception as e:
         logging.error(f"Error fetching Kp data: {e}")
         return json.dumps({"error": f"Could not fetch Kp data: {e}"})

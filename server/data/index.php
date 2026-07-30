@@ -291,7 +291,8 @@ switch ($action) {
 
     case 'get_stations':
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action);
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'get_kp_data':
@@ -300,7 +301,8 @@ switch ($action) {
     case 'get_meteor_data':
         header('Content-Type: application/json');
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action);
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'get_station_stats':
@@ -311,7 +313,8 @@ switch ($action) {
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($station_id);
         if ($start_date !== '') $command .= ' ' . escapeshellarg($start_date);
         if ($start_date !== '' && $end_date !== '') $command .= ' ' . escapeshellarg($end_date);
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'find_passes':
@@ -409,7 +412,8 @@ switch ($action) {
         }
 
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' request_transcode ' . escapeshellarg($task_id);
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'fetch_grid':
@@ -429,7 +433,8 @@ switch ($action) {
             . escapeshellarg($station_id) . ' '
             . escapeshellarg($cam_num);
         
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'fetch_annotation':
@@ -449,7 +454,8 @@ switch ($action) {
             . escapeshellarg($station_id) . ' '
             . escapeshellarg($cam_num);
         
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'fetch_stitch_grid':
@@ -486,7 +492,8 @@ switch ($action) {
             . escapeshellarg($station_id) . ' '
             . escapeshellarg($projection) . ' '
             . escapeshellarg($resolution);
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'fetch_archive_grid':
@@ -506,7 +513,8 @@ switch ($action) {
             . escapeshellarg($camera_num) . ' '
             . escapeshellarg($timestamp);
 
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'fetch_archive_annotation':
@@ -526,7 +534,8 @@ switch ($action) {
             . escapeshellarg($camera_num) . ' '
             . escapeshellarg($timestamp);
 
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'enhance_filter':
@@ -545,7 +554,8 @@ switch ($action) {
             . escapeshellarg($image) . ' '
             . escapeshellarg($threshold);
 
-        echo shell_exec($command);
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
     case 'download':

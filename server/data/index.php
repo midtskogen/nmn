@@ -271,9 +271,8 @@ switch ($action) {
             http_response_code(500);
             die("Language file not found for code: $lang_code");
         }
-        $lang_data = file_get_contents($lang_file);
         setcookie('lang', $lang_code, time() + (86400 * 365), "/"); // Set language cookie for 1 year
-        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($lang_data);
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($lang_file);
         echo shell_exec($command);
         break;
 
@@ -568,7 +567,11 @@ switch ($action) {
         $post_data = file_get_contents('php://input');
         $user_ip = get_user_ip();
 
-        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' download ' . escapeshellarg($task_id) . ' ' . escapeshellarg($post_data) . ' ' . escapeshellarg($user_ip) . ' > /dev/null 2>&1 &';
+        // Write POST data to a temp file to avoid ARG_MAX limits on shell arguments.
+        $payload_file = tempnam($LOCK_DIR, 'payload_');
+        file_put_contents($payload_file, $post_data);
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' download ' . escapeshellarg($task_id) . ' ' . escapeshellarg($payload_file) . ' ' . escapeshellarg($user_ip) . ' > /dev/null 2>&1 &';
         shell_exec($command);
         echo json_encode(['success' => true, 'task_id' => $task_id]);
         break;
@@ -593,6 +596,7 @@ switch ($action) {
             }
         } else {
             http_response_code(400);
+            header('Content-Type: application/json');
             echo json_encode(['error' => 'Invalid or missing task ID']);
         }
         break;

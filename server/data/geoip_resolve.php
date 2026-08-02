@@ -37,6 +37,7 @@ if (file_exists($cache_file)) {
 
 foreach ($ips as $ip) {
     if (isset($cache[$ip])) continue;
+    if (!filter_var($ip, FILTER_VALIDATE_IP)) continue;
     $url  = "http://ip-api.com/json/{$ip}?fields=country,countryCode,status";
     $ctx  = stream_context_create(['http' => ['timeout' => 3]]);
     $json = @file_get_contents($url, false, $ctx);

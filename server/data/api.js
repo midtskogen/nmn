@@ -61,7 +61,7 @@ async function startAsyncTask(action, pollFn) {
 function pollTaskStatus(taskId, statusAction, { onProgress, onComplete, onError }) {
     const intervalId = setInterval(async () => {
         try {
-            const response = await fetch(`${API_BASE}${statusAction}&id=${taskId}`);
+            const response = await fetch(`${API_BASE}${statusAction}&id=${encodeURIComponent(taskId)}`);
             const data = await response.json();
             if (!data || !data.status) return; // Ignore empty or invalid responses.
 
@@ -155,7 +155,7 @@ export function pollDownloadStatus(taskId, callbacks) {
  * @param {string} taskId - The ID of the task to cancel.
  */
 export function cancelTask(taskId) {
-    fetch(`${API_BASE}cancel&id=${taskId}`);
+    fetch(`${API_BASE}cancel&id=${encodeURIComponent(taskId)}`);
 }
 
 /**
@@ -163,7 +163,7 @@ export function cancelTask(taskId) {
  * @param {string} taskId - The ID of the task to clean up.
  */
 export function cleanupTask(taskId) {
-    fetch(`${API_BASE}cleanup&id=${taskId}`);
+    fetch(`${API_BASE}cleanup&id=${encodeURIComponent(taskId)}`);
 }
 
 
@@ -178,7 +178,7 @@ export function cleanupTask(taskId) {
  * @returns {Promise<string>} A promise that resolves to the stream task ID.
  */
 export async function startStream(stationId, cameraNum, resolution, hevcSupported) {
-    const url = `${API_BASE}start_stream&station_id=${stationId}&camera_num=${cameraNum}&resolution=${resolution}&hevc_supported=${hevcSupported}`;
+    const url = `${API_BASE}start_stream&station_id=${encodeURIComponent(stationId)}&camera_num=${encodeURIComponent(cameraNum)}&resolution=${encodeURIComponent(resolution)}&hevc_supported=${encodeURIComponent(hevcSupported)}`;
     const response = await fetch(url);
     const data = await response.json();
     if (data.success && data.stream_task_id) {
@@ -195,7 +195,7 @@ export async function startStream(stationId, cameraNum, resolution, hevcSupporte
  * @returns {Promise<object>} A promise that resolves to the JSON response containing the grid URL.
  */
 export async function fetchStreamGrid(streamTaskId, stationId, camNum) {
-    const url = `${API_BASE}fetch_grid&stream_task_id=${streamTaskId}&station_id=${stationId}&cam_num=${camNum}`;
+    const url = `${API_BASE}fetch_grid&stream_task_id=${encodeURIComponent(streamTaskId)}&station_id=${encodeURIComponent(stationId)}&cam_num=${encodeURIComponent(camNum)}`;
     const response = await fetch(url);
     return response.json();
 }
@@ -208,7 +208,7 @@ export async function fetchStreamGrid(streamTaskId, stationId, camNum) {
  * @returns {Promise<object>} A promise that resolves to the JSON response containing the annotation URL.
  */
 export async function fetchAnnotation(streamTaskId, stationId, camNum) {
-    const url = `${API_BASE}fetch_annotation&stream_task_id=${streamTaskId}&station_id=${stationId}&cam_num=${camNum}`;
+    const url = `${API_BASE}fetch_annotation&stream_task_id=${encodeURIComponent(streamTaskId)}&station_id=${encodeURIComponent(stationId)}&cam_num=${encodeURIComponent(camNum)}`;
     const response = await fetch(url);
     return response.json();
 }
@@ -223,7 +223,7 @@ export async function fetchAnnotation(streamTaskId, stationId, camNum) {
 export function pollStreamStatus(taskId, { onStatusUpdate, onReady, onError }) {
     const intervalId = setInterval(async () => {
         try {
-            const response = await fetch(`${API_BASE}stream_status&id=${taskId}`);
+            const response = await fetch(`${API_BASE}stream_status&id=${encodeURIComponent(taskId)}`);
             const data = await response.json();
             if (!data || !data.status) return;
 
@@ -270,6 +270,6 @@ export function stopStream(taskId) {
  * @param {string} taskId - The active stream task ID.
  */
 export async function requestTranscode(taskId) {
-    const response = await fetch(`${API_BASE}request_transcode&task_id=${taskId}`);
+    const response = await fetch(`${API_BASE}request_transcode&task_id=${encodeURIComponent(taskId)}`);
     return response.json();
 }

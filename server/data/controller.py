@@ -1645,6 +1645,19 @@ def render_template(template, lang_data):
         return str(lang_data.get(key, match.group(0)))
     return re.sub(r'__\{\{([a-zA-Z0-9_]+)\}\}__', replace_match, template)
 
+def _download_from_file(master_task_id, payload_file, user_ip):
+    """Reads the download JSON payload from a temp file and delegates to the coordinator."""
+    try:
+        with open(payload_file, 'r') as f:
+            json_payload = f.read()
+    finally:
+        try:
+            os.remove(payload_file)
+        except OSError:
+            pass
+    main_download_coordinator(master_task_id, json_payload, user_ip)
+
+
 def main():
     if len(sys.argv) < 2: sys.exit("Usage: controller.py <action> [args...]")
     action = sys.argv[1]
@@ -1675,23 +1688,39 @@ def main():
     # --- Global Exception Handling Wrapper ---
     try:
         actions = {
-            "get_stations": lambda: print(open(STATIONS_FILE).read()),
+            "get_stations": lambda: print(open(STATIONS_FILE, encoding='utf-8').read()),
             "get_camera_fovs": lambda: print(json.dumps(get_camera_fovs())),
             "get_kp_data": lambda: print(get_kp_data()),
             "get_lightning_data": lambda: print(json.dumps(get_lightning_data(sys.argv[2] if len(sys.argv) > 2 else datetime.now(timezone.utc).strftime('%Y-%m-%d')))),
             "get_meteor_data": lambda: print(json.dumps(get_meteor_data())),
-            "get_station_stats": lambda: print(json.dumps(get_station_stats(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None, sys.argv[4] if len(sys.argv) > 4 else None))),
-            "fetch_grid": lambda: print(json.dumps(fetch_grid_file(sys.argv[2], sys.argv[3], sys.argv[4]))),
-            "fetch_annotation": lambda: print(json.dumps(fetch_annotation_file(sys.argv[2], sys.argv[3], sys.argv[4]))),
+            "get_station_stats": lambda: print(json.dumps(get_station_stats(
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                sys.argv[3] if len(sys.argv) > 3 else None,
+                sys.argv[4] if len(sys.argv) > 4 else None))),
+            "fetch_grid": lambda: print(json.dumps(fetch_grid_file(
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                sys.argv[3] if len(sys.argv) > 3 else '',
+                sys.argv[4] if len(sys.argv) > 4 else ''))),
+            "fetch_annotation": lambda: print(json.dumps(fetch_annotation_file(
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                sys.argv[3] if len(sys.argv) > 3 else '',
+                sys.argv[4] if len(sys.argv) > 4 else ''))),
             "fetch_archive_grid": lambda: print(json.dumps(get_archive_grid_overlay(
-                sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                sys.argv[3] if len(sys.argv) > 3 else '',
+                sys.argv[4] if len(sys.argv) > 4 else '', stations_data))),
             "fetch_stitch_cam_boundaries": lambda: print(json.dumps(get_stitch_cam_boundaries(
-                sys.argv[2], sys.argv[3], stations_data,
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                sys.argv[3] if len(sys.argv) > 3 else '', stations_data,
                 resolution=sys.argv[4] if len(sys.argv) > 4 else 'hires'))),
             "fetch_archive_annotation": lambda: print(json.dumps(get_archive_annotation_overlay(
-                sys.argv[2], sys.argv[3], sys.argv[4], stations_data))),
-            "enhance_filter": lambda: print(json.dumps({"image": apply_enhance_filter(sys.argv[2], int(sys.argv[3]))})),
-            "download": lambda: main_download_coordinator(sys.argv[2], sys.argv[3], sys.argv[4]),
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                sys.argv[3] if len(sys.argv) > 3 else '',
+                sys.argv[4] if len(sys.argv) > 4 else '', stations_data))),
+            "enhance_filter": lambda: print(json.dumps({"image": apply_enhance_filter(
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                int(sys.argv[3]) if len(sys.argv) > 3 else 0)})),
+            "download": lambda: _download_from_file(sys.argv[2], sys.argv[3], sys.argv[4]),
             "_internal_download_station": lambda: download_for_single_station(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]),
             "_internal_start_stream": handle_start_stream,
             "stop_stream": lambda: stop_stream_relay(sys.argv[2]),
@@ -1702,7 +1731,9 @@ def main():
         if action in actions:
             actions[action]()
         elif action == "get_page":
-            lang_data = json.loads(sys.argv[2])
+            lang_file = sys.argv[2]
+            with open(lang_file, 'r', encoding='utf-8') as f:
+                lang_data = json.load(f)
             print(render_template(HTML_TEMPLATE, lang_data))
         elif action in ["cancel", "cleanup"]:
             master_task_id = sys.argv[2]

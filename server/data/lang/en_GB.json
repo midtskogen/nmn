@@ -242,6 +242,6 @@
     "playback_speed": "Speed",
     "playback_slowed": "Playback slowed to",
     "video_load_error": "Video could not be played \u2014 try downloading directly.",
-    "video_error_highres": "The browser cannot play this high-resolution timelapse video (4096×4096). H.264 decoding in browsers has an upper resolution limit. You can download the file to watch it in an external player.",
+    "video_error_highres": "The browser cannot play this high-resolution timelapse video ({width}×{height}). H.264 decoding in browsers has an upper resolution limit. You can download the file to watch it in an external player.",
     "video_error_generic": "Could not play the video."
 }

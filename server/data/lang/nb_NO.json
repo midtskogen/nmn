@@ -243,6 +243,6 @@
     "playback_speed": "Hastighet",
     "playback_slowed": "Avspilling redusert til",
     "video_load_error": "Videoen kunne ikke spilles av — prøv å laste ned direkte.",
-    "video_error_highres": "Nettleseren kan ikke spille av denne høgoppløste timelapse-videoen (4096×4096). H.264-dekoding i nettlesere har ei øvre oppløsningsgrense. Du kan laste ned fila for å se den i en ekstern spiller.",
+    "video_error_highres": "Nettleseren kan ikke spille av denne høgoppløste timelapse-videoen ({width}×{height}). H.264-dekoding i nettlesere har ei øvre oppløsningsgrense. Du kan laste ned fila for å se den i en ekstern spiller.",
     "video_error_generic": "Kunne ikke spille av videoen."
 }

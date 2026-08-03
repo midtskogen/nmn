@@ -1001,7 +1001,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                         os.rename(temp_path, local_path)
                         total_bytes += os.path.getsize(local_path)
                     if os.path.exists(local_path):
-                        thumb_kwargs = {"task_id": task_id, "path": local_path, "file_type": "lowres", "station_code": station_code, "cam_num": cam_num}
+                        thumb_kwargs = {"task_id": task_id, "path": local_path, "file_type": "lowres", "station_code": station_code, "cam_num": cam_num, "max_file_size_mb": 2000}
                         entry = {"url": f"download/{local_name}", "name": local_name, "utc_time_iso": f"{date_str}T00:00:00+00:00", "alternatives": []}
                         if thumb := create_thumbnail(**thumb_kwargs): entry["thumb_url"] = f"download/{thumb}"
                         results.setdefault(date_compact, []).append(entry)

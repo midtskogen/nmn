@@ -1232,24 +1232,48 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         loadingIndicator.style.display = 'none';
         errorOverlay.style.display = 'flex';
         if (isHighResTimelapse && (code === 3 || code === 4)) {
-            errorOverlay.textContent = t('video_error_highres');
+            errorOverlay.textContent = t('video_error_highres', {
+                width: video.videoWidth || 4096,
+                height: video.videoHeight || 4096
+            });
         } else {
             errorOverlay.textContent = t('video_error_generic') + (video.error?.message ? ` ${video.error.message}` : '');
         }
     });
 
     // Some browsers show a black screen for very high-resolution H.264 files
-    // without firing an error event. Show the explanation if playback hasn't
-    // started a few seconds after opening.
+    // without firing an error event. Detect them by dimensions and by whether
+    // playback actually advances past the start.
+    let highResWarningTimer = null;
     if (isHighResTimelapse) {
-        setTimeout(() => {
+        const showHighResWarning = () => {
             if (errorOverlay.style.display === 'flex') return;
-            if (video.readyState < 2 && video.paused && !video.ended) {
-                loadingIndicator.style.display = 'none';
-                errorOverlay.style.display = 'flex';
-                errorOverlay.textContent = t('video_error_highres');
+            loadingIndicator.style.display = 'none';
+            errorOverlay.style.display = 'flex';
+            errorOverlay.textContent = t('video_error_highres', {
+                width: video.videoWidth || 4096,
+                height: video.videoHeight || 4096
+            });
+            video.pause();
+            if (highResWarningTimer) {
+                clearTimeout(highResWarningTimer);
+                highResWarningTimer = null;
             }
-        }, 3000);
+        };
+        video.addEventListener('loadedmetadata', () => {
+            // Known browser H.264 decoder limits: width > 4096 or height > 2304
+            // is beyond what common browser implementations decode reliably.
+            if (video.videoWidth > 4096 || video.videoHeight > 2304) {
+                showHighResWarning();
+            }
+        }, { once: true });
+        highResWarningTimer = setTimeout(() => {
+            if (errorOverlay.style.display === 'flex') return;
+            if (video.ended) return;
+            if (video.currentTime === 0 || video.readyState < 3) {
+                showHighResWarning();
+            }
+        }, 1500);
     }
 
     video.addEventListener('timeupdate', () => {
@@ -1921,6 +1945,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     // Close button handler (defined after all handlers)
     closeButton.addEventListener('click', () => {
+        if (highResWarningTimer) clearTimeout(highResWarningTimer);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         document.removeEventListener('keydown', onFullscreenKeydown);
         videoWrapper.removeEventListener('wheel', onWheel);
@@ -2590,7 +2615,16 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                         li.appendChild(thumbContainer);
                      } else {
                         const fallbackShort = getShortName(file.name);
-                        li.appendChild(createEl('a', { href: file.url, target: '_blank', textContent: fallbackShort, title: file.name }));
+                        const fallbackLink = createEl('a', { href: '#', textContent: fallbackShort, title: file.name });
+                        fallbackLink.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            if (file.url.endsWith('.mp4')) {
+                                showVideoPreview(file.url, file.name, currentMediaList, mediaIndex);
+                            } else {
+                                showImagePreview(file.url, file.name, currentMediaList, mediaIndex);
+                            }
+                        });
+                        li.appendChild(fallbackLink);
                     }
 
                
@@ -2616,33 +2650,26 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                         }
                  
                    });
-                    const timelapseSuffixes = new Set(['teq', 'tfe', 'teqh', 'tfeh']);
                     Object.entries(preferredLinks).sort((a, b) => a[0].localeCompare(b[0])).forEach(([shortName, linkInfo]) => {
-                        let linkEl;
-                        if (timelapseSuffixes.has(shortName)) {
-                            // Direct link to file — no player
-                            linkEl = createEl('a', { href: linkInfo.url, target: '_blank', textContent: shortName, title: linkInfo.name });
-                        } else {
-                            linkEl = createEl('a', { href: '#', textContent: shortName });
-                            linkEl.addEventListener('click', (e) => {
-                                e.preventDefault();
-                                const linkIndex = currentMediaList.findIndex(m => m.url === linkInfo.url && m.name === linkInfo.name);
-                                if (linkInfo.url.endsWith('.mp4')) {
-                                    let previewList = currentMediaList;
-                                    let previewIndex = linkIndex >= 0 ? linkIndex : mediaIndex;
-                                    // If the video alternative is not a top-level media item, splice its
-                                    // duration/start_time into the current slot so the scrubber works.
-                                    if (linkIndex < 0 && (linkInfo.duration != null || linkInfo.start_time != null) && mediaIndex >= 0) {
-                                        previewList = currentMediaList.map((m, i) => i === mediaIndex
-                                            ? { ...m, url: linkInfo.url, name: linkInfo.name, isVideo: true, duration: linkInfo.duration, start_time: linkInfo.start_time }
-                                            : m);
-                                    }
-                                    showVideoPreview(linkInfo.url, linkInfo.name, previewList, previewIndex);
-                                } else {
-                                    showImagePreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
+                        const linkEl = createEl('a', { href: '#', textContent: shortName });
+                        linkEl.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            const linkIndex = currentMediaList.findIndex(m => m.url === linkInfo.url && m.name === linkInfo.name);
+                            if (linkInfo.url.endsWith('.mp4')) {
+                                let previewList = currentMediaList;
+                                let previewIndex = linkIndex >= 0 ? linkIndex : mediaIndex;
+                                // If the video alternative is not a top-level media item, splice its
+                                // duration/start_time into the current slot so the scrubber works.
+                                if (linkIndex < 0 && (linkInfo.duration != null || linkInfo.start_time != null) && mediaIndex >= 0) {
+                                    previewList = currentMediaList.map((m, i) => i === mediaIndex
+                                        ? { ...m, url: linkInfo.url, name: linkInfo.name, isVideo: true, duration: linkInfo.duration, start_time: linkInfo.start_time }
+                                        : m);
                                 }
-                            });
-                        }
+                                showVideoPreview(linkInfo.url, linkInfo.name, previewList, previewIndex);
+                            } else {
+                                showImagePreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
+                            }
+                        });
                         linksContainer.appendChild(linkEl);
                     });
                     if (linksContainer.hasChildNodes()) li.appendChild(linksContainer);

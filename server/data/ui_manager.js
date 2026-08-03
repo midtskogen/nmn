@@ -117,7 +117,7 @@ function buildEnhancedPreviewTitle(filename, url = null) {
     if (astronomy && astronomy.latitude && astronomy.longitude) {
         const timestampDate = new Date(isoTimestamp);
         const sunAlt = getSunAltitude(timestampDate, astronomy.latitude, astronomy.longitude);
-        sunAltText = ` | ${t('sun_altitude', 'Sun')}: ${sunAlt.toFixed(1)}°`;
+        sunAltText = ` | ${t('sun_altitude')}: ${sunAlt.toFixed(1)}°`;
     }
 
     // Build title with coordinates, elevation, sun altitude, and ISO timestamp
@@ -453,9 +453,9 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
         if (crossing.altitude_quality) {
             const qualityIcons = { high: '📡', medium: '📶', low: '⚠️' };
             const qualityTitles = {
-                high: t('altitude_quality_high', 'High accuracy: GPS altitude'),
-                medium: t('altitude_quality_medium', 'Medium accuracy: Mix of GPS and barometric'),
-                low: t('altitude_quality_low', 'Low accuracy: Primarily barometric altitude')
+                high: t('altitude_quality_high'),
+                medium: t('altitude_quality_medium'),
+                low: t('altitude_quality_low')
             };
             const qualityIcon = createEl('span', {
                 className: 'altitude-quality-indicator',
@@ -744,8 +744,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const timestampOverlay = createEl('div', { className: 'preview-timestamp', textContent: '' });
 
     // Loading indicator and error overlay
-    const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
-    const isHighResTimelapse = /_hires|hires|tfeh|teqh/i.test(videoUrl) || /_hires/i.test(title);
+    const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading') });
+    const isHighResTimelapse = /_(teqh|tfeh)\.mp4$/i.test(title);
     const errorOverlay = createEl('div', {
         className: 'preview-error-overlay',
         style: {
@@ -776,48 +776,48 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const playPauseBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '⏸',
-        title: t('modal_play_pause', 'Play/Pause')
+        title: t('modal_play_pause')
     });
 
     // Frame step controls
     const frameBackBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '◀',
-        title: t('modal_frame_back', 'Previous Frame')
+        title: t('modal_frame_back')
     });
 
     const frameForwardBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '▶',
-        title: t('modal_frame_forward', 'Next Frame')
+        title: t('modal_frame_forward')
     });
 
     // Rewind button
     const rewindBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '⏮',
-        title: t('modal_rewind', 'Rewind to Start')
+        title: t('modal_rewind')
     });
 
     // Screenshot button
     const screenshotBtn = createEl('button', {
         className: 'preview-control-btn screenshot',
         textContent: '📷',
-        title: t('screenshot', 'Take Screenshot')
+        title: t('screenshot')
     });
 
     // Download button
     const downloadBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '⬇',
-        title: t('download_video', 'Download Video')
+        title: t('download_video')
     });
 
     // Fullscreen button
     const fullscreenBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '⛶',
-        title: t('fullscreen', 'Fullscreen')
+        title: t('fullscreen')
     });
 
     // Navigation buttons (prev/next) - shown when mediaList is provided
@@ -828,12 +828,12 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         prevBtn = createEl('button', {
             className: 'preview-control-btn nav-btn',
             textContent: '◀',
-            title: t('previous', 'Previous')
+            title: t('previous')
         });
         nextBtn = createEl('button', {
             className: 'preview-control-btn nav-btn',
             textContent: '▶',
-            title: t('next', 'Next')
+            title: t('next')
         });
         // Use currentMediaList for dynamic total count
         const totalCount = currentMediaList.length || mediaList.length;
@@ -882,7 +882,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         step: '0.1',
         value: '1',
         className: 'preview-slider',
-        title: t('brightness', 'Brightness'),
+        title: t('brightness'),
         id: 'brightness-slider'
     });
 
@@ -894,7 +894,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         step: '0.1',
         value: '1',
         className: 'preview-slider',
-        title: t('contrast', 'Contrast'),
+        title: t('contrast'),
         id: 'contrast-slider'
     });
 
@@ -906,7 +906,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         step: '0.1',
         value: '1',
         className: 'preview-slider',
-        title: t('saturation', 'Saturation'),
+        title: t('saturation'),
         id: 'saturation-slider'
     });
 
@@ -918,18 +918,18 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         step: '0.05',
         value: '1',
         className: 'preview-slider',
-        title: t('playback_speed', 'Playback Speed'),
+        title: t('playback_speed'),
         id: 'speed-slider'
     });
     const speedLabel = createEl('label', { htmlFor: 'speed-slider', className: 'preview-filter-label', style: { whiteSpace: 'nowrap' } });
-    const updateSpeedLabel = (rate) => { speedLabel.textContent = `${t('playback_speed', 'Speed')} ${rate.toFixed(2).replace(/\.?0+$/, '')}\u00d7`; };
+    const updateSpeedLabel = (rate) => { speedLabel.textContent = `${t('playback_speed')} ${rate.toFixed(2).replace(/\.?0+$/, '')}\u00d7`; };
     updateSpeedLabel(1);
 
     // Reset filters button
     const resetFiltersBtn = createEl('button', {
         className: 'preview-control-btn reset',
-        textContent: t('reset_filters', 'Reset'),
-        title: t('reset_filters', 'Reset to default')
+        textContent: t('reset_filters'),
+        title: t('reset_filters')
     });
 
     // Timestamp toggle checkbox
@@ -938,7 +938,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         type: 'checkbox',
         checked: false
     });
-    timestampToggleContainer.append(timestampCheckbox, ' ', t('show_timestamp', 'Show timestamp'));
+    timestampToggleContainer.append(timestampCheckbox, ' ', t('show_timestamp'));
 
     // Detect timelapse files: STATION_YYYYMMDD_teq.mp4, _tfe.mp4, _teqh.mp4, _tfeh.mp4
     const timelapseFisheye = title.match(/^([A-Z]{2,4})_(\d{8})_tfeh?\.mp4$/);
@@ -961,12 +961,12 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         // Grid overlay toggle only (no annotation for timelapse)
         gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         gridCheckbox = createEl('input', { type: 'checkbox', id: 'grid-overlay-toggle', disabled: true });
-        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle'));
 
         // Camera boundary overlay toggle
         boundsToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         boundsCheckbox = createEl('input', { type: 'checkbox', id: 'bounds-overlay-toggle', disabled: true });
-        boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle', 'Show Cameras'));
+        boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle'));
     } else if (filenameMatch) {
         stationId = filenameMatch[1];
         cameraNum = filenameMatch[2];
@@ -989,32 +989,32 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         // Grid overlay toggle - initially greyed out until loaded
         gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         gridCheckbox = createEl('input', { type: 'checkbox', id: 'grid-overlay-toggle', disabled: true });
-        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle'));
 
         // Annotation overlay toggle - initially greyed out until loaded
         annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         annotationCheckbox = createEl('input', { type: 'checkbox', id: 'annotation-overlay-toggle', disabled: true });
-        annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle', 'Show Stars'));
+        annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle'));
     }
 
     // Brightness: label above slider in a small inline column
     const brightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
     brightnessWrapper.append(
-        createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'brightness-slider', className: 'preview-filter-label' }),
+        createEl('label', { textContent: t('brightness'), htmlFor: 'brightness-slider', className: 'preview-filter-label' }),
         brightnessSlider
     );
 
     // Contrast: label above slider in a small inline column
     const contrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
     contrastWrapper.append(
-        createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'contrast-slider', className: 'preview-filter-label' }),
+        createEl('label', { textContent: t('contrast'), htmlFor: 'contrast-slider', className: 'preview-filter-label' }),
         contrastSlider
     );
 
     // Saturation: label above slider in a small inline column
     const saturationWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
     saturationWrapper.append(
-        createEl('label', { textContent: t('saturation', 'Saturation'), htmlFor: 'saturation-slider', className: 'preview-filter-label' }),
+        createEl('label', { textContent: t('saturation'), htmlFor: 'saturation-slider', className: 'preview-filter-label' }),
         saturationSlider
     );
 
@@ -1222,15 +1222,19 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     });
 
     video.addEventListener('error', () => {
+        const code = video.error?.code;
+        // Transient decode errors often fire while the user is scrubbing rapidly.
+        // Don't show the error overlay during an active scrub; the change handler
+        // will seek to the final position and any real failure will surface then.
+        if (scrubbing && (code === MediaError.MEDIA_ERR_DECODE || code === MediaError.MEDIA_ERR_NETWORK)) {
+            return;
+        }
         loadingIndicator.style.display = 'none';
         errorOverlay.style.display = 'flex';
-        const code = video.error?.code;
         if (isHighResTimelapse && (code === 3 || code === 4)) {
-            errorOverlay.textContent = t('video_error_highres',
-                'Nettleseren kan ikke spille av denne høgoppløste timelapse-videoen (4096×4096). H.264-avkoding i nettlesere har en øvre oppløsningsgrense. Du kan laste ned filen for å se den i en ekstern spiller.');
+            errorOverlay.textContent = t('video_error_highres');
         } else {
-            errorOverlay.textContent = t('video_error_generic',
-                'Kunne ikke spille av videoen.') + (video.error?.message ? ` ${video.error.message}` : '');
+            errorOverlay.textContent = t('video_error_generic') + (video.error?.message ? ` ${video.error.message}` : '');
         }
     });
 
@@ -1243,8 +1247,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             if (video.readyState < 2 && video.paused && !video.ended) {
                 loadingIndicator.style.display = 'none';
                 errorOverlay.style.display = 'flex';
-                errorOverlay.textContent = t('video_error_highres',
-                    'Nettleseren kan ikke spille av denne høgoppløste timelapse-videoen (4096×4096). H.264-avkoding i nettlesere har en øvre oppløsningsgrense. Du kan laste ned filen for å se den i en ekstern spiller.');
+                errorOverlay.textContent = t('video_error_highres');
             }
         }, 3000);
     }
@@ -1281,7 +1284,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         video.playbackRate = newRate;
         speedSlider.value = newRate;
         updateSpeedLabel(newRate);
-        stallStatusEl.textContent = `${t('playback_slowed', 'Playback slowed to')} ${Math.round(newRate * 100)}%`;
+        stallStatusEl.textContent = `${t('playback_slowed')} ${Math.round(newRate * 100)}%`;
         stallStatusEl.style.display = 'block';
     };
 
@@ -1305,7 +1308,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         // code 1 = MEDIA_ERR_ABORTED (seek/navigation abort) — not a real failure
         // null error = spurious event fired during buffering; ignore both
         if (!err || err.code === MediaError.MEDIA_ERR_ABORTED) return;
-        loadingIndicator.textContent = t('video_load_error', 'Video could not be played — try downloading directly.');
+        loadingIndicator.textContent = t('video_load_error');
         loadingIndicator.style.display = 'block';
         loadingIndicator.style.color = '#f87';
     });
@@ -1491,6 +1494,36 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
         return 0;
     };
+    // Adaptive scrubber seeking: update the timestamp immediately, but queue
+    // video seeks so rapid dragging never overloads the decoder with overlapping
+    // seeks. Once the current seek finishes, the latest requested target is applied.
+    let pendingSeekTarget = null;
+    let isSeekInProgress = false;
+    let seekSafetyTimer = null;
+    const onScrubberSeekDone = () => {
+        isSeekInProgress = false;
+        if (seekSafetyTimer) {
+            clearTimeout(seekSafetyTimer);
+            seekSafetyTimer = null;
+        }
+        if (pendingSeekTarget !== null) {
+            const t = pendingSeekTarget;
+            pendingSeekTarget = null;
+            scheduleScrubberSeek(t);
+        }
+    };
+    const scheduleScrubberSeek = (targetTime) => {
+        if (isSeekInProgress) {
+            pendingSeekTarget = targetTime;
+            return;
+        }
+        isSeekInProgress = true;
+        pendingSeekTarget = null;
+        video.currentTime = targetTime;
+        seekSafetyTimer = setTimeout(onScrubberSeekDone, 500);
+    };
+    video.addEventListener('seeked', onScrubberSeekDone);
+
     scrubber.addEventListener('mousedown', () => {
         scrubbing = true;
         wasPlayingBeforeScrub = isPlaying;
@@ -1500,14 +1533,18 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     });
     scrubber.addEventListener('input', () => {
         const relativeTime = parseFloat(scrubber.value);
-        video.currentTime = getScrubberBase() + relativeTime;
+        const targetTime = getScrubberBase() + relativeTime;
         scrubberTime.textContent = useAbsoluteTime
-            ? getFormattedTimestamp(video.currentTime)
+            ? getFormattedTimestamp(targetTime)
             : fmtTime(relativeTime);
+        scheduleScrubberSeek(targetTime);
     });
     scrubber.addEventListener('change', () => {
         scrubbing = false;
-        video.currentTime = getScrubberBase() + parseFloat(scrubber.value);
+        const relativeTime = parseFloat(scrubber.value);
+        const targetTime = getScrubberBase() + relativeTime;
+        pendingSeekTarget = null;
+        scheduleScrubberSeek(targetTime);
         if (wasPlayingBeforeScrub) {
             video.play();
         } else {
@@ -1566,6 +1603,22 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             videoWrapper.msRequestFullscreen();
         }
     });
+
+    // Toggle play/pause with a click or the spacebar while in fullscreen
+    const onFullscreenVideoClick = (e) => {
+        if (document.fullscreenElement !== videoWrapper) return;
+        if (e.target.closest('button, input, label, a')) return;
+        playPauseBtn.click();
+    };
+    videoWrapper.addEventListener('click', onFullscreenVideoClick);
+    const onFullscreenKeydown = (e) => {
+        if (e.defaultPrevented) return;
+        if ((e.key === ' ' || e.code === 'Space') && document.fullscreenElement === videoWrapper) {
+            e.preventDefault();
+            playPauseBtn.click();
+        }
+    };
+    document.addEventListener('keydown', onFullscreenKeydown);
 
     // Sync overlays to the actual rendered video area (letterboxed inside the wrapper)
     // Also sets transformOrigin to content centre for correct zoom behaviour.
@@ -1788,6 +1841,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Close button handler (defined after all handlers)
     closeButton.addEventListener('click', () => {
         document.removeEventListener('fullscreenchange', onFullscreenChange);
+        videoWrapper.removeEventListener('click', onFullscreenVideoClick);
+        document.removeEventListener('keydown', onFullscreenKeydown);
         videoWrapper.removeEventListener('wheel', onWheel);
         videoWrapper.removeEventListener('mousedown', onMouseDown);
         videoRo.disconnect();
@@ -1841,7 +1896,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     const boundsOverlay = createEl('img', { className: 'archive-overlay bounds-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 11, opacity: '0' } });
     const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 12, opacity: '0' } });
 
-    const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading', 'Loading...') });
+    const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading') });
     imageWrapper.append(img, gridOverlay, boundsOverlay, annotationOverlay, loadingIndicator);
 
     img.addEventListener('load', () => {
@@ -1861,12 +1916,12 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     const downloadBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '⬇',
-        title: t('download_image', 'Download Image')
+        title: t('download_image')
     });
     const fullscreenBtn = createEl('button', {
         className: 'preview-control-btn',
         textContent: '⛶',
-        title: t('fullscreen', 'Fullscreen')
+        title: t('fullscreen')
     });
 
     // Navigation buttons (prev/next) - shown when mediaList is provided
@@ -1877,12 +1932,12 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         prevBtn = createEl('button', {
             className: 'preview-control-btn nav-btn',
             textContent: '◀',
-            title: t('previous', 'Previous')
+            title: t('previous')
         });
         nextBtn = createEl('button', {
             className: 'preview-control-btn nav-btn',
             textContent: '▶',
-            title: t('next', 'Next')
+            title: t('next')
         });
         // Use currentMediaList for dynamic total count
         const totalCount = currentMediaList.length || mediaList.length;
@@ -1904,14 +1959,14 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     const brightnessSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'img-brightness-slider' });
     const contrastSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'img-contrast-slider' });
     const saturationSlider = createEl('input', { type: 'range', min: '0', max: '3', step: '0.1', value: '1', className: 'preview-slider', id: 'img-saturation-slider' });
-    const resetFiltersBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters', 'Reset'), title: t('reset_filters', 'Reset to default') });
+    const resetFiltersBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters'), title: t('reset_filters') });
 
     const brightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
-    brightnessWrapper.append(createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'img-brightness-slider', className: 'preview-filter-label' }), brightnessSlider);
+    brightnessWrapper.append(createEl('label', { textContent: t('brightness'), htmlFor: 'img-brightness-slider', className: 'preview-filter-label' }), brightnessSlider);
     const contrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
-    contrastWrapper.append(createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'img-contrast-slider', className: 'preview-filter-label' }), contrastSlider);
+    contrastWrapper.append(createEl('label', { textContent: t('contrast'), htmlFor: 'img-contrast-slider', className: 'preview-filter-label' }), contrastSlider);
     const saturationWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
-    saturationWrapper.append(createEl('label', { textContent: t('saturation', 'Saturation'), htmlFor: 'img-saturation-slider', className: 'preview-filter-label' }), saturationSlider);
+    saturationWrapper.append(createEl('label', { textContent: t('saturation'), htmlFor: 'img-saturation-slider', className: 'preview-filter-label' }), saturationSlider);
 
     // Parse station and camera from image filename (e.g., "GAU_cam1_20260429_2056_image.jpg")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_(\d{8})_(\d{4})/);
@@ -1927,11 +1982,11 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
         gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         gridCheckbox = createEl('input', { type: 'checkbox', id: 'img-grid-overlay-toggle', disabled: true });
-        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle'));
 
         boundsToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         boundsCheckbox = createEl('input', { type: 'checkbox', id: 'img-bounds-overlay-toggle', disabled: true });
-        boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle', 'Show Cameras'));
+        boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle'));
 
         fetch(`index.php?action=fetch_stitch_grid&projection=${projection}&resolution=${resolution}`)
             .then(r => r.json())
@@ -1981,12 +2036,12 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         // Grid overlay toggle - initially greyed out until loaded
         gridToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         gridCheckbox = createEl('input', { type: 'checkbox', id: 'img-grid-overlay-toggle', disabled: true });
-        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle', 'Show Grid'));
+        gridToggleContainer.append(gridCheckbox, ' ', t('modal_grid_toggle'));
 
         // Annotation overlay toggle - initially greyed out until loaded
         annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         annotationCheckbox = createEl('input', { type: 'checkbox', id: 'img-annotation-overlay-toggle', disabled: true });
-        annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle', 'Show Stars'));
+        annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle'));
 
         // Fetch grid overlay
         fetch(`index.php?action=fetch_archive_grid&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(imageTimestamp)}`)
@@ -2028,7 +2083,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Enhance filter slider
     const enhanceWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
-    const enhanceLabel = createEl('label', { textContent: t('filter', 'Filter'), htmlFor: 'enhance-slider', className: 'preview-filter-label' });
+    const enhanceLabel = createEl('label', { textContent: t('filter'), htmlFor: 'enhance-slider', className: 'preview-filter-label' });
     const enhanceSlider = createEl('input', {
         type: 'range',
         min: '0',
@@ -2476,10 +2531,8 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                          
                         } else {
                             const existingIsHevc = existing.name.includes('_hevc.mp4');
-                            if (hevcSupported) { if (isHevc && !existingIsHevc) preferredLinks[shortName] = f; }
-    
-                                                   
-                            else { if (!isHevc && existingIsHevc) preferredLinks[shortName] = f; }
+                            // Prefer the H.264 (non-HEVC) copy so video scrubbing works reliably.
+                            if (!isHevc && existingIsHevc) preferredLinks[shortName] = f;
                         }
                  
                    });
@@ -2495,7 +2548,16 @@ export function displayResults(resultData, dom, hevcSupported, stationsData = nu
                                 e.preventDefault();
                                 const linkIndex = currentMediaList.findIndex(m => m.url === linkInfo.url && m.name === linkInfo.name);
                                 if (linkInfo.url.endsWith('.mp4')) {
-                                    showVideoPreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
+                                    let previewList = currentMediaList;
+                                    let previewIndex = linkIndex >= 0 ? linkIndex : mediaIndex;
+                                    // If the video alternative is not a top-level media item, splice its
+                                    // duration/start_time into the current slot so the scrubber works.
+                                    if (linkIndex < 0 && (linkInfo.duration != null || linkInfo.start_time != null) && mediaIndex >= 0) {
+                                        previewList = currentMediaList.map((m, i) => i === mediaIndex
+                                            ? { ...m, url: linkInfo.url, name: linkInfo.name, isVideo: true, duration: linkInfo.duration, start_time: linkInfo.start_time }
+                                            : m);
+                                    }
+                                    showVideoPreview(linkInfo.url, linkInfo.name, previewList, previewIndex);
                                 } else {
                                     showImagePreview(linkInfo.url, linkInfo.name, currentMediaList, linkIndex >= 0 ? linkIndex : mediaIndex);
                                 }
@@ -2551,7 +2613,7 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     let sunAltText = '';
     if (astronomy && astronomy.latitude && astronomy.longitude) {
         const sunAlt = getSunAltitude(new Date(), astronomy.latitude, astronomy.longitude);
-        sunAltText = ` | ${t('sun_altitude', 'Sun')}: ${sunAlt.toFixed(1)}°`;
+        sunAltText = ` | ${t('sun_altitude')}: ${sunAlt.toFixed(1)}°`;
     }
 
     // Build title with coordinates, elevation, and sun altitude
@@ -2589,13 +2651,13 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     const liveBrightnessSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'live-brightness-slider' });
     const liveContrastSlider = createEl('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1', className: 'preview-slider', id: 'live-contrast-slider' });
     const liveSaturationSlider = createEl('input', { type: 'range', min: '0', max: '3', step: '0.1', value: '1', className: 'preview-slider', id: 'live-saturation-slider' });
-    const liveResetBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters', 'Reset'), title: t('reset_filters', 'Reset to default') });
+    const liveResetBtn = createEl('button', { className: 'preview-control-btn reset', textContent: t('reset_filters'), title: t('reset_filters') });
     const liveBrightnessWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
-    liveBrightnessWrapper.append(createEl('label', { textContent: t('brightness', 'Brightness'), htmlFor: 'live-brightness-slider', className: 'preview-filter-label' }), liveBrightnessSlider);
+    liveBrightnessWrapper.append(createEl('label', { textContent: t('brightness'), htmlFor: 'live-brightness-slider', className: 'preview-filter-label' }), liveBrightnessSlider);
     const liveContrastWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
-    liveContrastWrapper.append(createEl('label', { textContent: t('contrast', 'Contrast'), htmlFor: 'live-contrast-slider', className: 'preview-filter-label' }), liveContrastSlider);
+    liveContrastWrapper.append(createEl('label', { textContent: t('contrast'), htmlFor: 'live-contrast-slider', className: 'preview-filter-label' }), liveContrastSlider);
     const liveSaturationWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
-    liveSaturationWrapper.append(createEl('label', { textContent: t('saturation', 'Saturation'), htmlFor: 'live-saturation-slider', className: 'preview-filter-label' }), liveSaturationSlider);
+    liveSaturationWrapper.append(createEl('label', { textContent: t('saturation'), htmlFor: 'live-saturation-slider', className: 'preview-filter-label' }), liveSaturationSlider);
     liveFilterControls.append(liveResetBtn, liveBrightnessWrapper, liveContrastWrapper, liveSaturationWrapper);
 
     let baseStatusText = t('modal_starting_stream');

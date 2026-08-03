@@ -759,17 +759,25 @@ class FileProcessor:
 
                 # Try to download if neither exists
                 if not os.path.exists(video_filepath) and not os.path.exists(hevc_filepath):
-                    self._scp_file(f"{remote_dir}/{source_prefix}_{t.strftime('%M')}.mp4", video_filepath)
-                    codec = internal_probe_codec(video_filepath)
+                    temp_download_path = video_filepath + ".tmp"
+                    self._scp_file(f"{remote_dir}/{source_prefix}_{t.strftime('%M')}.mp4", temp_download_path)
+                    codec = internal_probe_codec(temp_download_path)
+                    source_final_path = hevc_filepath if codec == 'hevc' else video_filepath
+                    os.rename(temp_download_path, source_final_path)
+                    # Make sure downloaded MP4s are web-optimized (moov atom at start).
+                    self._ensure_faststart(source_final_path)
+                    # Always produce a web-optimized H.264 copy for reliable scrubbing.
                     if codec == 'hevc':
-                        os.rename(video_filepath, hevc_filepath)
-                        # Transcode to H.264 for browsers that don't support HEVC
-                        if not self.hevc_supported and not os.path.exists(video_filepath):
-                            self._transcode_to_h264_blocking(hevc_filepath, video_filepath)
+                        self._transcode_to_h264_blocking(source_final_path, video_filepath)
 
-                # Ensure H.264 copy exists for non-HEVC browsers (may have been missed on a prior download)
-                if not self.hevc_supported and os.path.exists(hevc_filepath) and not os.path.exists(video_filepath):
+                # Ensure an H.264 copy exists (may have been missed on a prior download).
+                if os.path.exists(hevc_filepath) and not os.path.exists(video_filepath):
                     self._transcode_to_h264_blocking(hevc_filepath, video_filepath)
+
+                # Ensure any existing H.264 source is web-optimized.
+                if os.path.exists(video_filepath):
+                    self._ensure_faststart(video_filepath)
+
                 final_source_video = video_filepath if os.path.exists(video_filepath) else (hevc_filepath if os.path.exists(hevc_filepath) else None)
                 if final_source_video:
                     if os.path.exists(STACK_SCRIPT):
@@ -861,7 +869,20 @@ class FileProcessor:
             if f.endswith('.part') or f.endswith('.concat.mp4') or f.endswith('.concat_list.txt') or f.endswith('.faststart.tmp'): return False
             if os.path.isdir(os.path.join(DOWNLOAD_DIR, f)): return False
             return True
-        alternatives = [{"url": f"download/{f}", "name": f} for f in os.listdir(DOWNLOAD_DIR) if _is_alt_file(f)]
+        alternatives = []
+        for f in os.listdir(DOWNLOAD_DIR):
+            if not _is_alt_file(f):
+                continue
+            alt = {"url": f"download/{f}", "name": f}
+            if f.endswith('.mp4'):
+                alt_path = os.path.join(DOWNLOAD_DIR, f)
+                duration = internal_probe_duration(alt_path)
+                if duration is not None:
+                    alt["duration"] = duration
+                start_ts = internal_probe_start_time(alt_path)
+                if start_ts is not None:
+                    alt["start_time"] = start_ts
+            alternatives.append(alt)
         result = {"url": f"download/{final_filename}", "name": final_filename, "utc_time_iso": self.time_utc.isoformat(), "alternatives": alternatives}
         # Include the real media duration and start_time so the frontend
         # scrubber/timestamp can work even when the browser reports absolute

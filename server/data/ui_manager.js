@@ -1604,13 +1604,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
     });
 
-    // Toggle play/pause with a click or the spacebar while in fullscreen
-    const onFullscreenVideoClick = (e) => {
-        if (document.fullscreenElement !== videoWrapper) return;
-        if (e.target.closest('button, input, label, a')) return;
-        playPauseBtn.click();
-    };
-    videoWrapper.addEventListener('click', onFullscreenVideoClick);
+    // Spacebar toggles play/pause while in fullscreen
     const onFullscreenKeydown = (e) => {
         if (e.defaultPrevented) return;
         if ((e.key === ' ' || e.code === 'Space') && document.fullscreenElement === videoWrapper) {
@@ -1654,8 +1648,10 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const videoRo = new ResizeObserver(() => setTimeout(syncVideoOverlays, 0));
     videoRo.observe(videoWrapper);
 
-    // --- Pan/Zoom Logic ---
+    // --- Pan/Zoom and Fullscreen Scrub Logic ---
     let scale=1, panX=0, panY=0, isPanning=false, startPanX=0, startPanY=0, panOriginX=0, panOriginY=0;
+    let scrubDragActive=false, scrubStartX=0, scrubStartTime=0, scrubDidMove=false;
+    let scrubDragRaf=null, scrubDragMoveX=null, lastScrubDx=0, wasPlayingBeforeFullscreenScrub=false;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => { 
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
@@ -1683,6 +1679,25 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         updateTransform();
     };
     const onMouseMove = e => {
+        if (scrubDragActive) {
+            scrubDragMoveX = e.clientX;
+            if (scrubDragRaf) return;
+            scrubDragRaf = requestAnimationFrame(() => {
+                scrubDragRaf = null;
+                if (!scrubDragActive) return;
+                const dx = scrubDragMoveX - scrubStartX;
+                if (!scrubDidMove && Math.abs(dx) > 5) scrubDidMove = true;
+                if (scrubDidMove && Math.abs(dx - lastScrubDx) >= 10) {
+                    const duration = video.duration || 0;
+                    const width = videoWrapper.clientWidth || window.innerWidth;
+                    const sensitivity = (duration > 0 && width > 0) ? duration / width : 0.1;
+                    const targetTime = clamp(scrubStartTime + dx * sensitivity, 0, duration);
+                    lastScrubDx = dx;
+                    scheduleScrubberSeek(targetTime);
+                }
+            });
+            return;
+        }
         if (!isPanning) return;
         const maxPanX = contentRect.w * (scale - 1) / 2;
         const maxPanY = contentRect.h * (scale - 1) / 2;
@@ -1690,8 +1705,71 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         panY = clamp(startPanY + (e.clientY - panOriginY), -maxPanY, maxPanY);
         updateTransform();
     };
-    const onMouseUp = () => { isPanning=false; videoWrapper.style.cursor='default'; window.removeEventListener('mousemove',onMouseMove); window.removeEventListener('mouseup',onMouseUp); };
-    const onMouseDown = e => { if(e.button!==0)return; e.preventDefault(); isPanning=true; videoWrapper.style.cursor='grabbing'; panOriginX=e.clientX; panOriginY=e.clientY; startPanX=panX; startPanY=panY; window.addEventListener('mousemove',onMouseMove); window.addEventListener('mouseup',onMouseUp); };
+    const onMouseUp = () => {
+        if (scrubDragRaf) {
+            cancelAnimationFrame(scrubDragRaf);
+            scrubDragRaf = null;
+        }
+        if (scrubDragActive) {
+            const wasClick = !scrubDidMove;
+            if (!wasClick && scrubDragMoveX !== null) {
+                const dx = scrubDragMoveX - scrubStartX;
+                const duration = video.duration || 0;
+                const width = videoWrapper.clientWidth || window.innerWidth;
+                const sensitivity = (duration > 0 && width > 0) ? duration / width : 0.1;
+                const targetTime = clamp(scrubStartTime + dx * sensitivity, 0, duration);
+                pendingSeekTarget = null;
+                scheduleScrubberSeek(targetTime);
+            }
+            scrubDragActive = false;
+            scrubDidMove = false;
+            scrubDragMoveX = null;
+            videoWrapper.style.cursor = 'default';
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+            if (wasClick) {
+                playPauseBtn.click();
+            } else if (wasPlayingBeforeFullscreenScrub) {
+                video.play();
+            } else {
+                isPlaying = false;
+                playPauseBtn.textContent = '▶';
+            }
+            return;
+        }
+        if (!isPanning) return;
+        isPanning = false;
+        videoWrapper.style.cursor = 'default';
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+    };
+    const onMouseDown = e => {
+        if (e.button !== 0) return;
+        if (document.fullscreenElement === videoWrapper && scale <= 1.01) {
+            e.preventDefault();
+            scrubDragActive = true;
+            scrubStartX = e.clientX;
+            scrubStartTime = video.currentTime;
+            scrubDidMove = false;
+            scrubDragMoveX = e.clientX;
+            lastScrubDx = 0;
+            wasPlayingBeforeFullscreenScrub = isPlaying;
+            if (isPlaying) video.pause();
+            videoWrapper.style.cursor = 'ew-resize';
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mouseup', onMouseUp);
+            return;
+        }
+        e.preventDefault();
+        isPanning = true;
+        videoWrapper.style.cursor = 'grabbing';
+        panOriginX = e.clientX;
+        panOriginY = e.clientY;
+        startPanX = panX;
+        startPanY = panY;
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+    };
     videoWrapper.addEventListener('wheel', onWheel); videoWrapper.addEventListener('mousedown', onMouseDown);
 
     // Sync overlay visibility when entering/exiting fullscreen
@@ -1704,6 +1782,9 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             video.style.maxHeight = '';
             video.style.height = '';
             scale=1; panX=0; panY=0; updateTransform();
+            scrubDragActive = false;
+            isPanning = false;
+            videoWrapper.style.cursor = 'default';
         }
         setTimeout(syncVideoOverlays, 50);
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
@@ -1841,7 +1922,6 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Close button handler (defined after all handlers)
     closeButton.addEventListener('click', () => {
         document.removeEventListener('fullscreenchange', onFullscreenChange);
-        videoWrapper.removeEventListener('click', onFullscreenVideoClick);
         document.removeEventListener('keydown', onFullscreenKeydown);
         videoWrapper.removeEventListener('wheel', onWheel);
         videoWrapper.removeEventListener('mousedown', onMouseDown);

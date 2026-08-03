@@ -719,6 +719,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const closeButton = createEl('button', { className: 'preview-close-btn', textContent: '×' });
     header.appendChild(closeButton);
 
+    const isHighResTimelapse = /_(teqh|tfeh)\.mp4$/i.test(title);
+
     // Video container with overlay for timestamp
     const videoWrapper = createEl('div', { className: 'preview-video-wrapper' });
     const isMultiMinuteVideo = /_dur\d+_/.test(title);
@@ -727,7 +729,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         className: 'preview-video',
         controls: false,
         preload: isMultiMinuteVideo ? 'auto' : 'metadata',
-        autoplay: true,
+        autoplay: !isHighResTimelapse,
         muted: true
     });
 
@@ -745,7 +747,6 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     // Loading indicator and error overlay
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading') });
-    const isHighResTimelapse = /_(teqh|tfeh)\.mp4$/i.test(title);
     const errorOverlay = createEl('div', {
         className: 'preview-error-overlay',
         style: {
@@ -772,10 +773,10 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Playback controls
     const controls = createEl('div', { className: 'preview-controls' });
 
-    // Play/Pause button - video autoplays so start with pause symbol
+    // Play/Pause button - video autoplays unless high-res timelapse is blocked
     const playPauseBtn = createEl('button', {
         className: 'preview-control-btn',
-        textContent: '⏸',
+        textContent: isHighResTimelapse ? '▶' : '⏸',
         title: t('modal_play_pause')
     });
 
@@ -1162,7 +1163,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     }
 
     // Video event handlers
-    let isPlaying = true; // Video autoplays so start as playing
+    let isPlaying = !isHighResTimelapse; // Video autoplays unless high-res timelapse is blocked
     let frameStep = 1 / 30; // Assume 30fps, will be updated when metadata loads
 
     // Base epoch from filename timestamp (e.g. 2026-07-10T22:42:00 UTC)
@@ -1241,37 +1242,42 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
     });
 
-    // Some browsers show a black screen for very high-resolution H.264 files
-    // without firing an error event. Detect them by dimensions and by whether
-    // playback actually advances past the start.
+    // Very high-resolution H.264 timelapse files (e.g. 4096×4096) exceed common
+    // browser decoder limits and just play as a black screen. Block autoplay until
+    // metadata is available, then warn only if the decoded dimensions are too large.
     let highResWarningTimer = null;
+    let highResMetadataLoaded = false;
     if (isHighResTimelapse) {
-        const showHighResWarning = () => {
+        const showHighResWarning = (w, h) => {
             if (errorOverlay.style.display === 'flex') return;
             loadingIndicator.style.display = 'none';
             errorOverlay.style.display = 'flex';
             errorOverlay.textContent = t('video_error_highres', {
-                width: video.videoWidth || 4096,
-                height: video.videoHeight || 4096
+                width: w || video.videoWidth || 4096,
+                height: h || video.videoHeight || 4096
             });
-            video.pause();
+            isPlaying = false;
+            playPauseBtn.textContent = '▶';
             if (highResWarningTimer) {
                 clearTimeout(highResWarningTimer);
                 highResWarningTimer = null;
             }
         };
         video.addEventListener('loadedmetadata', () => {
-            // Known browser H.264 decoder limits: width > 4096 or height > 2304
-            // is beyond what common browser implementations decode reliably.
-            if (video.videoWidth > 4096 || video.videoHeight > 2304) {
-                showHighResWarning();
+            highResMetadataLoaded = true;
+            const width = video.videoWidth;
+            const height = video.videoHeight;
+            if (width > 4096 || height > 2304) {
+                showHighResWarning(width, height);
+            } else {
+                video.play();
+                isPlaying = true;
+                playPauseBtn.textContent = '⏸';
             }
         }, { once: true });
         highResWarningTimer = setTimeout(() => {
-            if (errorOverlay.style.display === 'flex') return;
-            if (video.ended) return;
-            if (video.currentTime === 0 || video.readyState < 3) {
-                showHighResWarning();
+            if (errorOverlay.style.display !== 'flex' && !highResMetadataLoaded) {
+                showHighResWarning(4096, 4096);
             }
         }, 1500);
     }

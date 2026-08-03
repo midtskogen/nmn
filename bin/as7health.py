@@ -1056,7 +1056,7 @@ class AS7Diagnostic:
             ("/var/log",        4096, "System log directory"),
             ("/var/mail",       3072, "System mail spool"),
             ("/var/spool/mail", 3072, "User mail spool"),
-            ("/tmp",             500, "Temporary files"),
+            ("/tmp",           25600, "Temporary files"),
             ("/var/tmp",         500, "Persistent temporary files"),
             ("/root",           2048, "Root home directory"),
             ("/home",          20480, "User home directories"),

@@ -1801,7 +1801,12 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             ov.style.transformOrigin = (rw / 2) + 'px ' + (rh / 2) + 'px';
         });
     };
-    video.addEventListener('loadedmetadata', syncVideoOverlays);
+    video.addEventListener('loadedmetadata', () => {
+        if (video.videoWidth && video.videoHeight) {
+            videoWrapper.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+        }
+        syncVideoOverlays();
+    });
     const videoRo = new ResizeObserver(() => setTimeout(syncVideoOverlays, 0));
     videoRo.observe(videoWrapper);
 
@@ -2428,7 +2433,12 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         // img transformOrigin is relative to img's own top-left (offsetLeft/Top)
         img.style.transformOrigin = (rl - img.offsetLeft + rw / 2) + 'px ' + (rt - img.offsetTop + rh / 2) + 'px';
     };
-    img.addEventListener('load', syncOverlays);
+    img.addEventListener('load', () => {
+        if (img.naturalWidth && img.naturalHeight) {
+            imageWrapper.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+        }
+        syncOverlays();
+    });
     const ro = new ResizeObserver(syncOverlays);
     ro.observe(imageWrapper);
 
@@ -2868,7 +2878,12 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
         const elev = astronomy.elevation ? `${astronomy.elevation}m` : '';
         titleText += ` (${lat}, ${lon}${elev ? `, ${elev}` : ''}${sunAltText})`;
     }
-    const modalTitle = createEl('h3', { id: 'video-modal-title', textContent: titleText });
+    const header = createEl('div', { className: 'preview-header' });
+    const modalTitle = createEl('h3', { id: 'video-modal-title', textContent: titleText, className: 'preview-title' });
+    const closeButton = createEl('button', { className: 'preview-close-btn', textContent: '×' });
+    closeButton.addEventListener('click', hideVideoModal);
+    header.append(modalTitle, closeButton);
+
     const videoContainer = createEl('div', { id: 'video-container', style: { aspectRatio: resolution === 'lowres' ? '800 / 448' : '1920 / 1080' } });
     const videoEl = createEl('video', { id: 'live-video', muted: true, autoplay: true, playsinline: true });
     const gridOverlay = createEl('img', { id: 'grid-overlay-image' });
@@ -2888,7 +2903,6 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     annotationToggleContainer.append(annotationCheckbox, annotationLabel);
     const fullscreenButton = createEl('button', { id: 'fullscreen-btn', textContent: t('modal_fullscreen_button') });
     controlsContainer.append(gridToggleContainer, annotationToggleContainer, fullscreenButton);
-    const closeButton = createEl('button', { id: 'video-close-button', textContent: t('modal_close_button'), onclick: hideVideoModal });
 
     // Filter controls
     const liveFilterControls = createEl('div', { className: 'preview-filter-controls' });
@@ -2927,7 +2941,7 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
     };
 
     videoContainer.append(videoEl, gridOverlay, annotationOverlay);
-    modalContent.append(modalTitle, statusEl, videoContainer, controlsContainer, liveFilterControls, closeButton);
+    modalContent.append(header, statusEl, videoContainer, controlsContainer, liveFilterControls);
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
 

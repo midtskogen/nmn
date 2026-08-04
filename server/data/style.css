@@ -974,7 +974,6 @@ button:hover:not(:disabled) {
     box-shadow: 12px 12px 18px #b1b5b9, -12px -12px 18px #ffffff;
     width: 900px;
     max-width: 90vw;
-    height: 75vh;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
@@ -1058,15 +1057,6 @@ button:hover:not(:disabled) {
     min-height: 1.2em;
 }
 
-#video-close-button {
-    width: auto;
-    padding: 8px 20px;
-    margin: 0 auto;
-    background-color: #9e1b1b;
-}
-#video-close-button:hover {
-    background-color: #801515;
-}
 .video-controls-container {
     display: flex;
     justify-content: center;
@@ -1081,8 +1071,7 @@ button:hover:not(:disabled) {
 }
 /* Overrides the default full-width button style for buttons inside the modal.
  */
-#video-modal-content #fullscreen-btn,
-#video-modal-content #video-close-button {
+#video-modal-content #fullscreen-btn {
     width: auto;
     flex-grow: 0;
     padding: 6px 16px;
@@ -1337,7 +1326,9 @@ button:hover:not(:disabled) {
     display: flex;
     align-items: center;
     justify-content: center;
-    flex: 1 1 auto;
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: 75vh;
 }
 
 /* Fullscreen mode for archive video preview */

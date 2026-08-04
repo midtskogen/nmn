@@ -972,10 +972,13 @@ button:hover:not(:disabled) {
     padding: 20px;
     border-radius: 15px;
     box-shadow: 12px 12px 18px #b1b5b9, -12px -12px 18px #ffffff;
+    width: 900px;
     max-width: 90vw;
+    height: 75vh;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
+    position: relative;
 }
 
 #video-container {
@@ -1230,6 +1233,64 @@ button:hover:not(:disabled) {
     min-height: 400px;
 }
 
+.modal-resize-handle {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    z-index: 100;
+    background: rgba(128, 128, 128, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    border-radius: 2px;
+}
+.modal-resize-handle:hover {
+    background: rgba(128, 128, 128, 0.65);
+}
+.modal-resize-handle.nw {
+    top: 2px;
+    left: 2px;
+    cursor: nwse-resize;
+}
+.modal-resize-handle.ne {
+    top: 2px;
+    right: 2px;
+    cursor: nesw-resize;
+}
+.modal-resize-handle.sw {
+    bottom: 2px;
+    left: 2px;
+    cursor: nesw-resize;
+}
+.modal-resize-handle.se {
+    bottom: 2px;
+    right: 2px;
+    cursor: nwse-resize;
+}
+
+.modal-drag-bar {
+    position: relative;
+    flex: 0 0 auto;
+    height: 18px;
+    margin: -20px -20px 10px -20px;
+    cursor: move;
+    background: rgba(255, 255, 255, 0.1);
+    border-top-left-radius: 15px;
+    border-top-right-radius: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 90;
+}
+.modal-drag-bar::after {
+    content: '';
+    width: 40px;
+    height: 4px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 2px;
+}
+.modal-drag-bar:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
 .preview-header {
     display: flex;
     justify-content: space-between;
@@ -1276,6 +1337,7 @@ button:hover:not(:disabled) {
     display: flex;
     align-items: center;
     justify-content: center;
+    flex: 1 1 auto;
 }
 
 /* Fullscreen mode for archive video preview */
@@ -1291,6 +1353,7 @@ button:hover:not(:disabled) {
     margin: 0 !important;
     z-index: 9999;
     background: #000;
+    max-height: none !important;
 }
 
 .preview-video-wrapper:fullscreen video.preview-video,
@@ -1313,19 +1376,26 @@ button:hover:not(:disabled) {
 }
 
 .preview-video {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
-    max-height: 60vh;
-    min-height: 300px;
-    display: block;
+    height: 100%;
+    min-height: 0;
+    object-fit: contain;
+    z-index: 1;
 }
 
 /* Image preview */
 .preview-video-wrapper img.preview-video {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
-    max-height: 60vh;
-    min-height: 300px;
-    display: block;
+    height: 100%;
+    min-height: 0;
     object-fit: contain;
+    z-index: 1;
 }
 
 .preview-timestamp {

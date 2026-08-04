@@ -1,4 +1,4 @@
-import * as uiManager from './ui_manager.js';
+import * as uiManager from './ui_manager.js?v=20260614h';
 import * as mapHandler from './map_handler.js';
 import * as chartHandler from './chart_handler.js';
 import * as api from './api.js';

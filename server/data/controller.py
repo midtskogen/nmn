@@ -260,7 +260,7 @@ HTML_TEMPLATE = """
 <script src="//unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="//cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="//cdn.jsdelivr.net/npm/hls.js@latest"></script>
-<link rel="stylesheet" href="style.css?v=20260614e">
+<link rel="stylesheet" href="style.css?v=20260614i">
 </head><body>
 <div class="container">
     <header>
@@ -379,7 +379,7 @@ HTML_TEMPLATE = """
         <div id="results-log"></div>
     </footer>
 </div>
-<script src="main.js?v=20260614e" type="module"></script>
+<script src="main.js?v=20260614h" type="module"></script>
 </body></html>
 """
 

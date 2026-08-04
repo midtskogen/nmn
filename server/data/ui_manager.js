@@ -52,6 +52,133 @@ function processUrlCheckQueue() {
 }
 
 /**
+ * Adds a top drag bar and draggable corner resize handles to a modal content element.
+ * @param {HTMLElement} modalContent
+ * @param {Function} [onResize] - Optional callback invoked while resizing (rAF-throttled).
+ */
+function makeModalResizable(modalContent, onResize) {
+    // Top drag bar to move the modal
+    const dragBar = createEl('div', { className: 'modal-drag-bar' });
+    modalContent.prepend(dragBar);
+
+    const corners = [
+        { cls: 'nw', dx: -1, dy: -1 },
+        { cls: 'ne', dx: 1, dy: -1 },
+        { cls: 'sw', dx: -1, dy: 1 },
+        { cls: 'se', dx: 1, dy: 1 }
+    ];
+    corners.forEach(({ cls }) => {
+        const handle = createEl('div', { className: `modal-resize-handle ${cls}` });
+        modalContent.appendChild(handle);
+        handle.addEventListener('mousedown', (e) => startResize(e, cls));
+    });
+
+    modalContent.style.position = 'relative';
+
+    let isResizing = false;
+    let isDragging = false;
+    let activeDx = 1;
+    let activeDy = 1;
+    let startX, startY, startWidth, startHeight, startLeft, startTop;
+    let dragOffsetX = 0, dragOffsetY = 0;
+    let resizeRafId = null;
+
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+    function startDrag(e) {
+        if (e.button !== 0 || document.fullscreenElement) return;
+        e.preventDefault();
+        e.stopPropagation();
+        isDragging = true;
+        const rect = modalContent.getBoundingClientRect();
+        modalContent.style.position = 'absolute';
+        modalContent.style.left = rect.left + 'px';
+        modalContent.style.top = rect.top + 'px';
+        dragOffsetX = e.clientX - rect.left;
+        dragOffsetY = e.clientY - rect.top;
+        window.addEventListener('mousemove', onDragMove);
+        window.addEventListener('mouseup', onDragUp);
+    }
+
+    function onDragMove(e) {
+        if (!isDragging) return;
+        const newLeft = clamp(e.clientX - dragOffsetX, 0, window.innerWidth - modalContent.offsetWidth);
+        const newTop = clamp(e.clientY - dragOffsetY, 0, window.innerHeight - modalContent.offsetHeight);
+        modalContent.style.left = newLeft + 'px';
+        modalContent.style.top = newTop + 'px';
+    }
+
+    function onDragUp() {
+        isDragging = false;
+        window.removeEventListener('mousemove', onDragMove);
+        window.removeEventListener('mouseup', onDragUp);
+    }
+
+    dragBar.addEventListener('mousedown', startDrag);
+
+    function startResize(e, cls) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (document.fullscreenElement) return;
+        isResizing = true;
+        const corner = corners.find(c => c.cls === cls);
+        activeDx = corner.dx;
+        activeDy = corner.dy;
+        startX = e.clientX;
+        startY = e.clientY;
+        const rect = modalContent.getBoundingClientRect();
+        startWidth = rect.width;
+        startHeight = rect.height;
+        startLeft = rect.left;
+        startTop = rect.top;
+        modalContent.style.position = 'absolute';
+        modalContent.style.left = startLeft + 'px';
+        modalContent.style.top = startTop + 'px';
+        modalContent.style.width = startWidth + 'px';
+        modalContent.style.height = startHeight + 'px';
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+    }
+
+    function onMouseMove(e) {
+        if (!isResizing) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        const newWidth = clamp(startWidth + dx * activeDx, 400, window.innerWidth * 0.95);
+        const newHeight = clamp(startHeight + dy * activeDy, 300, window.innerHeight * 0.95);
+
+        let offsetLeft = 0;
+        let offsetTop = 0;
+        if (activeDx < 0) offsetLeft = startWidth - newWidth;
+        if (activeDy < 0) offsetTop = startHeight - newHeight;
+
+        modalContent.style.left = (startLeft + offsetLeft) + 'px';
+        modalContent.style.top = (startTop + offsetTop) + 'px';
+        modalContent.style.width = newWidth + 'px';
+        modalContent.style.height = newHeight + 'px';
+
+        if (onResize) {
+            if (resizeRafId) cancelAnimationFrame(resizeRafId);
+            resizeRafId = requestAnimationFrame(() => {
+                resizeRafId = null;
+                onResize();
+            });
+        }
+    }
+
+    function onMouseUp() {
+        isResizing = false;
+        if (resizeRafId) {
+            cancelAnimationFrame(resizeRafId);
+            resizeRafId = null;
+        }
+        if (onResize) onResize();
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+    }
+}
+
+/**
  * Parses a filename and builds an enhanced title with station info, coordinates, elevation, sun altitude, and ISO timestamp.
  * Filename formats:
  * - Regular: stationCode_camN_YYYYMMDD_HHMM_type.ext
@@ -1678,6 +1805,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const videoRo = new ResizeObserver(() => setTimeout(syncVideoOverlays, 0));
     videoRo.observe(videoWrapper);
 
+    makeModalResizable(modalContent, syncVideoOverlays);
+
     // --- Pan/Zoom and Fullscreen Scrub Logic ---
     let scale=1, panX=0, panY=0, isPanning=false, startPanX=0, startPanY=0, panOriginX=0, panOriginY=0;
     let scrubDragActive=false, scrubStartX=0, scrubStartTime=0, scrubDidMove=false;
@@ -2303,6 +2432,8 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     const ro = new ResizeObserver(syncOverlays);
     ro.observe(imageWrapper);
 
+    makeModalResizable(modalContent, syncOverlays);
+
     // Pan/Zoom
     let scale = 1, minScale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
@@ -2847,7 +2978,9 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
         }
     });
     window.addEventListener('resize', updateOverlaySizing);
-    
+
+    makeModalResizable(modalContent, updateOverlaySizing);
+
     gridCheckbox.addEventListener('change', () => { gridOverlay.style.opacity = gridCheckbox.checked ? '0.6' : '0'; });
     annotationCheckbox.addEventListener('change', () => { annotationOverlay.style.opacity = annotationCheckbox.checked ? '0.6' : '0'; });
     

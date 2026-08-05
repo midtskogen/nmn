@@ -42,6 +42,9 @@ $translations = [
         'hidden_singular' => 'skjult',
         'hidden_plural' => 'skjulte',
         'month_names' => ["01" => "Januar", "02" => "Februar", "03" => "Mars", "04" => "April", "05" => "Mai", "06" => "Juni", "07" => "Juli", "08" => "August", "09" => "September", "10" => "Oktober", "11" => "November", "12" => "Desember"],
+        'theme_label' => 'Tema',
+        'theme_classic' => 'Klassisk',
+        'theme_night' => 'Nattehimmel',
     ],
     'en_GB' => [
         'lang_short' => 'en',
@@ -67,6 +70,9 @@ $translations = [
         'hidden_singular' => 'hidden',
         'hidden_plural' => 'hidden',
         'month_names' => ["01" => "January", "02" => "February", "03" => "March", "04" => "April", "05" => "May", "06" => "June", "07" => "July", "08" => "August", "09" => "September", "10" => "October", "11" => "November", "12" => "December"],
+        'theme_label' => 'Theme',
+        'theme_classic' => 'Classic',
+        'theme_night' => 'Night Sky',
     ],
     'de_DE' => [
         'lang_short' => 'de',
@@ -92,6 +98,9 @@ $translations = [
         'hidden_singular' => 'versteckt',
         'hidden_plural' => 'versteckt',
         'month_names' => ["01" => "Januar", "02" => "Februar", "03" => "März", "04" => "April", "05" => "Mai", "06" => "Juni", "07" => "Juli", "08" => "August", "09" => "September", "10" => "Oktober", "11" => "November", "12" => "Dezember"],
+        'theme_label' => 'Thema',
+        'theme_classic' => 'Klassisch',
+        'theme_night' => 'Nachthimmel',
     ],
     'cs_CZ' => [
         'lang_short' => 'cs',
@@ -117,6 +126,9 @@ $translations = [
         'hidden_singular' => 'skrytý',
         'hidden_plural' => 'skryto',
         'month_names' => ["01" => "Leden", "02" => "Únor", "03" => "Březen", "04" => "Duben", "05" => "Květen", "06" => "Červen", "07" => "Červenec", "08" => "Srpen", "09" => "Září", "10" => "Říjen", "11" => "Listopad", "12" => "Prosinec"],
+        'theme_label' => 'Motiv',
+        'theme_classic' => 'Klasické',
+        'theme_night' => 'Noční obloha',
     ],
     'fi_FI' => [
         'lang_short' => 'fi',
@@ -142,6 +154,9 @@ $translations = [
         'hidden_singular' => 'piilotettu',
         'hidden_plural' => 'piilotettua', // *** KORRIGERT HER ***
         'month_names' => ["01" => "Tammikuu", "02" => "Helmikuu", "03" => "Maaliskuu", "04" => "Huhtikuu", "05" => "Toukokuu", "06" => "Kesäkuu", "07" => "Heinäkuu", "08" => "Elokuu", "09" => "Syyskuu", "10" => "Lokakuu", "11" => "Marraskuu", "12" => "Joulukuu"],
+        'theme_label' => 'Teema',
+        'theme_classic' => 'Klassinen',
+        'theme_night' => 'Yötaivas',
     ],
     'lv_LV' => [
         'lang_short' => 'lv',
@@ -167,6 +182,9 @@ $translations = [
         'hidden_singular' => 'paslēpts',
         'hidden_plural' => 'paslēpti',
         'month_names' => ["01" => "Janvāris", "02" => "Februāris", "03" => "Marts", "04" => "Aprīlis", "05" => "Maijs", "06" => "Jūnijs", "07" => "Jūlijs", "08" => "Augusts", "09" => "Septembris", "10" => "Oktobris", "11" => "Novembris", "12" => "Decembris"],
+        'theme_label' => 'Tēma',
+        'theme_classic' => 'Klasiskā',
+        'theme_night' => 'Nakts debess',
     ],
 ];
 
@@ -738,18 +756,21 @@ function generateArchivePageHeader($targetYear, $part, $t) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{$mainTitle}</title>
+    <link rel="stylesheet" href="theme.css">
     <style>
         body { background: #ffffff; color: #000018; font-family: Verdana, Geneva, Arial, Helvetica, sans-serif; font-size: 12px; margin: 20px; }
         .page-header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; margin-bottom: 10px; }
         .page-header h1 { grid-column: 1 / -1; grid-row: 1; text-align: center; margin: 0; color: #082060; }
+        .theme-selector { grid-column: 1; grid-row: 1; justify-self: start; z-index: 1; }
         .language-switcher { grid-column: 3; grid-row: 1; justify-self: end; z-index: 1; }
         .language-switcher a { display: inline-block; text-decoration: none; margin: 0 2px; font-size: 1.5em; opacity: 0.7; transition: opacity 0.2s; }
         .language-switcher a:hover { opacity: 1; }
 
         @media screen and (max-width: 700px) {
-            .page-header { grid-template-columns: 1fr; gap: 10px; }
-            .page-header h1 { grid-row: 2; grid-column: 1; }
-            .language-switcher { grid-row: 1; grid-column: 1; }
+            .page-header { grid-template-columns: 1fr 1fr; gap: 10px; }
+            .page-header h1 { grid-row: 2; grid-column: 1 / -1; }
+            .theme-selector { grid-row: 1; grid-column: 1; justify-self: start; }
+            .language-switcher { grid-row: 1; grid-column: 2; justify-self: end; }
         }
 
         table { width: 100%; border-collapse: collapse; }
@@ -783,7 +804,13 @@ function generateArchivePageHeader($targetYear, $part, $t) {
     </style>
 </head>
 <body>
+    <canvas id="starfield"></canvas>
     <div class="page-header">
+        <div class="theme-selector">
+            <span class="theme-label">{$t['theme_label']}:</span>
+            <label><input type="radio" name="nmn-theme" value="classic" checked> {$t['theme_classic']}</label>
+            <label><input type="radio" name="nmn-theme" value="night"> {$t['theme_night']}</label>
+        </div>
         <h1>{$mainTitle}</h1>
         {$langSwitcherHTML}
     </div>
@@ -824,7 +851,7 @@ if ($isYearArgProvided) {
             echo generateEventTable($tableDataA, $t, true);
             echo "</div>\n";
             echo generatePageFooter($t);
-            echo "</body>\n</html>";
+            echo "\n<script src=\"theme.js\"></script>\n</body>\n</html>";
             $outputFile = BASE_PATH . "/{$targetYear}_{$lang_short}_a.html";
             file_put_contents($outputFile, ob_get_clean());
         }
@@ -846,7 +873,7 @@ if ($isYearArgProvided) {
             echo generateEventTable($tableDataB, $t, true);
             echo "</div>\n";
             echo generatePageFooter($t);
-            echo "</body>\n</html>";
+            echo "\n<script src=\"theme.js\"></script>\n</body>\n</html>";
             $outputFile = BASE_PATH . "/{$targetYear}_{$lang_short}_b.html";
             file_put_contents($outputFile, ob_get_clean());
         }

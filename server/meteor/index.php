@@ -23,6 +23,9 @@ $translations = [
         'archive_for_year' => 'Registreringer for %d',
         'archive_part1' => '(januar til juni)',
         'archive_part2' => '(juli til desember)',
+        'theme_label' => 'Tema',
+        'theme_classic' => 'Klassisk',
+        'theme_night' => 'Nattehimmel',
     ],
     'en_GB' => [
         'page_title' => 'Meteor Observations',
@@ -43,6 +46,9 @@ $translations = [
         'archive_for_year' => 'Detections for %d',
         'archive_part1' => '(January to June)',
         'archive_part2' => '(July to December)',
+        'theme_label' => 'Theme',
+        'theme_classic' => 'Classic',
+        'theme_night' => 'Night Sky',
     ],
     'de_DE' => [
         'page_title' => 'Meteorbeobachtungen',
@@ -63,6 +69,9 @@ $translations = [
         'archive_for_year' => 'Erfassungen für %d',
         'archive_part1' => '(Januar bis Juni)',
         'archive_part2' => '(Juli bis Dezember)',
+        'theme_label' => 'Thema',
+        'theme_classic' => 'Klassisch',
+        'theme_night' => 'Nachthimmel',
     ],
     'cs_CZ' => [
         'page_title' => 'Pozorování meteorů',
@@ -83,6 +92,9 @@ $translations = [
         'archive_for_year' => 'Záznamy za rok %d',
         'archive_part1' => '(leden - červen)',
         'archive_part2' => '(červenec - prosinec)',
+        'theme_label' => 'Motiv',
+        'theme_classic' => 'Klasické',
+        'theme_night' => 'Noční obloha',
     ],
     'fi_FI' => [
         'page_title' => 'Meteorihavainnot',
@@ -104,6 +116,9 @@ $translations = [
         'archive_for_year' => 'Havainnot vuodelta %d',
         'archive_part1' => '(tammi-kesäkuu)',
         'archive_part2' => '(heinä-joulukuu)',
+        'theme_label' => 'Teema',
+        'theme_classic' => 'Klassinen',
+        'theme_night' => 'Yötaivas',
     ],
     'lv_LV' => [
         'page_title' => 'Meteoru novērojumi',
@@ -124,6 +139,9 @@ $translations = [
         'archive_for_year' => 'Reģistrējumi par %d. gadu',
         'archive_part1' => '(janvāris līdz jūnijs)',
         'archive_part2' => '(jūlijs līdz decembris)',
+        'theme_label' => 'Tēma',
+        'theme_classic' => 'Klasiskā',
+        'theme_night' => 'Nakts debess',
     ],
 ];
 
@@ -259,9 +277,7 @@ $lang_short = substr($lang_code, 0, 2);
         
         /* === ADDED STYLES FOR LAYOUT CONTROL === */
         .info-container { display: flex; align-items: flex-start; gap: 20px; padding: 0 15px; }
-        .info-text { flex: 1; min-width: 60%; }
-        .info-image { flex-shrink: 0; text-align: center; }
-        .info-image img { max-width: 100%; height: auto; }
+        .info-column-left, .info-column-right { flex: 1; min-width: 0; }
         .static-content-wrapper { padding: 0 15px; }
         .scrollable-table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         .scrollable-table-container img { width: 256px; height: auto; }
@@ -289,6 +305,7 @@ $lang_short = substr($lang_code, 0, 2);
         /* === RESPONSIVE HEADER LAYOUT === */
         .page-header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; margin: 10px 15px; }
         .page-header h1 { grid-column: 1 / -1; grid-row: 1; text-align: center; margin: 0; }
+        .theme-selector { grid-column: 1; grid-row: 1; justify-self: start; z-index: 1; }
         .language-switcher { grid-column: 3; grid-row: 1; justify-self: end; z-index: 1; }
         .language-switcher a { display: inline-block; text-decoration: none; margin: 0 2px; font-size: 1.5em; opacity: 0.7; transition: opacity 0.2s; }
         .language-switcher a:hover { opacity: 1; }
@@ -300,18 +317,26 @@ $lang_short = substr($lang_code, 0, 2);
         }
 
         @media screen and (max-width: 700px) {
-            .page-header { grid-template-columns: 1fr; gap: 10px; }
-            .page-header h1 { grid-row: 2; grid-column: 1; }
-            .language-switcher { grid-row: 1; grid-column: 1; justify-self: end; }
+            .page-header { grid-template-columns: 1fr 1fr; gap: 10px; }
+            .page-header h1 { grid-row: 2; grid-column: 1 / -1; }
+            .theme-selector { grid-row: 1; grid-column: 1; justify-self: start; }
+            .language-switcher { grid-row: 1; grid-column: 2; justify-self: end; }
         }
 
         @media screen and (max-width: 480px) {
             .archive-list { column-count: 1; } /* 1 column for mobile */
         }
     </style>
+    <link rel="stylesheet" href="theme.css">
 </head>
 <body>
+    <canvas id="starfield"></canvas>
     <div class="page-header">
+        <div class="theme-selector">
+            <span class="theme-label"><?php echo htmlspecialchars($t['theme_label']); ?>:</span>
+            <label><input type="radio" name="nmn-theme" value="classic" checked> <?php echo htmlspecialchars($t['theme_classic']); ?></label>
+            <label><input type="radio" name="nmn-theme" value="night"> <?php echo htmlspecialchars($t['theme_night']); ?></label>
+        </div>
         <h1><?php echo $t['main_header']; ?></h1>
         <div class="language-switcher">
             <a href="?lang=nb_NO" title="Norsk">🇳🇴</a>
@@ -324,27 +349,25 @@ $lang_short = substr($lang_code, 0, 2);
     </div>
 
     <div id="observation-table-info" class="info-container">
-        <div class="info-text">
+        <div class="info-column-left">
             <p><?php echo $t['intro_p1']; ?></p>
 
             <h3><?php echo $t['about_table_header']; ?></h3>
             <ul>
                 <li><?php echo $t['about_table_li1']; ?></li>
-                <li><?pHP echo $t['about_table_li2']; ?></li>
+                <li><?php echo $t['about_table_li2']; ?></li>
                 <li><?php echo $t['about_table_li3']; ?></li>
                 <li><?php echo $t['about_table_li4']; ?></li>
             </ul>
 
+            <p><?php echo $t['important_notice_p1']; ?></p>
+        </div>
+        <div class="info-column-right">
             <h3><?php echo $t['your_observations_header']; ?></h3>
             <p><?php echo $t['your_observations_p1']; ?></p>
 
             <h3><?php echo $t['general_info_header']; ?></h3>
             <p><?php echo $t['general_info_p1']; ?></p>
-            <p><?php echo $t['important_notice_p1']; ?></p>
-
-        </div>
-        <div class="info-image">
-            <img src="meteor_cam.jpg" width="512" alt="<?php echo htmlspecialchars($t['camera_image_alt']); ?>">
         </div>
     </div>
 
@@ -392,5 +415,6 @@ $lang_short = substr($lang_code, 0, 2);
         </div>
     </div>
 
+<script src="theme.js"></script>
 </body>
 </html>

@@ -1,0 +1,179 @@
+/* --- Meteor theme switcher and animated starfield --- */
+#starfield {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: -1;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+}
+
+.theme-selector {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.9em;
+}
+
+.theme-selector .theme-label {
+    margin-right: 4px;
+}
+
+.theme-selector input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.theme-selector label {
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: opacity 0.2s ease;
+}
+
+.theme-selector label:hover {
+    opacity: 1;
+}
+
+.theme-selector label.active {
+    opacity: 1;
+    font-weight: bold;
+    color: var(--primary-color, inherit);
+    text-decoration: underline;
+}
+
+body.theme-night { --primary-color: #ffd166; --secondary-color: rgba(13, 19, 35, 0); --table-bg: rgba(13, 19, 35, 0); --text-color: #e0e6ed; --border-color: #5a4a2a; background: #090a0f; }
+
+body.theme-night {
+    color: var(--text-color);
+}
+
+body.theme-night #starfield {
+    opacity: 1;
+}
+
+/* --- Dark theme panel overrides for meteor pages --- */
+body.theme-dark .page-header h1,
+body.theme-dark h1,
+body.theme-dark h2,
+body.theme-dark h3 {
+    color: var(--primary-color);
+}
+
+body.theme-dark a {
+    color: var(--primary-color);
+}
+body.theme-dark a:visited {
+    color: #aaa;
+}
+
+body.theme-dark .filter-container fieldset,
+body.theme-dark .months-table,
+body.theme-dark .month-cell,
+body.theme-dark .month-header,
+body.theme-dark .observation-link,
+body.theme-dark .media-swap-container img,
+body.theme-dark .media-swap-container video,
+body.theme-dark .info-container,
+body.theme-dark .archive-list-container,
+body.theme-dark .language-switcher a {
+    border-color: var(--border-color);
+}
+
+body.theme-dark .month-cell,
+body.theme-dark .filter-container fieldset,
+body.theme-dark .months-table,
+body.theme-dark .spoiler-content,
+body.theme-dark #selection-results {
+    background: var(--table-bg);
+}
+
+body.theme-dark .info-container,
+body.theme-dark .archive-list-container,
+body.theme-dark .static-content-wrapper,
+body.theme-dark .scrollable-table-container {
+    background: var(--secondary-color);
+}
+
+body.theme-dark .month-header {
+    border-bottom-color: var(--primary-color);
+}
+body.theme-dark .month-header:hover {
+    background: transparent;
+    color: var(--primary-color);
+}
+
+body.theme-dark .observation-link {
+    border-bottom-color: var(--border-color);
+}
+
+body.theme-dark .observation-link.normal-altitude,
+body.theme-dark .observation-link.normal-altitude:visited,
+body.theme-dark .observation-link.unknown-altitude,
+body.theme-dark .observation-link.unknown-altitude:visited {
+    color: var(--text-color);
+}
+body.theme-dark .observation-link.low-altitude,
+body.theme-dark .observation-link.low-altitude:visited {
+    color: #ff6b6b;
+}
+body.theme-dark .observation-link.unlikely-altitude,
+body.theme-dark .observation-link.unlikely-altitude:visited {
+    color: #888;
+}
+
+body.theme-dark .minimized-count,
+body.theme-dark .location-details {
+    color: #a0aab8;
+}
+
+body.theme-dark .filter-container legend,
+body.theme-dark .back-link {
+    color: var(--primary-color);
+}
+
+body.theme-dark #observation-table-info a:link,
+body.theme-dark .archive-list a {
+    color: var(--primary-color);
+}
+body.theme-dark #observation-table-info a:visited,
+body.theme-dark .archive-list a:visited {
+    color: #aaa;
+}
+
+body.theme-dark .submit-button {
+    background-color: transparent;
+    color: var(--primary-color);
+    border: 1px solid var(--primary-color);
+}
+body.theme-dark .submit-button:hover {
+    background-color: transparent;
+    color: var(--text-color);
+    border-color: var(--text-color);
+}
+
+body.theme-dark #selection-results {
+    background: var(--table-bg);
+    border-color: var(--primary-color);
+}
+
+body.theme-dark .archive-section button {
+    background-color: transparent;
+    color: var(--text-color);
+    border-color: var(--border-color);
+}
+body.theme-dark .archive-section button:hover {
+    background-color: transparent;
+    color: var(--primary-color);
+}
+
+body.theme-dark .spoiler-content {
+    background: var(--table-bg);
+    border-color: var(--border-color);
+}

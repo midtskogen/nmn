@@ -1,4 +1,4 @@
-import * as uiManager from './ui_manager.js?v=20260614k';
+import * as uiManager from './ui_manager.js?v=20260614n';
 import * as mapHandler from './map_handler.js';
 import * as chartHandler from './chart_handler.js';
 import * as api from './api.js';
@@ -35,7 +35,7 @@ async function main() {
         document.body.innerHTML = 'Error: Could not load application language data. Please try refreshing the page.';
         return;
     }
-    
+
     // The main application logic starts once the DOM is fully loaded and language is fetched.
     initializeApp();
 }

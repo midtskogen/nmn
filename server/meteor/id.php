@@ -66,10 +66,17 @@
         .filter-container legend { font-weight: bold; }
         .filter-container label { margin: 0 10px; display: block; text-align: left; }
     </style>
+    <link rel="stylesheet" href="theme.css">
 </head>
 <body>
+    <canvas id="starfield"></canvas>
+    <div class="theme-selector" style="text-align: right; margin: 5px 10px 10px;">
+        <span class="theme-label">Tema:</span>
+        <label><input type="radio" name="nmn-theme" value="classic" checked> Klassisk</label>
+        <label><input type="radio" name="nmn-theme" value="night"> Nattehimmel</label>
+    </div>
 
-    <h1>De siste registreringene</h1>
+    <h1 style="margin-top: 0;">De siste registreringene</h1>
 
     <form id="event-selection-form" class="selection-form" onsubmit="showSelections(event)">
         <button type="submit" class="submit-button">Se avkrysninger</button>
@@ -429,5 +436,6 @@
 
     });
     </script>
+<script src="theme.js"></script>
 </body>
 </html>

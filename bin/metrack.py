@@ -1091,13 +1091,20 @@ def _plane_intersection_initial_guess(pos_vectors, los_vectors, weights):
     return np.concatenate([start_coord, best_fit_dir])
 
 
-def fit_track(obs_data, optimize=True):
-    n_obs = len(obs_data['longitudes']) // 2
-    if n_obs < 2 or len(set(zip(obs_data['latitudes'][:n_obs], obs_data['longitudes'][:n_obs]))) < 2:
-        return None, None, [], float('inf'), 0
+def fit_track(obs_data, optimize=True, pos_vectors=None, los_vectors=None):
+    if pos_vectors is None:
+        n_obs = len(obs_data['longitudes']) // 2
+        if n_obs < 2 or len(set(zip(obs_data['latitudes'][:n_obs], obs_data['longitudes'][:n_obs]))) < 2:
+            return None, None, [], float('inf'), 0
+        pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
+        los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
+    else:
+        n_obs = len(pos_vectors) // 2
+        if n_obs < 2:
+            return None, None, [], float('inf'), 0
 
-    pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
-    los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
+    pos_vectors = list(pos_vectors)
+    los_vectors = list(los_vectors)
 
     plane_normals = [np.cross(los_vectors[i], los_vectors[i + n_obs]) for i in range(n_obs)]
     plane_normals = [n / np.linalg.norm(n) if np.linalg.norm(n) > 0 else n for n in plane_normals]
@@ -1134,7 +1141,7 @@ def fit_track(obs_data, optimize=True):
         best_fit_dir /= np.linalg.norm(best_fit_dir)
         initial_params = np.concatenate([start_coord, best_fit_dir])
     if optimize and 'scipy' in AVAILABLE_LIBS:
-        final_params, _, _, _, _, flag = fmin_powell(chisq_of_fit, initial_params, args=(pos_vectors, los_vectors, obs_data['weights']), disp=False, full_output=True)
+        final_params, _, _, _, _, flag = fmin_powell(chisq_of_fit, initial_params, args=(pos_vectors, los_vectors, obs_data['weights']), disp=False, full_output=True, maxiter=200, maxfun=1000, xtol=1e-4, ftol=1e-4)
         if flag != 0: final_params = initial_params
     else: final_params = initial_params
     
@@ -1146,7 +1153,7 @@ def fit_track(obs_data, optimize=True):
     if np.dot(initial_params[3:], best_fit_dir) < 0: best_fit_dir = -best_fit_dir
 
     cross_positions, dists = [], []
-    for i in range(len(obs_data['longitudes'])):
+    for i in range(len(pos_vectors)):
         los_pos, track_pos = closest_point(pos_vectors[i], start_coord, los_vectors[i], best_fit_dir, return_points=True)
         cross_positions.append(los_pos)
         dists.append(np.linalg.norm(track_pos - start_coord) * np.sign(np.dot(track_pos - start_coord, best_fit_dir)))
@@ -1218,6 +1225,14 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
     los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
 
+    def _fit_subset(indices, optimize=False):
+        """Run fit_track on a station-index subset using precomputed vectors."""
+        sp = [pos_vectors[i] for i in indices] + [pos_vectors[i + num_stations] for i in indices]
+        sl = [los_vectors[i] for i in indices] + [los_vectors[i + num_stations] for i in indices]
+        sw = [weights[i] for i in indices] + [weights[i] for i in indices]
+        return fit_track({'weights': np.asarray(sw, dtype=float)}, optimize=optimize,
+                         pos_vectors=sp, los_vectors=sl)
+
     if options.get('debug_ransac', False): print("--- RANSAC Debugging Enabled (Hybrid Mode: RANSAC + Iterative Pruning) ---")
     candidate_sets = set()
 
@@ -1236,7 +1251,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
             else:
                 continue  # all observations from same location — skip this RANSAC iteration
             
-            candidate_start, candidate_end, _, _, _ = fit_track(_create_subset_obs_data(obs_data, sample_indices), optimize=False)
+            candidate_start, candidate_end, _, _, _ = _fit_subset(sample_indices, optimize=False)
             if candidate_start is None: continue
 
             track_ref, track_vec = candidate_start, (candidate_end - candidate_start)
@@ -1252,7 +1267,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
             current_weight_sum = sum(weights[idx] for idx in current_inlier_indices)
 
             if current_weight_sum >= best_weight_sum_this_run:
-                _, _, _, current_chi2, _ = fit_track(_create_subset_obs_data(obs_data, current_inlier_indices), optimize=False)
+                _, _, _, current_chi2, _ = _fit_subset(list(current_inlier_indices), optimize=False)
                 if np.isfinite(current_chi2):
                     if current_weight_sum > best_weight_sum_this_run or (current_weight_sum == best_weight_sum_this_run and current_chi2 < best_fit_error_this_run):
                         best_fit_error_this_run = current_chi2
@@ -1272,8 +1287,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         candidate_sets.add(frozenset(current_prune_indices))
         
         # Fit current set
-        subset_obs = _create_subset_obs_data(obs_data, current_prune_indices)
-        prune_start, prune_end, _, prune_chi2, _ = fit_track(subset_obs, optimize=True)
+        prune_start, prune_end, _, prune_chi2, _ = _fit_subset(current_prune_indices, optimize=True)
         
         if prune_start is None: break
         
@@ -1307,9 +1321,8 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     
     for k, indices_set in enumerate(candidate_sets):
         if len(indices_set) < 2: continue
+        fit_results = _fit_subset(list(indices_set), optimize=True)
         inlier_obs_data = _create_subset_obs_data(obs_data, indices_set)
-        fit_results = fit_track(inlier_obs_data, optimize=True)
-        
         current_score, total_weight = calculate_model_score(fit_results, inlier_obs_data, weights, indices_set, options)
 
         if options.get('debug_ransac', False):
@@ -1322,7 +1335,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     
     if best_final_model is None:
         print("Robust fit failed to find a valid model. Falling back to simple fit on all data.")
-        return fit_track(obs_data, optimize=True), obs_data, list(range(num_stations))
+        return _fit_subset(list(range(num_stations)), optimize=True), obs_data, list(range(num_stations))
 
     final_fit_results, final_obs_data, final_inlier_indices = best_final_model
     unique_inlier_names = {raw_data['names'][i] for i in final_inlier_indices}
@@ -1484,29 +1497,44 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
         return MetrackInfo(), None
 
     use_ransac = bool(options.get('use_ransac', True))
-    
+
     if borders and not options.get('autoborders'): options['borders'] = borders
     else: options['borders'] = None
 
     if options.get('azonly', False):
         print("Azimuth-only mode: No fitting is performed.")
         # Return enough data for az-only plotting
-        plot_data = {'track_start': None, 'track_end': None, 'cross_pos_all': None, 
+        plot_data = {'track_start': None, 'track_end': None, 'cross_pos_all': None,
                      'full_obs_data': full_obs_data, 'inlier_indices': list(range(len(raw_data['names'])))}
         return MetrackInfo(), plot_data
 
-    def _run_fit(obs_data_for_fit):
-        if use_ransac:
+    def _run_fit(obs_data_for_fit, with_ransac):
+        if with_ransac:
             return robust_fit_with_ransac(obs_data_for_fit, raw_data, options)
         print("RANSAC disabled. Using standard fit on all data.")
         fr = fit_track(obs_data_for_fit, optimize=options.get('optimize', True))
         return fr, obs_data_for_fit, list(range(len(raw_data['names'])))
 
+    def _fit_good_enough(info):
+        """True when a standard fit is clean enough to skip the expensive RANSAC pass."""
+        if not options.get('adaptive_ransac', True):
+            return False
+        if info is None or info.start_height == 0:
+            return False
+        if max(info.start_height, info.end_height) < 10.0:
+            return False
+        if info.speed != 0 and (info.speed < 8.0 or info.speed > 100.0):
+            return False
+        if info.error > options.get('adaptive_error_km', 5.0):
+            return False
+        return True
+
     options.setdefault('refraction', True)
     full_obs_data_fit = full_obs_data
 
+    # Always use a cheap standard fit to estimate refraction corrections.
     if options.get('refraction', True):
-        fit_initial, inlier_obs_initial, inlier_idx_initial = _run_fit(full_obs_data)
+        fit_initial, inlier_obs_initial, inlier_idx_initial = _run_fit(full_obs_data, False)
         if fit_initial[0] is not None:
             heights_km = _estimate_cross_heights_km(fit_initial[0], fit_initial[1], full_obs_data)
             alt_corr = []
@@ -1520,7 +1548,15 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
             except Exception:
                 full_obs_data_fit = full_obs_data
 
-    fit_results, inlier_obs_data, inlier_indices = _run_fit(full_obs_data_fit)
+    # Try a cheap standard fit on the refraction-corrected data.
+    fit_results, inlier_obs_data, inlier_indices = _run_fit(full_obs_data_fit, False)
+
+    # Fall back to RANSAC only if the cheap fit is poor and the user asked for robust fitting.
+    if use_ransac and fit_results[0] is not None:
+        _tmp_info = MetrackInfo()
+        _tmp_info, _, _, _ = _populate_info_from_fit(_tmp_info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
+        if not _fit_good_enough(_tmp_info):
+            fit_results, inlier_obs_data, inlier_indices = _run_fit(full_obs_data_fit, True)
 
     if fit_results[0] is None:
         print("Could not determine a valid track. Aborting.")
@@ -1598,6 +1634,10 @@ def calculate_trajectory_hybrid(inname: str, **kwargs):
     """
     # Robust initial-guess solution (current default).
     info_robust, plot_robust = calculate_trajectory(inname, **kwargs)
+
+    # If the robust solution is already clean, the heuristic guess won't improve it.
+    if not _is_implausible_info(info_robust) and info_robust.error <= kwargs.get('adaptive_error_km', 5.0):
+        return info_robust, plot_robust
 
     # Heuristic initial-guess solution: keep the corrected altaz2xyz but fall back
     # to the older heuristic initial guess used before _plane_intersection_initial_guess.
@@ -1701,6 +1741,8 @@ def main():
     parser.add_argument('--all-in-tolerance', type=float, default=1.0, help="Error tolerance to accept a fit with all stations.")
     parser.add_argument('--seed', type=int, default=0, help="Random seed for RANSAC.")
     parser.add_argument('--debug-ransac', action='store_true', help="Enable RANSAC debug prints.")
+    parser.add_argument('--adaptive-error-km', type=float, default=5.0, dest='adaptive_error_km', help="If the cheap standard fit error is below this (in km) and the trajectory is plausible, skip the expensive RANSAC pass.")
+    parser.add_argument('--no-adaptive-ransac', action='store_false', dest='adaptive_ransac', default=True, help="Always run the full RANSAC pass, never skip it based on the cheap fit.")
     parser.add_argument('--no-refraction', action='store_false', dest='refraction', default=True, help="Disable atmospheric refraction correction.")
     
     args = parser.parse_args()

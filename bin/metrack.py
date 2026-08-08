@@ -154,13 +154,14 @@ def _estimate_cross_heights_km(track_start, track_end, obs_data) -> List[float]:
         return [float('nan')] * n
     track_vec /= norm
 
-    pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
-    los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
+    pos_vectors = np.asarray([lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])])
+    los_vectors = np.asarray([altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])])
+    los_pos, _ = _closest_points_batch(np.asarray(track_start), np.asarray(track_vec),
+                                        pos_vectors, los_vectors, return_points=True)
     heights_km = []
-    for pos, los in zip(pos_vectors, los_vectors):
+    for pos in los_pos:
         try:
-            los_pos, _ = closest_point(pos, track_start, los, track_vec, return_points=True)
-            heights_km.append(float(xyz2lonlat(los_pos)[2]))
+            heights_km.append(float(xyz2lonlat(pos)[2]))
         except Exception:
             heights_km.append(float('nan'))
     return heights_km
@@ -262,6 +263,46 @@ def closest_point(p1, p2, u1, u2, return_points=False):
     t1, t2 = np.dot(R, u2), np.dot(R, u1)
     cross_1, cross_2 = p1 + t1 * u1, p2 + t2 * u2
     return (cross_1, cross_2) if return_points else (cross_1 + cross_2) / 2.0
+
+
+def _dist_line_line_batch(p0, d, p_array, u_array):
+    """Vectorised shortest distance from one reference line (p0, d) to many lines."""
+    p_array = np.asarray(p_array)
+    u_array = np.asarray(u_array)
+    w = p_array - p0
+    cross_du = np.cross(d, u_array)
+    denom = np.linalg.norm(cross_du, axis=1)
+    # Perpendicular distance: |w . (d x u)| / |d x u|
+    dist = np.abs(np.einsum('ij,ij->i', w, cross_du)) / (denom + 1e-30)
+    # Near-parallel fallback: distance from point p0 to line (p_array, u_array)
+    parallel = denom < 1e-9
+    if np.any(parallel):
+        cross_wd = np.cross(d, w)
+        parallel_dist = np.linalg.norm(cross_wd, axis=1) / (np.linalg.norm(d) + 1e-30)
+        dist[parallel] = parallel_dist[parallel]
+    return dist
+
+
+def _closest_points_batch(p0, d, p_array, u_array, return_points=False):
+    """Vectorised closest-point computation for many sight-lines vs one track line."""
+    p_array = np.asarray(p_array)
+    u_array = np.asarray(u_array)
+    p21 = p0 - p_array
+    m = np.cross(d, u_array)
+    m2 = np.einsum('ij,ij->i', m, m)
+    parallel = m2 < 1e-9
+    safe = ~parallel
+    # Original scalar uses m/m2, not a unit vector.
+    m_scaled = np.empty_like(m)
+    m_scaled[safe] = m[safe] / m2[safe][:, None]
+    R = np.cross(p21, m_scaled)
+    t1 = np.einsum('ij,ij->i', R, np.broadcast_to(d, u_array.shape))
+    t2 = np.einsum('ij,ij->i', R, u_array)
+    cross_1 = p_array + t1[:, None] * u_array
+    cross_2 = p0 + t2[:, None] * d
+    cross_1[parallel] = (p0 + p_array[parallel]) * 0.5
+    cross_2[parallel] = cross_1[parallel]
+    return (cross_1, cross_2) if return_points else (cross_1 + cross_2) * 0.5
 
 def intersec_line_plane(line_ref, line_vec, plane_ref, plane_vec):
     dot_product = np.dot(plane_vec, line_vec)
@@ -1152,11 +1193,14 @@ def fit_track(obs_data, optimize=True, pos_vectors=None, los_vectors=None):
     best_fit_dir /= np.linalg.norm(best_fit_dir)
     if np.dot(initial_params[3:], best_fit_dir) < 0: best_fit_dir = -best_fit_dir
 
-    cross_positions, dists = [], []
-    for i in range(len(pos_vectors)):
-        los_pos, track_pos = closest_point(pos_vectors[i], start_coord, los_vectors[i], best_fit_dir, return_points=True)
-        cross_positions.append(los_pos)
-        dists.append(np.linalg.norm(track_pos - start_coord) * np.sign(np.dot(track_pos - start_coord, best_fit_dir)))
+    cross_positions, track_positions = _closest_points_batch(np.asarray(start_coord), best_fit_dir,
+                                                               np.asarray(pos_vectors), np.asarray(los_vectors),
+                                                               return_points=True)
+    cross_positions = list(cross_positions)
+    track_vec_full = best_fit_dir / np.linalg.norm(best_fit_dir)
+    diffs = track_positions - start_coord
+    dists = np.linalg.norm(diffs, axis=1) * np.sign(np.einsum('ij,j->i', diffs, track_vec_full))
+    dists = list(dists)
     
     track_start = start_coord + min(dists) * best_fit_dir
     track_end = start_coord + max(dists) * best_fit_dir
@@ -1186,8 +1230,8 @@ def calculate_model_score(fit_results, inlier_obs_data, weights, indices_set, op
             penalty = 1e9
 
         durations = inlier_obs_data['durations']
+        num_inliers = len(durations)
         if any(d > 0 for d in durations):
-            num_inliers = len(durations)
             airspeeds = [np.linalg.norm(cross_pos[i + num_inliers] - cross_pos[i]) / d for i, d in enumerate(durations) if d > 0]
             if airspeeds:
                 calculated_speed = np.mean(airspeeds)
@@ -1258,11 +1302,12 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
             track_vec /= np.linalg.norm(track_vec)
             
             current_inlier_indices = set(sample_indices)
+            start_dists = _dist_line_line_batch(track_ref, track_vec, pos_vectors[:num_stations], los_vectors[:num_stations])
+            end_dists = _dist_line_line_batch(track_ref, track_vec, pos_vectors[num_stations:], los_vectors[num_stations:])
+            avg_dists = (start_dists + end_dists) * 0.5
             for j in range(num_stations):
                 if j in sample_indices: continue
-                # Distance from station sight lines to the trial track
-                dist = (dist_line_line(track_ref, track_vec, pos_vectors[j], los_vectors[j]) + dist_line_line(track_ref, track_vec, pos_vectors[j + num_stations], los_vectors[j + num_stations])) / 2.0
-                if dist < options.get('ransac_threshold', 1.0): current_inlier_indices.add(j)
+                if avg_dists[j] < options.get('ransac_threshold', 1.0): current_inlier_indices.add(j)
             
             current_weight_sum = sum(weights[idx] for idx in current_inlier_indices)
 
@@ -1294,19 +1339,16 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         # Calculate residuals for *current* stations to find the worst one
         track_ref, track_vec = prune_start, (prune_end - prune_start)
         track_vec /= np.linalg.norm(track_vec)
-        
-        max_dist = -1.0
-        worst_idx_in_subset = -1
-        
-        # We need to map subset indices back to global indices
-        for local_idx, global_idx in enumerate(current_prune_indices):
-            d1 = dist_line_line(track_ref, track_vec, pos_vectors[global_idx], los_vectors[global_idx])
-            d2 = dist_line_line(track_ref, track_vec, pos_vectors[global_idx + num_stations], los_vectors[global_idx + num_stations])
-            avg_dist = (d1 + d2) / 2.0
-            
-            if avg_dist > max_dist:
-                max_dist = avg_dist
-                worst_idx_in_subset = local_idx
+
+        start_dists = _dist_line_line_batch(track_ref, track_vec,
+                                            [pos_vectors[i] for i in current_prune_indices],
+                                            [los_vectors[i] for i in current_prune_indices])
+        end_dists = _dist_line_line_batch(track_ref, track_vec,
+                                          [pos_vectors[i + num_stations] for i in current_prune_indices],
+                                          [los_vectors[i + num_stations] for i in current_prune_indices])
+        avg_dists = (start_dists + end_dists) * 0.5
+        worst_idx_in_subset = int(np.argmax(avg_dists))
+        max_dist = float(avg_dists[worst_idx_in_subset])
         
         if options.get('debug_ransac', False):
             print(f"Pruning step: {len(current_prune_indices)} stations, Max Error: {max_dist:.3f} km. Dropping station index {current_prune_indices[worst_idx_in_subset]}")
@@ -1580,9 +1622,10 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
 
     # Prepare data for plotting functions
     final_track_vec = (track_end - track_start); final_track_vec /= np.linalg.norm(final_track_vec)
-    all_pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'], full_obs_data_fit['heights_m'])]
-    all_los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data_fit['altitudes'], full_obs_data_fit['azimuths'], full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'])]
-    cross_pos_all = [closest_point(pos, track_start, los, final_track_vec, return_points=True)[0] for pos, los in zip(all_pos_vectors, all_los_vectors)]
+    all_pos_vectors = np.asarray([lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'], full_obs_data_fit['heights_m'])])
+    all_los_vectors = np.asarray([altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data_fit['altitudes'], full_obs_data_fit['azimuths'], full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'])])
+    cross_pos_all, _ = _closest_points_batch(track_start, final_track_vec, all_pos_vectors, all_los_vectors, return_points=True)
+    cross_pos_all = list(cross_pos_all)
 
     plot_data = {
         'track_start': track_start, 'track_end': track_end, 'cross_pos_inliers': cross_pos_inliers,

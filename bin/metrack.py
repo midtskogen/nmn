@@ -219,12 +219,23 @@ def rotation_matrix(axis, theta):
                      [2*(bd-ac), 2*(cd+ab), aa+dd-bb-cc]])
 
 def altaz2xyz(alt_deg, az_deg, lon_deg, lat_deg):
-    v = np.array([-1., 0., 0.])
-    v = np.dot(rotation_matrix(np.array([0,1,0]), -np.radians(alt_deg)), v)
-    v = np.dot(rotation_matrix(np.array([0,0,1]), np.radians(az_deg)), v)
-    v = np.dot(rotation_matrix(np.array([0,1,0]), np.radians(lat_deg-90)), v)
-    v = np.dot(rotation_matrix(np.array([0,0,1]), -np.radians(lon_deg)), v)
-    return v
+    """Convert a local astronomical (alt, az) direction to a unit ECEF vector.
+
+    Azimuth is measured clockwise from geographic north.
+    Elevation (altitude) is the angle above the local horizon.
+    """
+    az = np.radians(az_deg)
+    el = np.radians(alt_deg)
+    # East, North, Up components of the line of sight in the local tangent frame
+    e = np.sin(az) * np.cos(el)
+    n = np.cos(az) * np.cos(el)
+    u = np.sin(el)
+    lonr = np.radians(lon_deg)
+    latr = np.radians(lat_deg)
+    x = -np.sin(lonr) * e - np.cos(lonr) * np.sin(latr) * n + np.cos(lonr) * np.cos(latr) * u
+    y =  np.cos(lonr) * e - np.sin(lonr) * np.sin(latr) * n + np.sin(lonr) * np.cos(latr) * u
+    z =  np.cos(latr) * n + np.sin(latr) * u
+    return np.array([x, y, z])
 
 def haversine(lon1, lat1, lon2, lat2):
     lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
@@ -993,6 +1004,60 @@ def chisq_of_fit(track_params, los_refs, los_vecs, weights):
     n_obs = len(weights)
     return sum((weights[i % n_obs] * dist_line_line(track_ref, track_vec, ref, vec))**2 for i, (ref, vec) in enumerate(zip(los_refs, los_vecs)))
 
+def _plane_intersection_initial_guess(pos_vectors, los_vectors, weights):
+    """Build an initial track guess from the median intersection of station planes.
+
+    Each station defines a plane through its position and its two observed sight-lines.
+    The intersection of those planes is the candidate track line.  Sign ambiguities in
+    the pairwise cross-products are resolved before averaging, and the track span is
+    set by the extreme projections of all sight-lines onto the candidate line.
+    """
+    n_obs = len(pos_vectors) // 2
+    plane_normals = [np.cross(los_vectors[i], los_vectors[i + n_obs]) for i in range(n_obs)]
+    plane_normals = [n / np.linalg.norm(n) if np.linalg.norm(n) > 0 else n for n in plane_normals]
+
+    dir_vectors, vec_weights = [], []
+    for i, j in itertools.combinations(range(n_obs), 2):
+        this_vec = np.cross(plane_normals[j], plane_normals[i])
+        norm = np.linalg.norm(this_vec)
+        if norm > 1e-9:
+            dir_vectors.append(this_vec / norm)
+            vec_weights.append(norm * weights[i] * weights[j])
+
+    if not dir_vectors:
+        return None
+
+    # Resolve sign ambiguity so that directions can be averaged meaningfully.
+    ref = dir_vectors[0]
+    for k in range(1, len(dir_vectors)):
+        if np.dot(dir_vectors[k], ref) < 0:
+            dir_vectors[k] = -dir_vectors[k]
+
+    best_fit_dir = np.average(dir_vectors, axis=0, weights=vec_weights if any(vec_weights) else None)
+    best_fit_dir /= np.linalg.norm(best_fit_dir)
+
+    # A point on the common line: least-squares intersection of the station planes.
+    A = np.vstack(plane_normals)
+    b = np.array([np.dot(plane_normals[i], pos_vectors[i]) for i in range(n_obs)])
+    start_coord, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+
+    def closest_t(p0, d, p, u):
+        w0 = p - p0
+        a = np.dot(u, u)
+        b = np.dot(u, d)
+        c = np.dot(d, d)
+        e = np.dot(u, w0)
+        f = np.dot(d, w0)
+        denom = a * c - b * b
+        return (a * f - b * e) / denom
+
+    ts = [closest_t(start_coord, best_fit_dir, pos_vectors[k], los_vectors[k]) for k in range(len(pos_vectors))]
+    t_min, t_max = min(ts), max(ts)
+    start_coord = start_coord + t_min * best_fit_dir
+    best_fit_dir = (t_max - t_min) * best_fit_dir
+    return np.concatenate([start_coord, best_fit_dir])
+
+
 def fit_track(obs_data, optimize=True):
     n_obs = len(obs_data['longitudes']) // 2
     if n_obs < 2 or len(set(zip(obs_data['latitudes'][:n_obs], obs_data['longitudes'][:n_obs]))) < 2:
@@ -1000,10 +1065,10 @@ def fit_track(obs_data, optimize=True):
 
     pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
     los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
-    
+
     plane_normals = [np.cross(los_vectors[i], los_vectors[i + n_obs]) for i in range(n_obs)]
     plane_normals = [n / np.linalg.norm(n) if np.linalg.norm(n) > 0 else n for n in plane_normals]
-    
+
     dir_vectors, vec_weights = [], []
     for i, j in itertools.combinations(range(n_obs), 2):
         this_vec = np.cross(plane_normals[j], plane_normals[i])
@@ -1015,24 +1080,26 @@ def fit_track(obs_data, optimize=True):
     fit_quality = sum(w for w in vec_weights if not np.isnan(w))
     if fit_quality < 0.02: optimize = False
 
-    if optimize:
-        start_coords = [p for i, j in itertools.combinations(range(n_obs), 2) for p in (intersec_line_plane(pos_vectors[i], los_vectors[i], pos_vectors[j], plane_normals[j]), intersec_line_plane(pos_vectors[j], los_vectors[j], pos_vectors[i], plane_normals[i])) if p is not None]
-        end_coords = [p for i, j in itertools.combinations(range(n_obs), 2) for p in (intersec_line_plane(pos_vectors[i+n_obs], los_vectors[i+n_obs], pos_vectors[j], plane_normals[j]), intersec_line_plane(pos_vectors[j+n_obs], los_vectors[j+n_obs], pos_vectors[i], plane_normals[i])) if p is not None]
-        start_coord = np.average(start_coords, axis=0) if start_coords else np.zeros(3)
-        end_coord = np.average(end_coords, axis=0) if end_coords else np.zeros(3)
-        guess_fit = end_coord - start_coord
-        best_fit_dir = np.average(dir_vectors, axis=0, weights=vec_weights if any(vec_weights) else None) if dir_vectors else guess_fit
-        if np.dot(guess_fit, best_fit_dir) < 0: best_fit_dir = -best_fit_dir
-    else:
-        start_points = [closest_point(pos_vectors[i], pos_vectors[j], los_vectors[i], los_vectors[j]) for i, j in itertools.combinations(range(n_obs), 2)]
-        end_points = [closest_point(pos_vectors[i+n_obs], pos_vectors[j+n_obs], los_vectors[i+n_obs], los_vectors[j+n_obs]) for i,j in itertools.combinations(range(n_obs), 2)]
-        start_coord, end_coord = np.mean(start_points, axis=0), np.mean(end_points, axis=0)
-        best_fit_dir = end_coord - start_coord
+    initial_params = _plane_intersection_initial_guess(pos_vectors, los_vectors, obs_data['weights'])
+    if initial_params is None:
+        # Fallback to the previous heuristic if the plane-based guess fails.
+        if optimize:
+            start_coords = [p for i, j in itertools.combinations(range(n_obs), 2) for p in (intersec_line_plane(pos_vectors[i], los_vectors[i], pos_vectors[j], plane_normals[j]), intersec_line_plane(pos_vectors[j], los_vectors[j], pos_vectors[i], plane_normals[i])) if p is not None]
+            end_coords = [p for i, j in itertools.combinations(range(n_obs), 2) for p in (intersec_line_plane(pos_vectors[i+n_obs], los_vectors[i+n_obs], pos_vectors[j], plane_normals[j]), intersec_line_plane(pos_vectors[j+n_obs], los_vectors[j+n_obs], pos_vectors[i], plane_normals[i])) if p is not None]
+            start_coord = np.average(start_coords, axis=0) if start_coords else np.zeros(3)
+            end_coord = np.average(end_coords, axis=0) if end_coords else np.zeros(3)
+            guess_fit = end_coord - start_coord
+            best_fit_dir = np.average(dir_vectors, axis=0, weights=vec_weights if any(vec_weights) else None) if dir_vectors else guess_fit
+            if np.dot(guess_fit, best_fit_dir) < 0: best_fit_dir = -best_fit_dir
+        else:
+            start_points = [closest_point(pos_vectors[i], pos_vectors[j], los_vectors[i], los_vectors[j]) for i, j in itertools.combinations(range(n_obs), 2)]
+            end_points = [closest_point(pos_vectors[i+n_obs], pos_vectors[j+n_obs], los_vectors[i+n_obs], los_vectors[j+n_obs]) for i,j in itertools.combinations(range(n_obs), 2)]
+            start_coord, end_coord = np.mean(start_points, axis=0), np.mean(end_points, axis=0)
+            best_fit_dir = end_coord - start_coord
 
-    if np.linalg.norm(best_fit_dir) < 1e-9: return None, None, [], float('inf'), fit_quality
-    best_fit_dir /= np.linalg.norm(best_fit_dir)
-    
-    initial_params = np.concatenate([start_coord, best_fit_dir])
+        if np.linalg.norm(best_fit_dir) < 1e-9: return None, None, [], float('inf'), fit_quality
+        best_fit_dir /= np.linalg.norm(best_fit_dir)
+        initial_params = np.concatenate([start_coord, best_fit_dir])
     if optimize and 'scipy' in AVAILABLE_LIBS:
         final_params, _, _, _, _, flag = fmin_powell(chisq_of_fit, initial_params, args=(pos_vectors, los_vectors, obs_data['weights']), disp=False, full_output=True)
         if flag != 0: final_params = initial_params
@@ -1375,6 +1442,8 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
         - MetrackInfo object with the summary of the fit.
         - A dictionary with data required for plotting.
     """
+    if kwargs.pop('hybrid', False):
+        return calculate_trajectory_hybrid(inname, **kwargs)
     options = kwargs.copy()
     raw_data, full_obs_data, borders = _load_and_prepare_data(inname)
     if not raw_data:
@@ -1454,6 +1523,71 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
     return info, plot_data
 
 
+def _is_implausible_info(info: MetrackInfo) -> bool:
+    """Quick physical-plausibility check for a fitted trajectory."""
+    if info is None or info.start_height == 0:
+        return True
+    if (info.error > 100 or info.start_height <= 0 or info.end_height <= 0 or
+        info.start_height > 200 or info.end_height > 200 or
+        info.speed < 8 or info.speed > 100):
+        return True
+    return False
+
+
+def _info_score(info: MetrackInfo) -> float:
+    """Lower is better. Penalises implausible results heavily."""
+    if _is_implausible_info(info):
+        return 1e12
+    return (info.error + 1.0) / (info.fit_quality + 1e-9)
+
+
+def _better_solution(info_a: MetrackInfo, info_b: MetrackInfo) -> bool:
+    """Returns True if solution a is preferable to solution b."""
+    impl_a = _is_implausible_info(info_a)
+    impl_b = _is_implausible_info(info_b)
+    if impl_a and not impl_b:
+        return False
+    if impl_b and not impl_a:
+        return True
+    return _info_score(info_a) < _info_score(info_b)
+
+
+def calculate_trajectory_hybrid(inname: str, **kwargs):
+    """
+    Runs the trajectory fit with the corrected altaz2xyz and two different
+    initial-guess strategies, then returns the more plausible solution.
+
+    - Branch A: robust plane-intersection initial guess (the default).
+    - Branch B: old heuristic initial guess (robust initial guess disabled).
+
+    The legacy branch is always run without RANSAC so the comparison stays
+    fast and matches the historical non-robust behaviour.
+    """
+    # Robust initial-guess solution (current default).
+    info_robust, plot_robust = calculate_trajectory(inname, **kwargs)
+
+    # Heuristic initial-guess solution: keep the corrected altaz2xyz but fall back
+    # to the older heuristic initial guess used before _plane_intersection_initial_guess.
+    saved_initial_guess = globals()['_plane_intersection_initial_guess']
+    globals()['_plane_intersection_initial_guess'] = lambda *args, **kwargs: None
+    try:
+        heuristic_kwargs = kwargs.copy()
+        heuristic_kwargs['use_ransac'] = False
+        info_heuristic, plot_heuristic = calculate_trajectory(inname, **heuristic_kwargs)
+    finally:
+        globals()['_plane_intersection_initial_guess'] = saved_initial_guess
+
+    # If one of the two failed outright, return the other.
+    if info_heuristic is None or plot_heuristic is None or info_heuristic.start_height == 0:
+        return info_robust, plot_robust
+    if info_robust is None or plot_robust is None or info_robust.start_height == 0:
+        return info_heuristic, plot_heuristic
+
+    if _better_solution(info_robust, info_heuristic):
+        return info_robust, plot_robust
+    return info_heuristic, plot_heuristic
+
+
 def generate_plots(info: MetrackInfo, plot_data: Dict[str, Any], options: Dict[str, Any],
                    translations: Optional[Dict[str, Any]] = None, output_prefix: str = ''):
     """
@@ -1526,6 +1660,8 @@ def main():
     parser.add_argument('--no-opt', action='store_false', dest='optimize', default=True, help="Turn off optimization.")
     parser.add_argument('--no-write-stat', action='store_false', dest='writestat', default=True, help="Do not write a .stat file.")
     parser.add_argument('--no-ransac', action='store_false', dest='use_ransac', default=True, help="Disable RANSAC robust fitting.")
+    parser.add_argument('--hybrid', action='store_true', dest='hybrid', default=True, help="Run both initial-guess strategies and keep the more plausible solution (default on).")
+    parser.add_argument('--no-hybrid', action='store_false', dest='hybrid', help="Disable hybrid fitting; use only the robust initial guess.")
     parser.add_argument('--ransac-threshold', type=float, default=1.0, help="RANSAC inlier distance threshold in km.")
     parser.add_argument('--ransac-iterations', type=int, default=10, help="Number of RANSAC iterations per run.")
     parser.add_argument('--ransac-runs', type=int, default=100, help="Number of independent RANSAC runs.")

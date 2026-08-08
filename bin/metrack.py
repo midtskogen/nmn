@@ -1000,9 +1000,36 @@ document.addEventListener("DOMContentLoaded", function () {{
     print(f"Interactive 3D plot saved to {filename}")
 
 def chisq_of_fit(track_params, los_refs, los_vecs, weights):
-    track_ref, track_vec = track_params[:3], track_params[3:]
-    n_obs = len(weights)
-    return sum((weights[i % n_obs] * dist_line_line(track_ref, track_vec, ref, vec))**2 for i, (ref, vec) in enumerate(zip(los_refs, los_vecs)))
+    """Vectorised weighted sum of squared line-to-line distances."""
+    track_ref = np.asarray(track_params[:3])
+    track_vec = np.asarray(track_params[3:])
+    refs = np.asarray(los_refs)
+    vecs = np.asarray(los_vecs)
+    w = np.asarray(weights)
+
+    u1u1 = float(np.dot(track_vec, track_vec))
+    u1u2 = vecs @ track_vec
+    u2u2 = np.einsum('ij,ij->i', vecs, vecs)
+    p2_p1 = refs - track_ref
+    b0 = p2_p1 @ track_vec                # U1 . (P2 - P1)
+    b1 = np.einsum('ij,ij->i', vecs, p2_p1)  # U2 . (P2 - P1)
+
+    denom = u1u1 * u2u2 - u1u2 * u1u2
+    # For near-parallel lines, fall back to the cross-product distance per element.
+    parallel = np.abs(denom) < 1e-18
+    safe = ~parallel
+    s = np.empty_like(denom)
+    t = np.empty_like(denom)
+    s[safe] = (u2u2[safe] * b0[safe] - u1u2[safe] * b1[safe]) / denom[safe]
+    t[safe] = (u1u2[safe] * b0[safe] - u1u1 * b1[safe]) / denom[safe]
+    s[parallel] = 0.0
+    t[parallel] = 0.0
+
+    d = (track_ref + s[:, None] * track_vec) - (refs + t[:, None] * vecs)
+    dist2 = np.einsum('ij,ij->i', d, d)
+    cross_dist2 = np.einsum('ij,ij->i', np.cross(track_vec, p2_p1), np.cross(track_vec, p2_p1)) / (u1u1 + 1e-30)
+    dist2 = np.where(parallel, cross_dist2, dist2)
+    return float(np.sum((w * w) * dist2))
 
 def _plane_intersection_initial_guess(pos_vectors, los_vectors, weights):
     """Build an initial track guess from the median intersection of station planes.
@@ -1040,6 +1067,12 @@ def _plane_intersection_initial_guess(pos_vectors, los_vectors, weights):
     A = np.vstack(plane_normals)
     b = np.array([np.dot(plane_normals[i], pos_vectors[i]) for i in range(n_obs)])
     start_coord, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+
+    # If the plane intersection is far outside the atmosphere or underground, the
+    # least-squares estimate is unreliable; fall back to the heuristic initial guess.
+    r = np.linalg.norm(start_coord)
+    if r < EARTH_RADIUS_KM - 100 or r > EARTH_RADIUS_KM + 500:
+        return None
 
     def closest_t(p0, d, p, u):
         w0 = p - p0
@@ -1174,27 +1207,27 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     2. Iterative Outlier Removal (good for small N with one or two bad stations).
     It compares the results of both strategies and picks the best one.
     """
-    random.seed(options['seed'])
+    random.seed(options.get('seed', 0))
     num_stations = len(raw_data['names'])
     weights = raw_data['weight'] # Access weights directly
 
     if num_stations < 3:
-        if options['debug_ransac']: print("Not enough stations for robust fit (< 3), using simple fit.")
-        return fit_track(obs_data, optimize=options['optimize']), obs_data, list(range(num_stations))
+        if options.get('debug_ransac', False): print("Not enough stations for robust fit (< 3), using simple fit.")
+        return fit_track(obs_data, optimize=options.get('optimize', True)), obs_data, list(range(num_stations))
 
     pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
     los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
 
-    if options['debug_ransac']: print("--- RANSAC Debugging Enabled (Hybrid Mode: RANSAC + Iterative Pruning) ---")
+    if options.get('debug_ransac', False): print("--- RANSAC Debugging Enabled (Hybrid Mode: RANSAC + Iterative Pruning) ---")
     candidate_sets = set()
 
     # --- Strategy A: RANSAC ---
-    for run in range(options['ransac_runs']):
+    for run in range(options.get('ransac_runs', 30)):
         best_inlier_indices_this_run = set()
         best_weight_sum_this_run = -1.0
         best_fit_error_this_run = float('inf')
         
-        for i in range(options['ransac_iterations']):
+        for i in range(options.get('ransac_iterations', 10)):
             for _retry in range(num_stations * num_stations + 10):
                 sample_indices = random.sample(range(num_stations), 2)
                 loc1 = (raw_data['latitudes'][sample_indices[0]], raw_data['longitudes'][sample_indices[0]])
@@ -1214,7 +1247,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
                 if j in sample_indices: continue
                 # Distance from station sight lines to the trial track
                 dist = (dist_line_line(track_ref, track_vec, pos_vectors[j], los_vectors[j]) + dist_line_line(track_ref, track_vec, pos_vectors[j + num_stations], los_vectors[j + num_stations])) / 2.0
-                if dist < options['ransac_threshold']: current_inlier_indices.add(j)
+                if dist < options.get('ransac_threshold', 1.0): current_inlier_indices.add(j)
             
             current_weight_sum = sum(weights[idx] for idx in current_inlier_indices)
 
@@ -1230,7 +1263,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
 
     # --- Strategy B: Iterative Outlier Removal (Greedy Pruning) ---
     # Start with ALL stations. Fit. Find worst residual. Drop it. Repeat.
-    if options['debug_ransac']: print("--- Starting Iterative Pruning Strategy ---")
+    if options.get('debug_ransac', False): print("--- Starting Iterative Pruning Strategy ---")
     current_prune_indices = list(range(num_stations))
     
     # We will try to prune down to at least 2 stations
@@ -1261,14 +1294,14 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
                 max_dist = avg_dist
                 worst_idx_in_subset = local_idx
         
-        if options['debug_ransac']:
+        if options.get('debug_ransac', False):
             print(f"Pruning step: {len(current_prune_indices)} stations, Max Error: {max_dist:.3f} km. Dropping station index {current_prune_indices[worst_idx_in_subset]}")
 
         # Remove the worst station
         current_prune_indices.pop(worst_idx_in_subset)
 
     # --- Evaluation: Compare all candidates (RANSAC & Pruning) ---
-    if options['debug_ransac']: print(f"\nEvaluating {len(candidate_sets)} candidate sets from RANSAC and Pruning...")
+    if options.get('debug_ransac', False): print(f"\nEvaluating {len(candidate_sets)} candidate sets from RANSAC and Pruning...")
     
     best_final_model, best_final_model_score = None, (0, float('inf'))
     
@@ -1279,7 +1312,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         
         current_score, total_weight = calculate_model_score(fit_results, inlier_obs_data, weights, indices_set, options)
 
-        if options['debug_ransac']:
+        if options.get('debug_ransac', False):
             inlier_names = sorted([raw_data['names'][i] for i in indices_set])
             print(f"Candidate {k+1}: weight={total_weight:.1f}, inliers={len(indices_set)}, final_err={fit_results[3]:.2f}, score={current_score[1]:.2f} -> {inlier_names}")
 
@@ -1294,7 +1327,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     final_fit_results, final_obs_data, final_inlier_indices = best_final_model
     unique_inlier_names = {raw_data['names'][i] for i in final_inlier_indices}
     
-    if options['debug_ransac']:
+    if options.get('debug_ransac', False):
         print(f"\nWinner: Weight {sum(weights[i] for i in final_inlier_indices):.1f}, Score {best_final_model_score[1]:.2f}, Stations: {sorted(list(unique_inlier_names))}")
 
     print(f"Final robust solution uses {len(final_inlier_indices)} observations (Weight: {sum(weights[i] for i in final_inlier_indices):.1f}) from {len(unique_inlier_names)} unique stations.")
@@ -1664,7 +1697,7 @@ def main():
     parser.add_argument('--no-hybrid', action='store_false', dest='hybrid', help="Disable hybrid fitting; use only the robust initial guess.")
     parser.add_argument('--ransac-threshold', type=float, default=1.0, help="RANSAC inlier distance threshold in km.")
     parser.add_argument('--ransac-iterations', type=int, default=10, help="Number of RANSAC iterations per run.")
-    parser.add_argument('--ransac-runs', type=int, default=100, help="Number of independent RANSAC runs.")
+    parser.add_argument('--ransac-runs', type=int, default=30, help="Number of independent RANSAC runs.")
     parser.add_argument('--all-in-tolerance', type=float, default=1.0, help="Error tolerance to accept a fit with all stations.")
     parser.add_argument('--seed', type=int, default=0, help="Random seed for RANSAC.")
     parser.add_argument('--debug-ransac', action='store_true', help="Enable RANSAC debug prints.")

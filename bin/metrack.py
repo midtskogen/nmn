@@ -595,20 +595,24 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     
     # --- Helper functions for color sorting and image generation ---
     def rgb_to_lab(rgb):
-        r, g, b = [x / 255.0 for x in rgb]
-        r = ((r + 0.055) / 1.055)**2.4 if r > 0.04045 else r / 12.92
-        g = ((g + 0.055) / 1.055)**2.4 if g > 0.04045 else g / 12.92
-        b = ((b + 0.055) / 1.055)**2.4 if b > 0.04045 else b / 12.92
+        rgb = np.asarray(rgb, dtype=np.float64)
+        r = rgb[..., 0] / 255.0
+        g = rgb[..., 1] / 255.0
+        b = rgb[..., 2] / 255.0
+        r = np.where(r > 0.04045, ((r + 0.055) / 1.055) ** 2.4, r / 12.92)
+        g = np.where(g > 0.04045, ((g + 0.055) / 1.055) ** 2.4, g / 12.92)
+        b = np.where(b > 0.04045, ((b + 0.055) / 1.055) ** 2.4, b / 12.92)
         r, g, b = r * 100, g * 100, b * 100
         x = r * 0.4124 + g * 0.3576 + b * 0.1805
         y = r * 0.2126 + g * 0.7152 + b * 0.0722
         z = r * 0.0193 + g * 0.1192 + b * 0.9505
         ref_x, ref_y, ref_z = 95.047, 100.0, 108.883
-        x /= ref_x; y /= ref_y; z /= ref_z
-        x = x**(1/3) if x > 0.008856 else (7.787 * x) + (16/116)
-        y = y**(1/3) if y > 0.008856 else (7.787 * y) + (16/116)
-        z = z**(1/3) if z > 0.008856 else (7.787 * z) + (16/116)
-        return (116 * y) - 16, 500 * (x - y), 200 * (y - z)
+        x, y, z = x / ref_x, y / ref_y, z / ref_z
+        x = np.where(x > 0.008856, x ** (1 / 3), 7.787 * x + 16 / 116)
+        y = np.where(y > 0.008856, y ** (1 / 3), 7.787 * y + 16 / 116)
+        z = np.where(z > 0.008856, z ** (1 / 3), 7.787 * z + 16 / 116)
+        lab = np.stack(((116 * y) - 16, 500 * (x - y), 200 * (y - z)), axis=-1)
+        return lab
 
     def sort_palette_by_luminance(palette_rgb):
         if not palette_rgb: return [], {}
@@ -687,40 +691,20 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     quant_16 = img.quantize(colors=16, method=Image.Quantize.MEDIANCUT)
     raw_palette_16 = quant_16.getpalette()
     palette_16_rgb = [tuple(raw_palette_16[i:i+3]) for i in range(0, len(raw_palette_16), 3)]
-    
-    sorted_palette_16, _ = sort_palette_by_luminance(palette_16_rgb)
-    
-    r_ch, g_ch, b_ch = zip(*sorted_palette_16)
-    x_old = np.linspace(0, 1, len(sorted_palette_16))
-    x_new = np.linspace(0, 1, 256)
-    r_new = np.interp(x_new, x_old, r_ch)
-    g_new = np.interp(x_new, x_old, g_ch)
-    b_new = np.interp(x_new, x_old, b_ch)
-    smoothed_palette_256 = list(zip(np.round(r_new).astype(np.uint8), np.round(g_new).astype(np.uint8), np.round(b_new).astype(np.uint8)))
 
-    if 'scipy' in AVAILABLE_LIBS:
-        palette_lab = np.array([rgb_to_lab(c) for c in smoothed_palette_256])
-        image_pixels = np.array(img)
-        h, w, _ = image_pixels.shape
-        pixels_flat = image_pixels.reshape(-1, 3)
-        pixels_lab = np.array([rgb_to_lab(p) for p in pixels_flat])
-        
-        tree = cKDTree(palette_lab)
-        _, indices = tree.query(pixels_lab)
-        
-        remapped_indexed_array = indices.reshape(h, w)
-    else:
-        print("Warning: Scipy not found. Falling back to simpler color mapping. Run 'pip install scipy' for best results.")
-        quant_256 = img.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
-        remapped_indexed_array = np.array(quant_256)
-        raw_palette_256 = quant_256.getpalette()
-        smoothed_palette_256 = [tuple(raw_palette_256[i:i+3]) for i in range(0, len(raw_palette_256), 3)]
+    sorted_palette_16, old_to_new_map = sort_palette_by_luminance(palette_16_rgb)
 
-    remapped_indexed_array = np.flipud(remapped_indexed_array)
-    
+    # Assign every pixel to its sorted palette index with a small lookup table.
+    indexed = np.array(quant_16)
+    lut = np.zeros(256, dtype=np.uint8)
+    for old_idx, new_idx in old_to_new_map.items():
+        lut[old_idx] = new_idx
+    remapped_indexed_array = np.flipud(lut[indexed])
+
     custom_colorscale = []
-    for i, (r,g,b) in enumerate(smoothed_palette_256):
-        norm_val = i / 255.0
+    n_cols = max(1, len(sorted_palette_16) - 1)
+    for i, (r, g, b) in enumerate(sorted_palette_16):
+        norm_val = i / n_cols
         custom_colorscale.append([norm_val, f'rgb({r},{g},{b})'])
     
     height, width = remapped_indexed_array.shape
@@ -729,7 +713,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         y=np.linspace(y_min_m / 1000.0, y_max_m / 1000.0, height),
         z=np.zeros((height, width)),
         surfacecolor=remapped_indexed_array,
-        cmin=0, cmax=255,
+        cmin=0, cmax=n_cols,
         colorscale=custom_colorscale,
         showscale=False, hoverinfo='none'
     ))

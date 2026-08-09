@@ -28,6 +28,7 @@ import math
 import pto_mapper
 import errno
 import datetime
+import time
 
 # Used for NFS/cross-device safe moves (avoid shutil.move() metadata/copy2 pitfalls).
 
@@ -82,6 +83,16 @@ except ImportError as e:
 # --- Script Constants ---
 OVERLAY_OPACITY = 0.40
 BIN_DIR = Path(__file__).parent.resolve()
+
+# Several ffmpeg encodes (orig/grid/gnomonic/gnomonic-grid + HEVC transcode) run
+# concurrently via ThreadPoolExecutor. Left at its default, libx264 spawns a
+# thread count based on all available cores per-process, causing severe
+# oversubscription (e.g. ~100 threads per encode on a 48-core box) when several
+# run at once. Cap each encode's thread count so total demand stays reasonable.
+try:
+    _FFMPEG_THREADS = int(os.environ.get('NMN_FFMPEG_THREADS', max(1, (os.cpu_count() or 8) // 6)))
+except Exception:
+    _FFMPEG_THREADS = 4
 
 # Used to report az/alt endpoints even if the video pipeline fails.
 LAST_AZALT_COORDS = None
@@ -626,7 +637,8 @@ def overlay_video_with_image(video_path, overlay_path, output_path, verbose=Fals
     print(f"-> {description}...")
     if verbose:
         print(f"   Video Input: {video_path}, Overlay Input: {overlay_path}")
-    
+
+    _t0 = time.perf_counter()
     try:
         input_video = ffmpeg.input(video_path)
         overlay_image = ffmpeg.input(overlay_path)
@@ -634,11 +646,11 @@ def overlay_video_with_image(video_path, overlay_path, output_path, verbose=Fals
         (
             ffmpeg
             .overlay(input_video, overlay_image)
-            .output(output_path, vcodec='libx264', preset='fast')
+            .output(output_path, vcodec='libx264', preset='fast', threads=_FFMPEG_THREADS)
             .overwrite_output()
             .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
         )
-        print(f"   ...Done: {description}.")
+        print(f"   ...Done: {description}. [{time.perf_counter() - _t0:.2f}s]")
     except ffmpeg.Error as e:
         print("\n--- ERROR during ffmpeg-python execution ---", file=sys.stderr)
         print(f"FFmpeg stderr:\n{e.stderr.decode('utf8')}", file=sys.stderr)
@@ -682,7 +694,7 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
                 (
                     ffmpeg
                     .input(str(hevc_file_path))
-                    .output(str(video_file), vcodec='libx264', crf=23, preset='medium')
+                    .output(str(video_file), vcodec='libx264', crf=23, preset='medium', threads=_FFMPEG_THREADS)
                     .overwrite_output()
                     .run(quiet=(not verbose), capture_stdout=True, capture_stderr=True)
                 )
@@ -874,7 +886,8 @@ def run_command(command, description, verbose=False):
     """Executes a shell command with progress indication and error handling."""
     if not verbose:
         print(f"-> {description}...")
-    
+
+    _t0 = time.perf_counter()
     do_capture = not verbose
     try:
         stdout_dest = subprocess.PIPE if do_capture else None
@@ -890,7 +903,9 @@ def run_command(command, description, verbose=False):
         )
 
         if not verbose:
-            print(f"   ...Done: {description}.")
+            print(f"   ...Done: {description}. [{time.perf_counter() - _t0:.2f}s]")
+        elif os.environ.get('NMN_TIMING'):
+            print(f"   [TIMING] {description}: {time.perf_counter() - _t0:.2f}s")
         return result
     except subprocess.CalledProcessError as e:
         print(f"\n--- ERROR executing external command ---\nCommand failed: {command}", file=sys.stderr)
@@ -1818,7 +1833,10 @@ if __name__ == "__main__":
     if args.client and (args.video_dir is None or args.start is None or args.length is None):
         parser.error("--client mode requires --video-dir, --start, and --length.")
 
-    os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
+    # Several CPU-bound subprocesses (drawgrid.py, stack.py, meteorcrop.py, ffmpeg)
+    # run concurrently. Letting each spawn OMP threads for the full core count
+    # causes severe oversubscription; cap it to a modest per-process value instead.
+    os.environ.setdefault('OMP_NUM_THREADS', str(_FFMPEG_THREADS))
     lockfile = Path("makevideos.lock")
 
     if lockfile.exists():

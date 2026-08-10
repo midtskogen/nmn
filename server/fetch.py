@@ -279,8 +279,15 @@ _LOC_DIR_CANDIDATES = [
 ]
 LOC_DIR = next((p for p in _LOC_DIR_CANDIDATES if p.is_dir()), _LOC_DIR_CANDIDATES[0])
 
+# Cache loaded translations so repeated calls in the same process do not re-read JSON.
+_TRANSLATION_CACHE: dict[str, dict] = {}
+
 def load_translations(lang_code: str) -> dict:
     """Loads the translation dictionary for a given language, with fallback to default."""
+    cached = _TRANSLATION_CACHE.get(lang_code)
+    if cached is not None:
+        return cached
+
     default_path = LOC_DIR / f"{DEFAULT_LANG}.json"
     lang_path = LOC_DIR / f"{lang_code}.json"
 
@@ -298,8 +305,55 @@ def load_translations(lang_code: str) -> dict:
                 translations.update(json.load(f))
             except json.JSONDecodeError as e:
                 logging.error(f"Error parsing language file {lang_path}: {e}")
-            
+
+    _TRANSLATION_CACHE[lang_code] = translations
     return translations
+
+
+def _make_template_translations(translations: dict, prefix: str = '') -> dict:
+    """Return a translations dict where every leaf string is a placeholder token.
+
+    Plot geometry is language-independent; only text changes. Rendering a plot
+    once with placeholder tokens lets us create language-specific outputs later
+    by string substitution instead of re-executing matplotlib/cartopy/SPICE.
+    """
+    template = {}
+    for key, value in translations.items():
+        path = f"{prefix}_{key}" if prefix else key
+        if isinstance(value, dict):
+            template[key] = _make_template_translations(value, path)
+        elif isinstance(value, str):
+            template[key] = f"NMN_I18N_{path.upper()}__"
+        else:
+            template[key] = value
+    return template
+
+
+def _collect_leaf_translations(translations: dict, prefix: str = '', out: dict = None) -> dict:
+    """Flatten a nested translations dict into {placeholder_token: real_string}."""
+    if out is None:
+        out = {}
+    for key, value in translations.items():
+        path = f"{prefix}_{key}" if prefix else key
+        if isinstance(value, dict):
+            _collect_leaf_translations(value, path, out)
+        elif isinstance(value, str):
+            out[f"NMN_I18N_{path.upper()}__"] = value
+    return out
+
+
+def _apply_translations_to_text(text: str, translation_map: dict, is_html: bool = False) -> str:
+    """Replace placeholder tokens in text with translated strings.
+
+    For HTML/JSON files the quoted-token form is replaced first with a
+    json.dumps() representation so embedded quotes remain valid. The raw token
+    form is then replaced for SVG text elements or plain text.
+    """
+    for token, value in translation_map.items():
+        if is_html:
+            text = text.replace(f'"{token}"', json.dumps(value))
+        text = text.replace(token, value)
+    return text
 
 
 def load_station_display_names() -> dict:
@@ -1577,27 +1631,68 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     if orbit_data:
                         orbit_data_by_lang[lang] = orbit_data
     
-    # Run orbit plots sequentially in main process (avoids SPICE lock contention)
+    # Run orbit plots sequentially in main process (avoids SPICE lock contention).
+    # The orbit geometry is language-independent, so render once with placeholder
+    # tokens and substitute translated strings for each language. This avoids
+    # re-executing SPICE for every language.
     if is_multistation and analysis_results and plot_data:
         res_filename = plot_data['resdat']
         date_str = plot_data['date_str']
         time_str = plot_data['time_str']
-        for lang in SUPPORTED_LANGS:
+        template_translations = _make_template_translations(load_translations(DEFAULT_LANG))
+
+        template_orbit_data = orbit_data_by_lang.get(DEFAULT_LANG, plot_data['orbit'])
+        if template_orbit_data.get('valid'):
+            logging.info("Generating orbit plot template")
             try:
-                translations = load_translations(lang)
-                file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-                current_orbit_data = orbit_data_by_lang.get(lang, {'valid': False})
-                if current_orbit_data.get('valid'):
-                    logging.info(f"Generating orbit plot for language: [{lang}]")
-                    orbit(True, current_orbit_data['entry_speed'], 0, res_filename,
-                          date_str, time_str, 'save',
-                          interactive=True, translations=translations, output_prefix=file_prefix)
-                    # Convert orbit SVG to JPG
-                    svg_path = event_dir / f"{file_prefix}orbit.svg"
-                    if svg_path.exists():
-                        svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_ORBIT_DPI)
+                orbit(True, template_orbit_data['entry_speed'], 0, res_filename,
+                      date_str, time_str, 'save',
+                      interactive=True, translations=template_translations,
+                      output_prefix='_template_orbit_')
             except Exception as e:
-                logging.warning(f"Failed to generate orbit plot for {lang}: {e}")
+                logging.warning(f"Failed to generate orbit plot template: {e}")
+
+            template_svg = event_dir / '_template_orbit_orbit.svg'
+            template_html = event_dir / '_template_orbit_orbit.html'
+
+            for lang in SUPPORTED_LANGS:
+                try:
+                    translations = load_translations(lang)
+                    file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                    current_orbit_data = orbit_data_by_lang.get(lang, {'valid': False})
+                    if not current_orbit_data.get('valid'):
+                        continue
+
+                    logging.info(f"Generating orbit plot for language: [{lang}]")
+                    lang_map = _collect_leaf_translations(translations)
+
+                    svg_path = event_dir / f"{file_prefix}orbit.svg"
+                    if template_svg.exists():
+                        svg_text = template_svg.read_text(encoding='utf-8')
+                        svg_path.write_text(
+                            _apply_translations_to_text(svg_text, lang_map, is_html=False),
+                            encoding='utf-8'
+                        )
+                        svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), Config.SVG_ORBIT_DPI)
+
+                    html_path = event_dir / f"{file_prefix}orbit.html"
+                    if template_html.exists():
+                        html_text = template_html.read_text(encoding='utf-8')
+                        html_path.write_text(
+                            _apply_translations_to_text(html_text, lang_map, is_html=True),
+                            encoding='utf-8'
+                        )
+                except Exception as e:
+                    logging.warning(f"Failed to generate orbit plot for {lang}: {e}")
+
+            # Clean up the temporary language-independent template files.
+            try:
+                if template_svg.exists():
+                    template_svg.unlink()
+                if template_html.exists():
+                    template_html.unlink()
+            except Exception as e:
+                logging.warning(f"Could not remove orbit template files: {e}")
     
     # Generate triangulation HTML reports sequentially (needs resdat which isn't picklable)
     if is_multistation and analysis_results and plot_data:

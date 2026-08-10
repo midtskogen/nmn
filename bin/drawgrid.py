@@ -4,6 +4,11 @@
 # Makes a file grid.png from a .pto file
 # Result usage example: composite -blend 40 meteor-20141010.jpg grid.png x.jpg
 
+# Increment this whenever the grid-generation logic changes materially, so
+# existing cached grids are invalidated.
+_GRID_CACHE_VERSION = '1'
+_BASE_GRID_CACHE_VERSION = '1'
+
 import pto_mapper
 import ephem
 import math
@@ -12,9 +17,11 @@ import wand.image
 import wand.drawing
 import wand.color
 import configparser
+import hashlib
 import json
 import os
 import re
+import shutil
 from datetime import datetime, UTC
 import time as _time
 from brightstar import brightstar
@@ -111,6 +118,80 @@ def main():
     parser.add_argument(action='store', dest='infile', help='input .pto file')
     parser.add_argument(action='store', dest='outfile', help='output grid file (default "grid.png")', default="grid.png", nargs='?')
     args = parser.parse_args()
+
+    # --- Grid output cache ----------------------------------------------------
+    # drawgrid.py is expensive (~6-14s) and many invocations repeat for the same
+    # PTO, timestamp, magnitude limit and config. Cache the rendered PNG keyed
+    # by all inputs that affect the output.
+    def _grid_cache_key(args):
+        parts = [
+            _GRID_CACHE_VERSION.encode(),
+            Path(args.infile).read_bytes(),
+            Path(args.config).read_bytes() if args.config else b'',
+            str(args.timestamp).encode(),
+            str(args.faintest).encode(),
+            str(args.brightest).encode(),
+            str(args.objects).encode(),
+            str(args.label_spacing).encode(),
+            str(args.image).encode(),
+            str(args.width).encode(),
+            str(args.height).encode(),
+            str(args.xscale).encode(),
+            str(args.yscale).encode(),
+            str(args.radec).encode(),
+            str(args.nopos).encode(),
+            str(args.refract).encode(),
+            str(args.panorama).encode(),
+            str(args.verbose).encode(),
+            str(args.base_image).encode(),
+            str(args.annotations_only).encode(),
+        ]
+        h = hashlib.sha256()
+        for p in parts:
+            h.update(p)
+            h.update(b'\x00')
+        return h.hexdigest()
+
+    def _base_grid_cache_key(args):
+        # Base grid (coordinate lines and their static labels) depends on the
+        # projection geometry, not on the timestamp — except in RA/Dec mode,
+        # where the RA/Dec grid rotates with the sky and therefore with time.
+        parts = [
+            _BASE_GRID_CACHE_VERSION.encode(),
+            Path(args.infile).read_bytes(),
+            Path(args.config).read_bytes() if args.config else b'',
+            str(args.radec).encode(),
+            str(args.timestamp).encode() if args.radec else b'',
+            str(args.refract).encode(),
+            str(args.panorama).encode(),
+            str(args.label_spacing).encode(),
+            str(args.image).encode(),
+            str(args.width).encode(),
+            str(args.height).encode(),
+            str(args.xscale).encode(),
+            str(args.yscale).encode(),
+        ]
+        h = hashlib.sha256()
+        for p in parts:
+            h.update(p)
+            h.update(b'\x00')
+        return h.hexdigest()
+
+    _cache_dir = Path(os.environ.get('NMN_GRID_CACHE_DIR', '/tmp/nmn_grid_cache'))
+    _cache_key = _grid_cache_key(args)
+    _cache_png = _cache_dir / f"{_cache_key[:32]}.png"
+    _cache_meta = _cache_dir / f"{_cache_key[:32]}.json"
+
+    _base_grid_key = _base_grid_cache_key(args)
+    _base_grid_cache_png = _cache_dir / f"base_{_base_grid_key[:32]}.png"
+    _base_grid_cache_meta = _cache_dir / f"base_{_base_grid_key[:32]}.json"
+
+    if _cache_png.exists() and _cache_meta.exists():
+        try:
+            shutil.copyfile(_cache_png, args.outfile)
+            return
+        except Exception:
+            pass  # fall through to recompute on any copy error
 
     # Load PTO data using the new parser
     pto_data = pto_mapper.parse_pto_file(args.infile)
@@ -555,6 +636,18 @@ def main():
     else:
         image = wand.image.Image(width=int(round(width * args.xscale)), height=int(round(height * args.yscale)), background=wand.color.Color('transparent'))
 
+    # Try to load a cached base grid (coordinate lines + static labels) so we
+    # don't rasterize it again for the same station/projection. This is safe
+    # because base-grid geometry does not depend on the timestamp in Az/Alt mode.
+    _base_grid_loaded = False
+    if not args.base_image and not args.annotations_only:
+        if _base_grid_cache_png.exists() and _base_grid_cache_meta.exists():
+            try:
+                image = wand.image.Image(filename=str(_base_grid_cache_png))
+                _base_grid_loaded = True
+            except Exception:
+                pass
+
     def writetext(draw, text, x, y, angle, alignment):
         if x < 0 or y < 0:
             return
@@ -568,8 +661,9 @@ def main():
         draw.rotate(-angle)
         draw.translate(-x-offset, -y+offset)
 
-    with wand.drawing.Drawing() as draw:
-        if not args.base_image and not args.annotations_only:
+    # --- Draw base grid (lines + static coordinate labels) --------------------
+    if not args.base_image and not args.annotations_only and not _base_grid_loaded:
+        with wand.drawing.Drawing() as draw:
             draw.fill_color = wand.color.Color('none')
             draw.stroke_color = wand.color.Color('grey50')
             draw.stroke_opacity = 0.5
@@ -588,6 +682,27 @@ def main():
             for text, angle, x, y, alignment in textlist:
                 writetext(draw, text, x, y, angle, alignment)
 
+            draw(image)
+
+        # Cache the rendered base grid for future timestamps at this station.
+        try:
+            _cache_dir.mkdir(parents=True, exist_ok=True)
+            _tmp_base_png = _base_grid_cache_png.with_suffix('.tmp.png')
+            image.save(filename=str(_tmp_base_png))
+            os.replace(_tmp_base_png, _base_grid_cache_png)
+            _tmp_base_meta = _base_grid_cache_meta.with_suffix('.tmp.json')
+            with open(_tmp_base_meta, 'w') as _f:
+                json.dump({
+                    'infile': str(args.infile),
+                    'cache_version': _BASE_GRID_CACHE_VERSION,
+                    'radec': args.radec,
+                }, _f)
+            os.replace(_tmp_base_meta, _base_grid_cache_meta)
+        except Exception:
+            pass
+
+    # --- Draw star annotations (timestamp-dependent) --------------------------
+    with wand.drawing.Drawing() as draw:
         if pos.date and pos.lat and pos.long and args.timestamp:
             stars = brightstar(pto_data, pos, args.faintest, args.brightest, args.objects)
 
@@ -790,6 +905,38 @@ def main():
 
         image.format = 'png'
         image.save(filename=args.outfile)
+
+    # Save a copy of the rendered grid to the cache for future reuse. Atomic
+    # write-into-place to avoid partially-written cache files under concurrency.
+    try:
+        _cache_dir.mkdir(parents=True, exist_ok=True)
+        _tmp_png = _cache_png.with_suffix('.tmp.png')
+        shutil.copyfile(args.outfile, _tmp_png)
+        os.replace(_tmp_png, _cache_png)
+        _tmp_meta = _cache_meta.with_suffix('.tmp.json')
+        with open(_tmp_meta, 'w') as _f:
+            json.dump({
+                'infile': str(args.infile),
+                'outfile': str(args.outfile),
+                'timestamp': args.timestamp,
+                'faintest': args.faintest,
+                'cache_version': _GRID_CACHE_VERSION,
+            }, _f)
+        os.replace(_tmp_meta, _cache_meta)
+
+        # Light pruning: keep at most 200 cached grids so /tmp doesn't grow
+        # indefinitely on a long-lived server.
+        _png_entries = sorted(_cache_dir.glob('*.png'),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+        if len(_png_entries) > 200:
+            for _old in _png_entries[200:]:
+                try:
+                    _old.unlink()
+                    _old.with_suffix('.json').unlink(missing_ok=True)
+                except OSError:
+                    pass
+    except Exception:
+        pass
 
 if __name__ == '__main__':
     main()

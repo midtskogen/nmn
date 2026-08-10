@@ -82,6 +82,13 @@ library.MagickMotionBlurImage.argtypes = (
     ctypes.c_double,  # angle
 )
 
+# Cap ffmpeg thread count to avoid oversubscription when several meteorcrop
+# encodes run concurrently or overlap with other pipeline work.
+try:
+    _FFMPEG_THREADS = int(os.environ.get('NMN_FFMPEG_THREADS', max(1, (os.cpu_count() or 8) // 6)))
+except Exception:
+    _FFMPEG_THREADS = 4
+
 
 class MotionBlurImage(Image):
     """A Wand Image subclass with a custom motion_blur method."""
@@ -427,7 +434,10 @@ def create_background_plate(event_dir: Path, pto_path: Path, source_video_path: 
     stitcher_path = Path(__file__).parent.resolve() / "stitcher.py"
 
     # 1. Extract the first frame from the source video.
-    ffmpeg_extract_cmd = ["ffmpeg", "-i", str(source_video_path), "-vframes", "1", "-q:v", "2", "-y", str(first_frame_tmp)]
+    ffmpeg_extract_cmd = [
+        "ffmpeg", "-threads", str(_FFMPEG_THREADS),
+        "-i", str(source_video_path), "-vframes", "1", "-q:v", "2", "-y", str(first_frame_tmp)
+    ]
     subprocess.run(ffmpeg_extract_cmd, check=True, capture_output=True)
 
     # 2. Stitch the first frame using the generated PTO file.
@@ -600,33 +610,37 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
     if trim_times:
         start_time, end_time = trim_times
         trim_duration = end_time - start_time
-        
+
         print(f"Trimming final video ({final_video_path.name})...")
         final_cmd = [
-            "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(processed_vid),
+            "ffmpeg", "-threads", str(_FFMPEG_THREADS), "-ss", f"{start_time:.3f}", "-i", str(processed_vid),
             "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-y", str(final_video_path)
         ]
         subprocess.run(final_cmd, check=True, capture_output=True)
-        
+
         print(f"Trimming original video ({final_orig_video_path.name})...")
         final_orig_cmd = [
-            "ffmpeg", "-ss", f"{start_time:.3f}", "-i", str(original_vid),
+            "ffmpeg", "-threads", str(_FFMPEG_THREADS), "-ss", f"{start_time:.3f}", "-i", str(original_vid),
             "-t", f"{trim_duration:.3f}", "-vf", final_filter, "-c:v", "libx264", "-y", str(final_orig_video_path)
         ]
         subprocess.run(final_orig_cmd, check=True, capture_output=True)
         print(f"✅ Saved '{final_orig_video_path.name}'")
     else: # No trimming needed, save full-length videos
         print(f"Saving final video ({final_video_path.name})...")
-        final_cmd = ["ffmpeg", "-i", str(processed_vid), "-vf", final_filter, "-y", str(final_video_path)]
+        final_cmd = [
+            "ffmpeg", "-threads", str(_FFMPEG_THREADS), "-i", str(processed_vid),
+            "-vf", final_filter, "-y", str(final_video_path)
+        ]
         subprocess.run(final_cmd, check=True, capture_output=True)
-        
+
         print(f"Saving original video ({final_orig_video_path.name})...")
-        try:
-            shutil.copyfile(str(original_vid), str(final_orig_video_path))
-            print(f"✅ Saved '{final_orig_video_path.name}'")
-        except Exception as e:
-            print(f"Warning: Could not write '{final_orig_video_path.name}': {e}", file=sys.stderr)
-    
+        final_orig_cmd = [
+            "ffmpeg", "-threads", str(_FFMPEG_THREADS), "-i", str(original_vid),
+            "-vf", final_filter, "-y", str(final_orig_video_path)
+        ]
+        subprocess.run(final_orig_cmd, check=True, capture_output=True)
+        print(f"✅ Saved '{final_orig_video_path.name}'")
+
     print(f"✅ Success! Created '{final_video_path.name}'")
 
     # --- Create WebM Videos from the newly created MP4s ---
@@ -637,21 +651,19 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
     webm_opts = ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30", "-an", "-y"]
 
     print(f"Creating WebM version ({final_webm_path.name})...")
-    webm_cmd = ["ffmpeg", "-i", str(final_video_path)] + webm_opts + [str(final_webm_path)]
+    webm_cmd = ["ffmpeg", "-threads", str(_FFMPEG_THREADS), "-i", str(final_video_path)] + webm_opts + [str(final_webm_path)]
     subprocess.run(webm_cmd, check=True, capture_output=True)
     print(f"✅ Success! Created '{final_webm_path.name}'")
-    
+
     # --- Create Inverted WebM Video ---
     final_neg_webm_path = final_video_path.with_name("fireball_neg.webm")
     print(f"Creating inverted WebM version ({final_neg_webm_path.name})...")
-    # Apply luminance inversion filter to the common options
-    neg_webm_cmd = ["ffmpeg", "-i", str(final_video_path), "-vf", "lutyuv=y=negval"] + webm_opts + [str(final_neg_webm_path)]
+    neg_webm_cmd = ["ffmpeg", "-threads", str(_FFMPEG_THREADS), "-i", str(final_video_path), "-vf", "lutyuv=y=negval"] + webm_opts + [str(final_neg_webm_path)]
     subprocess.run(neg_webm_cmd, check=True, capture_output=True)
     print(f"✅ Success! Created '{final_neg_webm_path.name}'")
 
-
     print(f"Creating WebM version ({final_orig_webm_path.name})...")
-    orig_webm_cmd = ["ffmpeg", "-i", str(final_orig_video_path)] + webm_opts + [str(final_orig_webm_path)]
+    orig_webm_cmd = ["ffmpeg", "-threads", str(_FFMPEG_THREADS), "-i", str(final_orig_video_path)] + webm_opts + [str(final_orig_webm_path)]
     subprocess.run(orig_webm_cmd, check=True, capture_output=True)
     print(f"✅ Success! Created '{final_orig_webm_path.name}'")
 
@@ -697,7 +709,7 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
             f"[v2][mask]blend=c0_mode=multiply"
         )
         ffmpeg_subtract_cmd = [
-            "ffmpeg", "-i", str(temp_stitched_video),
+            "ffmpeg", "-threads", str(_FFMPEG_THREADS), "-i", str(temp_stitched_video),
             "-loop", "1", "-i", str(background_plate_path),
             "-filter_complex", filter_graph,
             "-t", str(duration), "-y", str(temp_subtracted_video)
@@ -810,10 +822,8 @@ def main():
         # --- Mode-Specific Processing ---
 
         if args.mode == "video" or args.mode == "both":
-            # Create shared background plate once.
-            background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
-            
-            # Process video and create all outputs.
+            # background_plate_path was already created in the common setup phase
+            # above; reuse it instead of regenerating it.
             create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h)
             
         if args.mode == "image" or args.mode == "both":

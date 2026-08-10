@@ -11,10 +11,11 @@ from raw camera footage and then generates the initial gnomonic projection
 and cropped 'fireball.jpg'.
 """
 
+import os
+
 import argparse
 import base64
 import re
-import os
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,9 @@ except ImportError as e:
 OVERLAY_OPACITY = 0.40
 BIN_DIR = Path(__file__).parent.resolve()
 
+# In-memory cache for short-lived but repeated work inside one pipeline run.
+_VIDEO_RESOLUTION_CACHE: dict[str, tuple[int, int]] = {}
+
 # Several ffmpeg encodes (orig/grid/gnomonic/gnomonic-grid + HEVC transcode) run
 # concurrently via ThreadPoolExecutor. Left at its default, libx264 spawns a
 # thread count based on all available cores per-process, causing severe
@@ -144,16 +148,24 @@ def get_dynamic_mag_limit(pto_path):
 def get_video_resolution(video_path):
     """
     Probes the video file to return its width and height.
-    Defaults to 1920x1080 if probing fails.
+    Defaults to 1920x1080 if probing fails. Caches the result per path.
     """
+    path_str = str(video_path)
+    cached = _VIDEO_RESOLUTION_CACHE.get(path_str)
+    if cached is not None:
+        return cached
+
     try:
         probe = ffmpeg.probe(video_path)
         video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
         if video_stream:
-            return int(video_stream['width']), int(video_stream['height'])
+            result = (int(video_stream['width']), int(video_stream['height']))
+            _VIDEO_RESOLUTION_CACHE[path_str] = result
+            return result
     except Exception as e:
         print(f"Warning: Could not probe resolution of {video_path}: {e}", file=sys.stderr)
-    
+
+    _VIDEO_RESOLUTION_CACHE[path_str] = (1920, 1080)
     return 1920, 1080
 
 def draw_marker_crosses(image_path, pixel_coords, azalt_coords, verbose=False):
@@ -1633,26 +1645,35 @@ def main(args):
             if gnomonic_enabled:
                 _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, args.verbose)
         else:
-            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            # Cap workers to a modest multiple of the actual pipeline width
+            # (stack + full view + gnomonic view + meteorcrop + chained ffmpeg/PIL
+            # tasks). Using all 48 cores as threads just adds scheduling overhead,
+            # but going too low risks deadlock because the view functions submit
+            # child tasks to this same pool and then wait on them.
+            _pipeline_workers = min(24, (os.cpu_count() or 4))
+            with ThreadPoolExecutor(max_workers=_pipeline_workers) as executor:
                 stack_cmd = f"{sys.executable} {BIN_DIR}/stack.py --output {filenames['jpg']} {filenames['source']}"
                 future_stacked_jpg = executor.submit(run_command, stack_cmd, "Stacking video frames to create JPG", args.verbose)
 
-                # Ensure the clean stacked snapshot is taken as soon as stacking completes,
-                # before any other tasks can apply logos or modify the stacked JPG.
-                future_stacked_jpg.result()
-                # Save a clean copy immediately. jpg is already clean at this point —
-                # no logos have been applied yet. All parallel pipelines below read jpg
-                # as their base; meteorcrop also reads it directly.
-                try:
-                    clean_stacked = Path(f"{filenames['name']}-clean.jpg")
-                    if Path(filenames['jpg']).exists():
-                        shutil.copyfile(filenames['jpg'], str(clean_stacked))
-                except Exception:
-                    pass
+                # Save a clean stacked snapshot once stacking completes. Chained futures
+                # below depend on the result, so the copy is performed inside a callback
+                # rather than blocking this thread.
+                def _snapshot_clean_jpg(fut):
+                    try:
+                        fut.result()
+                    except Exception:
+                        return
+                    try:
+                        clean_stacked = Path(f"{filenames['name']}-clean.jpg")
+                        if Path(filenames['jpg']).exists():
+                            shutil.copyfile(filenames['jpg'], str(clean_stacked))
+                    except Exception:
+                        pass
+                future_stacked_jpg.add_done_callback(_snapshot_clean_jpg)
 
                 # Submit full view, gnomonic view, and meteorcrop all in parallel.
-                # meteorcrop reads clean jpg (just restored above) and source video (read-only) —
-                # it has no dependency on either view pipeline.
+                # meteorcrop reads clean jpg (created via callback) and source video (read-only)
+                # — it has no dependency on either view pipeline.
                 future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
 
                 if gnomonic_enabled:

@@ -132,6 +132,10 @@ class ErrorCatalog:
         "SOLVE_FIELD_MISSING": {"type": "failure", "description": "Astrometry solver ('solve-field') is not installed or not in PATH.", "reason": "This is a critical dependency for auto-calibration. The system cannot determine the star field without it.", "fix": "Ensure the 'astrometry.net' package is installed correctly ('sudo apt-get install astrometry.net')."},
         "FAILED_CAL_LOGS": {"type": "warning", "description": "Recent failed calibration logs were found.", "reason": "The calibration process is running but failing to solve the star field, often due to clouds, poor focus, or insufficient stars.", "fix": "Check the latest images in '/mnt/ams2/cal/' and the failed logs in that directory for specific error details."},
         "NO_CAL_SOURCE_IMAGES": {"type": "warning", "description": "No recent source images for calibration were found.", "reason": "The system is not capturing the special 'sense-up' images required for calibration. This could be a cron job issue.", "fix": "Verify that the 'IMX291.py' cron job is present and running correctly."},
+        "ASTROMETRY_PATH_MISSING": {"type": "warning", "description": "The astrometry index path 'add_path /usr/share/astrometry/' is missing or commented out in /etc/astrometry.cfg.", "reason": "Astrometry.net needs to know where its index files are located. Without this path, plate solving will not work.", "fix": "Add the line 'add_path /usr/share/astrometry/' to /etc/astrometry.cfg and ensure it is not commented out."},
+        "ASTROMETRY_INDEX_MISSING": {"type": "warning", "description": "A required astrometry index file is missing from /usr/share/astrometry/.", "reason": "Plate solving depends on these index files to identify star patterns. Missing index files mean plate solving will not work.", "fix": "Install or restore the missing index file in /usr/share/astrometry/."},
+        "ASTROMETRY_INDEX_EMPTY": {"type": "warning", "description": "A required astrometry index file exists but has zero size.", "reason": "Empty index files cannot be used for plate solving, so plate solving will not work.", "fix": "Replace the empty index file with a valid copy in /usr/share/astrometry/."},
+
         # Processes
         "FFMPEG_DOWN": {"type": "failure", "description": "The FFMPEG capture process is not running for one or more cameras.", "reason": "'ffmpeg' is the program responsible for capturing the video stream. If it's not running, no video is being saved.", "fix": "This is often a symptom of another problem (like an unreachable camera). The 'watch-dog.py' script should try to restart it automatically."},
         "STALE_PROCESS_FOUND": {"type": "info", "description": "Multiple instances of a key background process ({proc}) are running.", "reason": "This usually indicates a problem with cron job management or a stale lockfile. Conflicting processes can corrupt data.", "fix": "Manually stop all instances of the process ('sudo pkill -f {proc}') and let the watchdog restart it correctly."},
@@ -1373,9 +1377,50 @@ class AS7Diagnostic:
                     self.log_issue("CAM_STREAM_DOWN", context, indent=2)
 
 
+    def _check_astrometry_index_files(self):
+        """Verify the astrometry.net index path and required index files.
+
+        Without these, plate solving will not work.
+        """
+        cfg_path = "/etc/astrometry.cfg"
+        expected_path = "/usr/share/astrometry/"
+        index_files = [
+            "index-4116.fits", "index-4117.fits",
+            "index-4118.fits", "index-4119.fits",
+        ]
+
+        # Check the config line is present and uncommented.
+        path_ok = False
+        try:
+            if os.path.isfile(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        stripped = line.strip()
+                        if stripped == f"add_path {expected_path}":
+                            path_ok = True
+                            break
+        except Exception:
+            pass
+
+        if path_ok:
+            self.log_success(f"Astrometry index path '{expected_path}' is configured in {cfg_path}.")
+        else:
+            self.log_issue("ASTROMETRY_PATH_MISSING")
+
+        # Check that the index files exist and are non-empty.
+        for idx_file in index_files:
+            full_path = os.path.join(expected_path, idx_file)
+            if not os.path.isfile(full_path):
+                self.log_issue("ASTROMETRY_INDEX_MISSING", {'file': idx_file})
+            elif os.path.getsize(full_path) == 0:
+                self.log_issue("ASTROMETRY_INDEX_EMPTY", {'file': idx_file})
+            else:
+                self.log_success(f"Astrometry index file '{idx_file}' is present and non-empty.")
+
     def check_calibration_files(self):
         """Checks for the presence of essential astrometric calibration files."""
         print("\n--- Checking Calibration Files ---")
+        self._check_astrometry_index_files()
         as6_data = self.config_data.get("/home/ams/amscams/conf/as6.json", {})
         station_id = as6_data.get("site", {}).get("ams_id", "AMSXXX")
         cal_dirs = ["/mnt/ams2/cal/", f"/mnt/ams2/meteor_archive/{station_id}/CAL/"]

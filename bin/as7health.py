@@ -946,6 +946,12 @@ class AS7Diagnostic:
                                 if code == "FS_READ_ONLY":
                                     if not self._fs_is_still_readonly(line):
                                         continue
+                                # ntpd historically logs "statistics directory ... does
+                                # not exist or is unwriteable, error ..." when
+                                # /var/log/ntpsec/ is missing. This is a benign packaging
+                                # issue and does not affect time sync.
+                                if code == "NTP_LOG_ERRORS" and "statistics directory" in line.lower():
+                                    continue
                                 # Limit stored line length
                                 found_issues[code].append(line.strip()[:200])
                                 break # Move to next line

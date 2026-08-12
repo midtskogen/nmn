@@ -469,6 +469,180 @@ def map_image_to_pano(pto_data, image_index, x, y):
 
     return pano_x, pano_y
 
+@numba.njit(parallel=True, fastmath=True, cache=True)
+def calculate_pano_coords(coords_out, sw, sh, orig_w, orig_h, pano_proj_f,
+                          pano_hfov, pano_r, pano_s, cx, cy, a, b, c,
+                          src_proj_f, src_focal, R_pr, camera_yaw):
+    """JIT-compiled reprojection from source-image pixel to panorama pixel.
+
+    This is the vectorized, per-pixel-grid equivalent of map_image_to_pano():
+    for every pixel (x, y) of a single source image it computes the
+    corresponding panorama coordinate. Used to build a per-camera mask from
+    an equirectangular (or other) panorama mask via cv2.remap().
+    """
+    INVALID_COORD = -99999.0
+    pano_hfov_rad = math.radians(pano_hfov)
+    src_norm_radius = min(sw, sh) / 2.0
+    has_distortion = abs(a) > 1e-9 or abs(b) > 1e-9 or abs(c) > 1e-9
+    camera_yaw_rad = math.radians(camera_yaw)
+    has_pano_rotation = pano_r != 0.0
+    if has_pano_rotation:
+        pano_r_rad = math.radians(pano_r)
+        cos_pr, sin_pr = math.cos(pano_r_rad), math.sin(pano_r_rad)
+        center_x, center_y = orig_w / 2.0, orig_h / 2.0
+
+    for y in prange(sh):
+        for x in range(sw):
+            x_dist_centered = (x - sw / 2.0) + cx
+            y_dist_centered = -(y - sh / 2.0) + cy
+            r_dist = math.sqrt(x_dist_centered**2 + y_dist_centered**2)
+            r_ideal = r_dist
+
+            if has_distortion and src_norm_radius > 1e-6:
+                a_ = a / (src_norm_radius**3)
+                b_ = b / (src_norm_radius**2)
+                c_ = c / src_norm_radius
+                d_ = 1.0 - (a + b + c)
+                for _ in range(10):
+                    r_ideal_2 = r_ideal**2
+                    r_ideal_3 = r_ideal_2 * r_ideal
+                    f_r = (a_ * r_ideal_3 * r_ideal) + (b_ * r_ideal_3) + (c_ * r_ideal_2) + (d_ * r_ideal) - r_dist
+                    f_prime_r = (4.0 * a_ * r_ideal_3) + (3.0 * b_ * r_ideal_2) + (2.0 * c_ * r_ideal) + d_
+                    if abs(f_prime_r) < 1e-9:
+                        break
+                    r_ideal -= f_r / f_prime_r
+
+            if r_dist > 1e-9:
+                ratio = r_ideal / r_dist
+                x_ideal, y_ideal = x_dist_centered * ratio, y_dist_centered * ratio
+            else:
+                x_ideal, y_ideal = 0.0, 0.0
+
+            is_valid = True
+            vec_cam = np.empty(3, dtype=np.float32)
+            if src_proj_f == 0:
+                vec_cam[0], vec_cam[1], vec_cam[2] = x_ideal, y_ideal, -src_focal
+            elif src_proj_f == 3:
+                r_theta = math.sqrt(x_ideal**2 + y_ideal**2)
+                theta = r_theta / src_focal if src_focal > 1e-6 else 0.0
+                phi = math.atan2(y_ideal, x_ideal)
+                vec_cam[0] = math.sin(theta) * math.cos(phi)
+                vec_cam[1] = math.sin(theta) * math.sin(phi)
+                vec_cam[2] = -math.cos(theta)
+            else:
+                is_valid = False
+
+            if not is_valid:
+                coords_out[y, x, 0], coords_out[y, x, 1] = INVALID_COORD, INVALID_COORD
+                continue
+
+            norm = math.sqrt(vec_cam[0]**2 + vec_cam[1]**2 + vec_cam[2]**2)
+            if norm > 1e-6:
+                vec_cam[0] /= norm; vec_cam[1] /= norm; vec_cam[2] /= norm
+
+            vec_3d_adjusted = np.dot(R_pr, vec_cam)
+
+            pv1 = vec_3d_adjusted[1]
+            if pv1 > 1.0: pv1 = 1.0
+            elif pv1 < -1.0: pv1 = -1.0
+            pitch_adjusted = math.asin(pv1)
+            yaw_adjusted = math.atan2(vec_3d_adjusted[0], -vec_3d_adjusted[2])
+
+            world_yaw = yaw_adjusted + camera_yaw_rad
+            cos_world_pitch = math.cos(pitch_adjusted)
+            world_x = cos_world_pitch * math.sin(world_yaw)
+            world_y = math.sin(pitch_adjusted)
+            world_z = -cos_world_pitch * math.cos(world_yaw)
+
+            pano_x, pano_y, is_valid_pano = 0.0, 0.0, True
+            if pano_proj_f == 2:  # Equirectangular
+                pano_yaw = math.atan2(world_x, -world_z)
+                pano_pitch = math.asin(world_y)
+                pano_x = (pano_yaw / (2 * math.pi) + 0.5) * orig_w
+                pano_y = (-pano_pitch / math.pi + 0.5) * orig_h
+            elif pano_proj_f == 0:  # Rectilinear
+                pano_focal = (orig_w / 2.0) / math.tan(pano_hfov_rad / 2.0) if pano_hfov_rad > 0 else 1.0
+                if world_z >= 0:
+                    is_valid_pano = False
+                else:
+                    pano_x = world_x * (-pano_focal / world_z) + orig_w / 2.0
+                    pano_y = -(world_y * (-pano_focal / world_z)) + orig_h / 2.0
+            elif pano_proj_f == 3:  # Fisheye
+                fisheye_focal = (orig_w / 2.0) / (pano_hfov_rad / 2.0) if pano_hfov_rad > 0 else 1.0
+                theta = math.atan2(math.sqrt(world_x**2 + world_y**2), -world_z)
+                phi = math.atan2(world_y, world_x)
+                r_pano = theta * fisheye_focal
+                pano_x = r_pano * math.cos(phi) + orig_w / 2.0
+                pano_y = -(r_pano * math.sin(phi)) + orig_h / 2.0
+            else:
+                is_valid_pano = False
+
+            if not is_valid_pano:
+                coords_out[y, x, 0], coords_out[y, x, 1] = INVALID_COORD, INVALID_COORD
+                continue
+
+            if has_pano_rotation:
+                translated_x, translated_y = pano_x - center_x, pano_y - center_y
+                rotated_x = translated_x * cos_pr - translated_y * sin_pr
+                rotated_y = translated_x * sin_pr + translated_y * cos_pr
+                pano_x, pano_y = rotated_x + center_x, rotated_y + center_y
+
+            if pano_s != 1.0:
+                center_x2, center_y2 = orig_w / 2.0, orig_h / 2.0
+                pano_x = (pano_x - center_x2) * pano_s + center_x2
+                pano_y = (pano_y - center_y2) * pano_s + center_y2
+
+            coords_out[y, x, 0], coords_out[y, x, 1] = pano_x, pano_y
+
+
+def build_image_to_pano_map(pto_data, image_index):
+    """Build a (sh, sw, 2) float32 array mapping every pixel of a source
+    image to its panorama coordinate (x, y).
+
+    This is the vectorized counterpart of map_image_to_pano(), suitable for
+    use with cv2.remap() to resample a panorama-space image (e.g. a sky
+    mask) into a single camera's native resolution. Pixels with no valid
+    mapping (e.g. behind the camera) are set to -99999.0 in both channels.
+    """
+    global_options, images = pto_data
+    if image_index >= len(images):
+        raise IndexError("Image index is out of bounds.")
+
+    img = images[image_index]
+    sw, sh = int(img.get('w')), int(img.get('h'))
+    fov, src_proj_f = img.get('v'), int(img.get('f', 0))
+    fov_rad = math.radians(fov)
+
+    if src_proj_f == 0:
+        src_focal = sw / (2 * math.tan(fov_rad / 2)) if fov_rad > 0 else 0.0
+    elif src_proj_f == 3:
+        src_focal = sw / fov_rad if fov_rad > 0 else 0.0
+    else:
+        raise ValueError(f"Unsupported source projection type f{src_proj_f}")
+
+    p, r, yaw = img.get('p', 0), -img.get('r', 0), img.get('y', 0)
+    a, b, c = img.get('a', 0), img.get('b', 0), img.get('c', 0)
+    cx, cy = -img.get('d', 0), img.get('e', 0)
+    R_pr = create_pr_rotation_matrix(p, r)
+
+    orig_w, orig_h = global_options.get('w'), global_options.get('h')
+    pano_proj_f = int(global_options.get('f', 2))
+    pano_hfov = global_options.get('v')
+    pano_r = global_options.get('r', 0.0)
+    pano_s = global_options.get('s', 1.0)
+
+    if orig_w is None or orig_h is None or pano_hfov is None:
+        raise ValueError("PTO 'p' line must contain 'w', 'h', and 'v' parameters.")
+    if pano_s <= 0:
+        raise ValueError("Panorama scale factor 's' must be greater than 0.")
+
+    coords_out = np.empty((sh, sw, 2), dtype=np.float64)
+    calculate_pano_coords(coords_out, sw, sh, orig_w, orig_h, pano_proj_f,
+                          pano_hfov, pano_r, pano_s, cx, cy, a, b, c,
+                          src_proj_f, src_focal, R_pr, yaw)
+    return coords_out
+
+
 def _set_rotation_pt(yaw_rad, pitch_rad, roll_rad):
     """Build rotation matrix using Hugin/panotools SetRotationPT convention.
     Mirrors Matrix3::SetRotationPT from Hugin source (Matrix3.cpp)."""

@@ -1215,12 +1215,13 @@ class AS7Diagnostic:
             except ImportError: self.log_issue("PYTHON_PKG_MISSING", {'pkg': 'opencv-python' if pkg == 'cv2' else pkg})
 
         as6_data = self.config_data.get("/home/ams/amscams/conf/as6.json", {})
+        ams_id = as6_data.get('site', {}).get('ams_id')
         for cam_key, cam_info in as6_data.get('cameras', {}).items():
             cams_id = cam_info.get('cams_id')
-            if cams_id:
-                mask_file = f"/home/ams/amscams/conf/mask_{cams_id}.png"
+            if cams_id and ams_id:
+                mask_file = f"/mnt/ams2/meteor_archive/{ams_id}/CAL/MASKS/{cams_id}_mask.png"
                 if not os.path.isfile(mask_file):
-                    self.log_issue("MASK_FILE_MISSING", {'cam_key': cam_key, 'cams_id': cams_id})
+                    self.log_issue("MASK_FILE_MISSING", {'cam_key': cam_key, 'cams_id': cams_id, 'path': mask_file})
                 else:
                     self.log_success(f"Mask file found for camera '{cam_key}'.")
 

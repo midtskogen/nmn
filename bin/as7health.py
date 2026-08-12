@@ -128,7 +128,7 @@ class ErrorCatalog:
         "CAM_STREAM_DOWN": {"type": "failure", "description": "The video stream for a camera is down.", "reason": "The camera is online (ping successful), but it is not broadcasting a valid video stream.", "fix": "Reboot the camera. If the problem persists, check the camera's web interface for errors and verify the RTSP stream URL."},
         "CAM_BAD_SUBNET": {"type": "warning", "description": "A camera's IP address does not match any local network.", "reason": "The camera may be connected to the wrong network port, or the computer's network interface may be misconfigured.", "fix": "Ensure the camera is plugged into the dedicated camera network port. Verify the IP settings for that port on the computer match the camera's network."},
         # Calibration
-        "NO_CAL_FILE": {"type": "warning", "description": "No calibration files were found for one or more cameras.", "reason": "Calibration files are essential for converting pixel positions to astronomical coordinates. Without them, trajectory analysis is impossible.", "fix": "See the detailed sub-checks for more specific reasons and solutions."},
+        "NO_CAL_FILE": {"type": "warning", "description": "No valid reducer calibration file was found for one or more cameras in /mnt/ams2/cal/freecal/.", "reason": "The reducer uses a {cam_id}-calparams.json or {cam_id}-stacked-calparams.json file under /mnt/ams2/cal/freecal/ to convert pixel positions to celestial coordinates. Without this file, reduction will fail for that camera.", "fix": "Check that auto-calibration succeeded and produced files under /mnt/ams2/cal/freecal/. See the detailed sub-checks for more specific reasons and solutions."},
         "SOLVE_FIELD_MISSING": {"type": "failure", "description": "Astrometry solver ('solve-field') is not installed or not in PATH.", "reason": "This is a critical dependency for auto-calibration. The system cannot determine the star field without it.", "fix": "Ensure the 'astrometry.net' package is installed correctly ('sudo apt-get install astrometry.net')."},
         "FAILED_CAL_LOGS": {"type": "warning", "description": "Recent failed calibration logs were found.", "reason": "The calibration process is running but failing to solve the star field, often due to clouds, poor focus, or insufficient stars.", "fix": "Check the latest images in '/mnt/ams2/cal/' and the failed logs in that directory for specific error details."},
         "NO_CAL_SOURCE_IMAGES": {"type": "warning", "description": "No recent source images for calibration were found.", "reason": "The system is not capturing the special 'sense-up' images required for calibration. This could be a cron job issue.", "fix": "Verify that the 'IMX291.py' cron job is present and running correctly."},
@@ -1417,36 +1417,44 @@ class AS7Diagnostic:
             else:
                 self.log_success(f"Astrometry index file '{idx_file}' is present and non-empty.")
 
+    def _find_reducer_cal_file(self, cams_id):
+        """Look for a valid reducer calibration file for a camera.
+
+        The reducer's get_active_cal_file()/find_matching_cal_files() expects
+        a directory under /mnt/ams2/cal/freecal/ whose name contains the cam_id,
+        containing either {basename}-stacked-calparams.json or
+        {basename}-calparams.json.
+        """
+        freecal_dir = "/mnt/ams2/cal/freecal"
+        if not os.path.isdir(freecal_dir):
+            return False
+        for entry in os.listdir(freecal_dir):
+            if cams_id not in entry:
+                continue
+            cal_dir = os.path.join(freecal_dir, entry)
+            if not os.path.isdir(cal_dir):
+                continue
+            base = entry
+            for name in (f"{base}-stacked-calparams.json", f"{base}-calparams.json"):
+                cal_path = os.path.join(cal_dir, name)
+                if os.path.isfile(cal_path) and os.path.getsize(cal_path) > 0:
+                    return True
+        return False
+
     def check_calibration_files(self):
         """Checks for the presence of essential astrometric calibration files."""
         print("\n--- Checking Calibration Files ---")
         self._check_astrometry_index_files()
         as6_data = self.config_data.get("/home/ams/amscams/conf/as6.json", {})
-        station_id = as6_data.get("site", {}).get("ams_id", "AMSXXX")
-        cal_dirs = ["/mnt/ams2/cal/", f"/mnt/ams2/meteor_archive/{station_id}/CAL/"]
-        
+
         any_missing = False
         for cam_key, cam_info in as6_data.get('cameras', {}).items():
             cams_id = cam_info.get('cams_id')
             if cams_id:
                 try:
-                    found = False
-                    for d in cal_dirs:
-                        if os.path.isdir(d):
-                            # Use glob with recursive=True, requires Python 3.5+
-                            if sys.version_info >= (3, 5):
-                                if glob.glob(os.path.join(d, '**', f"*{cams_id}*calparams.json"), recursive=True):
-                                    found = True
-                                    break
-                            else: # Fallback for older Python without recursive glob
-                                for root, _, files in os.walk(d):
-                                    if any(f"*{cams_id}*calparams.json" in f for f in files):
-                                        found = True
-                                        break
-                                if found: break
-                                
-                    if found: self.log_success(f"Calibration file(s) found for camera '{cam_key}' ({cams_id}).")
-                    else: 
+                    if self._find_reducer_cal_file(cams_id):
+                        self.log_success(f"Reducer calibration file found for camera '{cam_key}' ({cams_id}).")
+                    else:
                         self.log_issue("NO_CAL_FILE", {'cam_key': cam_key, 'cams_id': cams_id})
                         any_missing = True
                 except PermissionError:
@@ -1455,7 +1463,7 @@ class AS7Diagnostic:
                 except Exception as e:
                      self.log_issue("PERMISSION_DENIED", {'check': f"searching calibration files for {cam_key}: {e}"})
                      any_missing = True # Assume missing if we can't search
-        
+
         if any_missing:
             self.diagnose_calibration_failures(indent=1)
 

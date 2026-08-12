@@ -21,7 +21,7 @@ Pipeline:
 
 Usage:
     automask.py [--cam-dir /meteor] [--ncams 7] [--sd]
-                [--timelapse-video PATH] [--output-dir DIR]
+                [--timelapse-video PATH] [--lookback N] [--output-dir DIR]
                 [--as6-json /home/ams/amscams/conf/as6.json]
                 [--no-install] [--fill-gaps] [--max-frames N]
 """
@@ -32,14 +32,31 @@ import re
 import sys
 import tempfile
 
+import cv2
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import make_equirect_mask
 import make_camera_masks
 
 
-def find_latest_timelapse(cam_dir, sd, archive_cam="cam8"):
-    """Find the most recent equirect timelapse video written by
+def _video_frame_count(path):
+    """Cheap frame-count probe (reads the container header only)."""
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            return 0
+        return int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        cap.release()
+
+
+def find_latest_timelapse(cam_dir, sd, archive_cam="cam8", lookback=10):
+    """Find the most complete equirect timelapse video written by
     timelapse_eq.sh, under {cam_dir}/{archive_cam}/{YYYYMMDD}/{fname}.
+
+    Looks at the most recent `lookback` dates that have the file, and
+    picks the one with the most frames (a partial/interrupted archive day
+    would otherwise be picked just for being newest).
     """
     archive_dir = os.path.join(cam_dir, archive_cam)
     fname = "timelapse.mp4" if sd else "timelapse_hires.mp4"
@@ -52,14 +69,32 @@ def find_latest_timelapse(cam_dir, sd, archive_cam="cam8"):
     if not date_dirs:
         raise FileNotFoundError(f"No date directories found under {archive_dir}")
 
+    candidates = []
     for d in date_dirs:
         candidate = os.path.join(archive_dir, d, fname)
         if os.path.isfile(candidate):
-            return candidate
+            candidates.append(candidate)
+        if len(candidates) >= lookback:
+            break
 
-    raise FileNotFoundError(
-        f"No {fname} found in any date directory under {archive_dir} "
-        f"(checked {len(date_dirs)} dates)")
+    if not candidates:
+        raise FileNotFoundError(
+            f"No {fname} found in any date directory under {archive_dir} "
+            f"(checked {len(date_dirs)} dates)")
+
+    counts = [(c, _video_frame_count(c)) for c in candidates]
+    best_path, best_count = max(counts, key=lambda x: x[1])
+
+    for path, n in counts:
+        marker = " <- selected" if path == best_path else ""
+        print(f"  {path}: {n} frames{marker}", file=sys.stderr)
+
+    if best_count <= 0:
+        raise FileNotFoundError(
+            f"All {len(candidates)} candidate timelapse videos under "
+            f"{archive_dir} failed to open or had 0 frames.")
+
+    return best_path
 
 
 def main():
@@ -78,6 +113,11 @@ def main():
     parser.add_argument("--timelapse-video", default=None,
                         help="Override: use this timelapse video instead of "
                              "auto-discovering the latest one")
+    parser.add_argument("--lookback", type=int, default=10,
+                        help="Number of most recent timelapse videos to "
+                             "consider; the one with the most frames is "
+                             "used (avoids picking a newer but incomplete "
+                             "archive day)")
     parser.add_argument("--output-dir", default=None,
                         help="Directory to write cam{N}_mask.png and the "
                              "intermediate equirect mask (default: a "
@@ -124,7 +164,8 @@ def main():
     else:
         print("Searching for the latest equirect timelapse video...")
         try:
-            video_path = find_latest_timelapse(args.cam_dir, args.sd)
+            video_path = find_latest_timelapse(args.cam_dir, args.sd,
+                                               lookback=args.lookback)
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)

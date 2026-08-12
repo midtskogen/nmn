@@ -21,8 +21,8 @@ Pipeline:
 
 Usage:
     automask.py [--cam-dir /meteor] [--ncams 7] [--sd]
-                [--timelapse-video PATH] [--lookback N] [--output-dir DIR]
-                [--as6-json /home/ams/amscams/conf/as6.json]
+                [--timelapse-video PATH | --date YYYYMMDD] [--lookback N]
+                [--output-dir DIR] [--as6-json /home/ams/amscams/conf/as6.json]
                 [--no-install] [--fill-gaps] [--max-frames N]
 """
 import argparse
@@ -113,6 +113,10 @@ def main():
     parser.add_argument("--timelapse-video", default=None,
                         help="Override: use this timelapse video instead of "
                              "auto-discovering the latest one")
+    parser.add_argument("--date", default=None, metavar="YYYYMMDD",
+                        help="Use the timelapse from this specific archive "
+                             "date (cam8/{YYYYMMDD}/timelapse[_hires].mp4) "
+                             "instead of auto-discovering the latest one")
     parser.add_argument("--lookback", type=int, default=10,
                         help="Number of most recent timelapse videos to "
                              "consider; the one with the most frames is "
@@ -156,10 +160,26 @@ def main():
     args = parser.parse_args()
 
     # --- Step 1: find the timelapse video -----------------------------
+    if args.timelapse_video and args.date:
+        print("Error: --timelapse-video and --date cannot be used together.",
+              file=sys.stderr)
+        sys.exit(1)
+
     if args.timelapse_video:
         video_path = args.timelapse_video
         if not os.path.isfile(video_path):
             print(f"Error: --timelapse-video not found: {video_path}", file=sys.stderr)
+            sys.exit(1)
+    elif args.date:
+        if not re.match(r'^\d{8}$', args.date):
+            print(f"Error: --date must be in YYYYMMDD format, got: {args.date}",
+                  file=sys.stderr)
+            sys.exit(1)
+        fname = "timelapse.mp4" if args.sd else "timelapse_hires.mp4"
+        video_path = os.path.join(args.cam_dir, "cam8", args.date, fname)
+        if not os.path.isfile(video_path):
+            print(f"Error: no timelapse found for date {args.date}: {video_path}",
+                  file=sys.stderr)
             sys.exit(1)
     else:
         print("Searching for the latest equirect timelapse video...")

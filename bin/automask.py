@@ -23,7 +23,7 @@ Usage:
     automask.py [--cam-dir /meteor] [--ncams 7] [--sd]
                 [--timelapse-video PATH | --date YYYYMMDD] [--lookback N]
                 [--output-dir DIR] [--as6-json /home/ams/amscams/conf/as6.json]
-                [--no-install] [--fill-gaps] [--max-frames N]
+                [--no-install] [--max-frames N] [--sample-interval N]
 """
 import argparse
 import glob
@@ -138,25 +138,11 @@ def main():
                              "directory; only write cam{N}_mask.png files "
                              "to --output-dir")
     parser.add_argument("--max-frames", type=int, default=0,
-                        help="Maximum frames to analyse when building the "
+                        help="Maximum day frames to analyse when building the "
                              "equirect mask (0 = all)")
-    parser.add_argument("--close-kernel", type=int, default=15,
-                        help="Morphological close kernel size")
-    parser.add_argument("--open-kernel", type=int, default=3,
-                        help="Morphological open kernel size")
-    parser.add_argument("--bottom-band", type=int, default=45,
-                        help="Height of bottom band to mask out")
-    parser.add_argument("--mean-weight", type=float, default=0.7,
-                        help="Weight of mean brightness in the sky score")
-    parser.add_argument("--var-weight", type=float, default=0.3,
-                        help="Weight of temporal variance in the sky score")
-    parser.add_argument("--fill-gaps", action="store_true", default=True,
-                        help="Fill small sky-through-canopy gaps (default: "
-                             "on, matches recommended hires settings)")
-    parser.add_argument("--no-fill-gaps", action="store_false", dest="fill_gaps",
-                        help="Disable gap filling")
-    parser.add_argument("--gap-max-area", type=int, default=8000,
-                        help="Max area in pixels of a gap to fill")
+    parser.add_argument("--sample-interval", type=int, default=2,
+                        help="Analyse every Nth frame when building the "
+                             "equirect mask (default 2)")
     args = parser.parse_args()
 
     # --- Step 1: find the timelapse video -----------------------------
@@ -211,14 +197,8 @@ def main():
         make_equirect_mask.build_sky_mask(
             video_path, equirect_mask_path,
             max_frames=args.max_frames,
-            close_kernel=args.close_kernel,
-            open_kernel=args.open_kernel,
-            bottom_band=args.bottom_band,
-            mean_weight=args.mean_weight,
-            var_weight=args.var_weight,
+            sample_interval=args.sample_interval,
             invert_output=True,  # white=non-sky, required by make_camera_masks/scan_stack.py
-            fill_gaps_enabled=args.fill_gaps,
-            gap_max_area=args.gap_max_area,
         )
 
         # --- Step 3: build (and install) per-camera masks --------------

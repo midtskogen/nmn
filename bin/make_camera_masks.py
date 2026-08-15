@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Map an equirectangular sky mask back to each of the individual camera views
-that stitch_latest.sh combined to create it, producing one native-resolution
-mask PNG per camera suitable for scan_stack.py.
+that stitch_latest.sh combined to create it, producing one mask PNG per
+camera suitable for scan_stack.py.  Masks are always written at 1920x1080
+(the size scan_stack.py's load_mask_imgs resizes to); SD mini-derived
+masks are upscaled from 800x448 with nearest-neighbour interpolation.
 
 This reuses stitcher.generate_pto_from_lens_files() to build the exact same
 combined PTO project that stitch_latest.sh implicitly builds when stitching
@@ -37,6 +39,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pto_mapper
 import stitcher
+
+# All per-camera masks are written at the amscams-native size; scan_stack.py
+# (load_mask_imgs) resizes masks to this before applying them.
+MASK_OUT_W, MASK_OUT_H = 1920, 1080
 
 
 def load_as6_camera_mapping(as6_json_path):
@@ -166,14 +172,22 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
         if not mask_white_is_sky:
             cam_mask = cv2.bitwise_not(cam_mask)
 
+        # scan_stack.py's load_mask_imgs resizes every mask to 1920x1080
+        # before use; store them at that size directly (nearest-neighbour
+        # keeps the binary mask binary).  SD mini-derived masks (800x448)
+        # share the same aspect ratio, so this upscale is distortion-free.
+        sw, sh = int(images[idx]['w']), int(images[idx]['h'])
+        if (sw, sh) != (MASK_OUT_W, MASK_OUT_H):
+            cam_mask = cv2.resize(cam_mask, (MASK_OUT_W, MASK_OUT_H),
+                                  interpolation=cv2.INTER_NEAREST)
+
         out_path = os.path.join(output_dir, f"cam{cam_num}_mask.png")
         cv2.imwrite(out_path, cam_mask)
         out_paths[cam_num] = out_path
 
-        sw, sh = int(images[idx]['w']), int(images[idx]['h'])
         non_sky_pct = 100 * np.count_nonzero(cam_mask == 255) / cam_mask.size if not mask_white_is_sky \
             else 100 * np.count_nonzero(cam_mask == 0) / cam_mask.size
-        print(f"  cam{cam_num}: {sw}x{sh} -> {out_path} "
+        print(f"  cam{cam_num}: {sw}x{sh} -> {MASK_OUT_W}x{MASK_OUT_H} -> {out_path} "
               f"(non-sky: {non_sky_pct:.1f}%)")
 
         if install_ams_id and install_cams_id_map:

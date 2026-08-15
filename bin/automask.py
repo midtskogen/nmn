@@ -8,8 +8,8 @@ This is a thin orchestrator around make_equirect_mask.py and
 make_camera_masks.py — see those scripts for the underlying algorithms.
 
 Pipeline:
-  1. Find the latest cam8/{YYYYMMDD}/timelapse_hires.mp4 (or timelapse.mp4
-     with --sd), matching the archive layout written by stitch_latest.sh /
+  1. Find the latest cam8/{YYYYMMDD}/timelapse.mp4 (or timelapse_hires.mp4
+     with --hd), matching the archive layout written by stitch_latest.sh /
      timelapse_eq.sh.
   2. make_equirect_mask.build_sky_mask() on that video -> equirect mask
      (white=non-sky, i.e. --invert convention, since that is what
@@ -20,7 +20,7 @@ Pipeline:
      (existing files are backed up first), unless --no-install is given.
 
 Usage:
-    automask.py [--cam-dir /meteor] [--ncams 7] [--sd]
+    automask.py [--cam-dir /meteor] [--ncams 7] [--hd]
                 [--timelapse-video PATH | --date YYYYMMDD] [--lookback N]
                 [--output-dir DIR] [--as6-json /home/ams/amscams/conf/as6.json]
                 [--no-install] [--max-frames N] [--sample-interval N]
@@ -107,9 +107,14 @@ def main():
                              "cam8 equirect archive")
     parser.add_argument("--ncams", type=int, default=7,
                         help="Number of cameras")
+    parser.add_argument("--hd", action="store_true",
+                        help="Use HD timelapse/inputs (timelapse_hires.mp4, "
+                             "full_*.jpg, auto-sized canvas) instead of the "
+                             "default SD (timelapse.mp4, mini_*.jpg, "
+                             "1280x848 canvas)")
     parser.add_argument("--sd", action="store_true",
-                        help="Use SD timelapse/inputs (timelapse.mp4, "
-                             "mini_*.jpg, 1280x848 canvas) instead of HD")
+                        help="Kept for backwards compatibility; SD is the "
+                             "default, so this is a no-op")
     parser.add_argument("--timelapse-video", default=None,
                         help="Override: use this timelapse video instead of "
                              "auto-discovering the latest one")
@@ -144,6 +149,7 @@ def main():
                         help="Analyse every Nth frame when building the "
                              "equirect mask (default 2)")
     args = parser.parse_args()
+    use_sd = not args.hd  # SD is the default; --hd selects the hires input
 
     # --- Step 1: find the timelapse video -----------------------------
     if args.timelapse_video and args.date:
@@ -161,7 +167,7 @@ def main():
             print(f"Error: --date must be in YYYYMMDD format, got: {args.date}",
                   file=sys.stderr)
             sys.exit(1)
-        fname = "timelapse.mp4" if args.sd else "timelapse_hires.mp4"
+        fname = "timelapse.mp4" if use_sd else "timelapse_hires.mp4"
         video_path = os.path.join(args.cam_dir, "cam8", args.date, fname)
         if not os.path.isfile(video_path):
             print(f"Error: no timelapse found for date {args.date}: {video_path}",
@@ -170,7 +176,7 @@ def main():
     else:
         print("Searching for the latest equirect timelapse video...")
         try:
-            video_path = find_latest_timelapse(args.cam_dir, args.sd,
+            video_path = find_latest_timelapse(args.cam_dir, use_sd,
                                                lookback=args.lookback)
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -215,8 +221,8 @@ def main():
                       f"{args.as6_json}: {e}", file=sys.stderr)
                 sys.exit(1)
 
-        prefix = "mini" if args.sd else "full"
-        output_width, output_height = (1280, 848) if args.sd else (None, None)
+        prefix = "mini" if use_sd else "full"
+        output_width, output_height = (1280, 848) if use_sd else (None, None)
 
         make_camera_masks.build_camera_masks(
             equirect_mask_path, output_dir, args.cam_dir, prefix,

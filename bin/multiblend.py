@@ -739,7 +739,8 @@ def compute_seams(images: List[ImageInfo], workwidth: int, workheight: int,
 
 
 def build_seam_mask_cache(images: List[ImageInfo], assignment: np.ndarray,
-                          workwidth: int, workheight: int, levels: int) -> dict:
+                          workwidth: int, workheight: int, levels: int,
+                          wrap_x: bool = False) -> dict:
     """Build per-image seam-mask pyramids for blend()'s seam_mask_cache.
 
     The pyramids depend only on the (static) assignment and image footprints,
@@ -761,9 +762,10 @@ def build_seam_mask_cache(images: List[ImageInfo], assignment: np.ndarray,
             mask_g[0][:] = (assignment == np.uint8(i))
         for l in range(levels - 1):
             if _NUMBA_OK:
-                _nb_ds2(mask_g[l], mask_g[l + 1])
+                _nb_ds2(mask_g[l], mask_g[l + 1], wrap_x)
             else:
-                _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
+                _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1],
+                                 wrap_x=wrap_x)
         cache[i] = [m.copy() for m in mask_g]
     return cache
 
@@ -787,8 +789,9 @@ except ImportError:
 
 if _NUMBA_OK:
     @_njit(parallel=True, cache=True, fastmath=True)
-    def _nb_ds3(src, dst):
-        """Full 2x downsample: [0.25,0.5,0.25] separable kernel, (C,H,W) float32."""
+    def _nb_ds3(src, dst, wrap_x=False):
+        """Full 2x downsample: [0.25,0.5,0.25] separable kernel, (C,H,W) float32.
+        wrap_x=True wraps the horizontal borders (360-degree panoramas)."""
         C = src.shape[0]; H = src.shape[1]; W = src.shape[2]
         dH = dst.shape[1]; dW = dst.shape[2]
         for c_di in _prange(C * dH):
@@ -799,8 +802,8 @@ if _NUMBA_OK:
             rip1 = si + 1 if si + 1 < H else H - 1
             for dj in range(dW):
                 sj   = dj * 2
-                cjm1 = sj - 1 if sj > 0     else 0
-                cjp1 = sj + 1 if sj + 1 < W else W - 1
+                cjm1 = sj - 1 if sj > 0     else (W - 1 if wrap_x else 0)
+                cjp1 = sj + 1 if sj + 1 < W else (0     if wrap_x else W - 1)
                 dst[c, di, dj] = (
                     np.float32(0.0625) * (src[c, rim1, cjm1] + src[c, rim1, cjp1] +
                                           src[c, rip1, cjm1] + src[c, rip1, cjp1]) +
@@ -810,8 +813,9 @@ if _NUMBA_OK:
                 )
 
     @_njit(parallel=True, cache=True, fastmath=True)
-    def _nb_ds2(src, dst):
-        """Full 2x downsample: [0.25,0.5,0.25] separable kernel, (H,W) float32."""
+    def _nb_ds2(src, dst, wrap_x=False):
+        """Full 2x downsample: [0.25,0.5,0.25] separable kernel, (H,W) float32.
+        wrap_x=True wraps the horizontal borders (360-degree panoramas)."""
         H = src.shape[0]; W = src.shape[1]
         dH = dst.shape[0]; dW = dst.shape[1]
         for di in _prange(dH):
@@ -820,8 +824,8 @@ if _NUMBA_OK:
             rip1 = si + 1 if si + 1 < H else H - 1
             for dj in range(dW):
                 sj   = dj * 2
-                cjm1 = sj - 1 if sj > 0     else 0
-                cjp1 = sj + 1 if sj + 1 < W else W - 1
+                cjm1 = sj - 1 if sj > 0     else (W - 1 if wrap_x else 0)
+                cjp1 = sj + 1 if sj + 1 < W else (0     if wrap_x else W - 1)
                 dst[di, dj] = (
                     np.float32(0.0625) * (src[rim1, cjm1] + src[rim1, cjp1] +
                                           src[rip1, cjm1] + src[rip1, cjp1]) +
@@ -831,8 +835,9 @@ if _NUMBA_OK:
                 )
 
     @_njit(parallel=True, cache=True, fastmath=True)
-    def _nb_us(src, dst, dr0, dr1, dc0, dc1):
-        """Banded 2x bilinear upsample, (C,h,w) → dst (C,H,W) band [dr0:dr1, dc0:dc1]."""
+    def _nb_us(src, dst, dr0, dr1, dc0, dc1, wrap_x=False):
+        """Banded 2x bilinear upsample, (C,h,w) → dst (C,H,W) band [dr0:dr1, dc0:dc1].
+        wrap_x=True wraps the horizontal borders (360-degree panoramas)."""
         C = src.shape[0]; h = src.shape[1]; w = src.shape[2]
         H = dst.shape[1]; W = dst.shape[2]
         si_lo = dr0 >> 1
@@ -849,7 +854,7 @@ if _NUMBA_OK:
             for sj in range(sj_lo, sj_hi):
                 dj0  = sj * 2
                 dj1  = dj0 + 1
-                sj_n = sj + 1 if sj + 1 < w else w - 1
+                sj_n = sj + 1 if sj + 1 < w else (0 if wrap_x else w - 1)
                 v00 = src[c, si,   sj]
                 v01 = src[c, si,   sj_n]
                 v10 = src[c, si_n, sj]
@@ -1333,14 +1338,23 @@ def pyramid_sizes(workwidth: int, workheight: int, levels: int) -> List[tuple]:
 
 def _downsample_into(src: np.ndarray, tmp: np.ndarray, dst: np.ndarray,
                      r_lo: int = 0, r_hi: int = -1,
-                     c_lo: int = 0, c_hi: int = -1) -> None:
+                     c_lo: int = 0, c_hi: int = -1,
+                     wrap_x: bool = False) -> None:
     """Downsample src into dst using tmp as scratch (all pre-allocated).
 
     r_lo/r_hi, c_lo/c_hi: row/col extent of the non-constant image region.
     Only the 2-D band around the image is convolved; the constant edge-extended
     rows/cols outside are simply copied, skipping up to 75% of work.
+
+    wrap_x=True wraps the horizontal convolution (360-degree panoramas);
+    the band optimisation is then skipped (full-array path).
     """
     H, W = src.shape[-2], src.shape[-1]
+    if wrap_x:
+        convolve1d(src, _KERNEL, axis=-1, mode='wrap', output=tmp)
+        convolve1d(tmp, _KERNEL, axis=-2, mode='reflect', output=tmp)
+        np.copyto(dst, tmp[..., ::2, ::2])
+        return
     if r_hi < 0: r_hi = H
     if c_hi < 0: c_hi = W
     lr = max(0, r_lo - 1);  rr = min(H, r_hi + 1)
@@ -1366,12 +1380,31 @@ def _downsample_into(src: np.ndarray, tmp: np.ndarray, dst: np.ndarray,
 
 def _upsample_into(src: np.ndarray, tmp: np.ndarray, dst: np.ndarray,
                    dr0: int = 0, dr1: int = -1,
-                   dc0: int = 0, dc1: int = -1) -> None:
+                   dc0: int = 0, dc1: int = -1,
+                   wrap_x: bool = False) -> None:
     """2x linear upsample src into dst using tmp as scratch (all pre-allocated).
     tmp.shape must be (*src.shape[:-1], dst.shape[-1]).
-    dr0/dr1, dc0/dc1: optional dst row/col band; only that region of dst is written."""
+    dr0/dr1, dc0/dc1: optional dst row/col band; only that region of dst is written.
+
+    wrap_x=True wraps the horizontal interpolation (360-degree panoramas);
+    the band optimisation is then skipped (full-array path)."""
     h, w = src.shape[-2], src.shape[-1]
     H, W = dst.shape[-2], dst.shape[-1]
+    if wrap_x:
+        # separable: horizontal wrap-aware pass into tmp, then vertical
+        # (clamped) pass into dst -- mirrors _nb_us semantics
+        ne = (W + 1) // 2          # even dst columns <- src columns
+        no = W // 2                # odd dst columns <- interpolated
+        tmp[..., :, 0::2] = src[..., :ne]
+        if no > 0:
+            tmp[..., :, 1::2] = (src[..., :no] + np.roll(src, -1, axis=-1)[..., :no]) * 0.5
+        ir = (H + 1) // 2
+        dst[..., 0::2, :] = tmp[..., :ir, :]
+        nor = H // 2
+        if nor > 0:
+            tmpp = np.concatenate([tmp, tmp[..., -1:, :]], axis=-2)
+            dst[..., 1::2, :] = (tmpp[..., :nor, :] + tmpp[..., 1:nor + 1, :]) * 0.5
+        return
     if dr1 < 0: dr1 = H
     if dc1 < 0: dc1 = W
     sr0 = dr0 >> 1;  sr1 = min(h, (dr1 + 2) >> 1)
@@ -1781,7 +1814,8 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
           out_info: Optional[dict] = None,
           print_func: Callable = print,
           exposure_info: Optional[List[dict]] = None,
-          seam_mask_cache: Optional[dict] = None) -> List[np.ndarray]:
+          seam_mask_cache: Optional[dict] = None,
+          wrap_x: bool = False) -> List[np.ndarray]:
     if verbosity >= 1:
         print_func("  blending...")
 
@@ -1841,9 +1875,10 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
                 mask_g[0][:] = (assignment == np.uint8(i))
             for l in range(levels - 1):
                 if _NUMBA_OK:
-                    _nb_ds2(mask_g[l], mask_g[l + 1])
+                    _nb_ds2(mask_g[l], mask_g[l + 1], wrap_x)
                 else:
-                    _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1])
+                    _downsample_into(mask_g[l], mask_c[l], mask_g[l + 1],
+                                     wrap_x=wrap_x)
             if seam_mask_cache is not None:
                 seam_mask_cache[i] = [m.copy() for m in mask_g]
                 mask_p = seam_mask_cache[i]
@@ -1867,12 +1902,12 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
             rl0 = r0 >> l;  rl1 = min((r1 + (1 << l) - 1) >> l, pyr_shapes[l][0])
             cl0 = c0 >> l;  cl1 = min((c1 + (1 << l) - 1) >> l, pyr_shapes[l][1])
             if _NUMBA_OK:
-                _nb_ds3(gauss[l], gauss[l + 1])
-                _nb_us(gauss[l + 1], lapl[l], rl0, rl1, cl0, cl1)
+                _nb_ds3(gauss[l], gauss[l + 1], wrap_x)
+                _nb_us(gauss[l + 1], lapl[l], rl0, rl1, cl0, cl1, wrap_x)
                 _nb_accum_prep(gauss[l], lapl[l], mask_p[l], rl0, rl1, cl0, cl1)
             else:
-                _downsample_into(gauss[l], lapl[l], gauss[l + 1], rl0, rl1, cl0, cl1)
-                _upsample_into(gauss[l + 1], uph_t[l], lapl[l], rl0, rl1, cl0, cl1)
+                _downsample_into(gauss[l], lapl[l], gauss[l + 1], rl0, rl1, cl0, cl1, wrap_x=wrap_x)
+                _upsample_into(gauss[l + 1], uph_t[l], lapl[l], rl0, rl1, cl0, cl1, wrap_x=wrap_x)
                 lb = lapl[l][..., rl0:rl1, cl0:cl1]
                 np.subtract(gauss[l][..., rl0:rl1, cl0:cl1], lb, out=lb)
                 np.multiply(lb, mask_p[l][rl0:rl1, cl0:cl1], out=lb)
@@ -1890,9 +1925,9 @@ def blend(images: List[ImageInfo], assignment: np.ndarray,
     np.copyto(_cg[-1], out_pyr[-1])
     for l in range(levels - 2, -1, -1):
         if _NUMBA_OK:
-            _nb_us(_cg[l + 1], _cg[l], 0, pyr_shapes[l][0], 0, pyr_shapes[l][1])
+            _nb_us(_cg[l + 1], _cg[l], 0, pyr_shapes[l][0], 0, pyr_shapes[l][1], wrap_x)
         else:
-            _upsample_into(_cg[l + 1], _cut[l], _cg[l])
+            _upsample_into(_cg[l + 1], _cut[l], _cg[l], wrap_x=wrap_x)
         _cg[l] += out_pyr[l]
 
     result = _cg[0]  # (3, H, W), no copy

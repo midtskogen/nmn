@@ -948,6 +948,7 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
                           is_video_output=False,
                           reverse=False, simple_seam=False, content_seam=False,
                           seam_load_filename=None,
+                          wrap_x=False,
                           verbosity=1, print_func=print):
     """Compute seam assignment and seam-mask pyramids, caching the assignment.
 
@@ -975,7 +976,7 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
             print_func=print_func,
         )
         seam_mask_cache = multiblend.build_seam_mask_cache(
-            images, assignment, workwidth, workheight, levels)
+            images, assignment, workwidth, workheight, levels, wrap_x=wrap_x)
         return assignment, seam_present, seam_mask_cache
 
     try:
@@ -991,7 +992,8 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
                         len(seam_present) == len(images) and
                         n == len(images) and levels_loaded == levels):
                     seam_mask_cache = multiblend.build_seam_mask_cache(
-                        images, assignment, workwidth, workheight, levels)
+                        images, assignment, workwidth, workheight, levels,
+                        wrap_x=wrap_x)
                     if verbosity >= 1:
                         print_func("  loaded seams from cache.")
                     return assignment, seam_present, seam_mask_cache
@@ -1011,7 +1013,7 @@ def compute_or_load_seams(images, workwidth, workheight, pto_file, pad, padsides
         print_func=print_func,
     )
     seam_mask_cache = multiblend.build_seam_mask_cache(
-        images, assignment, workwidth, workheight, levels)
+        images, assignment, workwidth, workheight, levels, wrap_x=wrap_x)
 
     try:
         os.makedirs(cache_dir, exist_ok=True)
@@ -1361,9 +1363,34 @@ def _precompile_numba_functions():
 
     _print("Pre-compilation complete.")
 
+
+def _erode_camera_mask(mask, iterations, wrap_x):
+    """binary_erosion of a per-camera canvas mask.
+
+    With wrap_x=True (full-360 equirect) the panorama's left/right borders
+    wrap around instead of acting as eroded boundaries, so the footprint of
+    a camera straddling the seam keeps its real content up to (and across)
+    the canvas edges.  Without this, the seam columns lose their true
+    coverage and get Voronoi-filled with another camera's fisheye-corner
+    content, which the multiband blend then smears into a wide pale/blurry
+    vertical stripe at the wrap point.
+    """
+    from scipy.ndimage import binary_erosion
+    if not wrap_x:
+        return binary_erosion(mask, iterations=iterations)
+    m = np.pad(mask, ((0, 0), (iterations, iterations)), mode='wrap')
+    m = binary_erosion(m, iterations=iterations)
+    return m[:, iterations:-iterations]
+
+
 def reproject_images(pto_file, input_files, output_file, pad, num_cores, padsides, enhance, force_video_dims: bool = False, fisheye_mask: bool = False, crop_to_content: bool = True, saturation: float = 1.0, devignette=None, input_datetime: str = None, seam_load_filename: str = None):
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=force_video_dims)
     final_w, final_h = global_options['final_w'], global_options['final_h']
+    # Full-360 equirect wraps horizontally: use wrap-aware mask erosion and
+    # blend pyramids so the left/right canvas edges stay seamless.
+    wrap_x = (not fisheye_mask
+              and int(global_options.get('f', 2)) == 2
+              and float(global_options.get('v', 360)) >= 359.99)
     num_images = len(mappings)
     if len(input_files) != num_images:
         raise ValueError(f"Number of input files ({len(input_files)}) does not match the number of images in the PTO file ({num_images}).")
@@ -1470,7 +1497,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         """Build ImageInfo from snapshotted per-camera arrays (runs in a thread,
         overlapping with the next camera's Numba reprojection)."""
         mask = w_snap > 1e-9
-        mask = _binary_erosion(mask, iterations=2)
+        mask = _erode_camera_mask(mask, 2, wrap_x)
 
         rows = np.any(mask, axis=1)
         cols = np.any(mask, axis=0)
@@ -1562,6 +1589,11 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
     levels = multiblend.compute_levels(images, workwidth, workheight, False, 1_000_000, 0)
     _print(f"  {workwidth}x{workheight}, {levels} levels (tightened from {final_w}x{final_h})")
 
+    # A full-360 equirect wraps horizontally: blend with horizontally
+    # wrapping pyramid kernels so the left/right canvas edges do not create
+    # a pale/blurry blend stripe at the wrap point.  (wrap_x was computed at
+    # the top of this function.)
+
     if seam_load_filename is not None:
         seam_load_filename = _prepare_loaded_seam(
             seam_load_filename, final_w, final_h, min_left, min_top,
@@ -1579,6 +1611,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         simple_seam=False,
         content_seam=False,
         seam_load_filename=seam_load_filename,
+        wrap_x=wrap_x,
         verbosity=0 if _quiet else 1,
         print_func=_print,
     )
@@ -1596,6 +1629,7 @@ def reproject_images(pto_file, input_files, output_file, pad, num_cores, padside
         verbosity=0 if _quiet else 2,
         print_func=_print,
         seam_mask_cache=seam_mask_cache,
+        wrap_x=wrap_x,
     )
     _print(f"  blend done ({time.perf_counter() - _t_phase:.2f}s)")
     _t_phase = time.perf_counter()
@@ -2796,6 +2830,11 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
+    # Full-360 equirect: blend with horizontally wrapping pyramid kernels so
+    # the left/right canvas edges do not create a blend stripe at the wrap.
+    wrap_x = (not fisheye_mask
+              and int(global_options.get('f', 2)) == 2
+              and float(global_options.get('v', 360)) >= 359.99)
     if final_w > 16384:
         raise ValueError(f"Output width {final_w} exceeds codec limits for H.264/libx264. PTO='{pto_file}'")
     if len(mappings) != num_images:
@@ -2879,7 +2918,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
         c0_i = int(np.argmax(cols_i))
         c1_i = int(len(cols_i) - np.argmax(cols_i[::-1]))
         cam_bboxes.append((r0_i, r1_i, c0_i, c1_i))
-        eroded_full_i = _binary_erosion_cam(mask_i, iterations=2)
+        eroded_full_i = _erode_camera_mask(mask_i, 2, wrap_x)
         rows_e = np.any(eroded_full_i, axis=1); cols_e = np.any(eroded_full_i, axis=0)
         if not rows_e.any():
             eroded_i = np.zeros((r1_i - r0_i, c1_i - c0_i), dtype=bool)
@@ -3212,6 +3251,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                         simple_seam=False,
                         content_seam=False,
                         seam_load_filename=seam_load_filename,
+                        wrap_x=wrap_x,
                         verbosity=0,
                         print_func=_print,
                     )
@@ -3241,6 +3281,7 @@ def reproject_timelapse(pto_file, camera_files, output_file, start_time, end_tim
                 exposure_info=None if recompute_exposure else cached_exp_info,
                 out_info=blend_out_info,
                 seam_mask_cache=seam_mask_cache,
+                wrap_x=wrap_x,
             )
             if recompute_exposure and 'exposure' in blend_out_info:
                 cached_exp_info = blend_out_info['exposure']
@@ -3339,6 +3380,11 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
 
     mappings, global_options = build_mappings(pto_file, pad, num_cores, padsides, is_video_output=True)
     final_w, final_h = global_options['final_w'], global_options['final_h']
+    # Full-360 equirect: blend with horizontally wrapping pyramid kernels so
+    # the left/right canvas edges do not create a blend stripe at the wrap.
+    wrap_x = (not fisheye_mask
+              and int(global_options.get('f', 2)) == 2
+              and float(global_options.get('v', 360)) >= 359.99)
     if final_w > 16384:
         raise ValueError(f"Output width {final_w} exceeds codec limits for H.264/libx264. PTO='{pto_file}'")
     num_images = len(mappings)
@@ -3612,7 +3658,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
         c1_i = int(len(cols_i) - np.argmax(cols_i[::-1]))
         cam_bboxes.append((r0_i, r1_i, c0_i, c1_i))
         # Erode mask first, then derive bbox from eroded mask — identical to image path
-        eroded_full_i = _binary_erosion_cam(mask_i, iterations=2)
+        eroded_full_i = _erode_camera_mask(mask_i, 2, wrap_x)
         rows_e = np.any(eroded_full_i, axis=1); cols_e = np.any(eroded_full_i, axis=0)
         if not rows_e.any():
             # Erosion consumed entire mask — fall back to uneroded bbox with empty mask
@@ -3959,6 +4005,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                     simple_seam=False,
                     content_seam=False,
                     seam_load_filename=seam_load_filename,
+                    wrap_x=wrap_x,
                     verbosity=0,
                     print_func=_print,
                 )
@@ -3981,6 +4028,7 @@ def reproject_videos(pto_file, input_files, output_file, pad, num_cores, padside
                 exposure_info=None if recompute_exposure else cached_exp_info,
                 out_info=blend_out_info,
                 seam_mask_cache=seam_mask_cache,
+                wrap_x=wrap_x,
             )
             if recompute_exposure and 'exposure' in blend_out_info:
                 cached_exp_info = blend_out_info['exposure']

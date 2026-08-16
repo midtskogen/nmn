@@ -88,7 +88,12 @@ def _local_background(gray, blur_kernel):
                               max(1, h // BG_DOWNSCALE)),
                        interpolation=cv2.INTER_AREA)
     k = _odd(blur_kernel / BG_DOWNSCALE)
+    # the panorama wraps horizontally: pad so the blur at the left/right
+    # edges sees the wrapped-around content, not a reflection
+    pad = k
+    small = cv2.copyMakeBorder(small, 0, 0, pad, pad, cv2.BORDER_WRAP)
     small = cv2.GaussianBlur(small, (k, k), 0)
+    small = small[:, pad:-pad]
     return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
@@ -367,6 +372,9 @@ def build_sky_mask(video_path, output_path, max_frames=0, sample_interval=2,
 
     seed = ((day_mean < t_abs) | (dark_frac > dark_frac_thresh)
             | (vgrad > texture_thresh)).astype(np.uint8) * 255
+    # wrap-pad before morphology so the 360-degree seam is seamless
+    wm = max(16, int(round(64 * s)))
+    seed = cv2.copyMakeBorder(seed, 0, 0, wm, wm, cv2.BORDER_WRAP)
     seed = cv2.morphologyEx(seed, cv2.MORPH_OPEN, cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (_odd(3 * s), _odd(3 * s))))
     seed = cv2.morphologyEx(seed, cv2.MORPH_CLOSE, cv2.getStructuringElement(
@@ -378,11 +386,19 @@ def build_sky_mask(video_path, output_path, max_frames=0, sample_interval=2,
                      smooth=seam_smooth, floor=seam_floor,
                      top_ratio=seam_top_ratio, grad_scale=grad_scale,
                      sigma=1.5 * s)
+
+    # The panorama wraps horizontally (360 degrees): all component-based
+    # assembly below runs on a wrap-padded image so structures crossing the
+    # left/right edge are treated as one and the seam stays invisible.
+    width_p = width + 2 * wm
+    day_mean_p = cv2.copyMakeBorder(day_mean, 0, 0, wm, wm, cv2.BORDER_WRAP)
+    h_p = np.concatenate([h[-wm:], h, h[:wm]])
+
     rows = np.arange(height)[:, None]
-    fg = (rows >= h[None, :]).astype(np.uint8) * 255
+    fg = (rows >= h_p[None, :]).astype(np.uint8) * 255
 
     # --- Tier 1: above-seam seed components attached to the foreground -----
-    above = (rows < h[None, :]).astype(np.uint8) * 255
+    above = (rows < h_p[None, :]).astype(np.uint8) * 255
     cand = cv2.bitwise_and(seed, above)
     fg = attach_components(fg, cand, max(4, int(round(8 * s * s))),
                            (_odd(7 * s), _odd(7 * s)))
@@ -394,10 +410,10 @@ def build_sky_mask(video_path, output_path, max_frames=0, sample_interval=2,
     # components floating in the sky (antennas, wires) -- treeline-edge
     # blackhat responses touch the seed mass and fuzzy needle-tip clumps
     # above crowns are not thin; both are already handled by tier 1.
-    bh_v = cv2.morphologyEx(day_mean, cv2.MORPH_BLACKHAT,
+    bh_v = cv2.morphologyEx(day_mean_p, cv2.MORPH_BLACKHAT,
                             cv2.getStructuringElement(cv2.MORPH_RECT,
                                                       (_odd(3 * s), _odd(15 * s))))
-    bh_h = cv2.morphologyEx(day_mean, cv2.MORPH_BLACKHAT,
+    bh_h = cv2.morphologyEx(day_mean_p, cv2.MORPH_BLACKHAT,
                             cv2.getStructuringElement(cv2.MORPH_RECT,
                                                       (_odd(15 * s), _odd(3 * s))))
     bh = np.maximum(bh_v, bh_h)
@@ -422,7 +438,7 @@ def build_sky_mask(video_path, output_path, max_frames=0, sample_interval=2,
                             (_odd(5 * s), _odd(45 * s)))
     added = cv2.bitwise_and(fg2, cv2.bitwise_not(fg))
     drop = int(round(31 * s))
-    for x in range(width):
+    for x in range(width_p):
         idx = np.where(added[:, x] > 0)[0]
         if not len(idx):
             continue
@@ -435,6 +451,7 @@ def build_sky_mask(video_path, output_path, max_frames=0, sample_interval=2,
 
     # --- Final: sky must stay connected to the top edge ---------------------
     fg = fill_enclosed_sky(fg)
+    fg = fg[:, wm:-wm]  # crop off the wrap padding
     sky_mask = cv2.bitwise_not(fg)
 
     # Default output: white = sky (intuitive image mask).  With --invert,

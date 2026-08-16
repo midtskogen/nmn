@@ -95,6 +95,38 @@ def find_camera_inputs(cam_dir, prefix, ncams=7):
     return lens_files, sample_images
 
 
+def _largest_arc_gap_center(vals, period):
+    """Return the centre of the largest uncovered arc of the values' circle.
+
+    Used to place the unwrap cut of a camera's pano-x map in the part of the
+    panorama the camera does not see, so the coordinate field is continuous
+    across its FOV.  Falls back to 0 (the natural seam) when degenerate.
+    """
+    if len(vals) == 0:
+        return 0.0
+    bins = 720
+    covered = np.zeros(bins, dtype=bool)
+    idx = np.floor(vals / period * bins).astype(int) % bins
+    covered[idx] = True
+    if covered.all():
+        return 0.0
+    # longest run of uncovered bins on the circle
+    doubled = np.concatenate([covered, covered])
+    best_len = best_start = 0
+    run_start = None
+    for i, c in enumerate(doubled):
+        if not c and run_start is None:
+            run_start = i
+        elif c and run_start is not None:
+            if i - run_start > best_len:
+                best_len, best_start = i - run_start, run_start
+            run_start = None
+    if run_start is not None and 2 * bins - run_start > best_len:
+        best_len, best_start = 2 * bins - run_start, run_start
+    center_bin = (best_start + best_len / 2) % bins
+    return (center_bin + 0.5) * period / bins
+
+
 def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
                        output_width=None, output_height=None,
                        mask_white_is_sky=True, ncams=7,
@@ -175,11 +207,16 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
         # coordinate-map upsampling below, their blend halo still resolves
         # to the non-sky border value instead of sampling garbage.
         if is_full_360:
-            # Bring into [0, orig_w) first, then shift into the padded
-            # image's coordinate space.
-            map_x = np.where(invalid, -1e6, np.mod(map_x, orig_w) + wrap_pad)
-        else:
-            map_x = np.where(invalid, -1e6, map_x)
+            map_x = np.mod(map_x, orig_w)
+            # Unwrap the azimuth discontinuity BEFORE upsampling: a camera
+            # whose FOV straddles the pano seam has map_x values jumping
+            # between ~orig_w and ~0, and interpolating across that jump
+            # would sample unrelated azimuths (a vertical artefact stripe).
+            # Place the cut in the largest uncovered arc of this camera's
+            # map so the field is continuous across the FOV.
+            cut = _largest_arc_gap_center(map_x[~invalid], orig_w)
+            map_x = np.where(map_x < cut, map_x + orig_w, map_x)
+        map_x = np.where(invalid, -1e6, map_x)
         map_y = np.where(invalid, -1e6, map_y)
         map_x = map_x.astype(np.float32)
         map_y = map_y.astype(np.float32)
@@ -200,6 +237,12 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
                                interpolation=cv2.INTER_LINEAR)
             invalid = cv2.resize(invalid.astype(np.uint8), (MASK_OUT_W, MASK_OUT_H),
                                  interpolation=cv2.INTER_NEAREST) > 0
+
+        if is_full_360:
+            # Wrap AFTER upsampling, then shift into the padded image's
+            # coordinate space.
+            map_x = np.where(map_x <= -9e5, map_x,
+                             np.mod(map_x, orig_w) + wrap_pad)
 
         cam_mask = cv2.remap(pano_mask_for_remap, map_x, map_y,
                              interpolation=cv2.INTER_CUBIC,

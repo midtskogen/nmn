@@ -187,6 +187,21 @@ def _build_fisheye_mask(native_masks_white_sky, images, cam_numbers, fe_w, fe_h)
         # this camera doesn't actually cover.
         raw_x, raw_y = coords[:, :, 0], coords[:, :, 1]
         valid = (raw_x > -99999.0) & (raw_x >= 0) & (raw_x < sw) & (raw_y >= 0) & (raw_y < sh)
+
+        # cv2.remap's cubic interpolation blends in a small neighbourhood of
+        # source pixels, so right at a camera's own frame edge it mixes in
+        # the BORDER_CONSTANT (non-sky) fill used for pixels just outside
+        # that camera's coverage. Composited into the fisheye canvas, that
+        # shows up as a thin curved artefact tracing each camera's own image
+        # boundary. Erode the valid footprint a few pixels inward (in
+        # fisheye-canvas space, so it follows the actual projected/curved
+        # boundary) so only samples safely inside each camera's frame -- away
+        # from that edge-interpolation noise -- are trusted; overlapping
+        # camera coverage fills in the rest.
+        valid_u8 = valid.astype(np.uint8)
+        erode_kernel = np.ones((5, 5), np.uint8)
+        valid = cv2.erode(valid_u8, erode_kernel, iterations=1) > 0
+
         # Scale from the camera's native PTO resolution to the canonical
         # MASK_OUT_W x MASK_OUT_H size the per-camera masks are stored at.
         map_x = np.where(valid, raw_x * (MASK_OUT_W / sw), -1e6).astype(np.float32)
@@ -201,6 +216,17 @@ def _build_fisheye_mask(native_masks_white_sky, images, cam_numbers, fe_w, fe_h)
         fe_valid_any |= valid
 
     fe_sky[~fe_valid_any] = 0
+
+    # Final cleanup: remove any remaining thin sky-coloured slivers (residual
+    # per-camera edge/interpolation noise the footprint erosion above didn't
+    # fully catch) with a morphological opening. Only opening -- never
+    # closing -- is used here: opening can only turn thin "sky" noise into
+    # "non-sky", the same safe direction as everything else in this
+    # pipeline, whereas closing would risk painting over genuinely thin
+    # foreground (antennas, wires) with sky.
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    fe_sky = cv2.morphologyEx(fe_sky, cv2.MORPH_OPEN, open_kernel)
+
     return fe_sky
 
 

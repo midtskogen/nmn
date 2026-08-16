@@ -279,6 +279,19 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
             cv2.imwrite(install_path, install_mask)
             print(f"  Installed -> {install_path}")
 
+            # Also expose the installed mask where the capture-side tooling
+            # looks for it, e.g. /meteor/cam{N}/mask.png. Only create the
+            # symlink if nothing is there yet (file or symlink, even a
+            # broken one) so we never clobber a manually placed mask.
+            link_path = os.path.join(cam_dir, f"cam{cam_num}", "mask.png")
+            if not os.path.lexists(link_path):
+                try:
+                    os.symlink(install_path, link_path)
+                    print(f"  Symlinked {link_path} -> {install_path}")
+                except OSError as e:
+                    print(f"  WARNING: could not symlink {link_path} -> "
+                          f"{install_path}: {e}")
+
     return out_paths
 
 
@@ -308,7 +321,9 @@ def main():
                              "amscams pipeline loads from: "
                              "/mnt/ams2/meteor_archive/{ams_id}/CAL/MASKS/{cams_id}_mask.png "
                              "(always written white=non-sky, regardless of --invert). "
-                             "Any pre-existing file is backed up first.")
+                             "Any pre-existing file is backed up first. Also symlinks "
+                             "{cam-dir}/cam{N}/mask.png to the installed file, if that "
+                             "path doesn't already exist.")
     parser.add_argument("--as6-json", default="/home/ams/amscams/conf/as6.json",
                         help="Path to as6.json, used with --install to resolve ams_id and "
                              "each camera's cams_id (default /home/ams/amscams/conf/as6.json)")

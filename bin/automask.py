@@ -18,6 +18,8 @@ Pipeline:
      native-resolution mask per camera, installed into
      /mnt/ams2/meteor_archive/{ams_id}/CAL/MASKS/{cams_id}_mask.png
      (existing files are backed up first), unless --no-install is given.
+     Also symlinks {cam-dir}/cam{N}/mask.png to the installed file, if
+     that path doesn't already exist (file or symlink).
 
 Usage:
     automask.py [--cam-dir /meteor] [--ncams 7] [--hd]

@@ -13,13 +13,17 @@ Pipeline:
      timelapse_eq.sh.
   2. make_equirect_mask.build_sky_mask() on that video -> equirect mask
      (white=non-sky, i.e. --invert convention, since that is what
-     make_camera_masks / scan_stack.py need).
+     make_camera_masks / scan_stack.py need). Also copied to
+     {cam-dir}/cam8/mask.png.
   3. make_camera_masks.build_camera_masks() on that equirect mask -> one
      native-resolution mask per camera, installed into
      /mnt/ams2/meteor_archive/{ams_id}/CAL/MASKS/{cams_id}_mask.png
      (existing files are backed up first), unless --no-install is given.
      Also symlinks {cam-dir}/cam{N}/mask.png to the installed file, if
-     that path doesn't already exist (file or symlink).
+     that path doesn't already exist (file or symlink). A fisheye-
+     projection mask is also assembled from the per-camera masks (same
+     geometry as stitch_latest.sh's --fisheye stitch) and copied to
+     {cam-dir}/cam9/mask.png.
 
 Usage:
     automask.py [--cam-dir /meteor] [--ncams 7] [--hd]
@@ -209,6 +213,15 @@ def main():
             invert_output=True,  # white=non-sky, required by make_camera_masks/scan_stack.py
         )
 
+        equirect_publish_path = os.path.join(args.cam_dir, "cam8", "mask.png")
+        try:
+            import shutil
+            shutil.copy2(equirect_mask_path, equirect_publish_path)
+            print(f"Copied equirect mask -> {equirect_publish_path}")
+        except OSError as e:
+            print(f"WARNING: could not copy equirect mask to "
+                  f"{equirect_publish_path}: {e}", file=sys.stderr)
+
         # --- Step 3: build (and install) per-camera masks --------------
         print("\n--- Building per-camera masks ---")
         install_ams_id, install_cams_id_map = None, None
@@ -225,14 +238,28 @@ def main():
 
         prefix = "mini" if use_sd else "full"
         output_width, output_height = (1280, 848) if use_sd else (None, None)
+        fisheye_width, fisheye_height = (2048, 2048) if use_sd else (None, None)
 
-        make_camera_masks.build_camera_masks(
+        cam_mask_paths = make_camera_masks.build_camera_masks(
             equirect_mask_path, output_dir, args.cam_dir, prefix,
             output_width=output_width, output_height=output_height,
             mask_white_is_sky=False, ncams=args.ncams,
             install_ams_id=install_ams_id,
             install_cams_id_map=install_cams_id_map,
+            build_fisheye=True, fisheye_width=fisheye_width,
+            fisheye_height=fisheye_height,
         )
+
+        fisheye_mask_path = cam_mask_paths.get(9)
+        if fisheye_mask_path:
+            fisheye_publish_path = os.path.join(args.cam_dir, "cam9", "mask.png")
+            try:
+                import shutil
+                shutil.copy2(fisheye_mask_path, fisheye_publish_path)
+                print(f"Copied fisheye mask -> {fisheye_publish_path}")
+            except OSError as e:
+                print(f"WARNING: could not copy fisheye mask to "
+                      f"{fisheye_publish_path}: {e}", file=sys.stderr)
 
         if args.no_install:
             print(f"\n--install skipped (--no-install); per-camera masks "

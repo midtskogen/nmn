@@ -16,7 +16,14 @@ camera's native resolution via cv2.remap().
 Usage:
     make_camera_masks.py <equirect_mask.png> <output_dir> \
         [--cam-dir /meteor] [--ncams 7] [--sd] [--invert] \
-        [--output-width W --output-height H]
+        [--output-width W --output-height H] \
+        [--fisheye [--fisheye-width W --fisheye-height H]]
+
+With --fisheye, a cam9_mask.png is also assembled: each camera's own
+native-resolution mask (computed en route to cam{N}_mask.png) is reprojected
+into an f3/190deg-HFOV fisheye canvas using the same shared per-camera
+geometry stitch_latest.sh's --fisheye stitch uses, combining overlapping
+cameras conservatively (non-sky wins) instead of photometrically blending.
 
 The equirect mask must have been generated at the SAME output resolution
 stitch_latest.sh used for the mode it corresponds to:
@@ -27,6 +34,7 @@ stitch_latest.sh used for the mode it corresponds to:
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -127,10 +135,79 @@ def _largest_arc_gap_center(vals, period):
     return (center_bin + 0.5) * period / bins
 
 
+def _build_fisheye_mask(native_masks_white_sky, images, cam_numbers, fe_w, fe_h):
+    """Assemble a fisheye-projection sky mask (white=sky) from each camera's
+    native-resolution equirect-derived mask.
+
+    This mirrors the geometry stitch_latest.sh's --fisheye stitch uses (same
+    per-camera intrinsics/extrinsics from the shared PTO 'i' lines, f3/190
+    degree HFOV panorama canvas), reprojecting each camera's own mask
+    straight into the fisheye canvas rather than blending photos, since a
+    binary sky/non-sky classification doesn't need photometric blending: a
+    fisheye pixel is only "sky" if every camera that covers it agrees, and
+    pixels no camera covers (e.g. the corners outside the fisheye circle)
+    default to non-sky.
+    """
+    fe_sky = np.full((fe_h, fe_w), 255, dtype=np.uint8)
+    fe_valid_any = np.zeros((fe_h, fe_w), dtype=bool)
+
+    for idx, cam_num in enumerate(cam_numbers):
+        img = images[idx]
+        sw, sh = int(img['w']), int(img['h'])
+        fov, src_proj_f = img.get('v'), int(img.get('f', 0))
+        fov_rad = math.radians(fov)
+        if src_proj_f == 0:
+            src_focal = sw / (2 * math.tan(fov_rad / 2)) if fov_rad > 0 else 0
+        elif src_proj_f == 3:
+            src_focal = sw / fov_rad if fov_rad > 0 else 0
+        else:
+            continue
+
+        src_norm_radius = min(sw, sh) / 2.
+        y, p, r = img.get('y', 0), img.get('p', 0), -img.get('r', 0)
+        a, b, c = img.get('a', 0), img.get('b', 0), img.get('c', 0)
+        cx, cy = -img.get('d', 0), img.get('e', 0)
+        R_pr_inv = pto_mapper.create_pr_rotation_matrix(p, r).T
+
+        coords = np.empty((fe_h, fe_w, 2), dtype=np.float32)
+        pto_mapper.calculate_source_coords(
+            coords, fe_w, fe_h, fe_w, fe_h, 0, 0, 3, 190.0,
+            sw, sh, R_pr_inv, y, src_focal, src_norm_radius,
+            a, b, c, cx, cy, src_proj_f, 0.0, 1.0)
+
+        # calculate_source_coords() only flags a coordinate invalid when the
+        # projection itself fails (e.g. behind the camera); its lens model
+        # is valid well beyond the physical sensor extent (it's normally
+        # used with explicit padding for blend overlap), so it will happily
+        # return e.g. x=-300 or x=1200 for an 800-wide sensor. Without also
+        # bounding to the actual [0, sw) x [0, sh) sensor rectangle here,
+        # those out-of-frame samples fall through cv2.remap's border
+        # handling as "non-sky" and incorrectly veto real sky pixels that
+        # this camera doesn't actually cover.
+        raw_x, raw_y = coords[:, :, 0], coords[:, :, 1]
+        valid = (raw_x > -99999.0) & (raw_x >= 0) & (raw_x < sw) & (raw_y >= 0) & (raw_y < sh)
+        # Scale from the camera's native PTO resolution to the canonical
+        # MASK_OUT_W x MASK_OUT_H size the per-camera masks are stored at.
+        map_x = np.where(valid, raw_x * (MASK_OUT_W / sw), -1e6).astype(np.float32)
+        map_y = np.where(valid, raw_y * (MASK_OUT_H / sh), -1e6).astype(np.float32)
+
+        cam_contrib = cv2.remap(native_masks_white_sky[cam_num], map_x, map_y,
+                                interpolation=cv2.INTER_CUBIC,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        _, cam_contrib = cv2.threshold(cam_contrib, 127, 255, cv2.THRESH_BINARY)
+
+        fe_sky = np.where(valid, np.minimum(fe_sky, cam_contrib), fe_sky)
+        fe_valid_any |= valid
+
+    fe_sky[~fe_valid_any] = 0
+    return fe_sky
+
+
 def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
                        output_width=None, output_height=None,
                        mask_white_is_sky=True, ncams=7,
-                       install_ams_id=None, install_cams_id_map=None):
+                       install_ams_id=None, install_cams_id_map=None,
+                       build_fisheye=False, fisheye_width=None, fisheye_height=None):
     """Build one native-resolution mask PNG per camera from an equirect mask."""
     pano_mask = cv2.imread(str(equirect_mask_path), cv2.IMREAD_GRAYSCALE)
     if pano_mask is None:
@@ -197,6 +274,7 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
         pano_mask_for_remap = pano_mask
 
     out_paths = {}
+    native_masks_white_sky = {}
     for idx, cam_num in enumerate(cam_numbers):
         coords = pto_mapper.build_image_to_pano_map(pto_data, idx)
         map_x = coords[:, :, 0]
@@ -250,6 +328,9 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
         _, cam_mask = cv2.threshold(cam_mask, 127, 255, cv2.THRESH_BINARY)
         cam_mask[invalid] = 0
 
+        if build_fisheye:
+            native_masks_white_sky[cam_num] = cam_mask.copy()
+
         if not mask_white_is_sky:
             cam_mask = cv2.bitwise_not(cam_mask)
 
@@ -292,6 +373,19 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
                     print(f"  WARNING: could not symlink {link_path} -> "
                           f"{install_path}: {e}")
 
+    if build_fisheye:
+        fe_w = fisheye_width or 4096
+        fe_h = fisheye_height or 4096
+        fe_mask = _build_fisheye_mask(native_masks_white_sky, images, cam_numbers, fe_w, fe_h)
+        if not mask_white_is_sky:
+            fe_mask = cv2.bitwise_not(fe_mask)
+        fe_out_path = os.path.join(output_dir, "cam9_mask.png")
+        cv2.imwrite(fe_out_path, fe_mask)
+        out_paths[9] = fe_out_path
+        non_sky_pct = 100 * np.count_nonzero(fe_mask == 255) / fe_mask.size if not mask_white_is_sky \
+            else 100 * np.count_nonzero(fe_mask == 0) / fe_mask.size
+        print(f"  cam9 (fisheye): {fe_w}x{fe_h} -> {fe_out_path} (non-sky: {non_sky_pct:.1f}%)")
+
     return out_paths
 
 
@@ -327,6 +421,18 @@ def main():
     parser.add_argument("--as6-json", default="/home/ams/amscams/conf/as6.json",
                         help="Path to as6.json, used with --install to resolve ams_id and "
                              "each camera's cams_id (default /home/ams/amscams/conf/as6.json)")
+    parser.add_argument("--fisheye", action="store_true",
+                        help="Also assemble a cam9_mask.png fisheye-projection mask "
+                             "(f3, 190deg HFOV) in output_dir, by reprojecting each "
+                             "camera's own native mask into the fisheye canvas the same "
+                             "way stitch_latest.sh's --fisheye stitch does, the same "
+                             "shared per-camera geometry.")
+    parser.add_argument("--fisheye-width", type=int, default=None,
+                        help="Fisheye canvas width (default 4096, or 2048 to match "
+                             "stitch_latest.sh --sd)")
+    parser.add_argument("--fisheye-height", type=int, default=None,
+                        help="Fisheye canvas height (default 4096, or 2048 to match "
+                             "stitch_latest.sh --sd)")
     args = parser.parse_args()
 
     prefix = "mini" if args.sd else "full"
@@ -342,6 +448,8 @@ def main():
         output_width=args.output_width, output_height=args.output_height,
         mask_white_is_sky=not args.invert, ncams=args.ncams,
         install_ams_id=install_ams_id, install_cams_id_map=install_cams_id_map,
+        build_fisheye=args.fisheye, fisheye_width=args.fisheye_width,
+        fisheye_height=args.fisheye_height,
     )
 
 

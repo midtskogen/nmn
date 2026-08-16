@@ -32,6 +32,7 @@ stitch_latest.sh used for the mode it corresponds to:
     to match the EQ_SIZE_ARGS used in stitch_latest.sh --sd mode.
 """
 import argparse
+import copy
 import glob
 import json
 import math
@@ -376,7 +377,17 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
     if build_fisheye:
         fe_w = fisheye_width or 4096
         fe_h = fisheye_height or 4096
-        fe_mask = _build_fisheye_mask(native_masks_white_sky, images, cam_numbers, fe_w, fe_h)
+        # generate_pto_from_lens_files() applies this same (yaw=0, pitch=-90,
+        # roll=0) global rotation to every camera pose when it builds a real
+        # 'fisheye' projection PTO for stitch_latest.sh's --fisheye stitch,
+        # so that the fisheye canvas centre lands on zenith instead of the
+        # cameras' horizon-forward axis. `images` here came from the
+        # *equirect* PTO and doesn't have that rotation, so apply it to a
+        # copy before reprojecting into the fisheye canvas.
+        fisheye_images = copy.deepcopy(images)
+        fisheye_pto_data = (dict(global_options), fisheye_images)
+        pto_mapper.rotate_panorama(fisheye_pto_data, yaw_deg=0, pitch_deg=-90, roll_deg=0)
+        fe_mask = _build_fisheye_mask(native_masks_white_sky, fisheye_images, cam_numbers, fe_w, fe_h)
         if not mask_white_is_sky:
             fe_mask = cv2.bitwise_not(fe_mask)
         fe_out_path = os.path.join(output_dir, "cam9_mask.png")

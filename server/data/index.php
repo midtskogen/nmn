@@ -537,6 +537,25 @@ switch ($action) {
         echo $_out ?: json_encode(['error' => 'Backend returned no output']);
         break;
 
+    case 'fetch_archive_mask':
+        header('Content-Type: application/json');
+        $station_id = $_GET['station_id'] ?? null;
+        $camera_num = $_GET['camera_num'] ?? null;
+
+        if (!$station_id || !$camera_num || !preg_match('/^[A-Z]{3}$/', $station_id) || !ctype_digit($camera_num)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid or missing parameters']);
+            exit;
+        }
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' fetch_archive_mask '
+            . escapeshellarg($station_id) . ' '
+            . escapeshellarg($camera_num);
+
+        $_out = shell_exec($command);
+        echo $_out ?: json_encode(['error' => 'Backend returned no output']);
+        break;
+
     case 'enhance_filter':
         header('Content-Type: application/json');
         $image = $_GET['image'] ?? null;

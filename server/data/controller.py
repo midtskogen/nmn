@@ -240,7 +240,7 @@ try:
         start_stream_relay, stop_stream_relay, request_stream_transcode,
         fetch_grid_file, fetch_annotation_file,
         get_archive_grid_overlay, get_archive_annotation_overlay,
-        get_stitch_cam_boundaries
+        get_stitch_cam_boundaries, get_archive_mask_overlay
     )
     from data_fetchers import (
         get_kp_data, get_lightning_data, get_meteor_data, get_camera_fovs, get_station_stats
@@ -1738,6 +1738,9 @@ def main():
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 sys.argv[3] if len(sys.argv) > 3 else '',
                 sys.argv[4] if len(sys.argv) > 4 else '', stations_data))),
+            "fetch_archive_mask": lambda: print(json.dumps(get_archive_mask_overlay(
+                sys.argv[2] if len(sys.argv) > 2 else '',
+                sys.argv[3] if len(sys.argv) > 3 else '', stations_data))),
             "enhance_filter": lambda: print(json.dumps({"image": apply_enhance_filter(
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 int(sys.argv[3]) if len(sys.argv) > 3 else 0)})),

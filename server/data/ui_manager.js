@@ -862,12 +862,18 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     // Grid, annotation, and camera-boundary overlays for archive videos (hidden by default via opacity, shown via toggle)
     const gridOverlay = createEl('img', { id: 'grid-overlay-image', className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 10 } });
-    const annotationOverlay = createEl('img', { id: 'annotation-overlay-image', className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 12 } });
-    const boundsOverlay = createEl('img', { id: 'bounds-overlay-image', className: 'archive-overlay bounds-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 11 } });
+    const annotationOverlay = createEl('img', { id: 'annotation-overlay-image', className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 11 } });
+    const boundsOverlay = createEl('img', { id: 'bounds-overlay-image', className: 'archive-overlay bounds-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 13 } });
+    // Mask overlay: black=sky made transparent, white=foreground made opaque
+    // black by the backend. Drawn above grid/annotations but below the
+    // camera-boundary overlay, so "Vis kameragrenser" stays visible on top
+    // of the mask.
+    const maskOverlay = createEl('img', { id: 'mask-overlay-image', className: 'archive-overlay mask-overlay', style: { display: 'block', position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 12 } });
     // Explicitly set opacity 0 to hide initially
     gridOverlay.style.opacity = '0';
     annotationOverlay.style.opacity = '0';
     boundsOverlay.style.opacity = '0';
+    maskOverlay.style.opacity = '0';
 
     // Timestamp overlay with date (2 decimal precision) - lower right
     const timestampOverlay = createEl('div', { className: 'preview-timestamp', textContent: '' });
@@ -895,7 +901,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
     });
 
-    videoWrapper.append(video, gridOverlay, boundsOverlay, annotationOverlay, timestampOverlay, loadingIndicator, errorOverlay);
+    videoWrapper.append(video, gridOverlay, boundsOverlay, annotationOverlay, maskOverlay, timestampOverlay, loadingIndicator, errorOverlay);
 
     // Playback controls
     const controls = createEl('div', { className: 'preview-controls' });
@@ -1076,8 +1082,8 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Parse station and camera from video filename (e.g., "GAU_cam1_20260429_2056_hires.mp4")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_\d{8}_\d{4}/);
     let stationId = null, cameraNum = null, videoTimestamp = null, annotationTimestamp = null;
-    let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null;
-    let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null;
+    let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null, maskToggleContainer = null;
+    let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null, maskCheckbox = null;
 
     if (timelapseFull) {
         // Timelapse: derive stationId, cameraNum, timestamp from filename
@@ -1095,6 +1101,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         boundsToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         boundsCheckbox = createEl('input', { type: 'checkbox', id: 'bounds-overlay-toggle', disabled: true });
         boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle'));
+
+        // Mask overlay toggle (cam8/cam9 stitched masks)
+        maskToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        maskCheckbox = createEl('input', { type: 'checkbox', id: 'mask-overlay-toggle', disabled: true });
+        maskToggleContainer.append(maskCheckbox, ' ', t('modal_mask_toggle'));
     } else if (filenameMatch) {
         stationId = filenameMatch[1];
         cameraNum = filenameMatch[2];
@@ -1123,6 +1134,11 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         annotationCheckbox = createEl('input', { type: 'checkbox', id: 'annotation-overlay-toggle', disabled: true });
         annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle'));
+
+        // Mask overlay toggle - initially greyed out until loaded
+        maskToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        maskCheckbox = createEl('input', { type: 'checkbox', id: 'mask-overlay-toggle', disabled: true });
+        maskToggleContainer.append(maskCheckbox, ' ', t('modal_mask_toggle'));
     }
 
     // Brightness: label above slider in a small inline column
@@ -1151,6 +1167,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
     if (boundsToggleContainer) checkboxesWrapper.append(boundsToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
+    if (maskToggleContainer) checkboxesWrapper.append(maskToggleContainer);
 
     // Speed: combined label+value above slider
     const speedWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
@@ -1206,6 +1223,24 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
                 .catch(() => {});
             boundsCheckbox.addEventListener('change', () => {
                 boundsOverlay.style.opacity = boundsCheckbox.checked ? '0.8' : '0';
+            });
+        }
+
+        // Load mask overlay - fetch JSON metadata first, then set image src.
+        // Works for every camera number, including the stitched cam8/cam9.
+        if (maskToggleContainer) {
+            fetch(`index.php?action=fetch_archive_mask&station_id=${stationId}&camera_num=${cameraNum}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success && data.mask_url) {
+                        maskOverlay.src = data.mask_url;
+                        maskToggleContainer.style.opacity = '1';
+                        maskCheckbox.disabled = false;
+                    }
+                })
+                .catch(() => {});
+            maskCheckbox.addEventListener('change', () => {
+                maskOverlay.style.opacity = maskCheckbox.checked ? '1' : '0';
             });
         }
 
@@ -1793,7 +1828,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         const originX = (rl + rw / 2) + 'px';
         const originY = (rt + rh / 2) + 'px';
         video.style.transformOrigin = originX + ' ' + originY;
-        [gridOverlay, boundsOverlay, annotationOverlay].forEach(ov => {
+        [gridOverlay, boundsOverlay, annotationOverlay, maskOverlay].forEach(ov => {
             ov.style.left            = rl + 'px';
             ov.style.top             = rt + 'px';
             ov.style.width           = rw + 'px';
@@ -1819,7 +1854,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => { 
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-        video.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = transform;
+        video.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = maskOverlay.style.transform = transform;
     };
     const getContentCentre = () => {
         const rect = videoWrapper.getBoundingClientRect();
@@ -1954,6 +1989,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
         boundsOverlay.style.opacity = boundsCheckbox?.checked ? '0.8' : '0';
         annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
+        maskOverlay.style.opacity = maskCheckbox?.checked ? '1' : '0';
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
 
@@ -1975,17 +2011,25 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             ctx.globalAlpha = 1.0;
         }
 
-        // Draw camera bounds overlay if enabled
-        if (boundsCheckbox?.checked && boundsOverlay.src) {
-            ctx.globalAlpha = 0.8;
-            ctx.drawImage(boundsOverlay, 0, 0, canvas.width, canvas.height);
-            ctx.globalAlpha = 1.0;
-        }
-
         // Draw annotation overlay if enabled
         if (annotationCheckbox?.checked && annotationOverlay.src) {
             ctx.globalAlpha = 0.6;
             ctx.drawImage(annotationOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+
+        // Draw mask overlay if enabled - its own alpha channel already
+        // encodes sky (transparent) vs. foreground (opaque black), so no
+        // extra globalAlpha blending is needed. Drawn before the camera
+        // bounds overlay so "Vis kameragrenser" stays visible on top.
+        if (maskCheckbox?.checked && maskOverlay.src) {
+            ctx.drawImage(maskOverlay, 0, 0, canvas.width, canvas.height);
+        }
+
+        // Draw camera bounds overlay if enabled
+        if (boundsCheckbox?.checked && boundsOverlay.src) {
+            ctx.globalAlpha = 0.8;
+            ctx.drawImage(boundsOverlay, 0, 0, canvas.width, canvas.height);
             ctx.globalAlpha = 1.0;
         }
 
@@ -2138,11 +2182,16 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Overlays: positioned to exactly match img's rendered position/size within wrapper
     const gridOverlay = createEl('img', { className: 'archive-overlay grid-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 10, opacity: '0' } });
-    const boundsOverlay = createEl('img', { className: 'archive-overlay bounds-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 11, opacity: '0' } });
-    const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 12, opacity: '0' } });
+    const boundsOverlay = createEl('img', { className: 'archive-overlay bounds-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 13, opacity: '0' } });
+    const annotationOverlay = createEl('img', { className: 'archive-overlay annotation-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 11, opacity: '0' } });
+    // Mask overlay: black=sky made transparent, white=foreground made opaque
+    // black by the backend. Drawn above grid/annotations but below the
+    // camera-boundary overlay, so "Vis kameragrenser" stays visible on top
+    // of the mask.
+    const maskOverlay = createEl('img', { className: 'archive-overlay mask-overlay', style: { display: 'block', position: 'absolute', pointerEvents: 'none', zIndex: 12, opacity: '0' } });
 
     const loadingIndicator = createEl('div', { className: 'preview-loading', textContent: t('loading') });
-    imageWrapper.append(img, gridOverlay, boundsOverlay, annotationOverlay, loadingIndicator);
+    imageWrapper.append(img, gridOverlay, boundsOverlay, annotationOverlay, maskOverlay, loadingIndicator);
 
     img.addEventListener('load', () => {
         loadingIndicator.style.display = 'none';
@@ -2218,8 +2267,8 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     // Detect stitched panorama filenames (e.g. "GAU_20260429_2056_hires_equirect.jpg" or "..._hires_long_equirect.jpg")
     // Match against imageUrl since title may be a short display name like 'eqh'
     const stitchMatch = imageUrl.match(/_(hires|lowres)(?:_long)?_(equirect|fisheye)\.jpg(?:[?#].*)?$/i);
-    let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null;
-    let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null;
+    let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null, maskToggleContainer = null;
+    let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null, maskCheckbox = null;
 
     if (stitchMatch) {
         const resolution = stitchMatch[1].toLowerCase();   // 'hires' or 'lowres'
@@ -2232,6 +2281,10 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         boundsToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         boundsCheckbox = createEl('input', { type: 'checkbox', id: 'img-bounds-overlay-toggle', disabled: true });
         boundsToggleContainer.append(boundsCheckbox, ' ', t('modal_bounds_toggle'));
+
+        maskToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        maskCheckbox = createEl('input', { type: 'checkbox', id: 'img-mask-overlay-toggle', disabled: true });
+        maskToggleContainer.append(maskCheckbox, ' ', t('modal_mask_toggle'));
 
         fetch(`index.php?action=fetch_stitch_grid&projection=${projection}&resolution=${resolution}`)
             .then(r => r.json())
@@ -2257,6 +2310,19 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
                     }
                 })
                 .catch(() => {});
+
+            // Stitched panoramas expose their mask as cam8 (equirect) / cam9 (fisheye)
+            const maskCameraNum = projection === 'eq' ? '8' : '9';
+            fetch(`index.php?action=fetch_archive_mask&station_id=${stationCodeMatch[1]}&camera_num=${maskCameraNum}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success && data.mask_url) {
+                        maskOverlay.src = data.mask_url;
+                        maskToggleContainer.style.opacity = '1';
+                        maskCheckbox.disabled = false;
+                    }
+                })
+                .catch(() => {});
         }
 
         gridCheckbox.addEventListener('change', () => {
@@ -2264,6 +2330,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         });
         boundsCheckbox.addEventListener('change', () => {
             boundsOverlay.style.opacity = boundsCheckbox.checked ? '0.8' : '0';
+        });
+        maskCheckbox.addEventListener('change', () => {
+            maskOverlay.style.opacity = maskCheckbox.checked ? '1' : '0';
         });
     } else if (filenameMatch) {
         const stationId = filenameMatch[1];
@@ -2287,6 +2356,27 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         annotationToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
         annotationCheckbox = createEl('input', { type: 'checkbox', id: 'img-annotation-overlay-toggle', disabled: true });
         annotationToggleContainer.append(annotationCheckbox, ' ', t('modal_annotation_toggle'));
+
+        // Mask overlay toggle - initially greyed out until loaded
+        maskToggleContainer = createEl('label', { className: 'preview-overlay-toggle', style: { opacity: '0.5' } });
+        maskCheckbox = createEl('input', { type: 'checkbox', id: 'img-mask-overlay-toggle', disabled: true });
+        maskToggleContainer.append(maskCheckbox, ' ', t('modal_mask_toggle'));
+
+        // Fetch mask overlay
+        fetch(`index.php?action=fetch_archive_mask&station_id=${stationId}&camera_num=${cameraNum}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.success && data.mask_url) {
+                    maskOverlay.src = data.mask_url;
+                    maskToggleContainer.style.opacity = '1';
+                    maskCheckbox.disabled = false;
+                }
+            })
+            .catch(() => {});
+
+        maskCheckbox.addEventListener('change', () => {
+            maskOverlay.style.opacity = maskCheckbox.checked ? '1' : '0';
+        });
 
         // Fetch grid overlay
         fetch(`index.php?action=fetch_archive_grid&station_id=${stationId}&camera_num=${cameraNum}&timestamp=${encodeURIComponent(imageTimestamp)}`)
@@ -2325,6 +2415,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     if (gridToggleContainer) checkboxesWrapper.append(gridToggleContainer);
     if (boundsToggleContainer) checkboxesWrapper.append(boundsToggleContainer);
     if (annotationToggleContainer) checkboxesWrapper.append(annotationToggleContainer);
+    if (maskToggleContainer) checkboxesWrapper.append(maskToggleContainer);
 
     // Enhance filter slider
     const enhanceWrapper = createEl('span', { style: { display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'center' } });
@@ -2423,7 +2514,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
             rh = eh; rw = eh * imgAspect;
             rt = img.offsetTop; rl = img.offsetLeft + (ew - rw) / 2;
         }
-        [gridOverlay, boundsOverlay, annotationOverlay].forEach(ov => {
+        [gridOverlay, boundsOverlay, annotationOverlay, maskOverlay].forEach(ov => {
             ov.style.left   = rl + 'px';
             ov.style.top    = rt + 'px';
             ov.style.width  = rw + 'px';
@@ -2449,7 +2540,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => {
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-        img.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = transform;
+        img.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = maskOverlay.style.transform = transform;
     };
 
     // Compute scale needed to fill the fullscreen wrapper.
@@ -2542,6 +2633,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         gridOverlay.style.opacity = gridCheckbox?.checked ? '0.6' : '0';
         boundsOverlay.style.opacity = boundsCheckbox?.checked ? '0.8' : '0';
         annotationOverlay.style.opacity = annotationCheckbox?.checked ? '0.6' : '0';
+        maskOverlay.style.opacity = maskCheckbox?.checked ? '1' : '0';
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
 
@@ -2550,7 +2642,8 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         const hasGrid = gridCheckbox?.checked && gridOverlay.src && gridOverlay.complete;
         const hasBounds = boundsCheckbox?.checked && boundsOverlay.src && boundsOverlay.complete;
         const hasAnnotation = annotationCheckbox?.checked && annotationOverlay.src && annotationOverlay.complete;
-        if (!hasGrid && !hasBounds && !hasAnnotation) {
+        const hasMask = maskCheckbox?.checked && maskOverlay.src && maskOverlay.complete;
+        if (!hasGrid && !hasBounds && !hasAnnotation && !hasMask) {
             const link = document.createElement('a');
             link.href = imageUrl;
             link.download = title;
@@ -2569,14 +2662,21 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
             ctx.drawImage(gridOverlay, 0, 0, canvas.width, canvas.height);
             ctx.globalAlpha = 1.0;
         }
-        if (hasBounds) {
-            ctx.globalAlpha = 0.8;
-            ctx.drawImage(boundsOverlay, 0, 0, canvas.width, canvas.height);
-            ctx.globalAlpha = 1.0;
-        }
         if (hasAnnotation) {
             ctx.globalAlpha = 0.6;
             ctx.drawImage(annotationOverlay, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+        if (hasMask) {
+            // Mask overlay's own alpha channel already encodes sky
+            // (transparent) vs. foreground (opaque black). Drawn before
+            // the camera bounds overlay so "Vis kameragrenser" stays
+            // visible on top.
+            ctx.drawImage(maskOverlay, 0, 0, canvas.width, canvas.height);
+        }
+        if (hasBounds) {
+            ctx.globalAlpha = 0.8;
+            ctx.drawImage(boundsOverlay, 0, 0, canvas.width, canvas.height);
             ctx.globalAlpha = 1.0;
         }
         canvas.toBlob(blob => {

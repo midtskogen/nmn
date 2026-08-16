@@ -1401,6 +1401,12 @@ button:hover:not(:disabled) {
     font-size: 13px;
     pointer-events: none;
     white-space: nowrap;
+    /* .preview-video has z-index:1, and the archive-overlay images go up
+       to z-index:13, so without an explicit z-index here the timestamp
+       text would be painted behind the video/overlays (z-index:auto
+       stacks below any positioned sibling with a positive z-index) and
+       never be visible. */
+    z-index: 14;
 }
 
 .preview-loading {

@@ -12,6 +12,7 @@ import re
 import shlex
 import threading
 from datetime import datetime, timezone
+from PIL import Image
 
 # Import from our new shared utility library
 # Imports utility functions shared across multiple backend scripts.
@@ -632,6 +633,82 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
     except subprocess.TimeoutExpired:
         logging.error(f"{log_prefix} Operation timeout")
         return {"success": False, "error": "error_annotation_timeout"}
+    except Exception as e:
+        logging.error(f"{log_prefix} Error: {e}")
+        return {"success": False, "error": "error_internal"}
+
+
+def get_archive_mask_overlay(station_code, cam_num, stations_data):
+    """
+    Fetches a camera's foreground mask (/meteor/camN/mask.png on the station,
+    white=non-sky/foreground, black=sky - see automask.py) and turns it into
+    a transparent "Show mask" overlay: sky (black) becomes fully transparent
+    and foreground (white) becomes opaque black, so overlaying it on the
+    image/video visually masks out everything but the sky.
+    Returns a web-accessible URL path.
+    """
+    # Map station code to station ID
+    station_id = None
+    for sid, s in stations_data.items():
+        if s.get('station', {}).get('code', '').upper() == station_code.upper():
+            station_id = sid
+            break
+
+    if not station_id:
+        logging.error(f"[ArchiveMask] Station code {station_code} not found in stations data")
+        return {"success": False, "error": "error_station_not_found"}
+
+    log_prefix = f"[ArchiveMask {station_id}_cam{cam_num}]"
+    logging.info(f"{log_prefix} Request")
+
+    try:
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        cached_filename = f"mask_{station_id}_cam{cam_num}.png"
+        cached_filepath = os.path.join(DOWNLOAD_DIR, cached_filename)
+
+        # The station-side mask only changes when automask.py is re-run
+        # there, so a day-long cache (matching fetch_archive_grid) is fine.
+        if os.path.exists(cached_filepath) and os.path.getsize(cached_filepath) > 0:
+            try:
+                age_seconds = time.time() - os.path.getmtime(cached_filepath)
+            except OSError:
+                age_seconds = 10**9
+            if age_seconds < 86400:
+                logging.info(f"{log_prefix} Using cached mask overlay (age={age_seconds:.0f}s)")
+                return {"success": True, "mask_url": f"download/{cached_filename}"}
+            logging.info(f"{log_prefix} Cached mask overlay is stale ({age_seconds:.0f}s), refetching")
+
+        tmp_raw = os.path.join(DOWNLOAD_DIR, f"mask_raw_{station_id}_cam{cam_num}_{uniqid()}.png")
+        scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
+                   f"{station_id}:/meteor/cam{cam_num}/mask.png", tmp_raw]
+        logging.info(f"{log_prefix} Fetching mask.png")
+        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0 or not os.path.exists(tmp_raw):
+            logging.error(f"{log_prefix} SCP failed: {result.stderr}")
+            return {"success": False, "error": "error_mask_not_found"}
+
+        try:
+            # Black (sky, 0) in the source mask -> alpha 0 (transparent).
+            # White (foreground, 255) -> alpha 255, drawn as opaque black.
+            with Image.open(tmp_raw) as src:
+                alpha = src.convert('L')
+                black = Image.new('L', alpha.size, 0)
+                overlay = Image.merge('RGBA', (black, black, black, alpha))
+                tmp_out = cached_filepath + f".{uniqid()}.tmp"
+                overlay.save(tmp_out, 'PNG')
+            os.replace(tmp_out, cached_filepath)
+        finally:
+            try:
+                os.remove(tmp_raw)
+            except OSError:
+                pass
+
+        logging.info(f"{log_prefix} Mask overlay generated: {cached_filename}")
+        return {"success": True, "mask_url": f"download/{cached_filename}"}
+
+    except subprocess.TimeoutExpired:
+        logging.error(f"{log_prefix} SCP timeout")
+        return {"success": False, "error": "error_grid_fetch_timeout"}
     except Exception as e:
         logging.error(f"{log_prefix} Error: {e}")
         return {"success": False, "error": "error_internal"}

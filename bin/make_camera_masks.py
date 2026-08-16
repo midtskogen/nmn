@@ -137,6 +137,19 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Create the install directory (including .../CAL and .../CAL/MASKS) once,
+    # up front, so a missing archive tree is created before any install.
+    install_masks_dir = None
+    if install_ams_id and install_cams_id_map:
+        install_masks_dir = f"/mnt/ams2/meteor_archive/{install_ams_id}/CAL/MASKS"
+        if not os.path.isdir(install_masks_dir):
+            print(f"Creating install directory: {install_masks_dir}")
+        try:
+            os.makedirs(install_masks_dir, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(
+                f"Could not create install directory {install_masks_dir}: {e}")
+
     # An equirect panorama with a full 360-degree horizontal FOV wraps at its
     # left/right edges (pano_x=0 and pano_x=orig_w represent the same yaw).
     # cv2.remap has no per-axis wrap mode, and coordinates that round to
@@ -158,28 +171,44 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
         map_y = coords[:, :, 1]
 
         invalid = map_x <= -99998
+        # Park invalid coordinates far out of bounds so that, after the
+        # coordinate-map upsampling below, their blend halo still resolves
+        # to the non-sky border value instead of sampling garbage.
         if is_full_360:
             # Bring into [0, orig_w) first, then shift into the padded
             # image's coordinate space.
-            map_x = np.mod(map_x, orig_w) + wrap_pad
+            map_x = np.where(invalid, -1e6, np.mod(map_x, orig_w) + wrap_pad)
+        else:
+            map_x = np.where(invalid, -1e6, map_x)
+        map_y = np.where(invalid, -1e6, map_y)
         map_x = map_x.astype(np.float32)
         map_y = map_y.astype(np.float32)
 
-        cam_mask = cv2.remap(pano_mask_for_remap, map_x, map_y, interpolation=cv2.INTER_NEAREST,
+        # scan_stack.py's load_mask_imgs resizes every mask to 1920x1080
+        # before use; store them at that size directly.  Rather than
+        # nearest-neighbour-upscaling the binary mask (stair-stepped edges),
+        # upsample the *coordinate maps* -- a smooth field, where bilinear
+        # interpolation is sub-pixel accurate -- and then resample the
+        # equirect mask with cubic interpolation.  The final threshold
+        # re-binarises, leaving a smooth, anti-aliased boundary that follows
+        # the projection geometry instead of either pixel grid.
+        sw, sh = int(images[idx]['w']), int(images[idx]['h'])
+        if (sw, sh) != (MASK_OUT_W, MASK_OUT_H):
+            map_x = cv2.resize(map_x, (MASK_OUT_W, MASK_OUT_H),
+                               interpolation=cv2.INTER_LINEAR)
+            map_y = cv2.resize(map_y, (MASK_OUT_W, MASK_OUT_H),
+                               interpolation=cv2.INTER_LINEAR)
+            invalid = cv2.resize(invalid.astype(np.uint8), (MASK_OUT_W, MASK_OUT_H),
+                                 interpolation=cv2.INTER_NEAREST) > 0
+
+        cam_mask = cv2.remap(pano_mask_for_remap, map_x, map_y,
+                             interpolation=cv2.INTER_CUBIC,
                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        _, cam_mask = cv2.threshold(cam_mask, 127, 255, cv2.THRESH_BINARY)
         cam_mask[invalid] = 0
 
         if not mask_white_is_sky:
             cam_mask = cv2.bitwise_not(cam_mask)
-
-        # scan_stack.py's load_mask_imgs resizes every mask to 1920x1080
-        # before use; store them at that size directly (nearest-neighbour
-        # keeps the binary mask binary).  SD mini-derived masks (800x448)
-        # share the same aspect ratio, so this upscale is distortion-free.
-        sw, sh = int(images[idx]['w']), int(images[idx]['h'])
-        if (sw, sh) != (MASK_OUT_W, MASK_OUT_H):
-            cam_mask = cv2.resize(cam_mask, (MASK_OUT_W, MASK_OUT_H),
-                                  interpolation=cv2.INTER_NEAREST)
 
         out_path = os.path.join(output_dir, f"cam{cam_num}_mask.png")
         cv2.imwrite(out_path, cam_mask)
@@ -199,9 +228,7 @@ def build_camera_masks(equirect_mask_path, output_dir, cam_dir, prefix,
             # subtract/exclude), regardless of the --invert flag used for
             # the plain output_dir copy above.
             install_mask = cam_mask if not mask_white_is_sky else cv2.bitwise_not(cam_mask)
-            masks_dir = f"/mnt/ams2/meteor_archive/{install_ams_id}/CAL/MASKS"
-            os.makedirs(masks_dir, exist_ok=True)
-            install_path = os.path.join(masks_dir, f"{cams_id}_mask.png")
+            install_path = os.path.join(install_masks_dir, f"{cams_id}_mask.png")
             if os.path.exists(install_path):
                 backup_path = install_path + f".bak-{time.strftime('%Y%m%d-%H%M%S')}"
                 shutil.copy2(install_path, backup_path)

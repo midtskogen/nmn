@@ -1315,6 +1315,31 @@ button:hover:not(:disabled) {
     color: #000;
 }
 
+/* Used instead of the normal in-header close button when the header itself
+   is omitted (e.g. timelapse videos, to save vertical space): floats the
+   close button over the top-right corner of the video/image instead. */
+.preview-close-btn-overlay {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 15;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 22px;
+}
+
+.preview-close-btn-overlay:hover {
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+}
+
 .preview-video-wrapper {
     position: relative;
     background: #000;

@@ -1175,8 +1175,17 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
 
     filterControls.append(resetFiltersBtn, speedWrapper, brightnessWrapper, contrastWrapper, saturationWrapper, checkboxesWrapper);
 
-    // Assemble modal
-    modalContent.append(header, videoWrapper, scrubberRow, controls, filterControls);
+    // Assemble modal. Timelapse videos skip the title header (the title
+    // adds little value there and the extra height isn't worth it), but
+    // still need a visible close button, so move it out of the header and
+    // float it over the top-right corner of the video instead.
+    if (timelapseFull) {
+        closeButton.classList.add('preview-close-btn-overlay');
+        videoWrapper.appendChild(closeButton);
+        modalContent.append(videoWrapper, scrubberRow, controls, filterControls);
+    } else {
+        modalContent.append(header, videoWrapper, scrubberRow, controls, filterControls);
+    }
     modalBackdrop.appendChild(modalContent);
     document.body.appendChild(modalBackdrop);
 

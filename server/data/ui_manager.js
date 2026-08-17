@@ -1078,6 +1078,9 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     const timelapseFisheye = title.match(/^([A-Z]{2,4})_(\d{8})_tfeh?\.mp4$/);
     const timelapseEquirect = title.match(/^([A-Z]{2,4})_(\d{8})_teqh?\.mp4$/);
     const timelapseFull = timelapseFisheye || timelapseEquirect;
+    // Equirectangular timelapses are 360°-wide: dragging sideways should roll/wrap
+    // the video seamlessly instead of the normal clamped pan behaviour.
+    const isEquirectVideo = !!timelapseEquirect;
 
     // Parse station and camera from video filename (e.g., "GAU_cam1_20260429_2056_hires.mp4")
     const filenameMatch = title.match(/^([A-Z]{3})_cam(\d+)_\d{8}_\d{4}/);
@@ -1819,6 +1822,10 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     // Also sets transformOrigin to content centre for correct zoom behaviour.
     // contentRect holds {x, y, w, h} relative to videoWrapper top-left.
     let contentRect = { x: 0, y: 0, w: 0, h: 0 };
+    // Assigned later (equirect only) to keep the roll canvases' geometry in sync.
+    let rollGeometrySync = null;
+    // Assigned later (equirect only); mirrors video's transformOrigin so zoom centres correctly.
+    let rollViewport = null;
     const syncVideoOverlays = () => {
         const vw = video.offsetWidth, vh = video.offsetHeight;
         const nw = video.videoWidth || vw, nh = video.videoHeight || vh;
@@ -1837,6 +1844,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         const originX = (rl + rw / 2) + 'px';
         const originY = (rt + rh / 2) + 'px';
         video.style.transformOrigin = originX + ' ' + originY;
+        if (rollViewport) rollViewport.style.transformOrigin = originX + ' ' + originY;
         [gridOverlay, boundsOverlay, annotationOverlay, maskOverlay].forEach(ov => {
             ov.style.left            = rl + 'px';
             ov.style.top             = rt + 'px';
@@ -1844,6 +1852,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             ov.style.height          = rh + 'px';
             ov.style.transformOrigin = (rw / 2) + 'px ' + (rh / 2) + 'px';
         });
+        if (rollGeometrySync) rollGeometrySync();
     };
     video.addEventListener('loadedmetadata', () => {
         if (video.videoWidth && video.videoHeight) {
@@ -1860,10 +1869,14 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
     let scale=1, panX=0, panY=0, isPanning=false, startPanX=0, startPanY=0, panOriginX=0, panOriginY=0;
     let scrubDragActive=false, scrubStartX=0, scrubStartTime=0, scrubDidMove=false;
     let scrubDragRaf=null, scrubDragMoveX=null, lastScrubDx=0, wasPlayingBeforeFullscreenScrub=false;
+    // Equirectangular roll state: horizontal offset is applied to the roll canvases
+    // (see below) so it wraps seamlessly instead of clamping like panX.
+    let rollOffsetPx = 0, startRollOffset = 0, rollRafId = null;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => { 
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
         video.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = maskOverlay.style.transform = transform;
+        if (rollViewport) rollViewport.style.transform = `translate(0px, ${panY}px) scale(${scale})`;
     };
     const getContentCentre = () => {
         const rect = videoWrapper.getBoundingClientRect();
@@ -1907,10 +1920,15 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
             return;
         }
         if (!isPanning) return;
-        const maxPanX = contentRect.w * (scale - 1) / 2;
         const maxPanY = contentRect.h * (scale - 1) / 2;
-        panX = clamp(startPanX + (e.clientX - panOriginX), -maxPanX, maxPanX);
         panY = clamp(startPanY + (e.clientY - panOriginY), -maxPanY, maxPanY);
+        if (isEquirectVideo) {
+            rollOffsetPx = startRollOffset + (e.clientX - panOriginX) / scale;
+            if (rollGeometrySync) rollGeometrySync();
+        } else {
+            const maxPanX = contentRect.w * (scale - 1) / 2;
+            panX = clamp(startPanX + (e.clientX - panOriginX), -maxPanX, maxPanX);
+        }
         updateTransform();
     };
     const onMouseUp = () => {
@@ -1947,13 +1965,13 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         }
         if (!isPanning) return;
         isPanning = false;
-        videoWrapper.style.cursor = 'default';
+        videoWrapper.style.cursor = isEquirectVideo ? 'grab' : 'default';
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
     };
     const onMouseDown = e => {
         if (e.button !== 0) return;
-        if (document.fullscreenElement === videoWrapper && scale <= 1.01) {
+        if (!isEquirectVideo && document.fullscreenElement === videoWrapper && scale <= 1.01) {
             e.preventDefault();
             scrubDragActive = true;
             scrubStartX = e.clientX;
@@ -1975,10 +1993,77 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         panOriginY = e.clientY;
         startPanX = panX;
         startPanY = panY;
+        startRollOffset = rollOffsetPx;
         window.addEventListener('mousemove', onMouseMove);
         window.addEventListener('mouseup', onMouseUp);
     };
     videoWrapper.addEventListener('wheel', onWheel); videoWrapper.addEventListener('mousedown', onMouseDown);
+
+    if (isEquirectVideo) {
+        // Roll canvas mirrors the (now-hidden) video + grid/bounds/mask overlays by
+        // repainting the current video frame + overlays every animation frame, drawn
+        // twice at a wrapping horizontal offset (exactly like CSS background-repeat-x
+        // with background-position-x) so dragging rolls the 360° panorama seamlessly.
+        // A single canvas (rather than a second <video>) avoids decoding the source
+        // twice and stays perfectly in sync with the one playing <video>.
+        video.style.visibility = 'hidden';
+        gridOverlay.style.visibility = 'hidden';
+        boundsOverlay.style.visibility = 'hidden';
+        maskOverlay.style.visibility = 'hidden';
+
+        rollViewport = createEl('canvas', { style: { position: 'absolute', pointerEvents: 'none', zIndex: 1 } });
+        videoWrapper.appendChild(rollViewport);
+        videoWrapper.style.cursor = 'grab';
+
+        const applyRollGeometry = () => {
+            const { x: rl, y: rt, w: rw, h: rh } = contentRect;
+            if (!rw || !rh) return;
+            rollViewport.style.left = rl + 'px';
+            rollViewport.style.top = rt + 'px';
+            rollViewport.style.width = rw + 'px';
+            rollViewport.style.height = rh + 'px';
+            const cw = Math.max(1, Math.round(rw)), ch = Math.max(1, Math.round(rh));
+            if (rollViewport.width !== cw) rollViewport.width = cw;
+            if (rollViewport.height !== ch) rollViewport.height = ch;
+        };
+        rollGeometrySync = applyRollGeometry;
+
+        const ctx = rollViewport.getContext('2d');
+        const drawLayer = (dx, srcImg, w, h) => {
+            const opacity = parseFloat(srcImg.style.opacity) || 0;
+            if (opacity <= 0 || !srcImg.complete || !srcImg.naturalWidth) return;
+            ctx.globalAlpha = opacity;
+            ctx.drawImage(srcImg, dx, 0, w, h);
+            ctx.globalAlpha = 1;
+        };
+        const drawFrame = () => {
+            const w = rollViewport.width, h = rollViewport.height;
+            if (w && h) {
+                ctx.clearRect(0, 0, w, h);
+                // Positive rollOffsetPx shifts content right, same convention as the
+                // image viewer's background-position-x drag handling. Snapped to a
+                // whole pixel: the image viewer's CSS background-repeat tiling is
+                // seamless by construction, but two canvas drawImage() calls abutting
+                // at a sub-pixel x get edge-antialiased independently, which visibly
+                // blends the (slightly different) colours on each side of the wrap
+                // into a thin seam. Rounding removes that sub-pixel blend entirely.
+                let mod = rollOffsetPx % w;
+                if (mod < 0) mod += w;
+                mod = Math.round(mod);
+                const hasVideoFrame = video.readyState >= 2 && video.videoWidth && video.videoHeight;
+                for (const dx of [mod, mod - w]) {
+                    if (hasVideoFrame) ctx.drawImage(video, dx, 0, w, h);
+                    drawLayer(dx, gridOverlay, w, h);
+                    drawLayer(dx, maskOverlay, w, h);
+                    drawLayer(dx, boundsOverlay, w, h);
+                }
+            }
+            rollRafId = requestAnimationFrame(drawFrame);
+        };
+        rollRafId = requestAnimationFrame(drawFrame);
+
+        applyRollGeometry();
+    }
 
     // Sync overlay visibility when entering/exiting fullscreen
     const onFullscreenChange = () => {
@@ -2144,6 +2229,7 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
         videoWrapper.removeEventListener('wheel', onWheel);
         videoWrapper.removeEventListener('mousedown', onMouseDown);
         videoRo.disconnect();
+        if (rollRafId) cancelAnimationFrame(rollRafId);
         history.back();
     });
 
@@ -2276,6 +2362,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
     // Detect stitched panorama filenames (e.g. "GAU_20260429_2056_hires_equirect.jpg" or "..._hires_long_equirect.jpg")
     // Match against imageUrl since title may be a short display name like 'eqh'
     const stitchMatch = imageUrl.match(/_(hires|lowres)(?:_long)?_(equirect|fisheye)\.jpg(?:[?#].*)?$/i);
+    // Equirectangular panoramas are 360°-wide: dragging sideways should roll/wrap
+    // the image seamlessly instead of the normal clamped pan behaviour.
+    const isEquirect = !!(stitchMatch && stitchMatch[2].toLowerCase() === 'equirect');
     let gridToggleContainer = null, annotationToggleContainer = null, boundsToggleContainer = null, maskToggleContainer = null;
     let gridCheckbox = null, annotationCheckbox = null, boundsCheckbox = null, maskCheckbox = null;
 
@@ -2511,6 +2600,8 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Sync overlays to the actual rendered image area inside the img element
     // (object-fit:contain means the rendered area may be smaller than offsetWidth/Height)
+    // Assigned later (equirect only) to also keep the roll layers' geometry in sync.
+    let rollGeometrySync = null;
     const syncOverlays = () => {
         const ew = img.offsetWidth, eh = img.offsetHeight;
         const nw = img.naturalWidth || ew, nh = img.naturalHeight || eh;
@@ -2532,6 +2623,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         });
         // img transformOrigin is relative to img's own top-left (offsetLeft/Top)
         img.style.transformOrigin = (rl - img.offsetLeft + rw / 2) + 'px ' + (rt - img.offsetTop + rh / 2) + 'px';
+        if (rollGeometrySync) rollGeometrySync();
     };
     img.addEventListener('load', () => {
         if (img.naturalWidth && img.naturalHeight) {
@@ -2546,10 +2638,20 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     // Pan/Zoom
     let scale = 1, minScale = 1, panX = 0, panY = 0, isPanning = false, startPanX = 0, startPanY = 0, panOriginX = 0, panOriginY = 0;
+    // Equirectangular roll state: horizontal offset is applied via CSS background-position
+    // (see roll layers below) so it wraps seamlessly instead of clamping like panX.
+    let rollOffsetPx = 0, startRollOffset = 0;
+    let rollBase = null, rollGrid = null, rollBounds = null, rollMask = null;
     const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const updateTransform = () => {
         const transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
         img.style.transform = gridOverlay.style.transform = boundsOverlay.style.transform = annotationOverlay.style.transform = maskOverlay.style.transform = transform;
+        if (rollBase) {
+            // Roll layers only ever translate vertically (panY) + zoom; the horizontal
+            // component is handled by background-position so it can wrap infinitely.
+            const rollTransform = `translate(0px, ${panY}px) scale(${scale})`;
+            rollBase.style.transform = rollGrid.style.transform = rollBounds.style.transform = rollMask.style.transform = rollTransform;
+        }
     };
 
     // Compute scale needed to fill the fullscreen wrapper.
@@ -2607,10 +2709,77 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         }
         updateTransform();
     };
-    const onMouseMove = e => { if (!isPanning) return; const rect = imageWrapper.getBoundingClientRect(); const imgNaturalWidth = img.naturalWidth || img.offsetWidth; const imgNaturalHeight = img.naturalHeight || img.offsetHeight; const wrapperAspect = rect.width / rect.height; const imgAspect = imgNaturalWidth / imgNaturalHeight; let baseImgWidth, baseImgHeight; if (imgAspect > wrapperAspect) { baseImgWidth = rect.width; baseImgHeight = rect.width / imgAspect; } else { baseImgWidth = rect.height * imgAspect; baseImgHeight = rect.height; } const maxPanX = baseImgWidth * (scale - 1) / 2; const maxPanY = baseImgHeight * (scale - 1) / 2; panX = clamp(startPanX + (e.clientX - panOriginX), -maxPanX, maxPanX); panY = clamp(startPanY + (e.clientY - panOriginY), -maxPanY, maxPanY); updateTransform(); };
-    const onMouseUp = () => { isPanning = false; imageWrapper.style.cursor = 'default'; window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
-    const onMouseDown = e => { if (e.button !== 0) return; e.preventDefault(); isPanning = true; imageWrapper.style.cursor = 'grabbing'; panOriginX = e.clientX; panOriginY = e.clientY; startPanX = panX; startPanY = panY; window.addEventListener('mousemove', onMouseMove); window.addEventListener('mouseup', onMouseUp); };
+    const onMouseMove = e => { if (!isPanning) return; const rect = imageWrapper.getBoundingClientRect(); const imgNaturalWidth = img.naturalWidth || img.offsetWidth; const imgNaturalHeight = img.naturalHeight || img.offsetHeight; const wrapperAspect = rect.width / rect.height; const imgAspect = imgNaturalWidth / imgNaturalHeight; let baseImgWidth, baseImgHeight; if (imgAspect > wrapperAspect) { baseImgWidth = rect.width; baseImgHeight = rect.width / imgAspect; } else { baseImgWidth = rect.height * imgAspect; baseImgHeight = rect.height; } const maxPanY = baseImgHeight * (scale - 1) / 2; panY = clamp(startPanY + (e.clientY - panOriginY), -maxPanY, maxPanY); if (isEquirect) { rollOffsetPx = startRollOffset + (e.clientX - panOriginX) / scale; if (rollGeometrySync) rollGeometrySync(); } else { const maxPanX = baseImgWidth * (scale - 1) / 2; panX = clamp(startPanX + (e.clientX - panOriginX), -maxPanX, maxPanX); } updateTransform(); };
+    const onMouseUp = () => { isPanning = false; imageWrapper.style.cursor = isEquirect ? 'grab' : 'default'; window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
+    const onMouseDown = e => { if (e.button !== 0) return; e.preventDefault(); isPanning = true; imageWrapper.style.cursor = 'grabbing'; panOriginX = e.clientX; panOriginY = e.clientY; startPanX = panX; startPanY = panY; startRollOffset = rollOffsetPx; window.addEventListener('mousemove', onMouseMove); window.addEventListener('mouseup', onMouseUp); };
     imageWrapper.addEventListener('wheel', onWheel); imageWrapper.addEventListener('mousedown', onMouseDown);
+
+    if (isEquirect) {
+        // Roll layers mirror the (now-hidden) img/grid/bounds/mask elements using
+        // CSS background-image + repeat-x, which tiles the 360° panorama infinitely.
+        // Dragging just moves background-position, so the wrap point never has to be
+        // handled explicitly - the browser's own tiling makes it seamless.
+        img.style.visibility = 'hidden';
+        gridOverlay.style.visibility = 'hidden';
+        boundsOverlay.style.visibility = 'hidden';
+        maskOverlay.style.visibility = 'hidden';
+
+        rollBase = createEl('div', { style: { position: 'absolute', backgroundRepeat: 'repeat-x', pointerEvents: 'none', zIndex: 1, opacity: '1' } });
+        rollGrid = createEl('div', { style: { position: 'absolute', backgroundRepeat: 'repeat-x', pointerEvents: 'none', zIndex: 10, opacity: '0' } });
+        rollBounds = createEl('div', { style: { position: 'absolute', backgroundRepeat: 'repeat-x', pointerEvents: 'none', zIndex: 13, opacity: '0' } });
+        rollMask = createEl('div', { style: { position: 'absolute', backgroundRepeat: 'repeat-x', pointerEvents: 'none', zIndex: 12, opacity: '0' } });
+        imageWrapper.append(rollBase, rollGrid, rollBounds, rollMask);
+        imageWrapper.style.cursor = 'grab';
+
+        const applyRollGeometry = () => {
+            const ew = img.offsetWidth, eh = img.offsetHeight;
+            const nw = img.naturalWidth || ew, nh = img.naturalHeight || eh;
+            const imgAspect = nw / nh, boxAspect = ew / eh;
+            let rw, rh, rl, rt;
+            if (imgAspect > boxAspect) {
+                rw = ew; rh = ew / imgAspect;
+                rl = img.offsetLeft; rt = img.offsetTop + (eh - rh) / 2;
+            } else {
+                rh = eh; rw = eh * imgAspect;
+                rt = img.offsetTop; rl = img.offsetLeft + (ew - rw) / 2;
+            }
+            [rollBase, rollGrid, rollBounds, rollMask].forEach(layer => {
+                layer.style.left = rl + 'px';
+                layer.style.top = rt + 'px';
+                layer.style.width = rw + 'px';
+                layer.style.height = rh + 'px';
+                layer.style.backgroundSize = `${rw}px ${rh}px`;
+                layer.style.backgroundPositionX = rollOffsetPx + 'px';
+                layer.style.backgroundPositionY = '0';
+            });
+        };
+        rollGeometrySync = applyRollGeometry;
+
+        // Mirror src + opacity from the hidden source <img> onto its roll layer
+        // whenever either changes (initial load, enhance filter, checkbox toggle).
+        const mirrorLayer = (sourceImg, rollLayer) => {
+            const sync = () => {
+                rollLayer.style.backgroundImage = sourceImg.src ? `url("${sourceImg.src}")` : 'none';
+            };
+            new MutationObserver(sync).observe(sourceImg, { attributes: true, attributeFilter: ['src'] });
+            sync();
+        };
+        mirrorLayer(img, rollBase);
+        mirrorLayer(gridOverlay, rollGrid);
+        mirrorLayer(boundsOverlay, rollBounds);
+        mirrorLayer(maskOverlay, rollMask);
+        // Opacity toggles (grid/bounds/mask checkboxes) set style.opacity on the hidden
+        // source <img>; mirror that onto the roll layer too.
+        const mirrorOpacity = (sourceImg, rollLayer) => {
+            new MutationObserver(() => { rollLayer.style.opacity = sourceImg.style.opacity || '0'; })
+                .observe(sourceImg, { attributes: true, attributeFilter: ['style'] });
+        };
+        mirrorOpacity(gridOverlay, rollGrid);
+        mirrorOpacity(boundsOverlay, rollBounds);
+        mirrorOpacity(maskOverlay, rollMask);
+
+        applyRollGeometry();
+    }
 
     // Fullscreen
     fullscreenBtn.addEventListener('click', () => {

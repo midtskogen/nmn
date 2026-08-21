@@ -98,6 +98,19 @@ if 'Pillow' in AVAILABLE_LIBS:
 EARTH_RADIUS_KM = 6371.0
 WGS84_FLATTENING = 1.0 / 298.257223563
 WGS84_E_SQ = 2 * WGS84_FLATTENING - WGS84_FLATTENING**2
+EARTH_STD_GRAV_KM3S2 = 398600.4418  # GM in km^3/s^2
+
+
+def _min_orbital_speed_for_height_km(height_km: float, speed_margin_km_s: float = 1.0) -> float:
+    """Circular orbital speed at the given altitude minus a safety margin.
+
+    For a non-powered object in Earth orbit the minimum physically plausible
+    speed at altitude ``h`` is roughly the circular orbit speed
+    sqrt(GM / (R_earth + h)).  We subtract a small margin to allow for
+    elliptical orbits, measurement uncertainty, and high-orbiting objects
+    such as satellites near apogee.
+    """
+    return max(1.0, math.sqrt(EARTH_STD_GRAV_KM3S2 / (EARTH_RADIUS_KM + height_km)) - speed_margin_km_s)
 
 ATM_SCALE_HEIGHT_KM = 7.0
 
@@ -797,7 +810,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             station_x, station_y = project_points([site_lons[i]], [site_lats[i]]); start_los_lon, start_los_lat, start_los_h = xyz2lonlat(cross_pos[i]); start_los_x, start_los_y = project_points([start_los_lon], [start_los_lat]); end_los_lon, end_los_lat, end_los_h = xyz2lonlat(cross_pos[i + n_obs]); end_los_x, end_los_y = project_points([end_los_lon], [end_los_lat]); linestyle = 'solid' if i in inlier_indices else 'dash'
             traces.extend([go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), showlegend=False, hoverinfo='none'), go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), showlegend=False, hoverinfo='none')])
 
-    x_min_km, x_max_km, y_min_km, y_max_km = x_min_m / 1000.0, x_max_m / 1000.0, y_min_m / 1000.0, y_max_m / 1000.0; grid_center_km = {'x': (x_min_km + x_max_km) / 2.0, 'y': (y_min_km + y_max_km) / 2.0}; norm_factor = 245.0
+    x_min_km, x_max_km, y_min_km, y_max_km = x_min_m / 1000.0, x_max_m / 1000.0, y_min_m / 1000.0, y_max_m / 1000.0
 
     extra_paths = options.get('extra_paths')
     if extra_paths:
@@ -925,16 +938,41 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     
     # Calculate track midpoint for camera centering
     track_mid = (track_start + track_end) / 2.0
-    mid_lon, mid_lat, _ = xyz2lonlat(track_mid)
+    mid_lon, mid_lat, mid_h_km = xyz2lonlat(track_mid)
     mid_x_km, mid_y_km = project_points([mid_lon], [mid_lat])
-    
-    translated_x = mid_x_km[0] - grid_center_km['x']
-    translated_y = mid_y_km[0] - grid_center_km['y']
-    camera_center = dict(x=translated_x / norm_factor, y=translated_y / norm_factor, z=0); camera_distance_norm = 1.3
-    initial_eye = dict(x=camera_center['x'] + camera_distance_norm * np.cos(np.radians(0)), y=camera_center['y'] + camera_distance_norm * np.sin(np.radians(0)), z=camera_center['z'] + camera_distance_norm * np.tan(np.radians(35)))
+
+    # Plotly's 3D camera eye/center are interpreted in a normalized scene cube,
+    # so we normalize the pivot to the horizontal extent of the data.
+    scene_dx = x_max_km - x_min_km
+    scene_dy = y_max_km - y_min_km
+    half_size = max(scene_dx, scene_dy) / 2.0
+    if half_size < 1.0:
+        half_size = 1.0
+
+    grid_center_x = (x_min_km + x_max_km) / 2.0
+    grid_center_y = (y_min_km + y_max_km) / 2.0
+
+    camera_center = dict(
+        x=float((mid_x_km[0] - grid_center_x) / half_size),
+        y=float((mid_y_km[0] - grid_center_y) / half_size),
+        z=0.0
+    )
+
+    camera_distance = 1.3
+    # Initial eye position: azimuth 0°, elevation 35° above horizontal
+    elev_deg = 35.0
+    initial_eye = dict(
+        x=camera_center['x'] + camera_distance * np.cos(np.radians(0)),
+        y=camera_center['y'] + camera_distance * np.sin(np.radians(0)),
+        z=camera_center['z'] + camera_distance * np.tan(np.radians(elev_deg))
+    )
 
     frames = []; num_frames = 180
-    for k in range(num_frames): theta = (k / num_frames) * 2 * np.pi; eye_x = camera_center['x'] + camera_distance_norm * np.cos(theta); eye_y = camera_center['y'] + camera_distance_norm * np.sin(theta); frames.append(go.Frame(layout=dict(scene=dict(camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']))))))
+    for k in range(num_frames):
+        theta = (k / num_frames) * 2 * np.pi
+        eye_x = camera_center['x'] + camera_distance * np.cos(theta)
+        eye_y = camera_center['y'] + camera_distance * np.sin(theta)
+        frames.append(go.Frame(layout=dict(scene=dict(camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']))))))
     
     layout = go.Layout(
         title=translations.get("plot_map_interactive_title", "Meteor's Atmospheric Trajectory"), title_x=0.5, title_y=0.92, 
@@ -1219,7 +1257,10 @@ def calculate_model_score(fit_results, inlier_obs_data, weights, indices_set, op
             airspeeds = [np.linalg.norm(cross_pos[i + num_inliers] - cross_pos[i]) / d for i, d in enumerate(durations) if d > 0]
             if airspeeds:
                 calculated_speed = np.mean(airspeeds)
-                if calculated_speed < 8.0 or calculated_speed > 100.0:
+                min_speed = options.get('min_speed')
+                if min_speed is None:
+                    min_speed = _min_orbital_speed_for_height_km(min(start_h, end_h))
+                if calculated_speed < min_speed or calculated_speed > 100.0:
                     penalty += 1e9 
 
     # Safety Check: If MSE is huge, this is a bad fit (e.g. bird outlier), regardless of weight.
@@ -1549,8 +1590,12 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
             return False
         if max(info.start_height, info.end_height) < 10.0:
             return False
-        if info.speed != 0 and (info.speed < 8.0 or info.speed > 100.0):
-            return False
+        if info.speed != 0:
+            min_speed = options.get('min_speed')
+            if min_speed is None:
+                min_speed = _min_orbital_speed_for_height_km(min(info.start_height, info.end_height))
+            if info.speed < min_speed or info.speed > 100.0:
+                return False
         if info.error > options.get('adaptive_error_km', 5.0):
             return False
         return True
@@ -1591,7 +1636,10 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
     info = MetrackInfo()
     info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
 
-    is_plausible = not (max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < 8.0 or info.speed > 100.0)))
+    min_speed = options.get('min_speed')
+    if min_speed is None:
+        min_speed = _min_orbital_speed_for_height_km(min(info.start_height, info.end_height))
+    is_plausible = not (max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < min_speed or info.speed > 100.0)))
 
     if not is_plausible and use_ransac:
         print("\nWarning: RANSAC solution is physically implausible. Attempting fallback...")
@@ -1600,6 +1648,11 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
             print("Fallback fit also failed. Aborting."); return MetrackInfo(), None
         inlier_obs_data = full_obs_data_fit; inlier_indices = list(range(len(raw_data['names'])))
         info, track_start, track_end, cross_pos_inliers = _populate_info_from_fit(info, fit_results, inlier_obs_data, raw_data, inlier_indices, options)
+        # Recompute plausibility with the same dynamic threshold for the fallback.
+        min_speed = options.get('min_speed')
+        if min_speed is None:
+            min_speed = _min_orbital_speed_for_height_km(min(info.start_height, info.end_height))
+        is_plausible = not (max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < min_speed or info.speed > 100.0)))
 
     if 'showerassoc' in AVAILABLE_LIBS:
         info.shower, _ = AVAILABLE_LIBS['showerassoc'].showerassoc(info.radiant_ra, info.radiant_dec, info.speed, time.strftime("%Y-%m-%d", time.localtime(info.timestamp)))

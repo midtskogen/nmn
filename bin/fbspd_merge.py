@@ -19,6 +19,7 @@ import itertools
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
+import math
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -47,6 +48,19 @@ if _PROJECT_DIR is not None:
 EARTH_RADIUS = 6371.0  # Mean radius in km
 FLATTENING = 1.0 / 298.257223563  # Earth flattening factor (WGS-84)
 E_SQUARED = 2 * FLATTENING - FLATTENING**2  # Eccentricity squared
+EARTH_STD_GRAV_KM3S2 = 398600.4418  # GM in km^3/s^2
+
+
+def _min_orbital_speed_for_height_km(height_km: float, speed_margin_km_s: float = 1.0) -> float:
+    """Circular orbital speed at the given altitude minus a safety margin.
+
+    For a non-powered object in Earth orbit the minimum physically plausible
+    speed at altitude ``h`` is roughly the circular orbit speed
+    sqrt(GM / (R_earth + h)).  We subtract a small margin to allow for
+    elliptical orbits, measurement uncertainty, and high-orbiting objects
+    such as satellites near apogee.
+    """
+    return max(1.0, math.sqrt(EARTH_STD_GRAV_KM3S2 / (EARTH_RADIUS + height_km)) - speed_margin_km_s)
 
 # --- Configuration Constants ---
 TIME_OFFSET_BRUTE_STEP = 0.25
@@ -402,10 +416,10 @@ def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False
             
     return final_offsets_array
 
-def _refine_offsets_by_projection_method(station_obs: List[Dict], initial_offsets: np.ndarray, debug: bool = False) -> np.ndarray:
+def _refine_offsets_by_projection_method(station_obs: List[Dict], initial_offsets: np.ndarray, debug: bool = False, min_speed: float = 7.0) -> np.ndarray:
     if len(station_obs) < 2: return initial_offsets
     merged_data, station_id_arr, _ = _merge_and_sort_station_data(station_obs, initial_offsets)
-    fit_params, n_ok, _, _ = _fit_merged_data_with_cost(merged_data['reltime'], merged_data['pos'], merged_data['sig'], debug, 0.1)
+    fit_params, n_ok, _, _ = _fit_merged_data_with_cost(merged_data['reltime'], merged_data['pos'], merged_data['sig'], debug, 0.1, min_speed)
     if n_ok == 0: return initial_offsets
     residuals = merged_data['pos'] - expfunc(merged_data['reltime'], *fit_params)
     mad = median_abs_deviation(residuals, scale='normal')
@@ -425,7 +439,7 @@ def _refine_offsets_by_projection_method(station_obs: List[Dict], initial_offset
     inlier_obs = [station_obs[i] for i in inlier_station_idxs]
     inlier_offsets = initial_offsets[list(inlier_station_idxs)]
     core_merged_data, _, _ = _merge_and_sort_station_data(inlier_obs, inlier_offsets)
-    core_params, n_ok, _, _ = _fit_merged_data_with_cost(core_merged_data['reltime'], core_merged_data['pos'], core_merged_data['sig'], debug, 0.1)
+    core_params, n_ok, _, _ = _fit_merged_data_with_cost(core_merged_data['reltime'], core_merged_data['pos'], core_merged_data['sig'], debug, 0.1, min_speed)
     if n_ok == 0: return initial_offsets
     t_dense = np.linspace(core_merged_data['reltime'].min(), core_merged_data['reltime'].max(), 2000)
     pos_dense = expfunc(t_dense, *core_params)
@@ -444,14 +458,14 @@ def _refine_offsets_by_projection_method(station_obs: List[Dict], initial_offset
         if debug: print(f"  -> Successfully re-timed '{outlier_station['site_info']['name']}'. New offset: {new_offset:.2f}s")
     return final_offsets
 
-def _align_fragments_to_anchor_method(station_obs: List[Dict], debug: bool = False) -> np.ndarray:
+def _align_fragments_to_anchor_method(station_obs: List[Dict], debug: bool = False, min_speed: float = 7.0) -> np.ndarray:
     if not station_obs: return np.array([])
     fragment_lengths = [len(obs.get('reltime', [])) for obs in station_obs]
     if not any(fragment_lengths): return np.zeros(len(station_obs))
     anchor_idx = np.argmax(fragment_lengths)
     anchor_obs = station_obs[anchor_idx]
     if debug: print(f"Anchor Fragment: Using '{anchor_obs['site_info']['name']}' ({len(anchor_obs['reltime'])} points) as alignment anchor.")
-    anchor_params, n_ok, _, _ = _fit_merged_data_with_cost(anchor_obs['reltime'], anchor_obs['pos'], anchor_obs['sig'], debug, 0.1)
+    anchor_params, n_ok, _, _ = _fit_merged_data_with_cost(anchor_obs['reltime'], anchor_obs['pos'], anchor_obs['sig'], debug, 0.1, min_speed)
     if n_ok == 0:
         if debug: print("Anchor fit failed. Cannot proceed with alignment. Returning zero offsets.")
         return np.zeros(len(station_obs))
@@ -517,7 +531,7 @@ def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray
     sig[ang_err <= 0] = MIN_POSITIONAL_SIGMA
     return {"pos": pos, "height": height, "sig": sig, "site_info": cendat.site_info}
 
-def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray, debug: bool, fscale: float) -> Tuple[Optional[np.ndarray], int, Optional[np.ndarray], float]:
+def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray, debug: bool, fscale: float, min_speed: float = 7.0) -> Tuple[Optional[np.ndarray], int, Optional[np.ndarray], float]:
     n_pts = len(reltime)
     if n_pts < MIN_POINTS_FOR_EXP_FIT:
         if debug: print(f"Fit failed: Not enough data points ({n_pts})")
@@ -535,8 +549,8 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
         v0_guess, p0_guess = lin_params_guess[0], lin_params_guess[1]
     except RuntimeError: v0_guess, p0_guess = 40.0, pos[0] if len(pos) > 0 else 0
     
-    exp_bounds = ([8.0, -500.0, 1e-6, -np.inf], [73.0, -1e-9, 10.0, np.inf])
-    
+    exp_bounds = ([min_speed, -500.0, 1e-6, -np.inf], [73.0, -1e-9, 10.0, np.inf])
+
     v0_guess_clipped = np.clip(v0_guess, exp_bounds[0][0], exp_bounds[1][0])
 
     if debug and v0_guess_clipped != v0_guess:
@@ -552,9 +566,10 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
         res_exp = None
     
     res_lin = None
+    lin_bounds = ([min_speed, -np.inf], [np.inf, np.inf])
     try:
-        lin_params_initial_guess, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig)
-        res_lin = least_squares(residual_func, lin_params_initial_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, linfunc))
+        lin_params_initial_guess, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig, bounds=lin_bounds)
+        res_lin = least_squares(residual_func, lin_params_initial_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, linfunc), bounds=lin_bounds)
     except (RuntimeError, ValueError):
         if not (res_exp and res_exp.success):
             print("Error: Both exponential and linear fits failed.")
@@ -666,11 +681,19 @@ def generate_speed_plots(plot_data: Dict[str, Any], translations: Optional[dict]
     plt.savefig(f"{output_prefix}spd_acc.svg", bbox_inches='tight', pad_inches=0.05)
     plt.close(fig2)
 
-def calculate_speed_profile(resname: str, cennames: List[str], datname: str, debug: bool = False, 
-                            fscale: float = 0.1, sigma_level: float = 1.0, seed: Optional[int] = None, 
-                            num_simulations: int = 1000) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def calculate_speed_profile(resname: str, cennames: List[str], datname: str, debug: bool = False,
+                            fscale: float = 0.1, sigma_level: float = 1.0, seed: Optional[int] = None,
+                            num_simulations: int = 1000, min_speed: Optional[float] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     if seed is not None: np.random.seed(seed)
     resdat = readres(resname)
+
+    # Default minimum speed: circular orbit speed at the trajectory altitude
+    # minus 1 km/s, allowing for elliptical orbits and measurement uncertainty.
+    if min_speed is None:
+        mean_alt_km = (float(resdat.height[0]) + float(resdat.height[1])) / 2.0
+        min_speed = _min_orbital_speed_for_height_km(mean_alt_km)
+        if debug:
+            print(f"  -> Auto-derived minimum speed from altitude ({mean_alt_km:.1f} km): {min_speed:.2f} km/s")
     all_sitedata = get_sitecoord_fromdat(datname) if datname else []
     all_cendat = [readcen(f) for f in cennames if Path(f).exists()]
     if not all_cendat: print("Error: No valid centroid data could be loaded."); return None, None
@@ -700,10 +723,10 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
     if not station_obs_split: print("Error: No data fragments left after splitting."); return None, None
 
     print("\n--- Trying Timing Strategy 1: Triplet-based physical fit ---")
-    offsets_A_initial = _find_offsets_by_triplet_method(list(station_obs_split), debug=debug); offsets_A_final = _refine_offsets_by_projection_method(list(station_obs_split), offsets_A_initial, debug=debug); merged_A, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_A_final); time_A = merged_A['reltime'] - merged_A['reltime'][0] if merged_A['reltime'].size > 0 else merged_A['reltime']; params_A, n_ok_A, pcov_A, cost_A = _fit_merged_data_with_cost(time_A, merged_A['pos'], merged_A['sig'], debug, fscale)
-    
+    offsets_A_initial = _find_offsets_by_triplet_method(list(station_obs_split), debug=debug); offsets_A_final = _refine_offsets_by_projection_method(list(station_obs_split), offsets_A_initial, debug=debug, min_speed=min_speed); merged_A, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_A_final); time_A = merged_A['reltime'] - merged_A['reltime'][0] if merged_A['reltime'].size > 0 else merged_A['reltime']; params_A, n_ok_A, pcov_A, cost_A = _fit_merged_data_with_cost(time_A, merged_A['pos'], merged_A['sig'], debug, fscale, min_speed)
+
     print("\n--- Trying Timing Strategy 2: Anchor-based projection fit ---")
-    offsets_B_final = _align_fragments_to_anchor_method(list(station_obs_split), debug=debug); merged_B, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_B_final); time_B = merged_B['reltime'] - merged_B['reltime'][0] if merged_B['reltime'].size > 0 else merged_B['reltime']; params_B, n_ok_B, pcov_B, cost_B = _fit_merged_data_with_cost(time_B, merged_B['pos'], merged_B['sig'], debug, fscale)
+    offsets_B_final = _align_fragments_to_anchor_method(list(station_obs_split), debug=debug, min_speed=min_speed); merged_B, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_B_final); time_B = merged_B['reltime'] - merged_B['reltime'][0] if merged_B['reltime'].size > 0 else merged_B['reltime']; params_B, n_ok_B, pcov_B, cost_B = _fit_merged_data_with_cost(time_B, merged_B['pos'], merged_B['sig'], debug, fscale, min_speed)
     
     print("\n--- Comparison of Timing Strategies ---"); print(f"Strategy 1 (Triplet) Final Fit Cost: {cost_A if cost_A != np.inf else 'Failed'}"); print(f"Strategy 2 (Anchor)  Final Fit Cost: {cost_B if cost_B != np.inf else 'Failed'}")
     

@@ -926,9 +926,9 @@ class SpiceLock:
         return False
 
 
-def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: dict, plot_data: dict) -> tuple:
+def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: dict, plot_data: dict, force_plots: bool = False) -> tuple:
     """Worker function to generate outputs for one language in a separate process.
-    
+
     This runs in its own process, so matplotlib and SPICE are isolated per language.
     """
     try:
@@ -940,17 +940,29 @@ def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: d
         generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
         
         current_orbit_data = {'valid': False}
-        
-        if plot_data and plot_data.get('orbit', {}).get('valid'):
-            # Resolve shower name
-            raw_shower_name = plot_data['orbit']['showername']
+        orbit_data = plot_data.get('orbit', {}) if plot_data else {}
+        orbit_valid = bool(orbit_data.get('valid'))
+        has_metrack = plot_data and plot_data.get('metrack_info') is not None and plot_data.get('metrack_plot_data') is not None
+        has_fbspd = plot_data and plot_data.get('fbspd_plot_data') is not None
+
+        # Fill any trajectory/orbit fields that are available, even if the orbit
+        # itself was rejected (e.g. end altitude too high).  The triangulation
+        # HTML report can still show atmospheric trajectory and speed.
+        for key in ['entry_speed', 'az', 'alt', 'ra', 'dec', 'rp', 'ecc', 'inc',
+                    'lnode', 'argp', 'm0', 't0', 'showername']:
+            if key in orbit_data:
+                current_orbit_data[key] = orbit_data[key]
+
+        if orbit_valid:
+            # Resolve shower name to the requested language
+            raw_shower_name = orbit_data.get('showername', '')
             shower_code = None
-            
+
             if raw_shower_name in translations.get('showers', {}):
                 shower_code = raw_shower_name
             elif raw_shower_name and raw_shower_name.lower() in name_to_code:
                 shower_code = name_to_code[raw_shower_name.lower()]
-            
+
             final_shower_name = ""
             if shower_code:
                 final_shower_name = translations.get('showers', {}).get(shower_code, raw_shower_name)
@@ -959,23 +971,18 @@ def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: d
                     final_shower_name = translations.get('sporadic', 'sporadic')
                 else:
                     final_shower_name = raw_shower_name
-            
+
             current_orbit_data['showername'] = final_shower_name
             current_orbit_data['showername_sg'] = final_shower_name
-            current_orbit_data['entry_speed'] = plot_data['orbit']['entry_speed']
-            current_orbit_data['az'] = plot_data['orbit']['az']
-            current_orbit_data['alt'] = plot_data['orbit']['alt']
-            current_orbit_data['ra'] = plot_data['orbit']['ra']
-            current_orbit_data['dec'] = plot_data['orbit']['dec']
-            current_orbit_data['rp'] = plot_data['orbit']['rp']
-            current_orbit_data['ecc'] = plot_data['orbit']['ecc']
-            current_orbit_data['inc'] = plot_data['orbit']['inc']
-            current_orbit_data['lnode'] = plot_data['orbit']['lnode']
-            current_orbit_data['argp'] = plot_data['orbit']['argp']
-            current_orbit_data['m0'] = plot_data['orbit']['m0']
-            current_orbit_data['t0'] = plot_data['orbit']['t0']
             current_orbit_data['valid'] = True
-            
+        elif force_plots and (has_metrack or has_fbspd):
+            # --force-plots: keep valid=False but still produce trajectory/speed
+            # plots and let the main process generate the triangulation report.
+            pass
+        else:
+            return (lang, None, current_orbit_data)
+
+        if has_metrack or has_fbspd:
             plot_opts = {
                 'doplot': 'save',
                 'interactive': True,
@@ -983,22 +990,19 @@ def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: d
                 'azonly': False,
                 'mapres': 'i'
             }
-            
+
             # Run metrack plots (each process has its own matplotlib)
-            metrack_info = plot_data.get('metrack_info')
-            metrack_plot_data = plot_data.get('metrack_plot_data')
-            if metrack_info is not None and metrack_plot_data is not None:
-                generate_metrack_plots(metrack_info, metrack_plot_data,
+            if has_metrack:
+                generate_metrack_plots(plot_data['metrack_info'], plot_data['metrack_plot_data'],
                                        plot_opts, translations=translations, output_prefix=file_prefix)
-            
+
             # Run speed plots
-            fbspd_plot_data = plot_data.get('fbspd_plot_data')
-            if fbspd_plot_data is not None:
-                generate_speed_plots(fbspd_plot_data,
+            if has_fbspd:
+                generate_speed_plots(plot_data['fbspd_plot_data'],
                                      translations=translations, output_prefix=file_prefix)
-            
+
             # Note: Orbit plots (SPICE) are done sequentially in main process to avoid lock contention
-            
+
             # Convert SVG to JPG (orbit.svg is generated in main process)
             dpi_map = {'map.svg': Config.SVG_MAP_DPI}
             for svg_name in ["posvstime.svg", "spd_acc.svg", "height.svg", "map.svg"]:
@@ -1006,10 +1010,10 @@ def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: d
                 if svg_path.exists():
                     dpi = dpi_map.get(svg_name, Config.SVG_DEFAULT_DPI)
                     svg_to_jpg(svg_path, svg_path.with_suffix('.jpg'), dpi)
-            
+
             # Note: Triangulation HTML report generation is done in the main process
             # after parallel plotting, since it requires resdat which isn't easily picklable
-        
+
         return (lang, None, current_orbit_data)
     except Exception as e:
         return (lang, str(e), None)
@@ -1065,7 +1069,7 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
             logging.error(f"Failed to send tweet using key {key}: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     obs_filename = f"obs_{date.strftime('%Y-%m-%d_%H:%M:%S')}.txt"
@@ -1169,7 +1173,8 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 'ransac_iterations': 10,
                 'ransac_runs': 100,
                 'debug_ransac': False,
-                'all_in_tolerance': 1.0
+                'all_in_tolerance': 1.0,
+                'min_speed': min_speed,
             }
 
             metrack_info, metrack_plot_data = calculate_trajectory(str(obs_filepath), **metrack_opts)
@@ -1440,17 +1445,18 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             logging.info(f"Multi-station event ({len(station_codes)} stations). Performing core analysis...")
             
             metrack_opts = {
-                'timestamp': date.timestamp(), 
-                'optimize': True, 
+                'timestamp': date.timestamp(),
+                'optimize': True,
                 'use_ransac': not all_stations, # Disable RANSAC if all_stations is True
                 'seed': 0,
                 'ransac_threshold': 1.0,
                 'ransac_iterations': 10,
                 'ransac_runs': 100,
                 'debug_ransac': False,
-                'all_in_tolerance': 1.0
+                'all_in_tolerance': 1.0,
+                'min_speed': min_speed,
             }
-            fbspd_opts = {'debug': True, 'seed': 0}
+            fbspd_opts = {'debug': True, 'seed': 0, 'min_speed': min_speed}
             
             metrack_info, metrack_plot_data = calculate_trajectory(str(obs_filepath), **metrack_opts)
             if not metrack_plot_data: raise ValueError("Metrack calculation returned no plot data.")
@@ -1478,6 +1484,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                               if station_name_to_code.get(p.parts[-3]) in inlier_codes]
 
             entry_speed = None
+            fbspd_results = None
             fbspd_plot_data = None
             try:
                 fbspd_results, fbspd_plot_data = calculate_speed_profile(
@@ -1619,7 +1626,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             futures = {
                 executor.submit(
                     _generate_language_in_process,
-                    lang, str(event_dir), name_to_code, plot_data
+                    lang, str(event_dir), name_to_code, plot_data, force_plots
                 ): lang for lang in SUPPORTED_LANGS
             }
             for future in as_completed(futures):
@@ -1704,7 +1711,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     translations = load_translations(lang)
                     file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
                     current_orbit_data = orbit_data_by_lang.get(lang, {'valid': False})
-                    if current_orbit_data.get('valid'):
+                    if current_orbit_data.get('valid') or (force_plots and current_orbit_data):
                         generate_triangulation_html_report(
                             event_dir / f"{file_prefix}tables.html",
                             resdat,
@@ -1994,7 +2001,7 @@ def main():
         description="Fetch and process meteor data, or reprocess an existing event directory.",
         usage="""
     To fetch:     python3 fetch.py <station> <port> <remote_dir>
-    To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen]
+    To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen] [--force-plots] [--min-speed SPEED]
         """
     )
     parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
@@ -2015,6 +2022,19 @@ def main():
         "--origcen",
         action="store_true",
         help="Use original centroid.txt data instead of calculated centroid2.txt."
+    )
+    parser.add_argument(
+        "--force-plots",
+        action="store_true",
+        help="For reprocessing mode: generate trajectory, speed, and triangulation "
+             "reports even when the orbit solution is flagged as physically implausible."
+    )
+    parser.add_argument(
+        "--min-speed",
+        type=float,
+        default=None,
+        help="Override the minimum physically plausible speed (km/s). "
+             "If omitted, it is derived from the fitted altitude as circular-orbit speed minus 1 km/s."
     )
     parser.add_argument(
         "--infrasound",
@@ -2061,7 +2081,9 @@ def main():
             logging.warning(f"Could not create index.php symlink: {e}")
         
         try:
-            process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
+            process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all,
+                      use_orig_cen=args.origcen, infrasound_only=args.infrasound,
+                      verbose=args.verbose, force_plots=args.force_plots, min_speed=args.min_speed)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:

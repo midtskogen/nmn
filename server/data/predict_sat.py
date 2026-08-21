@@ -42,7 +42,15 @@ if PTO_MAPPER_AVAILABLE:
 
 # --- Configuration specific to this script ---
 TLE_FILE = os.path.join(BASE_DIR, 'tle.json')
-PASS_CACHE_FILE = os.path.join(CACHE_DIR, 'pass_cache.json')
+# Per-station cache directory. Each station's passes (over the full
+# SEARCH_DAYS window) are cached independently, so an on-demand request for
+# one or a few stations doesn't have to (re)compute passes for every station
+# in the network -- this used to be the dominant cost once the satellite
+# catalog was broadened (245 satellites x ~90 stations x 7 days took several
+# minutes and produced a 58 MB response). The 'days' filter requested by the
+# client is applied when *serving* results from these caches, not when
+# computing them, so it never triggers recomputation.
+PASS_CACHE_DIR = os.path.join(CACHE_DIR, 'passes')
 LOG_FILE = os.path.join(LOG_DIR, 'predict_sat.log')
 
 # --- Script settings ---
@@ -55,16 +63,56 @@ MAXIMUM_SUN_ALT = -9 # The maximum sun altitude for a pass to be considered "dar
 # (-6 is civil twilight)
 
 # A dictionary of specific satellites to track by name and NORAD catalog number.
+# These are always kept regardless of the generic brightness pre-filter below,
+# and use a hand-tuned absolute magnitude instead of the per-category default.
 SATELLITES_OF_INTEREST = {
     "ISS (ZARYA)": 25544, "LACROSSE 5": 28646, "PAZ": 43215, "CSG-1": 47219,
     "TERRA": 25994, "AQUA": 27424, "GENESIS 2": 31820, "TANDEM-X": 36605,
     "SARAL": 39086, "OCEANSAT-2": 35931,
+    # Identified 2026-08-21 as the object triangulated by 6 NMN stations on
+    # 2026-08-17 ~20:52 UTC (event 20260817/205203): propagating this TLE
+    # matches the triangulated start point to ~12 km and, 206s later, the
+    # triangulated end point to ~1.9 km (course/speed/altitude all consistent
+    # with the fbspd/metrack fit). NORAD 25406 is the satellite itself
+    # (1998-045A); its rocket body is a separate object, NORAD 25407.
+    "COSMOS 2360": 25406,
 }
 # A dictionary of estimated absolute magnitudes for the satellites of interest.
 SATELLITE_MAGNITUDES = {
     "ISS (ZARYA)": -2.0, "LACROSSE 5": 1.5, "PAZ": 2.0, "CSG-1": 2.5, "TERRA": 2.8,
     "AQUA": 2.8, "GENESIS 2": 3.0, "TANDEM-X": 3.0, "SARAL": 3.0, "OCEANSAT-2": 3.0,
+    "COSMOS 2360": 3.5,  # not in CelesTrak's top-100 visual list; rough estimate
 }
+
+# --- Generic catalogue coverage (beyond the curated SATELLITES_OF_INTEREST) ---
+# Historically this script discarded every downloaded TLE that wasn't one of
+# the ~10 named satellites above, even though it downloads whole CelesTrak
+# groups (stations, starlink, weather, resource, radar, active). That made
+# the "satellite passes" feature far too narrow.
+#
+# We now auto-include satellites from the small, purpose-built groups below
+# (a few hundred objects total) using a per-category default absolute
+# magnitude, since those groups consist of comparably large/bright
+# satellites where a rough shared brightness assumption is reasonable.
+#
+# 'starlink' and 'active' are deliberately EXCLUDED from this auto-include:
+# they contain many thousands of wildly different-sized objects (from
+# defunct rocket stages down to cubesats), so no single default magnitude is
+# meaningful, and at typical LEO altitudes almost any plausible default
+# clears MAX_VISIBLE_MAGNITUDE anyway -- auto-including them would balloon
+# the tracked set to nearly the entire catalogue and make the per-station
+# pass search far too slow. Those two groups are still downloaded (so
+# specific named SATELLITES_OF_INTEREST entries living only in those groups
+# are still found), but non-curated members of them are skipped.
+CATEGORY_DEFAULT_ABS_MAG = {
+    'stations': 0.0,    # crewed/large stations (ISS/CSS-class)
+    'weather': 3.0,      # large weather satellites (NOAA, MetOp, Meteor-M, ...)
+    'resource': 3.0,     # large earth-observation satellites (Landsat, Sentinel, ...)
+    'radar': 3.5,        # radar imaging satellites (TerraSAR-X, RADARSAT, ICEYE, ...)
+}
+BROADENED_CATEGORIES = frozenset(CATEGORY_DEFAULT_ABS_MAG.keys())
+BEST_CASE_MAGNITUDE_MARGIN = 1.0  # extra slack for the optimistic pre-filter above
+WGS72_EARTH_RADIUS_KM = 6378.135  # radius used internally by the SGP4 propagator
 
 
 # --- Worker Initialization ---
@@ -103,20 +151,31 @@ def get_tle_data(ts):
     TLE data describes the orbits of satellites and is required for position prediction.
     """
     cached_data = None
-    # Check if a recent and complete TLE cache file exists.
+    # Check if a recent TLE cache file exists. We intentionally do NOT also
+    # require every curated SATELLITES_OF_INTEREST name to be present here:
+    # a satellite that has permanently decayed/deorbited (no source ever has
+    # a current TLE for it again) would otherwise make this check fail
+    # forever, forcing a full re-fetch -- and the CelesTrak rate-limit risk
+    # that comes with it -- on every single call regardless of freshness.
     if os.path.exists(TLE_FILE) and (datetime.now().timestamp() - os.path.getmtime(TLE_FILE)) / 3600 < TLE_UPDATE_INTERVAL_HOURS:
         cached_data = read_json_file(TLE_FILE, default={})
-        if all(sat_name in cached_data for sat_name in SATELLITES_OF_INTEREST): return cached_data
+        if cached_data: return cached_data
     
-    logging.info("Cache is stale or incomplete. Forcing fresh TLE download.")
+    logging.info("Cache is stale or missing. Forcing fresh TLE download.")
     tle_data = {}
-    # List of CelesTrak TLE sources to query.
+    last_error = None
+    # List of CelesTrak TLE sources to query, tagged with a category used to
+    # assign a default absolute magnitude to satellites we don't have a
+    # hand-curated estimate for (see CATEGORY_DEFAULT_ABS_MAG).
     sources = [
-        "https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle", "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle",
-        "https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle", "https://celestrak.org/NORAD/elements/gp.php?GROUP=resource&FORMAT=tle",
-        "https://celestrak.org/NORAD/elements/gp.php?GROUP=radar&FORMAT=tle", "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle"
+        ("https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle", 'stations'),
+        ("https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle", 'starlink'),
+        ("https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle", 'weather'),
+        ("https://celestrak.org/NORAD/elements/gp.php?GROUP=resource&FORMAT=tle", 'resource'),
+        ("https://celestrak.org/NORAD/elements/gp.php?GROUP=radar&FORMAT=tle", 'radar'),
+        ("https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle", 'active'),
     ]
-    for source_url in sources:
+    for source_url, category in sources:
         try:
             req = urllib.request.Request(source_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -128,16 +187,81 @@ def get_tle_data(ts):
                 name, line1, line2 = lines[i].strip(), lines[i+1].strip(), lines[i+2].strip()
                 try: satnum = int(line1[2:7])
                 except (ValueError, IndexError): continue
-             
-                # Keep the TLE if it's one of the satellites we are interested in.
-                if name in SATELLITES_OF_INTEREST or satnum in SATELLITES_OF_INTEREST.values():
+
+                is_curated = name in SATELLITES_OF_INTEREST or satnum in SATELLITES_OF_INTEREST.values()
+                try:
                     temp_sat = EarthSatellite(line1, line2, name, ts)
-                    tle_data[name] = {'satnum': satnum, 'line1': line1, 'line2': line2, 'inclination': temp_sat.model.inclo}
-       
+                except Exception:
+                    continue
+
+                if is_curated:
+                    abs_mag = SATELLITE_MAGNITUDES.get(name, 3.0)
+                elif category in BROADENED_CATEGORIES:
+                    # Cheap pre-filter: estimate this satellite's best-possible
+                    # brightness (directly overhead, best phase) and skip it
+                    # if that's already fainter than we could ever detect.
+                    default_abs_mag = CATEGORY_DEFAULT_ABS_MAG[category]
+                    altitude_km = max(100.0, (temp_sat.model.a * WGS72_EARTH_RADIUS_KM) - WGS72_EARTH_RADIUS_KM)
+                    best_case_mag = default_abs_mag + 5 * np.log10(altitude_km / 1000.0)
+                    if best_case_mag >= MAX_VISIBLE_MAGNITUDE + BEST_CASE_MAGNITUDE_MARGIN:
+                        continue
+                    abs_mag = default_abs_mag
+                else:
+                    # 'starlink' / 'active': too large and size-heterogeneous
+                    # to safely auto-include (see BROADENED_CATEGORIES note
+                    # above). Only keep named SATELLITES_OF_INTEREST matches
+                    # from these groups, which is_curated already handled.
+                    continue
+
+                # Keep the most optimistic (brightest) entry if the same
+                # satellite shows up in more than one downloaded group.
+                existing = tle_data.get(name)
+                if existing is not None and existing.get('abs_mag', 99.0) <= abs_mag:
+                    continue
+                tle_data[name] = {'satnum': satnum, 'line1': line1, 'line2': line2, 'inclination': temp_sat.model.inclo, 'abs_mag': abs_mag}
+
         except Exception as e:
+            # CelesTrak rate-limits individual GROUP endpoints (e.g. it returns
+            # HTTP 403 with "GP data has not updated since your last successful
+            # download" if the same group is requested again within its update
+            # window). That must not abort the whole fetch: skip this source,
+            # keep whatever TLEs we already collected from other sources, and
+            # fall back to any previously cached entry for the satellites we
+            # could not refresh.
             logging.error(f"Could not process TLE from {source_url}: {e}")
-            if cached_data: return cached_data # Return stale data if fresh download fails.
-            else: return {"error": f"Failed to download TLE data: {e}"}
+            last_error = e
+
+    # Some curated satellites aren't members of any of the group downloads
+    # above (e.g. CelesTrak's GROUP=active only lists satellites it
+    # considers currently "active", which excludes some trackable objects
+    # like COSMOS 2360). Fetch those individually by NORAD catalog number so
+    # a curated entry doesn't silently go missing just because it fell out
+    # of (or never belonged to) one of the bulk group downloads.
+    missing_curated = {name: satnum for name, satnum in SATELLITES_OF_INTEREST.items() if name not in tle_data}
+    for name, satnum in missing_curated.items():
+        try:
+            url = f"https://celestrak.org/NORAD/elements/gp.php?CATNR={satnum}&FORMAT=tle"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                lines = response.read().decode('utf-8').strip().splitlines()
+            if len(lines) < 3: continue
+            fetched_name, line1, line2 = lines[0].strip(), lines[1].strip(), lines[2].strip()
+            temp_sat = EarthSatellite(line1, line2, fetched_name, ts)
+            tle_data[name] = {'satnum': satnum, 'line1': line1, 'line2': line2, 'inclination': temp_sat.model.inclo, 'abs_mag': SATELLITE_MAGNITUDES.get(name, 3.0)}
+        except Exception as e:
+            logging.error(f"Could not fetch individual TLE for curated satellite '{name}' (NORAD {satnum}): {e}")
+            last_error = e
+
+    if cached_data:
+        # Fill in any satellites we failed to refresh this round with their
+        # last known-good TLE, rather than dropping them entirely.
+        for name, data in cached_data.items():
+            tle_data.setdefault(name, data)
+
+    if not tle_data:
+        if cached_data: return cached_data # Return stale data if fresh download fails.
+        return {"error": f"Failed to download TLE data: {last_error}"}
+
     atomic_json_write(TLE_FILE, tle_data)
     return tle_data
 
@@ -164,6 +288,19 @@ def process_station(args):
 
     end_time = ts.utc(end_dt) # 
     start_time = ts.utc(start_dt) # 
+
+    # Camera calibration (PTO) data only depends on the station and camera
+    # number, not on the satellite/pass being evaluated, so look it up once
+    # per station instead of once per (satellite, pass, camera) combination.
+    # With hundreds of passes x up to 7 cameras this used to mean re-reading
+    # and re-parsing cameras.json from disk thousands of times per station.
+    station_pto_data = {}
+    if PTO_MAPPER_AVAILABLE:
+        for cam_num in range(1, 8):
+            try:
+                station_pto_data[cam_num] = get_pto_data_from_json(CAMERAS_FILE, f"{station_id.replace('ams', '')}:{cam_num}")
+            except Exception:
+                station_pto_data[cam_num] = None
 
     for name, data in tle_data.items():
         # Log which satellite is being checked
@@ -208,7 +345,10 @@ def process_station(args):
                     continue # 
 
                 # 3. Estimate the satellite's apparent magnitude (brightness).
-                abs_mag = SATELLITE_MAGNITUDES.get(name, 99.0) # 
+                # 'abs_mag' is stored per-satellite in tle_data (hand-curated
+                # for SATELLITES_OF_INTEREST, or a per-category default for
+                # everything else picked up from the broader catalogue).
+                abs_mag = data.get('abs_mag', SATELLITE_MAGNITUDES.get(name, 99.0)) # 
                 topocentric_culminate = (satellite - location).at(culminate_time) # 
                 r_km = topocentric_culminate.distance().km # 
                 # The following calculates the phase angle to adjust brightness.
@@ -249,12 +389,10 @@ def process_station(args):
                 camera_views = []
                 # Check visibility for each of the station's cameras.
                 for cam_num in range(1, 8):
-                    pto_data = None
-                    if PTO_MAPPER_AVAILABLE:
-                        try: pto_data = get_pto_data_from_json(CAMERAS_FILE, f"{station_id.replace('ams', '')}:{cam_num}")
-                        
-                        except Exception: continue
-                    
+                    pto_data = station_pto_data.get(cam_num)
+                    if PTO_MAPPER_AVAILABLE and pto_data is None:
+                        continue
+
                     in_view_start, in_view_end = None, None
                     for j, t in enumerate(pass_times):
                         # Use prediction_utils to check if the (az, alt) point is within the camera's FoV.
@@ -325,119 +463,198 @@ def _group_and_finalize_passes(all_passes_found):
             "ground_track": rounded_ground_track,
             "station_sky_tracks": station_sky_tracks,
             "camera_views": all_camera_views,
-            "earliest_camera_utc": min(cv['start_utc'] for cv in all_camera_views)
+            "earliest_camera_utc": min(cv['start_utc'] for cv in all_camera_views),
+            # Needed (together with earliest_camera_utc) to test time-range
+            # filters by *overlap* rather than just the start time: a pass
+            # can span several minutes across multiple stations/cameras, so a
+            # narrow requested window can fall inside that span without
+            # containing its earliest view.
+            "latest_camera_utc": max(cv['end_utc'] for cv in all_camera_views)
         }
         final_passes.append(final_pass)
 
     final_passes.sort(key=lambda p: p['earliest_camera_utc'], reverse=True)
     return final_passes
 
+def _station_cache_path(station_id):
+    return os.path.join(PASS_CACHE_DIR, f"{station_id}.json")
+
+def _load_station_cache(station_id, current_tle_names):
+    """Returns the cached raw (ungrouped) passes for a station if the cache
+    exists, is within PASS_CACHE_LIFETIME_MINUTES, and was built from the
+    current TLE set. Returns None if a fresh computation is needed."""
+    path = _station_cache_path(station_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        mod_time = os.path.getmtime(path)
+        if (datetime.now().timestamp() - mod_time) >= PASS_CACHE_LIFETIME_MINUTES * 60:
+            return None
+        cached = read_json_file(path, default=None)
+        if not cached or set(cached.get("satellites_in_cache", [])) != current_tle_names:
+            return None
+        return cached.get("passes", [])
+    except (IOError, json.JSONDecodeError):
+        return None
+
+def _save_station_cache(station_id, tle_names, station_passes):
+    os.makedirs(PASS_CACHE_DIR, exist_ok=True)
+    atomic_json_write(_station_cache_path(station_id), {"satellites_in_cache": list(tle_names), "passes": station_passes}, indent=2)
+
+def _filter_by_days(final_passes, days):
+    """Keeps only passes that overlap the last `days` days (i.e. any part of
+    the pass -- not just its earliest camera view -- falls at/after the
+    cutoff). `days` of None or <= 0 disables filtering (full SEARCH_DAYS)."""
+    if not days or days <= 0:
+        return final_passes
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return [p for p in final_passes if p.get('latest_camera_utc', p['earliest_camera_utc']) >= cutoff_iso]
+
+def _parse_iso(value):
+    """Parses an ISO8601 timestamp (with optional trailing 'Z') into a
+    'YYYY-MM-DDTHH:MM:SSZ' string comparable with skyfield's utc_iso() output.
+    Returns None if `value` is falsy or unparseable."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except ValueError:
+        return None
+
+def _filter_by_range(final_passes, start_iso, end_iso):
+    """Keeps only passes that *overlap* [start_iso, end_iso] (either bound
+    may be omitted), i.e. any part of the pass's span -- from its earliest to
+    its latest camera view across all involved stations -- intersects the
+    requested window. A pure "earliest_camera_utc within bounds" test would
+    wrongly drop passes whose earliest view starts just before a narrow
+    window even though most of the pass (as seen by other stations/cameras)
+    falls inside it. Takes precedence over `_filter_by_days` when explicit
+    bounds are supplied (e.g. from the satellite panel's drag-to-select time
+    range slider)."""
+    start_cutoff = _parse_iso(start_iso)
+    end_cutoff = _parse_iso(end_iso)
+    if not start_cutoff and not end_cutoff:
+        return final_passes
+    result = final_passes
+    if start_cutoff:
+        result = [p for p in result if p.get('latest_camera_utc', p['earliest_camera_utc']) >= start_cutoff]
+    if end_cutoff:
+        result = [p for p in result if p['earliest_camera_utc'] <= end_cutoff]
+    return result
+
+def _compute_and_cache_stations(station_items, tle_data, tle_names, status_file=None):
+    """Computes passes for the given [(station_id, station_info), ...] list
+    (in parallel across stations), caching each station's result as it
+    completes. Returns the combined raw (ungrouped) passes for all of them."""
+    all_passes_found = []
+    if not station_items:
+        return all_passes_found
+    tasks = [(sid, sinfo, tle_data) for sid, sinfo in station_items]
+    total = len(tasks)
+    done = 0
+    with ProcessPoolExecutor(initializer=init_worker) as executor:
+        futures = {executor.submit(process_station, task): task[0] for task in tasks}
+        for future in as_completed(futures):
+            station_id = futures[future]
+            try:
+                station_result = future.result()
+                all_passes_found.extend(station_result)
+                _save_station_cache(station_id, tle_names, station_result)
+            except Exception as exc:
+                logging.error(f"A station task generated an exception for {station_id}: {exc}")
+            done += 1
+            if status_file:
+                progress = 5 + int((done / total) * 90)
+                message = f"status_calculating_for_station|processed={done},total={total}"
+                update_status(status_file, "progress", {"step": progress, "total": 100, "message": message})
+    return all_passes_found
+
 def find_all_passes_for_cron():
     """
-    A special version of the prediction function intended to be run by a cron job.
-    It runs silently and its only purpose is to update the main pass cache file.
+    A special version of the prediction function intended to be run by a cron
+    job. It runs silently and its only purpose is to keep every station's
+    per-station pass cache warm, so on-demand requests (for any station
+    selection) can be served quickly.
     """
-    if os.path.exists(PASS_CACHE_FILE):
-        try:
-            mod_time = os.path.getmtime(PASS_CACHE_FILE)
-            lifetime_seconds = PASS_CACHE_LIFETIME_MINUTES * 60
-            if (datetime.now().timestamp() - mod_time) < lifetime_seconds:
-                with open(PASS_CACHE_FILE, 'r') as f:
-                    cached_data = json.load(f)
-                # Exit early if the cache is still valid and contains the correct set of satellites.
-                if set(SATELLITES_OF_INTEREST.keys()) == set(cached_data.get("satellites_in_cache", [])):
-                    logging.info("Cron run: Cache is still valid. Exiting.")
-                    return
-        except (IOError, json.JSONDecodeError):
-             logging.warning("Cache file exists but is invalid. Proceeding with recalculation.")
-
-    logging.info("--- Starting cron pass prediction (cache invalid or missing) ---")
     try:
-  
         ts = load.timescale()
         with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
         tle_data = get_tle_data(ts)
         if "error" in tle_data:
             logging.error(f"Failed to get TLE data in cron mode: {tle_data['error']}")
             return
-        all_passes_found = []
-        
-      
-        tasks = [(sid, sinfo, tle_data) for sid, sinfo in stations_data.items()]
-        with ProcessPoolExecutor(initializer=init_worker) as executor:
-            results = executor.map(process_station, tasks)
-            for station_result in results:
-                all_passes_found.extend(station_result)
-        
-        final_passes = _group_and_finalize_passes(all_passes_found)
-        result_data = {"passes": final_passes}
-   
-        with open(PASS_CACHE_FILE, 'w') as f:
-            json.dump({"satellites_in_cache": list(SATELLITES_OF_INTEREST.keys()), "data": result_data}, f, indent=2)
-        logging.info(f"Cron prediction finished. Found {len(final_passes)} passes and updated cache.")
+        tle_names = set(tle_data.keys())
+
+        stale_items = [(sid, sinfo) for sid, sinfo in stations_data.items() if _load_station_cache(sid, tle_names) is None]
+        if not stale_items:
+            logging.info("Cron run: All station caches are still valid. Exiting.")
+            return
+
+        logging.info(f"--- Starting cron pass prediction for {len(stale_items)} stale/missing station caches ---")
+        _compute_and_cache_stations(stale_items, tle_data, tle_names)
+        logging.info("Cron prediction finished; per-station caches updated.")
     except Exception as e:
         logging.exception(f"An unhandled error occurred during cron pass prediction")
 
-def find_all_passes(task_id):
+def find_all_passes(task_id, station_ids=None, days=None, start_iso=None, end_iso=None):
     """
     Main orchestrator function for an on-demand pass prediction request.
-    It first tries to serve from cache, and if the cache is invalid, it recalculates
-    all passes, reports progress, and updates the cache.
-    """
-    if os.path.exists(PASS_CACHE_FILE):
-        try:
-            mod_time = os.path.getmtime(PASS_CACHE_FILE)
-            lifetime_seconds = PASS_CACHE_LIFETIME_MINUTES * 60
-            if (datetime.now().timestamp() - mod_time) < lifetime_seconds:
-                with open(PASS_CACHE_FILE, 'r') as f:
-                    
-                    cached_data = json.load(f)
-                if set(SATELLITES_OF_INTEREST.keys()) == set(cached_data.get("satellites_in_cache", [])):
-                    logging.info(f"Task {task_id}: Found valid cache. Serving from cache.")
-                    update_status(os.path.join(LOCK_DIR, f"{task_id}.json"), "complete", {"data": cached_data.get("data", {})})
-                    return
-      
-        except (IOError, json.JSONDecodeError):
-            logging.warning(f"Task {task_id}: Cache file is invalid. Recalculating.")
 
-    logging.info(f"--- Starting pass prediction for task {task_id} (cache invalid or missing) ---")
+    station_ids: optional list of station IDs to restrict the search to. This
+    is the main lever for keeping requests fast: each station's raw passes
+    (over the full SEARCH_DAYS window) are cached independently, so asking
+    for one or two stations only computes (or reuses the cache for) those,
+    instead of every station in the network.
+    days: optional number of days (<= SEARCH_DAYS) to limit the *returned*
+    results to (from now, going back). Ignored if start_iso/end_iso is given.
+    start_iso/end_iso: optional explicit ISO8601 UTC bounds (e.g. from the
+    satellite panel's drag-to-select time range slider), used instead of
+    `days` when either is supplied. Both filters are cheap post-filters over
+    the (fully cached) results and never trigger recomputation.
+    """
+    status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     try:
-        status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
         ts = load.timescale()
         with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
+
+        if station_ids:
+            target_items = [(sid, stations_data[sid]) for sid in station_ids if sid in stations_data]
+            if not target_items:
+                update_status(status_file, "error", {"message": "error_invalid_station"})
+                return
+        else:
+            target_items = list(stations_data.items())
+
         tle_data = get_tle_data(ts)
         if "error" in tle_data:
-  
             update_status(status_file, "error", {"message": tle_data["error"]})
             return
-        all_passes_found = []
-        
-        tasks = [(sid, sinfo, tle_data) for sid, sinfo in stations_data.items()]
-        total_stations = len(tasks)
-        stations_processed = 0
-        update_status(status_file, "progress", {"step": 5, "total": 100, "message": "status_calculating"})
-     
-        with ProcessPoolExecutor(initializer=init_worker) as executor:
-            futures = [executor.submit(process_station, task) for task in tasks]
-            # As each worker process completes, update the overall progress.
-            for future in as_completed(futures):
-                try:
-                    station_result = future.result()
-                    all_passes_found.extend(station_result)
-                except Exception as exc:
-                    
-                    logging.error(f'A station task generated an exception: {exc}')
-                stations_processed += 1
-                progress = 5 + int((stations_processed / total_stations) * 90)
-                message = f"status_calculating_for_station|processed={stations_processed},total={total_stations}"
-                update_status(status_file, "progress", {"step": progress, "total": 100, "message": message})
+        tle_names = set(tle_data.keys())
 
-        
+        update_status(status_file, "progress", {"step": 5, "total": 100, "message": "status_calculating"})
+
+        cached_passes, to_compute = [], []
+        for sid, sinfo in target_items:
+            station_cached = _load_station_cache(sid, tle_names)
+            if station_cached is None:
+                to_compute.append((sid, sinfo))
+            else:
+                cached_passes.extend(station_cached)
+
+        logging.info(f"Task {task_id}: {len(target_items) - len(to_compute)} station(s) served from cache, {len(to_compute)} need computation.")
+        computed_passes = _compute_and_cache_stations(to_compute, tle_data, tle_names, status_file=status_file)
+
         update_status(status_file, "progress", {"step": 95, "total": 100, "message": "status_grouping_results"})
-        final_passes = _group_and_finalize_passes(all_passes_found)
+        final_passes = _group_and_finalize_passes(cached_passes + computed_passes)
+        if start_iso or end_iso:
+            final_passes = _filter_by_range(final_passes, start_iso, end_iso)
+        else:
+            final_passes = _filter_by_days(final_passes, days)
         result_data = {"passes": final_passes}
-        atomic_json_write(PASS_CACHE_FILE, {"satellites_in_cache": list(SATELLITES_OF_INTEREST.keys()), "data": result_data}, indent=2)
-        logging.info(f"Finished prediction for task {task_id}. Found {len(final_passes)} passes.")
+        logging.info(f"Finished prediction for task {task_id}. Found {len(final_passes)} passes (range={start_iso}..{end_iso}, days={days or SEARCH_DAYS}, stations={len(target_items)}).")
         update_status(status_file, "complete", {"data": result_data})
     except Exception as e:
         logging.exception(f"An unhandled error occurred during pass prediction for task {task_id}")
@@ -464,7 +681,12 @@ Example cron job to run every 4 hours:
     parser.add_argument("task_id", nargs='?', default=None, help="The task ID provided by the PHP script for progress tracking.")
     parser.add_argument("--cron", action="store_true", help="Run in cron mode to silently update the cache file. This implies --quiet.")
     parser.add_argument("--quiet", action="store_true", help="Suppress all logging to files and the terminal.")
+    parser.add_argument("--station", default=None, help="Comma-separated list of station IDs to restrict the search to (default: all stations).")
+    parser.add_argument("--days", type=int, default=None, help=f"Only return passes from the last N days (default: full {SEARCH_DAYS}-day search window). Ignored if --start/--end is given.")
+    parser.add_argument("--start", default=None, help="Only return passes at/after this ISO8601 UTC timestamp. Takes precedence over --days.")
+    parser.add_argument("--end", default=None, help="Only return passes at/before this ISO8601 UTC timestamp. Takes precedence over --days.")
     args = parser.parse_args()
+    station_ids = [s.strip() for s in args.station.split(',') if s.strip()] if args.station else None
 
     is_quiet = args.quiet or args.cron
     if not is_quiet:
@@ -483,7 +705,7 @@ Example cron job to run every 4 hours:
     elif args.task_id:
         status_file = os.path.join(LOCK_DIR, f"{args.task_id}.json")
         try:
-            find_all_passes(args.task_id)
+            find_all_passes(args.task_id, station_ids=station_ids, days=args.days, start_iso=args.start, end_iso=args.end)
         except Exception as e:
             logging.exception("A fatal error occurred at the top level of the script!")
             update_status(status_file, "error", {"message": "error_internal", "task_id": args.task_id, "debug": "logs/predict_sat.log"})

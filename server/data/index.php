@@ -319,7 +319,26 @@ switch ($action) {
     case 'find_passes':
         header('Content-Type: application/json');
         $task_id = uniqid('pass_task_');
-        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($SATELLITE_SCRIPT) . ' ' . escapeshellarg($task_id) . ' > /dev/null 2>&1 &';
+        // Optional filters: restrict to specific station(s) and/or a shorter
+        // time window than the full search range. Both are validated strictly
+        // since they're passed through to a shell command.
+        $stations_param = isset($_GET['station']) ? $_GET['station'] : '';
+        $station_ids = array_filter(array_map('trim', explode(',', $stations_param)), function($s) {
+            return $s !== '' && preg_match('/^[a-zA-Z0-9_]+$/', $s);
+        });
+        $days_param = isset($_GET['days']) && preg_match('/^\d+$/', $_GET['days']) ? (int)$_GET['days'] : null;
+        // Explicit ISO8601 UTC range (e.g. from the satellite panel's drag
+        // slider), takes precedence over 'days' when present.
+        $iso_pattern = '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/';
+        $start_param = isset($_GET['start']) && preg_match($iso_pattern, $_GET['start']) ? $_GET['start'] : null;
+        $end_param = isset($_GET['end']) && preg_match($iso_pattern, $_GET['end']) ? $_GET['end'] : null;
+
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($SATELLITE_SCRIPT) . ' ' . escapeshellarg($task_id);
+        if (!empty($station_ids)) $command .= ' --station ' . escapeshellarg(implode(',', $station_ids));
+        if ($start_param !== null) $command .= ' --start ' . escapeshellarg($start_param);
+        if ($end_param !== null) $command .= ' --end ' . escapeshellarg($end_param);
+        if ($start_param === null && $end_param === null && $days_param !== null && $days_param > 0) $command .= ' --days ' . escapeshellarg($days_param);
+        $command .= ' > /dev/null 2>&1 &';
         shell_exec($command);
         echo json_encode(['success' => true, 'task_id' => $task_id]);
         break;

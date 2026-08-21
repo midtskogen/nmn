@@ -87,6 +87,28 @@ def parse_pto_file(pto_file):
         raise ValueError("Could not parse panorama or image lines from PTO file.")
     return global_options, images
 
+_cameras_json_cache = {}  # json_path -> (mtime, parsed_data)
+
+def _load_cameras_json(json_path):
+    """
+    Loads and parses a cameras.json file, caching the result keyed by
+    (path, mtime) so repeated lookups (e.g. once per satellite pass per
+    camera, across many stations/passes) don't re-read and re-parse the same
+    file from disk every time. Automatically picks up on-disk changes since
+    the cache is invalidated whenever the file's mtime changes.
+    """
+    try:
+        mtime = os.path.getmtime(json_path)
+    except OSError:
+        mtime = None
+    cached = _cameras_json_cache.get(json_path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    _cameras_json_cache[json_path] = (mtime, data)
+    return data
+
 def get_pto_data_from_json(json_path, selector):
     """
     Creates a pto_data structure from a cameras.json file and a selector.
@@ -107,8 +129,7 @@ def get_pto_data_from_json(json_path, selector):
     except (ValueError, IndexError):
         raise ValueError(f"Invalid format for selector '{selector}'. Use STATION:CAMERA (e.g., 171:7).")
 
-    with open(json_path, 'r', encoding='utf-8') as f:
-        cameras_data = json.load(f)
+    cameras_data = _load_cameras_json(json_path)
 
     i_line = cameras_data.get(station_id, {}).get(cam_name, {}).get("calibration")
     if not i_line:

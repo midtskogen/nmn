@@ -61,6 +61,9 @@ function initializeApp() {
     let currentHighlightedCrossingId = null;
     let stationStatsStart = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
     let stationStatsEnd = new Date().toISOString().slice(0, 10);
+    let satellitePollIntervalId = null;
+    let satelliteRequestSeq = 0;
+    let satelliteSearchTerm = '';
 
     // --- DOM Element Cache ---
     const dom = {
@@ -208,6 +211,97 @@ function initializeApp() {
             stationStatsEnd = new Date().toISOString().slice(0, 10);
         }
         refreshStationStats();
+        if (document.getElementById('satellite-toggle').checked) refreshSatellitePasses();
+    }
+
+    /**
+     * (Re)fetches satellite passes, scoped to the currently selected stations
+     * and the time range chosen via the satellite panel's slider/presets.
+     * Restricting to selected stations avoids searching the whole network
+     * (~90 stations), which is what makes this fast. If no station is
+     * selected, no request is made at all -- we just show a prompt to select one.
+     */
+    function refreshSatellitePasses() {
+        // Cancel any still-pending previous request/poll so it can't overwrite
+        // the results of this (newer) request when it eventually completes.
+        if (satellitePollIntervalId) {
+            clearInterval(satellitePollIntervalId);
+            satellitePollIntervalId = null;
+        }
+        const requestSeq = ++satelliteRequestSeq;
+
+        // Clear stale results immediately so the list/map don't keep showing
+        // data for the previous station selection while the new one loads.
+        currentHighlightedPassId = null;
+        passData = {};
+        mapHandler.setPassData({});
+        handleMapZoomEnd();
+
+        const stationIds = Array.from(selectedStations);
+        const scopeNote = document.getElementById('satellite-scope-note');
+
+        if (stationIds.length === 0) {
+            if (scopeNote) scopeNote.textContent = '';
+            uiManager.showPanelInfo('satellite', t('satellite_no_stations_selected'));
+            return;
+        }
+
+        if (scopeNote) scopeNote.textContent = t('satellite_scope_selected', { count: stationIds.length });
+        const range = uiManager.getSatelliteRangeIso() || {};
+
+        uiManager.showPanelError('satellite', t('loading_passes'));
+        api.fetchAllPasses({
+            onProgress: (data) => { if (requestSeq === satelliteRequestSeq) uiManager.updateTaskProgress('satellite', data); },
+            onComplete: (data) => {
+                if (requestSeq !== satelliteRequestSeq) return; // Superseded by a newer request.
+                satellitePollIntervalId = null;
+                passData = data.data;
+                renderSatellitePasses();
+            },
+            onError: (data) => {
+                if (requestSeq !== satelliteRequestSeq) return; // Superseded by a newer request.
+                satellitePollIntervalId = null;
+                const baseMsg = data && data.message ? t(data.message) : t('error_internal');
+                const details = [];
+                if (data && data.task_id) details.push(`task=${data.task_id}`);
+                if (data && data.debug) details.push(data.debug);
+                uiManager.showPanelError('satellite', details.length ? `${baseMsg} (${details.join(', ')})` : baseMsg);
+            }
+        }, { stationIds, startIso: range.startIso, endIso: range.endIso }).then(result => {
+            // Only keep tracking the interval if this request is still current.
+            if (result && requestSeq === satelliteRequestSeq) {
+                satellitePollIntervalId = result.intervalId;
+            } else if (result) {
+                clearInterval(result.intervalId);
+            }
+        }).catch(error => {
+            if (requestSeq === satelliteRequestSeq) {
+                uiManager.showPanelError('satellite', error.message || t('error_internal'));
+            }
+        });
+    }
+
+    /**
+     * Applies the current satellite name search filter (case-insensitive
+     * substring match) to the last-fetched `passData` and re-renders the list
+     * and map from it. This is purely client-side over already-loaded data,
+     * so typing in the search box never triggers a new backend request.
+     */
+    function renderSatellitePasses() {
+        const allPasses = passData.passes || [];
+        const term = satelliteSearchTerm.trim().toLowerCase();
+        const filteredPasses = term
+            ? allPasses.filter(p => (p.satellite || '').toLowerCase().includes(term))
+            : allPasses;
+        const filteredData = { ...passData, passes: filteredPasses };
+
+        mapHandler.setPassData(filteredData);
+        if (term && filteredPasses.length === 0 && allPasses.length > 0) {
+            uiManager.showPanelInfo('satellite', t('satellite_search_no_matches', { query: satelliteSearchTerm.trim() }));
+        } else {
+            uiManager.displayAllPasses(filteredData, { onHeaderClick: handlePassHeaderClick, onDownloadClick: (id) => startPassDownload(id, 'satellite'), onEventClick: (pass, event) => handleEventClick(pass, 'satellite', event) });
+        }
+        handleMapZoomEnd();
     }
 
     function refreshStationStats() {
@@ -1166,32 +1260,25 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 document.getElementById('aircraft-toggle').checked = false;
                 uiManager.showPanel('satellite');
                 uiManager.hidePanel('aircraft');
-               
-                mapHandler.highlightTrack(null, 'aircraft', 
-false, false);
-                api.fetchAllPasses({
-                    onProgress: (data) => uiManager.updateTaskProgress('satellite', data),
-                    onComplete: (data) => {
-    
-                        passData = data.data;
-      
-                        mapHandler.setPassData(data.data);
-                        uiManager.displayAllPasses(data.data, { onHeaderClick: handlePassHeaderClick, onDownloadClick: (id) => startPassDownload(id, 'satellite'), onEventClick: (pass, event) => handleEventClick(pass, 'satellite', event) });
-                        handleMapZoomEnd();
-                  
-                    },
-                    onError: (data) => {
-                        const baseMsg = data && data.message ? t(data.message) : t('error_internal');
-                        const details = [];
-                        if (data && data.task_id) details.push(`task=${data.task_id}`);
-                        if (data && data.debug) details.push(data.debug);
-                        uiManager.showPanelError('satellite', details.length ? `${baseMsg} (${details.join(', ')})` : baseMsg);
-                    }
-                });
+                mapHandler.highlightTrack(null, 'aircraft', false, false);
+                refreshSatellitePasses();
             } else {
                 uiManager.hidePanel('satellite');
                 mapHandler.highlightTrack(null, 'satellite', false, false);
+                if (satellitePollIntervalId) {
+                    clearInterval(satellitePollIntervalId);
+                    satellitePollIntervalId = null;
+                }
+                satelliteRequestSeq++; // Invalidate any in-flight request's callbacks.
             }
+        });
+        uiManager.initSatelliteRangeSlider({
+            onChange: () => { if (document.getElementById('satellite-toggle').checked) refreshSatellitePasses(); }
+        });
+        uiManager.setSatelliteRangePreset(1); // Default to "last 1 day".
+        document.getElementById('satellite-search-input').addEventListener('input', (e) => {
+            satelliteSearchTerm = e.target.value;
+            if (document.getElementById('satellite-toggle').checked) renderSatellitePasses();
         });
         document.getElementById('aircraft-toggle').addEventListener('change', (e) => {
             if (e.target.checked) {

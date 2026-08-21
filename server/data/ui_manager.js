@@ -3873,6 +3873,179 @@ export function showPanelError(panelType, message) {
     }
 }
 
+/** Displays a neutral (non-error) informational message inside a panel's list area,
+ * e.g. "no stations selected".
+ */
+export function showPanelInfo(panelType, message) {
+    const listEl = document.getElementById(`${panelType}-list`);
+    if (listEl) {
+        listEl.replaceChildren(createEl('p', { style: 'color: #6c757d; margin: 0;', textContent: message }));
+    }
+}
+
+// --- Satellite panel: time range dual-handle slider ---
+// The slider spans the last SATELLITE_RANGE_MAX_HOURS hours (7 days) up to
+// "now". Its integer value represents hours-since-(7-days-ago), so 0 = 7
+// days ago and SATELLITE_RANGE_MAX_HOURS = now.
+const SATELLITE_RANGE_MAX_HOURS = 7 * 24;
+
+function satelliteRangeHoursToDate(hoursSinceStart) {
+    return new Date(Date.now() - (SATELLITE_RANGE_MAX_HOURS - hoursSinceStart) * 3600000);
+}
+
+function formatSatelliteRangeLabel(date) {
+    const datePart = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    const timePart = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+    return `${datePart} ${timePart} UTC`;
+}
+
+/**
+ * Sets up the satellite panel's dual-handle time range slider and its
+ * 1/3/7-day preset buttons. Renders day tick marks once, then keeps the
+ * progress bar, labels, and active preset button in sync as the user drags
+ * either handle or clicks a preset.
+ * @param {object} options
+ * @param {function} options.onChange - Called with `{startIso, endIso}` whenever the committed range changes.
+ */
+export function initSatelliteRangeSlider({ onChange }) {
+    const startInput = document.getElementById('satellite-range-start');
+    const endInput = document.getElementById('satellite-range-end');
+    const progress = document.getElementById('satellite-range-progress');
+    const startLabel = document.getElementById('satellite-range-start-label');
+    const endLabel = document.getElementById('satellite-range-end-label');
+    const presetButtons = document.querySelectorAll('.satellite-preset-btn');
+    if (!startInput || !endInput) return;
+
+    renderSatelliteRangeTicks();
+
+    function updateVisuals() {
+        const startVal = parseInt(startInput.value, 10);
+        const endVal = parseInt(endInput.value, 10);
+        const pct = v => (v / SATELLITE_RANGE_MAX_HOURS) * 100;
+        if (progress) {
+            progress.style.left = `${pct(startVal)}%`;
+            progress.style.width = `${Math.max(0, pct(endVal) - pct(startVal))}%`;
+        }
+        if (startLabel) startLabel.textContent = formatSatelliteRangeLabel(satelliteRangeHoursToDate(startVal));
+        if (endLabel) endLabel.textContent = formatSatelliteRangeLabel(satelliteRangeHoursToDate(endVal));
+        // Keep whichever handle is on the right half of the track on top, so
+        // it stays draggable even when the two handles are close together.
+        if (startVal > SATELLITE_RANGE_MAX_HOURS / 2) {
+            startInput.style.zIndex = 3; endInput.style.zIndex = 2;
+        } else {
+            startInput.style.zIndex = 2; endInput.style.zIndex = 3;
+        }
+        presetButtons.forEach(btn => {
+            const days = parseInt(btn.dataset.days, 10);
+            const expectedStart = SATELLITE_RANGE_MAX_HOURS - days * 24;
+            btn.classList.toggle('active', startVal === expectedStart && endVal === SATELLITE_RANGE_MAX_HOURS);
+        });
+    }
+
+    function emitChange() {
+        const startVal = parseInt(startInput.value, 10);
+        const endVal = parseInt(endInput.value, 10);
+        if (onChange) {
+            onChange({
+                startIso: satelliteRangeHoursToDate(startVal).toISOString(),
+                endIso: satelliteRangeHoursToDate(endVal).toISOString()
+            });
+        }
+    }
+
+    startInput.addEventListener('input', () => {
+        if (parseInt(startInput.value, 10) > parseInt(endInput.value, 10)) startInput.value = endInput.value;
+        updateVisuals();
+    });
+    endInput.addEventListener('input', () => {
+        if (parseInt(endInput.value, 10) < parseInt(startInput.value, 10)) endInput.value = startInput.value;
+        updateVisuals();
+    });
+    // 'change' (not 'input') fires once the user releases the handle, which
+    // is when we actually want to trigger a (re)fetch.
+    startInput.addEventListener('change', emitChange);
+    endInput.addEventListener('change', emitChange);
+
+    presetButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            setSatelliteRangePreset(parseInt(btn.dataset.days, 10));
+            emitChange();
+        });
+    });
+
+    updateVisuals();
+}
+
+/** Programmatically moves the slider handles to match a 1/3/7-day preset. */
+export function setSatelliteRangePreset(days) {
+    const startInput = document.getElementById('satellite-range-start');
+    const endInput = document.getElementById('satellite-range-end');
+    if (!startInput || !endInput) return;
+    endInput.value = SATELLITE_RANGE_MAX_HOURS;
+    startInput.value = Math.max(0, SATELLITE_RANGE_MAX_HOURS - days * 24);
+    // Re-trigger the same listeners 'input' would use, to refresh visuals.
+    startInput.dispatchEvent(new Event('input'));
+    endInput.dispatchEvent(new Event('input'));
+}
+
+/** Returns the slider's currently selected range as ISO8601 UTC bounds. */
+export function getSatelliteRangeIso() {
+    const startInput = document.getElementById('satellite-range-start');
+    const endInput = document.getElementById('satellite-range-end');
+    if (!startInput || !endInput) return null;
+    return {
+        startIso: satelliteRangeHoursToDate(parseInt(startInput.value, 10)).toISOString(),
+        endIso: satelliteRangeHoursToDate(parseInt(endInput.value, 10)).toISOString()
+    };
+}
+
+// Hour ticks are drawn every SATELLITE_TICK_HOUR_STEP hours, aligned to real
+// clock boundaries (e.g. 00/06/12/18), not just every N hours from "now".
+// A tick landing on 00:00 is a "major" tick showing the date; the rest are
+// "minor" ticks showing just the (24-hour) hour.
+const SATELLITE_TICK_HOUR_STEP = 6;
+
+/** Returns the first UTC clock time >= `from` that's a multiple of `hourStep` hours. */
+function firstAlignedTick(from, hourStep) {
+    const t = new Date(from);
+    t.setUTCMinutes(0, 0, 0); // Floor to the start of this UTC hour.
+    if (t < from) t.setUTCHours(t.getUTCHours() + 1); // Ensure we didn't floor below `from`.
+    const rem = t.getUTCHours() % hourStep;
+    if (rem !== 0) t.setUTCHours(t.getUTCHours() + (hourStep - rem));
+    return t;
+}
+
+function renderSatelliteRangeTicks() {
+    const ticksEl = document.getElementById('satellite-range-ticks');
+    if (!ticksEl) return;
+    ticksEl.replaceChildren();
+
+    const rangeStart = satelliteRangeHoursToDate(0);
+    const rangeEnd = satelliteRangeHoursToDate(SATELLITE_RANGE_MAX_HOURS);
+
+    for (let t = firstAlignedTick(rangeStart, SATELLITE_TICK_HOUR_STEP); t <= rangeEnd; t.setUTCHours(t.getUTCHours() + SATELLITE_TICK_HOUR_STEP)) {
+        const hoursSinceStart = (t - rangeStart) / 3600000;
+        const pct = (hoursSinceStart / SATELLITE_RANGE_MAX_HOURS) * 100;
+        const isMidnight = t.getUTCHours() === 0;
+
+        ticksEl.appendChild(createEl('div', {
+            className: `satellite-range-tick${isMidnight ? ' major' : ''}`,
+            style: `left: ${pct}%;`
+        }));
+
+        // Clamp the first/last labels so they don't overhang outside the slider.
+        const translate = pct < 3 ? '0' : (pct > 97 ? '-100%' : '-50%');
+        const label = isMidnight
+            ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+            : String(t.getUTCHours()).padStart(2, '0');
+        ticksEl.appendChild(createEl('div', {
+            className: `satellite-range-tick-label${isMidnight ? ' major' : ''}`,
+            style: `left: ${pct}%; transform: translateX(${translate});`,
+            textContent: label
+        }));
+    }
+}
+
 /**
  * Displays or updates a progress bar inside a panel, used for async tasks like fetching passes.
  * @param {string} panelType - The type of panel ('satellite' or 'aircraft').

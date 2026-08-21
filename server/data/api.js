@@ -39,12 +39,16 @@ export async function fetchInitialData() {
  * @param {string} action - The API action to trigger (e.g., 'find_passes').
  * @param {function} pollFn - The function to call for polling the status of the task. This function will be passed the new task_id.
  */
-async function startAsyncTask(action, pollFn) {
-    const response = await fetch(`${API_BASE}${action}`);
+async function startAsyncTask(action, pollFn, params = {}) {
+    const query = new URLSearchParams(params).toString();
+    const url = query ? `${API_BASE}${action}&${query}` : `${API_BASE}${action}`;
+    const response = await fetch(url);
     const data = await response.json();
     if (data.success && data.task_id) {
         // If the task was started successfully, begin polling for its status.
-        pollFn(data.task_id);
+        // Return both, so callers can cancel the poll (e.g. clearInterval) if
+        // a newer request supersedes this one before it completes.
+        return { taskId: data.task_id, intervalId: pollFn(data.task_id) };
     } else {
         throw new Error(data.error || `Could not start task: ${action}.`);
     }
@@ -105,10 +109,23 @@ export async function fetchStationStats(stationId, startDate, endDate) {
 /**
  * Initiates the process of finding all visible satellite passes.
  * @param {object} callbacks - Callbacks for `onProgress`, `onComplete`, and `onError`.
+ * @param {object} [filters] - Optional filters to narrow (and speed up) the search.
+ * @param {string[]} [filters.stationIds] - Restrict the search to these station IDs (default: all stations, which is much slower).
+ * @param {number} [filters.days] - Only return passes from the last N days (ignored if startIso/endIso is given).
+ * @param {string} [filters.startIso] - Only return passes at/after this ISO8601 UTC timestamp.
+ * @param {string} [filters.endIso] - Only return passes at/before this ISO8601 UTC timestamp.
  */
-export function fetchAllPasses(callbacks) {
+export function fetchAllPasses(callbacks, filters = {}) {
     const pollFn = (taskId) => pollTaskStatus(taskId, 'pass_status', callbacks);
-    return startAsyncTask('find_passes', pollFn);
+    const params = {};
+    if (filters.stationIds && filters.stationIds.length) params.station = filters.stationIds.join(',');
+    if (filters.startIso || filters.endIso) {
+        if (filters.startIso) params.start = filters.startIso;
+        if (filters.endIso) params.end = filters.endIso;
+    } else if (filters.days) {
+        params.days = filters.days;
+    }
+    return startAsyncTask('find_passes', pollFn, params);
 }
 
 /**

@@ -33,9 +33,11 @@ if _PROJECT_DIR is not None:
 
 try:
     import pto_mapper
-except ImportError:
-    print("Error: 'pto_mapper.py' not found.", file=sys.stderr)
-    print("Please ensure 'pto_mapper.py' is in the same directory or in the Python path.", file=sys.stderr)
+except ImportError as _e:
+    print("Error: failed to import 'pto_mapper.py'.", file=sys.stderr)
+    print(f"  Reason: {_e}", file=sys.stderr)
+    print("Please ensure 'pto_mapper.py' is in the same directory or in the Python path, "
+          "and that all of its dependencies (e.g. numba) are installed.", file=sys.stderr)
     sys.exit(1)
 
 from stars import cat

@@ -1,38 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-import tkinter as tk
-import amscalib2lens
-import json
-import copy
-import argparse
-import ffmpeg
-import tempfile
-import glob
-import os
-import configparser
-import ephem
-import math
 import sys
-import re
-import subprocess
-import numpy as np
-import contextlib
-import signal
-import atexit
-import threading
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
-from tkinter import messagebox
-from tkinter import ttk
-from datetime import datetime, timezone, timedelta
-from PIL import Image, ImageTk, ImageEnhance, ImageFilter, ImageDraw
-from brightstar import brightstar
-from recalibrate import recalibrate
-from timestamp import get_timestamp
-import pto_mapper
-
-
 from pathlib import Path
 
 # Ensure local project modules are importable even when this script is executed via symlink
@@ -51,6 +20,41 @@ if _PROJECT_DIR is not None:
             if _ps not in sys.path:
                 sys.path.insert(0, _ps)
 
+import tkinter as tk
+import amscalib2lens
+import json
+import copy
+import argparse
+import ffmpeg
+if not hasattr(ffmpeg, 'probe') or not hasattr(ffmpeg, 'input'):
+    print("Error: the installed 'ffmpeg' Python package does not provide the ffmpeg-python API.", file=sys.stderr)
+    print("Please install the correct package:", file=sys.stderr)
+    print("  pip uninstall ffmpeg && pip install ffmpeg-python", file=sys.stderr)
+    sys.exit(1)
+import tempfile
+import glob
+import os
+import configparser
+import ephem
+import math
+import re
+import subprocess
+import numpy as np
+import contextlib
+import signal
+import atexit
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from tkinter import messagebox
+from tkinter import ttk
+from datetime import datetime, timezone, timedelta
+from PIL import Image, ImageTk, ImageEnhance, ImageFilter, ImageDraw
+from brightstar import brightstar
+from recalibrate import recalibrate
+from timestamp import get_timestamp
+import pto_mapper
+
 LAUNCHER_DEFAULTS = {
     'station_display': '',
     'cam_num': '',
@@ -63,6 +67,11 @@ LAUNCHER_DEFAULTS = {
 # --- Globals for temp file cleanup ---
 temp_files_to_clean = []
 temp_dirs = []
+
+# Large video-decode scratch space: decoded full-resolution frames are
+# multi-GB, so keep them on real disk instead of a RAM-backed /tmp.
+_USER_SCRATCH_DIR = os.path.expanduser('~/nmn_reducer_scratch')
+os.makedirs(_USER_SCRATCH_DIR, exist_ok=True)
 
 def cleanup_temp_resources():
     """Cleans up all temporary directories and files created by the script."""
@@ -465,7 +474,9 @@ def read_frames(filename, directory, skip_seconds=0, total_seconds=None):
 
     if not total_frames:
         _, err = proc.communicate()
-        if proc.returncode != 0: raise ffmpeg.Error('ffmpeg', None, err)
+        if proc.returncode != 0:
+            print(f"ffmpeg stderr:\n{err}", file=sys.stderr)
+            raise ffmpeg.Error('ffmpeg', None, err)
         return
 
     bar_length = 40
@@ -479,7 +490,11 @@ def read_frames(filename, directory, skip_seconds=0, total_seconds=None):
             sys.stdout.flush()
 
     sys.stdout.write(f"\rProgress: [{'#' * bar_length}] {total_frames}/{total_frames} (100%)\n\n")
-    if proc.wait() != 0: raise ffmpeg.Error('ffmpeg', None, proc.stderr.read())
+    returncode = proc.wait()
+    if returncode != 0:
+        err = proc.stderr.read()
+        print(f"ffmpeg stderr:\n{err}", file=sys.stderr)
+        raise ffmpeg.Error('ffmpeg', None, err)
 
 
 def read_first_frame(filename, directory, skip_seconds=0):
@@ -2080,7 +2095,7 @@ if __name__ == '__main__':
 
         if is_video_mode:
             frames_ready = False
-            temp_dir_first = tempfile.TemporaryDirectory(prefix="clickcoords_first_", dir="/tmp")
+            temp_dir_first = tempfile.TemporaryDirectory(prefix="clickcoords_first_", dir=_USER_SCRATCH_DIR)
             temp_dirs.append(temp_dir_first)
             try:
                 read_first_frame(args.imgfiles[0], temp_dir_first.name, skip_seconds=args.skip)
@@ -2150,6 +2165,32 @@ if __name__ == '__main__':
 
         if is_video_mode:
             def _load_full_sequence():
+                temp_dirs_start = len(temp_dirs)
+                try:
+                    _load_full_sequence_impl()
+                except Exception as e:
+                    if app.load_cancel_event.is_set():
+                        return
+                    import traceback
+                    traceback.print_exc()
+                    err_msg = str(e)
+                    def _show_load_error(err_msg=err_msg):
+                        messagebox.showerror("Failed to load video sequence", err_msg)
+                    try:
+                        window.after(0, _show_load_error)
+                    except Exception:
+                        pass
+                    # Don't leave multi-GB decoded-frame temp dirs from this
+                    # failed attempt lying around for the rest of the GUI
+                    # session (atexit cleanup only runs when the app closes).
+                    for d in temp_dirs[temp_dirs_start:]:
+                        try:
+                            d.cleanup()
+                        except Exception:
+                            pass
+                    del temp_dirs[temp_dirs_start:]
+
+            def _load_full_sequence_impl():
                 full_images = []
                 seconds_to_skip = args.skip
                 seconds_to_load = args.total
@@ -2185,7 +2226,7 @@ if __name__ == '__main__':
                             if current_file_load_duration <= 0:
                                 break
 
-                        temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir="/tmp")
+                        temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir=_USER_SCRATCH_DIR)
                         temp_dirs.append(temp_dir)
                         read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
                         decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))

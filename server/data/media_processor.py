@@ -294,10 +294,17 @@ def apply_ffmpeg_overlay(base_media_path, overlay_path, output_path):
             else: video_codec_opts = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
 
         audio_codec_opts = ["-c:a", "copy"] if is_video else []
+        # Preserve the base file's absolute start timestamp (Unix PTS) and
+        # creation_time metadata through the overlay filter/re-encode. Without
+        # -copyts, ffmpeg resets the output's PTS to start at 0 whenever a
+        # filter is used, which mplayer/ffprobe then report as 1970-01-01.
+        # -map_metadata carries over creation_time (and other tags) from the
+        # base video, mirroring _transcode_to_h264_blocking/_ensure_faststart.
+        timestamp_opts = ["-copyts", "-map_metadata", "0"] if is_video else []
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", base_media_path,
             "-i", overlay_path, "-filter_complex", "[0:v][1:v]overlay",
-            *video_codec_opts, *audio_codec_opts, "-y", temp_output_path
+            *timestamp_opts, *video_codec_opts, *audio_codec_opts, "-y", temp_output_path
         ]
         logging.info(f"Executing ffmpeg command: {' '.join(command)}")
         subprocess.run(command, check=True, capture_output=True, timeout=600)

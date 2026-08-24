@@ -5,6 +5,7 @@ import json
 import os
 import logging
 import argparse
+import hashlib
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import Manager
@@ -38,6 +39,17 @@ from prediction_utils import (
 from data_fetchers import get_air_pressure
 from shared_utils import atomic_json_write, read_json_file
 
+# The 7-day flight archive, airport/flight DBs, and OpenSky token cache must be
+# the same files no matter how this script is invoked: through the web-root
+# symlinks (index.php sets NMN_DATA_DIR to the directory it was accessed
+# through, e.g. /var/www/html/data) or directly/via cron (no NMN_DATA_DIR, so
+# prediction_utils.BASE_DIR falls back to this file's own real directory).
+# Without pinning these to one canonical location, the web path and the cron
+# job silently build up two separate, mostly-empty archives and caches.
+_REAL_DATA_DIR = os.path.dirname(os.path.realpath(__file__))
+CACHE_DIR = os.path.join(_REAL_DATA_DIR, 'cache')
+LOG_DIR = os.path.join(_REAL_DATA_DIR, 'logs')
+
 # --- Try to import pto_mapper.py ---
 # The PTO_MAPPER_AVAILABLE flag, imported from prediction_utils, determines if
 # camera calibration features can be used.
@@ -50,7 +62,26 @@ if PTO_MAPPER_AVAILABLE:
 
 # --- Configuration specific to this script ---
 TRACK_CACHE_DIR = os.path.join(CACHE_DIR, 'flight_tracks')
-CREDENTIALS_FILE = os.environ.get('NMN_CREDENTIALS_FILE', os.path.join(BASE_DIR, 'credentials.json'))
+def _resolve_credentials_file():
+    """Look for credentials.json in the environment override, the invocation
+    directory (so symlinks to the cron path work), the script directory, and
+    a sibling 'data' web-root folder if running from nmn/server/data."""
+    if path := os.environ.get('NMN_CREDENTIALS_FILE'):
+        return path
+    real_dir = os.path.dirname(os.path.realpath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])) if sys.argv and os.path.isfile(sys.argv[0]) else real_dir, 'credentials.json'),
+        os.path.join(real_dir, 'credentials.json'),
+        os.path.normpath(os.path.join(real_dir, '..', '..', '..', 'data', 'credentials.json')),
+        os.path.join(BASE_DIR, 'credentials.json'),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    # Fall back to the most likely path so a clear FileNotFoundError is raised.
+    return candidates[0]
+
+CREDENTIALS_FILE = _resolve_credentials_file()
 LOG_FILE = os.path.join(LOG_DIR, 'find_aircraft.log')
 TOKEN_CACHE_FILE = os.path.join(CACHE_DIR, 'opensky_token.json')
 AIRPORT_DB_FILE = os.path.join(CACHE_DIR, 'airports.json')
@@ -69,6 +100,9 @@ REQUEST_RETRY_COUNT = 3 # Number of retries for failed API requests.
 REQUEST_RETRY_DELAY_S = 2 # Delay between retries.
 AIRCRAFT_CACHE_LIFETIME_MINUTES = 15 # How long to use the main results cache.
 FLIGHT_DB_UPDATE_INTERVAL_MINUTES = 15 # Minimum time between fetching new flight lists.
+FLIGHT_ARCHIVE_HOURS = 7 * 24 # How many hours of flight-list chunks to keep for the 7-day slider.
+FLIGHT_ARCHIVE_CHUNK_SECONDS = 2 * 3600 # OpenSky /flights/all max interval.
+FLIGHT_ARCHIVE_DIR = os.path.join(CACHE_DIR, 'flight_archive')
 # --- WGS84 Ellipsoid Constants for ECEF coordinate conversion ---
 WGS84_A = 6378137.0 # Major axis (radius)
 WGS84_E2 = 0.00669437999014 # Eccentricity squared
@@ -737,6 +771,7 @@ def fetch_and_process_track(args):
             "station_sky_tracks": station_sky_tracks,
             "camera_views": camera_views,
             "earliest_camera_utc": min(cv['start_utc'] for cv in camera_views),
+            "latest_camera_utc": max(cv['end_utc'] for cv in camera_views),
             "altitude_stats": altitude_source_stats,
             "altitude_quality": altitude_quality}
 
@@ -752,45 +787,311 @@ def cleanup_old_cache(directory, max_age_hours):
         except OSError:
             continue
 
-def find_all_crossings(task_id):
+class FlightDataProvider:
+    """Abstract base for aircraft flight-list providers."""
+    def get_name(self):
+        return 'abstract'
+    def max_flight_list_hours(self):
+        return None
+    def fetch_flights_for_range(self, task_id, start_ts, end_ts, access_token):
+        raise NotImplementedError
+
+
+class OpenSkyProvider(FlightDataProvider):
+    """OpenSky Network provider. Fetches /flights/all in 2-hour chunks and
+    keeps a local rolling archive so the 7-day panel doesn't hit OpenSky for
+    every UI request. Chunks are fetched live only when missing or not yet
+    finalized, then written to disk for reuse."""
+    def get_name(self):
+        return 'opensky'
+    def max_flight_list_hours(self):
+        return FLIGHT_ARCHIVE_HOURS
+
+    def _chunk_path(self, chunk_start, chunk_end):
+        return os.path.join(FLIGHT_ARCHIVE_DIR, f"flights_{chunk_start}_{chunk_end}.json")
+
+    def _fetch_live_chunk(self, task_id, chunk_start, chunk_end, access_token):
+        try:
+            response = requests.get(
+                f"https://opensky-network.org/api/flights/all?begin={chunk_start}&end={chunk_end}",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+            logging.error(f"Task {task_id}: Could not fetch flight list chunk {chunk_start}-{chunk_end}: {e}")
+            return None
+        finally:
+            # Be polite to OpenSky: pace live chunk fetches even on errors.
+            time.sleep(0.5)
+
+    def _get_chunk(self, task_id, chunk_start, chunk_end, access_token, allow_archive=True):
+        """Return flights for one 2-hour chunk, using the archive if available.
+        Historical (final) missing chunks are not fetched live during on-demand
+        requests (allow_archive=True) to avoid OpenSky rate-limits; the cron
+        (allow_archive=False) backfills them."""
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        # A chunk that ended more than 5 minutes ago is effectively final; we can
+        # cache it. The most recent chunk keeps changing as new positions arrive.
+        is_final = chunk_end <= now_ts - 300
+        path = self._chunk_path(chunk_start, chunk_end)
+
+        if allow_archive and is_final:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        return json.load(f)
+                except (IOError, json.JSONDecodeError) as e:
+                    logging.warning(f"Task {task_id}: Could not read archive chunk {chunk_start}-{chunk_end}: {e}")
+
+            # Older missing chunks are backfilled by the cron. The two most recent
+            # finalized chunks (which the cron may not have archived yet) are still
+            # fetched live so on-demand requests show the latest available data.
+            latest_final = self._align_chunk_start(now_ts - 300)
+            if chunk_end >= latest_final - FLIGHT_ARCHIVE_CHUNK_SECONDS:
+                flights = self._fetch_live_chunk(task_id, chunk_start, chunk_end, access_token)
+                if is_final and flights is not None:
+                    try:
+                        os.makedirs(FLIGHT_ARCHIVE_DIR, exist_ok=True)
+                        atomic_json_write(path, flights)
+                    except Exception as e:
+                        logging.warning(f"Task {task_id}: Could not write archive chunk {chunk_start}-{chunk_end}: {e}")
+                return flights if flights is not None else []
+
+            # Historical missing chunk: wait for the cron backfill, don't hammer OpenSky.
+            logging.info(f"Task {task_id}: Archive chunk {chunk_start}-{chunk_end} missing; skipping live fetch.")
+            return []
+
+        flights = self._fetch_live_chunk(task_id, chunk_start, chunk_end, access_token)
+
+        if is_final and flights is not None:
+            try:
+                os.makedirs(FLIGHT_ARCHIVE_DIR, exist_ok=True)
+                atomic_json_write(path, flights)
+            except Exception as e:
+                logging.warning(f"Task {task_id}: Could not write archive chunk {chunk_start}-{chunk_end}: {e}")
+        return flights if flights is not None else []
+
+    def _align_chunk_start(self, ts):
+        step = FLIGHT_ARCHIVE_CHUNK_SECONDS
+        return (ts // step) * step
+
+    def fetch_flights_for_range(self, task_id, start_ts, end_ts, access_token):
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if end_ts > now_ts:
+            end_ts = now_ts
+        max_start_ts = now_ts - FLIGHT_ARCHIVE_HOURS * 3600
+        if start_ts < max_start_ts:
+            logging.info(f"Task {task_id}: Clamping flight-list window to the {FLIGHT_ARCHIVE_HOURS}-hour archive.")
+            start_ts = max_start_ts
+        if start_ts >= end_ts:
+            return []
+
+        # Use aligned 2-hour chunk boundaries so the cron and UI share the same cache files.
+        aligned_start = self._align_chunk_start(start_ts)
+
+        # Align the fetch window to full 2-hour archive chunks so on-demand
+        # requests with arbitrary start/end use the same files as the cron.
+        fetch_end = self._align_chunk_start(end_ts) + FLIGHT_ARCHIVE_CHUNK_SECONDS
+        if fetch_end > now_ts:
+            fetch_end = now_ts
+
+        all_flights = []
+        logging.info(f"Task {task_id}: Collecting flight list from {datetime.fromtimestamp(start_ts, tz=timezone.utc)} to {datetime.fromtimestamp(end_ts, tz=timezone.utc)}")
+        chunk_start = aligned_start
+        while chunk_start < fetch_end:
+            chunk_end = min(chunk_start + FLIGHT_ARCHIVE_CHUNK_SECONDS, fetch_end)
+            if chunk_end - chunk_start < 60:
+                break
+            all_flights.extend(self._get_chunk(task_id, chunk_start, chunk_end, access_token))
+            chunk_start += FLIGHT_ARCHIVE_CHUNK_SECONDS
+
+        # Deduplicate by icao24 + firstSeen in case a flight appears in two
+        # adjacent 2-hour chunks.
+        deduped = {f"{f.get('icao24')}-{f.get('firstSeen')}": f for f in all_flights}
+        return list(deduped.values())
+
+    def refresh_archive(self, task_id, access_token, force_last_n=2):
+        """Cron helper: ensure all finalized 2-hour chunks in the archive window
+        exist on disk. Missing chunks are fetched live; the last N chunks are
+        always refetched so partial latest data is finalized."""
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        end_ts = (now_ts - 300)  # the latest partial 2-hour chunk
+        start_ts = now_ts - FLIGHT_ARCHIVE_HOURS * 3600
+        if start_ts >= end_ts:
+            return
+
+        # Align to fixed 2-hour boundaries so the archive is shared with UI requests.
+        end_ts = self._align_chunk_start(end_ts)
+        start_ts = self._align_chunk_start(start_ts)
+
+        # Determine the last N chunk boundaries to force-refetch.
+        chunk_boundaries = list(range(start_ts, end_ts, FLIGHT_ARCHIVE_CHUNK_SECONDS))
+        forced = set(chunk_boundaries[-force_last_n:]) if force_last_n > 0 else set()
+
+        logging.info(f"Task {task_id}: Refreshing flight archive from {datetime.fromtimestamp(start_ts, tz=timezone.utc)} to {datetime.fromtimestamp(end_ts, tz=timezone.utc)}")
+        for chunk_start in chunk_boundaries:
+            chunk_end = chunk_start + FLIGHT_ARCHIVE_CHUNK_SECONDS
+            if chunk_end > end_ts or chunk_end - chunk_start < 60:
+                break
+            path = self._chunk_path(chunk_start, chunk_end)
+            if chunk_start not in forced and os.path.exists(path):
+                continue
+            # Fetch live and save to archive. Paced to avoid OpenSky 429s.
+            self._get_chunk(task_id, chunk_start, chunk_end, access_token, allow_archive=False)
+            time.sleep(5.0)
+
+        # Prune chunks that have aged out of the archive window.
+        cutoff = now_ts - FLIGHT_ARCHIVE_HOURS * 3600
+        for filename in os.listdir(FLIGHT_ARCHIVE_DIR):
+            file_path = os.path.join(FLIGHT_ARCHIVE_DIR, filename)
+            try:
+                if not os.path.isfile(file_path):
+                    continue
+                # Filenames like flights_1234567890_1234575090.json
+                parts = filename.replace('.json', '').split('_')
+                if len(parts) >= 3:
+                    chunk_end = int(parts[2])
+                    if chunk_end < cutoff:
+                        os.remove(file_path)
+            except (ValueError, OSError):
+                continue
+
+
+def _get_provider(creds):
+    """Return the configured flight-data provider. Defaults to OpenSky."""
+    provider_name = (creds.get('aircraftProvider') or creds.get('aircraft_provider') or 'opensky').lower()
+    if provider_name == 'opensky':
+        return OpenSkyProvider()
+    # Future providers (e.g. ADS-B Exchange, Plane Finder, SkyLink) can be added here.
+    logging.warning(f"Unknown aircraft provider '{provider_name}', falling back to OpenSky.")
+    return OpenSkyProvider()
+
+
+def update_flight_archive():
+    """Cron-mode entry point. Refreshes the rolling OpenSky flight archive."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(FLIGHT_ARCHIVE_DIR, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler(LOG_FILE)])
+    logging.info("--- Flight archive refresh started ---")
+
+    try:
+        with open(CREDENTIALS_FILE, 'r') as f:
+            creds = json.load(f)
+        access_token = get_opensky_token('cron', creds['clientId'], creds['clientSecret'])
+        if not access_token:
+            logging.error("Could not obtain OpenSky access token for archive refresh.")
+            return
+        provider = _get_provider(creds)
+        if not isinstance(provider, OpenSkyProvider):
+            logging.warning(f"Archive refresh is currently only supported for OpenSky, not {provider.get_name()}.")
+            return
+        provider.refresh_archive('cron', access_token)
+        logging.info("--- Flight archive refresh finished ---")
+    except Exception as e:
+        logging.exception("Flight archive refresh failed")
+
+
+def _aircraft_filter_cache_key(station_ids, start_dt, end_dt):
+    key_parts = ['aircraft'] + sorted(station_ids or []) + [start_dt.isoformat(), end_dt.isoformat()]
+    return hashlib.sha256('|'.join(key_parts).encode()).hexdigest()[:24]
+
+
+def find_all_crossings(task_id, station_ids=None, days=None, start_iso=None, end_iso=None):
     """
     Main orchestrator function.
-    Fetches flight data, filters for candidates,
-    and uses a process pool to calculate visibility for each candidate flight.
+    Fetches flight data for the requested stations and time window, filters for
+    candidates, and uses a process pool to calculate visibility for each one.
     """
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
-    
-    # This block checks for a fresh, complete cache of recent results. If found,
-    # it serves the cached data immediately to avoid re-computation.
+    now = datetime.now(timezone.utc)
+
+    # Resolve the requested time range (defaults to the last 24 hours).
+    if start_iso and end_iso:
+        try:
+            requested_start = datetime.fromisoformat(start_iso.replace('Z', '+00:00'))
+            requested_end = datetime.fromisoformat(end_iso.replace('Z', '+00:00'))
+        except ValueError:
+            requested_start = now - timedelta(hours=24)
+            requested_end = now
+    elif days:
+        requested_start = now - timedelta(days=days)
+        requested_end = now
+    else:
+        requested_start = now - timedelta(hours=24)
+        requested_end = now
+
+    if requested_end > now:
+        requested_end = now
+    if requested_start >= requested_end:
+        requested_start = now - timedelta(hours=1)
+        requested_end = now
+
+    # Load stations and restrict to the requested set if given.
     try:
-        if os.path.exists(AIRCRAFT_CACHE_FILE):
-            mod_time = os.path.getmtime(AIRCRAFT_CACHE_FILE)
-            cache_age_seconds = time.time() - mod_time
-            if cache_age_seconds < (AIRCRAFT_CACHE_LIFETIME_MINUTES * 60):
-                logging.info(f"Task {task_id}: Found fresh main results cache (age: {cache_age_seconds:.0f}s). Serving from cache.")
-                with open(AIRCRAFT_CACHE_FILE, 'r') as f:
+        with open(STATIONS_FILE, 'r') as f:
+            stations_data = json.load(f)
+    except Exception as e:
+        logging.error(f"Task {task_id}: Could not load stations: {e}")
+        update_status(status_file, "error", {"message": "error_invalid_station", "task_id": task_id, "debug": "logs/find_aircraft.log"})
+        return
+
+    if station_ids:
+        stations_data = {sid: stations_data[sid] for sid in station_ids if sid in stations_data}
+        if not stations_data:
+            update_status(status_file, "error", {"message": "error_invalid_station", "task_id": task_id, "debug": "logs/find_aircraft.log"})
+            return
+
+    # Check for a fresh, filter-specific cache.
+    cache_key = _aircraft_filter_cache_key(list(stations_data.keys()), requested_start, requested_end)
+    cache_file = os.path.join(CACHE_DIR, f'aircraft_crossings_{cache_key}.json')
+    try:
+        if os.path.exists(cache_file):
+            cache_age = time.time() - os.path.getmtime(cache_file)
+            if cache_age < (AIRCRAFT_CACHE_LIFETIME_MINUTES * 60):
+                logging.info(f"Task {task_id}: Found fresh aircraft cache (age {cache_age:.0f}s). Serving from cache.")
+                with open(cache_file, 'r') as f:
                     cached_data = json.load(f)
                 update_status(status_file, "complete", cached_data)
                 return
     except (IOError, json.JSONDecodeError) as e:
-        logging.warning(f"Task {task_id}: Could not read aircraft cache file: {e}. Recalculating.")
-        
+        logging.warning(f"Task {task_id}: Could not read aircraft cache: {e}. Recalculating.")
+
     try:
         cleanup_old_cache(TRACK_CACHE_DIR, TRACK_CACHE_HOURS)
         update_status(status_file, "progress", {"step": 5, "message": "status_authenticating"})
-        with open(CREDENTIALS_FILE, 'r') as f: creds = json.load(f)
+        with open(CREDENTIALS_FILE, 'r') as f:
+            creds = json.load(f)
+        provider = _get_provider(creds)
         access_token = get_opensky_token(task_id, creds['clientId'], creds['clientSecret'])
-        if not access_token: raise ValueError("Failed to obtain OpenSky access token.")
-        
+        if not access_token:
+            raise ValueError("Failed to obtain OpenSky access token.")
+
+        # Clamp to the provider's supported lookback.
+        max_hours = provider.max_flight_list_hours()
+        if max_hours is not None:
+            max_start = now - timedelta(hours=max_hours)
+            if requested_start < max_start:
+                logging.info(f"Task {task_id}: Requested start {requested_start} is beyond provider {provider.get_name()} limit ({max_hours}h). Clamping.")
+                requested_start = max_start
+
+        start_ts = int(requested_start.timestamp())
+        end_ts = int(requested_end.timestamp())
+
         update_status(status_file, "progress", {"step": 10, "message": "status_loading_databases"})
-        with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
         airport_db = get_airport_db(task_id)
-        
+
         update_status(status_file, "progress", {"step": 15, "message": "status_fetching_flights"})
-        flight_list, _ = update_and_get_flight_database(task_id, access_token)
+        flight_list = provider.fetch_flights_for_range(task_id, start_ts, end_ts, access_token)
         if not flight_list:
-            update_status(status_file, "complete", {"data": {"crossings": []}});
+            update_status(status_file, "complete", {"data": {"crossings": [], "time_window_hours": 0}})
             return
+
+        # Keep only flights that overlap the requested time window.
+        range_start_ts = int(requested_start.timestamp())
+        range_end_ts = int(requested_end.timestamp())
+        flight_list = [f for f in flight_list if f.get('lastSeen', 0) >= range_start_ts and f.get('firstSeen', 0) <= range_end_ts]
 
         update_status(status_file, "progress", {"step": 20, "message": "status_filtering_flights"})
         station_coords = [(s['astronomy']['latitude'], s['astronomy']['longitude']) for s in stations_data.values()]
@@ -893,22 +1194,36 @@ def find_all_crossings(task_id):
                     if result := future.result(): final_crossings.append(result)
                     update_status(status_file, "progress", {"step": 25 + int(((i + 1) / total_tasks) * 70), "message": f"status_fetching_aircraft_track|i={i + 1},total={total_tasks}"})
 
+        # Apply the requested time window to the actual crossing times.
+        final_crossings = [
+            c for c in final_crossings
+            if c.get('latest_camera_utc') and c.get('earliest_camera_utc')
+            and datetime.fromisoformat(c['latest_camera_utc']) >= requested_start
+            and datetime.fromisoformat(c['earliest_camera_utc']) <= requested_end
+        ]
+
         final_crossings.sort(key=lambda p: p['earliest_camera_utc'], reverse=True)
 
         time_window_hours = 24
         if final_crossings:
             oldest_pass_time_str = final_crossings[-1]['earliest_camera_utc']
             oldest_pass_time = datetime.fromisoformat(oldest_pass_time_str)
-            now = datetime.now(timezone.utc)
             duration_seconds = (now - oldest_pass_time).total_seconds()
             time_window_hours = round(duration_seconds / 3600)
-            
+
         result_data = {"data": {"crossings": final_crossings, "time_window_hours": time_window_hours}}
-        
-        # Atomically write to the main cache file to prevent race conditions.
-        # Write to a temporary file first, then rename it to the final destination.
-        # This ensures that any process reading the cache file will always get a complete JSON.
-        atomic_json_write(AIRCRAFT_CACHE_FILE, result_data)
+
+        # Cache the result for this specific station/time filter so that repeated
+        # requests (search typing, range tweaks, etc.) don't recompute everything.
+        # Empty results are not cached, so a temporary OpenSky outage/rate-limit can
+        # recover on the next request instead of serving a stale "no flights" response.
+        if final_crossings:
+            try:
+                atomic_json_write(cache_file, result_data)
+            except Exception as e:
+                logging.warning(f"Task {task_id}: Could not write aircraft cache: {e}")
+        else:
+            logging.info(f"Task {task_id}: Not caching empty aircraft result (likely API hiccup or no matches).")
 
         update_status(status_file, "complete", result_data)
  
@@ -917,16 +1232,31 @@ def find_all_crossings(task_id):
         update_status(status_file, "error", {"message": "error_internal", "task_id": task_id, "debug": "logs/find_aircraft.log"})
 
 def main():
-    """Parses command-line arguments and initiates the aircraft finding process."""
+    """Parses command-line arguments and initiates the aircraft finding process
+    or the archive-refresh cron mode."""
     parser = argparse.ArgumentParser(description="Finds aircraft visible to camera stations.")
-    parser.add_argument("task_id", help="The task ID for progress tracking.")
+    parser.add_argument("task_id", nargs='?', default=None, help="The task ID for progress tracking.")
+    parser.add_argument("--station", help="Comma-separated station IDs to restrict the search to.")
+    parser.add_argument("--days", type=int, help="Number of days to look back (ignored if --start/--end are given).")
+    parser.add_argument("--start", help="ISO 8601 UTC timestamp for the start of the search window.")
+    parser.add_argument("--end", help="ISO 8601 UTC timestamp for the end of the search window.")
+    parser.add_argument("--cron", action="store_true", help="Run in cron mode to refresh the OpenSky flight archive.")
     args = parser.parse_args()
+
+    if args.cron:
+        update_flight_archive()
+        return
+
+    if not args.task_id:
+        parser.error("task_id is required unless --cron is used.")
+
     # Ensure log file directory exists
     os.makedirs(LOG_DIR, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(process)d - %(message)s', handlers=[logging.FileHandler(LOG_FILE)])
     logging.info(f"--- Script execution started for task {args.task_id} ---")
-    
-    find_all_crossings(args.task_id)
+
+    station_ids = [s.strip() for s in args.station.split(',') if s.strip()] if args.station else None
+    find_all_crossings(args.task_id, station_ids=station_ids, days=args.days, start_iso=args.start, end_iso=args.end)
 
 if __name__ == "__main__":
     main()

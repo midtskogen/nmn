@@ -533,6 +533,25 @@ export function displayAllPasses(passData, { onHeaderClick, onDownloadClick, onE
 }
 
 /**
+ * Formats a raw ATC callsign into the user-facing identifier (IATA prefix + number + airline name).
+ * @param {string} rawCallsign - The raw callsign from flight_info.
+ * @returns {string} The formatted display callsign, or an empty string if none.
+ */
+export function formatAircraftCallsign(rawCallsign) {
+    if (!rawCallsign) return '';
+    let flightIdentifier = String(rawCallsign).trim();
+    if (flightIdentifier && flightIdentifier.length > 3) {
+        const icao = flightIdentifier.substring(0, 3).toUpperCase();
+        const flightNumber = flightIdentifier.substring(3);
+        const airlineInfo = airlineCodes[icao];
+        if (airlineInfo) {
+            flightIdentifier = `${airlineInfo.iata}${flightNumber} (${airlineInfo.name})`;
+        }
+    }
+    return flightIdentifier;
+}
+
+/**
  * Renders the list of aircraft crossings in the corresponding panel.
  * @param {object} aircraftData - The data containing an array of aircraft crossings.
  * @param {object} callbacks - An object containing callbacks for user interactions.
@@ -554,19 +573,7 @@ export function displayAllAircraft(aircraftData, { onHeaderClick, onDownloadClic
         const formattedTimestamp = earliestTime.toISOString().slice(0, 19).replace('T', ' ');
         
         const { callsign, origin, destination } = crossing.flight_info;
-        let flightIdentifier = (callsign || '????').trim();
-
-   
-         if (flightIdentifier && flightIdentifier.length > 3) {
-            const icao = flightIdentifier.substring(0, 3).toUpperCase();
-            const flightNumber = flightIdentifier.substring(3);
-            const airlineInfo = airlineCodes[icao];
-
-            if (airlineInfo) {
-                flightIdentifier = `${airlineInfo.iata}${flightNumber} (${airlineInfo.name})`;
-          
-           }
-        }
+        let flightIdentifier = formatAircraftCallsign(callsign) || '????';
 
         const header = createEl('h6', { dataset: { crossingId: crossing.crossing_id }, textContent: t('aircraft_header', { callsign: flightIdentifier, origin: (origin || '?'), destination: (destination || '?'), timestamp: formattedTimestamp }) });
         header.addEventListener('click', () => onHeaderClick(crossing.crossing_id, 'aircraft'));
@@ -3913,7 +3920,7 @@ export function initSatelliteRangeSlider({ onChange }) {
     const progress = document.getElementById('satellite-range-progress');
     const startLabel = document.getElementById('satellite-range-start-label');
     const endLabel = document.getElementById('satellite-range-end-label');
-    const presetButtons = document.querySelectorAll('.satellite-preset-btn');
+    const presetButtons = document.querySelectorAll('#satellite-panel .satellite-preset-btn');
     if (!startInput || !endInput) return;
 
     renderSatelliteRangeTicks();
@@ -4034,6 +4041,128 @@ function renderSatelliteRangeTicks() {
         }));
 
         // Clamp the first/last labels so they don't overhang outside the slider.
+        const translate = pct < 3 ? '0' : (pct > 97 ? '-100%' : '-50%');
+        const label = isMidnight
+            ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+            : String(t.getUTCHours()).padStart(2, '0');
+        ticksEl.appendChild(createEl('div', {
+            className: `satellite-range-tick-label${isMidnight ? ' major' : ''}`,
+            style: `left: ${pct}%; transform: translateX(${translate});`,
+            textContent: label
+        }));
+    }
+}
+
+// --- Aircraft panel: time range dual-handle slider (mirrors satellite but 24 h) ---
+const AIRCRAFT_RANGE_MAX_HOURS = 7 * 24;
+
+function aircraftRangeHoursToDate(hoursSinceStart) {
+    return new Date(Date.now() - (AIRCRAFT_RANGE_MAX_HOURS - hoursSinceStart) * 3600000);
+}
+
+export function initAircraftRangeSlider({ onChange }) {
+    const startInput = document.getElementById('aircraft-range-start');
+    const endInput = document.getElementById('aircraft-range-end');
+    const progress = document.getElementById('aircraft-range-progress');
+    const startLabel = document.getElementById('aircraft-range-start-label');
+    const endLabel = document.getElementById('aircraft-range-end-label');
+    const presetButtons = document.querySelectorAll('#aircraft-panel .satellite-preset-btn');
+    if (!startInput || !endInput) return;
+
+    renderAircraftRangeTicks();
+
+    function updateVisuals() {
+        const startVal = parseInt(startInput.value, 10);
+        const endVal = parseInt(endInput.value, 10);
+        const pct = v => (v / AIRCRAFT_RANGE_MAX_HOURS) * 100;
+        if (progress) {
+            progress.style.left = `${pct(startVal)}%`;
+            progress.style.width = `${Math.max(0, pct(endVal) - pct(startVal))}%`;
+        }
+        if (startLabel) startLabel.textContent = formatSatelliteRangeLabel(aircraftRangeHoursToDate(startVal));
+        if (endLabel) endLabel.textContent = formatSatelliteRangeLabel(aircraftRangeHoursToDate(endVal));
+        if (startVal > AIRCRAFT_RANGE_MAX_HOURS / 2) {
+            startInput.style.zIndex = 3; endInput.style.zIndex = 2;
+        } else {
+            startInput.style.zIndex = 2; endInput.style.zIndex = 3;
+        }
+        presetButtons.forEach(btn => {
+            const hours = parseInt(btn.dataset.hours, 10);
+            const expectedStart = AIRCRAFT_RANGE_MAX_HOURS - hours;
+            btn.classList.toggle('active', startVal === expectedStart && endVal === AIRCRAFT_RANGE_MAX_HOURS);
+        });
+    }
+
+    function emitChange() {
+        const startVal = parseInt(startInput.value, 10);
+        const endVal = parseInt(endInput.value, 10);
+        if (onChange) {
+            onChange({
+                startIso: aircraftRangeHoursToDate(startVal).toISOString(),
+                endIso: aircraftRangeHoursToDate(endVal).toISOString()
+            });
+        }
+    }
+
+    startInput.addEventListener('input', () => {
+        if (parseInt(startInput.value, 10) > parseInt(endInput.value, 10)) startInput.value = endInput.value;
+        updateVisuals();
+    });
+    endInput.addEventListener('input', () => {
+        if (parseInt(endInput.value, 10) < parseInt(startInput.value, 10)) endInput.value = startInput.value;
+        updateVisuals();
+    });
+    startInput.addEventListener('change', emitChange);
+    endInput.addEventListener('change', emitChange);
+
+    presetButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            setAircraftRangePreset(parseInt(btn.dataset.hours, 10));
+            emitChange();
+        });
+    });
+
+    updateVisuals();
+}
+
+export function setAircraftRangePreset(hours) {
+    const startInput = document.getElementById('aircraft-range-start');
+    const endInput = document.getElementById('aircraft-range-end');
+    if (!startInput || !endInput) return;
+    endInput.value = AIRCRAFT_RANGE_MAX_HOURS;
+    startInput.value = Math.max(0, AIRCRAFT_RANGE_MAX_HOURS - hours);
+    startInput.dispatchEvent(new Event('input'));
+    endInput.dispatchEvent(new Event('input'));
+}
+
+export function getAircraftRangeIso() {
+    const startInput = document.getElementById('aircraft-range-start');
+    const endInput = document.getElementById('aircraft-range-end');
+    if (!startInput || !endInput) return null;
+    return {
+        startIso: aircraftRangeHoursToDate(parseInt(startInput.value, 10)).toISOString(),
+        endIso: aircraftRangeHoursToDate(parseInt(endInput.value, 10)).toISOString()
+    };
+}
+
+function renderAircraftRangeTicks() {
+    const ticksEl = document.getElementById('aircraft-range-ticks');
+    if (!ticksEl) return;
+    ticksEl.replaceChildren();
+
+    const rangeStart = aircraftRangeHoursToDate(0);
+    const rangeEnd = aircraftRangeHoursToDate(AIRCRAFT_RANGE_MAX_HOURS);
+
+    for (let t = firstAlignedTick(rangeStart, SATELLITE_TICK_HOUR_STEP); t <= rangeEnd; t.setUTCHours(t.getUTCHours() + SATELLITE_TICK_HOUR_STEP)) {
+        const hoursSinceStart = (t - rangeStart) / 3600000;
+        const pct = (hoursSinceStart / AIRCRAFT_RANGE_MAX_HOURS) * 100;
+        const isMidnight = t.getUTCHours() === 0;
+
+        ticksEl.appendChild(createEl('div', {
+            className: `satellite-range-tick${isMidnight ? ' major' : ''}`,
+            style: `left: ${pct}%;`
+        }));
+
         const translate = pct < 3 ? '0' : (pct > 97 ? '-100%' : '-50%');
         const label = isMidnight
             ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })

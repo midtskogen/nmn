@@ -19,9 +19,13 @@ except ImportError as e:
 
 # --- Configuration Constants ---
 # Establishes base paths for all necessary directories and configuration files.
-BASE_DIR = os.environ.get('NMN_DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.environ.get('NMN_DATA_DIR', os.path.dirname(os.path.realpath(__file__)))
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
-LOCK_DIR = os.path.join(BASE_DIR, 'locks')
+_lock_dir_default = os.path.join(BASE_DIR, 'locks')
+# On bolide the deployed nmn/server/data/locks is not group-writable for www-data;
+# use the sibling web-root data/locks instead when it exists and is writable.
+_web_lock_dir = os.path.normpath(os.path.join(BASE_DIR, '..', '..', '..', 'data', 'locks'))
+LOCK_DIR = os.environ.get('NMN_LOCK_DIR') or (_web_lock_dir if os.path.isdir(_web_lock_dir) and os.access(_web_lock_dir, os.W_OK) else _lock_dir_default)
 CACHE_DIR = os.path.join(BASE_DIR, 'cache')
 STATIONS_FILE = os.path.join(BASE_DIR, 'stations.json')
 CAMERAS_FILE = os.path.join(BASE_DIR, 'cameras.json')

@@ -1,5 +1,5 @@
-import * as uiManager from './ui_manager.js?v=20260614n';
-import * as mapHandler from './map_handler.js';
+import * as uiManager from './ui_manager.js?v=20260822c';
+import * as mapHandler from './map_handler.js?v=20260822c';
 import * as chartHandler from './chart_handler.js';
 import * as api from './api.js';
 import { getSunTimes } from './calculations.js';
@@ -64,6 +64,9 @@ function initializeApp() {
     let satellitePollIntervalId = null;
     let satelliteRequestSeq = 0;
     let satelliteSearchTerm = '';
+    let aircraftPollIntervalId = null;
+    let aircraftRequestSeq = 0;
+    let aircraftSearchTerm = '';
 
     // --- DOM Element Cache ---
     const dom = {
@@ -98,6 +101,7 @@ function initializeApp() {
     uiManager.initUIManager(dom, resetAll, t);
     chartHandler.initChart(t);
     mapHandler.initMap('map', handleMapMoveEnd, handleMapZoomEnd, t);
+    mapHandler.setTrackClickCallback(handlePassHeaderClick);
 
     // Set up callback for when imagery fallback occurs (e.g., showing yesterday's clouds when today's aren't available yet)
     mapHandler.setImageryFallbackCallback((layerType, requestedDate, effectiveDate) => {
@@ -212,6 +216,7 @@ function initializeApp() {
         }
         refreshStationStats();
         if (document.getElementById('satellite-toggle').checked) refreshSatellitePasses();
+        if (document.getElementById('aircraft-toggle').checked) refreshAircraftCrossings();
     }
 
     /**
@@ -300,6 +305,95 @@ function initializeApp() {
             uiManager.showPanelInfo('satellite', t('satellite_search_no_matches', { query: satelliteSearchTerm.trim() }));
         } else {
             uiManager.displayAllPasses(filteredData, { onHeaderClick: handlePassHeaderClick, onDownloadClick: (id) => startPassDownload(id, 'satellite'), onEventClick: (pass, event) => handleEventClick(pass, 'satellite', event) });
+        }
+        handleMapZoomEnd();
+    }
+
+    /**
+     * (Re)fetches aircraft crossings, scoped to the currently selected stations
+     * and the time range chosen via the aircraft panel's slider/presets.
+     * Restricting to selected stations and a chosen time window avoids
+     * repeatedly processing the full 24-hour flight database.
+     */
+    function refreshAircraftCrossings() {
+        if (aircraftPollIntervalId) {
+            clearInterval(aircraftPollIntervalId);
+            aircraftPollIntervalId = null;
+        }
+        const requestSeq = ++aircraftRequestSeq;
+
+        currentHighlightedCrossingId = null;
+        aircraftData = {};
+        mapHandler.setAircraftData({});
+        handleMapZoomEnd();
+
+        const stationIds = Array.from(selectedStations);
+        const scopeNote = document.getElementById('aircraft-scope-note');
+
+        if (stationIds.length === 0) {
+            if (scopeNote) scopeNote.textContent = '';
+            uiManager.showPanelInfo('aircraft', t('aircraft_no_stations_selected'));
+            return;
+        }
+
+        if (scopeNote) scopeNote.textContent = t('aircraft_scope_selected', { count: stationIds.length });
+        const range = uiManager.getAircraftRangeIso() || {};
+
+        uiManager.showPanelError('aircraft', t('loading_aircraft'));
+        api.fetchAllAircraftCrossings({
+            onProgress: (data) => { if (requestSeq === aircraftRequestSeq) uiManager.updateTaskProgress('aircraft', data); },
+            onComplete: (data) => {
+                if (requestSeq !== aircraftRequestSeq) return;
+                aircraftPollIntervalId = null;
+                aircraftData = data.data;
+                renderAircraftCrossings();
+            },
+            onError: (data) => {
+                if (requestSeq !== aircraftRequestSeq) return;
+                aircraftPollIntervalId = null;
+                const baseMsg = data && data.message ? t(data.message) : t('error_internal');
+                const details = [];
+                if (data && data.task_id) details.push(`task=${data.task_id}`);
+                if (data && data.debug) details.push(data.debug);
+                uiManager.showPanelError('aircraft', details.length ? `${baseMsg} (${details.join(', ')})` : baseMsg);
+            }
+        }, { stationIds, startIso: range.startIso, endIso: range.endIso }).then(result => {
+            if (result && requestSeq === aircraftRequestSeq) {
+                aircraftPollIntervalId = result.intervalId;
+            } else if (result) {
+                clearInterval(result.intervalId);
+            }
+        }).catch(error => {
+            if (requestSeq === aircraftRequestSeq) {
+                uiManager.showPanelError('aircraft', error.message || t('error_internal'));
+            }
+        });
+    }
+
+    /**
+     * Applies the current aircraft search filter (case-insensitive substring
+     * match on callsign, origin, destination, or internal crossing id) to the
+     * last-fetched `aircraftData` and re-renders the list and map from it.
+     */
+    function renderAircraftCrossings() {
+        const allCrossings = aircraftData.crossings || [];
+        const term = aircraftSearchTerm.trim().toLowerCase();
+        const filteredCrossings = term
+            ? allCrossings.filter(c => {
+                const info = c.flight_info || {};
+                const displayCallsign = uiManager.formatAircraftCallsign(info.callsign);
+                const haystack = [info.callsign, displayCallsign, info.origin, info.destination, c.crossing_id]
+                    .map(s => (s || '').toLowerCase()).join(' ');
+                return haystack.includes(term);
+            })
+            : allCrossings;
+        const filteredData = { ...aircraftData, crossings: filteredCrossings };
+
+        mapHandler.setAircraftData(filteredData);
+        if (term && filteredCrossings.length === 0 && allCrossings.length > 0) {
+            uiManager.showPanelInfo('aircraft', t('aircraft_search_no_matches', { query: aircraftSearchTerm.trim() }));
+        } else {
+            uiManager.displayAllAircraft(filteredData, { onHeaderClick: handlePassHeaderClick, onDownloadClick: (id) => startPassDownload(id, 'aircraft'), onEventClick: (pass, event) => handleEventClick(pass, 'aircraft', event) });
         }
         handleMapZoomEnd();
     }
@@ -1286,31 +1380,24 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
                 uiManager.showPanel('aircraft');
                 uiManager.hidePanel('satellite');
                 mapHandler.highlightTrack(null, 'satellite', false, false);
-          
-    
-                api.fetchAllAircraftCrossings({
-                    onProgress: (data) => uiManager.updateTaskProgress('aircraft', data),
-                    onComplete: (data) => {
-                      
-                   
-                        aircraftData = data.data;
-                        mapHandler.setAircraftData(data.data);
-                        uiManager.displayAllAircraft(data.data, { onHeaderClick: handlePassHeaderClick, onDownloadClick: (id) => startPassDownload(id, 'aircraft'), onEventClick: (pass, event) => handleEventClick(pass, 'aircraft', event) });
-                        handleMapZoomEnd();
-     
-                    },
-                    onError: (data) => {
-                        const baseMsg = data && data.message ? t(data.message) : t('error_internal');
-                        const details = [];
-                        if (data && data.task_id) details.push(`task=${data.task_id}`);
-                        if (data && data.debug) details.push(data.debug);
-                        uiManager.showPanelError('aircraft', details.length ? `${baseMsg} (${details.join(', ')})` : baseMsg);
-                    }
-                });
+                refreshAircraftCrossings();
             } else {
                 uiManager.hidePanel('aircraft');
                 mapHandler.highlightTrack(null, 'aircraft', false, false);
+                if (aircraftPollIntervalId) {
+                    clearInterval(aircraftPollIntervalId);
+                    aircraftPollIntervalId = null;
+                }
+                aircraftRequestSeq++; // Invalidate any in-flight request's callbacks.
             }
+        });
+        uiManager.initAircraftRangeSlider({
+            onChange: () => { if (document.getElementById('aircraft-toggle').checked) refreshAircraftCrossings(); }
+        });
+        uiManager.setAircraftRangePreset(24); // Default to the last 1 day.
+        document.getElementById('aircraft-search-input').addEventListener('input', (e) => {
+            aircraftSearchTerm = e.target.value;
+            if (document.getElementById('aircraft-toggle').checked) renderAircraftCrossings();
         });
         dom.downloadForm.addEventListener('submit', (event) => {
             event.preventDefault();

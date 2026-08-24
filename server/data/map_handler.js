@@ -9,6 +9,7 @@ let meteorCountLayer = null;
 let stationMarkers = {}, groundTrackLayers = {}, bearingLineLayer = null;
 let passData = {}, aircraftData = {}, lightningData = [], meteorData = [];
 let meteorCounts = null;
+let trackClickCallback = null;
 
 // --- Icon Definitions ---
 const iconOptions = { iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] };
@@ -184,6 +185,7 @@ export function setAircraftData(data) { aircraftData = data; }
 export function setLightningData(data) { lightningData = data; }
 export function setMeteorData(data) { meteorData = data; }
 export function setMeteorCounts(data) { meteorCounts = data; }
+export function setTrackClickCallback(fn) { trackClickCallback = fn; }
 
 function updateMeteorStationCountBadges() {
     if (meteorCountLayer) {
@@ -354,11 +356,14 @@ export function highlightTrack(id, type, isSatView, isAircraftView) {
     if (passData.passes) {
         passData.passes.forEach(pass => {
             const isHighlighted = isSatView && pass.pass_id === id;
-            const style = { color: isHighlighted ? 'red' : 'grey', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6 };
+            const style = { color: isHighlighted ? 'red' : 'grey', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6, interactive: true };
             const track = createSegmentedPolyline(pass.ground_track, style);
             const timeMarkers = drawTimeMarkers(pass, 'red');
             groundTrackLayers[pass.pass_id] = track;
             groundTrackLayers[pass.pass_id + '_markers'] = timeMarkers;
+            if (trackClickCallback) {
+                track.on('click', () => trackClickCallback(pass.pass_id, 'satellite'));
+            }
             if (isSatView) {
                 track.addTo(map);
                 if (isHighlighted) timeMarkers.addTo(map);
@@ -369,11 +374,14 @@ export function highlightTrack(id, type, isSatView, isAircraftView) {
     if (aircraftData.crossings) {
         aircraftData.crossings.forEach(crossing => {
             const isHighlighted = isAircraftView && crossing.crossing_id === id;
-            const style = { color: isHighlighted ? 'yellow' : '#a0522d', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6 };
+            const style = { color: isHighlighted ? 'yellow' : '#a0522d', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6, interactive: true };
             const track = createSegmentedPolyline(crossing.ground_track, style);
             const timeMarkers = drawTimeMarkers(crossing, 'yellow');
             groundTrackLayers[crossing.crossing_id] = track;
             groundTrackLayers[crossing.crossing_id + '_markers'] = timeMarkers;
+            if (trackClickCallback) {
+                track.on('click', () => trackClickCallback(crossing.crossing_id, 'aircraft'));
+            }
             if (isAircraftView) {
                 track.addTo(map);
                 if (isHighlighted) {

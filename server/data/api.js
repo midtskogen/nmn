@@ -131,10 +131,23 @@ export function fetchAllPasses(callbacks, filters = {}) {
 /**
  * Initiates the process of finding all visible aircraft crossings.
  * @param {object} callbacks - Callbacks for `onProgress`, `onComplete`, and `onError`.
+ * @param {object} [filters] - Optional filters to narrow (and speed up) the search.
+ * @param {string[]} [filters.stationIds] - Restrict the search to these station IDs.
+ * @param {number} [filters.days] - Only return crossings from the last N days (ignored if startIso/endIso is given).
+ * @param {string} [filters.startIso] - Only return crossings at/after this ISO8601 UTC timestamp.
+ * @param {string} [filters.endIso] - Only return crossings at/before this ISO8601 UTC timestamp.
  */
-export function fetchAllAircraftCrossings(callbacks) {
+export function fetchAllAircraftCrossings(callbacks, filters = {}) {
     const pollFn = (taskId) => pollTaskStatus(taskId, 'aircraft_status', callbacks);
-    return startAsyncTask('find_aircraft_crossings', pollFn);
+    const params = {};
+    if (filters.stationIds && filters.stationIds.length) params.station = filters.stationIds.join(',');
+    if (filters.startIso || filters.endIso) {
+        if (filters.startIso) params.start = filters.startIso;
+        if (filters.endIso) params.end = filters.endIso;
+    } else if (filters.days) {
+        params.days = filters.days;
+    }
+    return startAsyncTask('find_aircraft_crossings', pollFn, params);
 }
 
 /**

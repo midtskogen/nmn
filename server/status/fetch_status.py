@@ -250,7 +250,7 @@ def parse_log_content(content):
         'successes': successes,
         'warnings': warnings,
         'failures': failures,
-        'issues': issues[:5]  # Limit to top 5
+        'issues': issues[:20]  # Keep enough detail for a useful email summary
     }
 
 
@@ -409,14 +409,14 @@ def write_summary_json(results):
 def get_recent_statuses(station_id, n=3):
     """Get the N most recent status log entries for a station.
     
-    Returns list of dicts with keys: failures, fetch_success, issues_json, timestamp.
-    Ordered most recent first.
+    Returns list of dicts with keys: failures, warnings, fetch_success,
+    issues_json, timestamp. Ordered most recent first.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT failures, fetch_success, issues_json, timestamp
+        SELECT failures, warnings, fetch_success, issues_json, timestamp
         FROM status_logs
         WHERE station_id = ?
         ORDER BY timestamp DESC
@@ -515,6 +515,37 @@ def get_station_display_name(station_id):
         return station_id
 
 
+def build_issue_summary(entry, max_listed=15):
+    """Build a human-readable Norwegian summary of the errors/warnings found
+    in a status_logs entry, for inclusion in a notification email.
+    """
+    if station_is_offline(entry):
+        return "Stasjonen er ikke tilgjengelig (offline).\n"
+
+    issues = []
+    try:
+        issues = json.loads(entry.get('issues_json') or '[]')
+    except Exception:
+        pass
+
+    failures = entry.get('failures', 0) or 0
+    warnings = entry.get('warnings', 0) or 0
+    summary = f"Antall feil: {failures}\nAntall advarsler: {warnings}\n"
+
+    if issues:
+        labels = {'fail': 'FEIL', 'warning': 'ADVARSEL'}
+        # Show failures before warnings so the most serious items are seen first.
+        ordered = sorted(issues, key=lambda i: 0 if i.get('type') == 'fail' else 1)
+        summary += "\nDetaljer:\n"
+        for issue in ordered[:max_listed]:
+            label = labels.get(issue.get('type'), issue.get('type', '').upper())
+            summary += f"  - [{label}] {issue.get('text', '')}\n"
+        if len(ordered) > max_listed:
+            summary += f"  ... og {len(ordered) - max_listed} til.\n"
+
+    return summary
+
+
 def send_email(to_addresses, subject, body):
     """Send an email via local sendmail/SMTP."""
     if not to_addresses:
@@ -558,21 +589,7 @@ def check_and_notify(station_id):
     # but the one before that was clean)
     if (station_has_failure(current) and station_has_failure(previous)
             and before_prev is not None and not station_has_failure(before_prev)):
-        # Build failure description
-        issues = []
-        try:
-            issues = json.loads(current.get('issues_json') or '[]')
-        except Exception:
-            pass
-        
-        if station_is_offline(current):
-            feil_beskrivelse = "Stasjonen er ikke tilgjengelig (offline).\n"
-        else:
-            feil_beskrivelse = f"Antall feil: {current['failures']}\n"
-            if issues:
-                feil_beskrivelse += "\nFeil:\n"
-                for issue in issues:
-                    feil_beskrivelse += f"  - {issue.get('text', '')}\n"
+        feil_beskrivelse = build_issue_summary(current)
         
         subject = f"[NMN] Feil ved {display_name} ({station_id})"
         body = (

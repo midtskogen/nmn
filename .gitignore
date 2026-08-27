@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.pyo
 server/data/cameras.json
+# Generated tetra3 pattern database (built from stars.py on first run)
+bin/data/tetra3_stars.npz

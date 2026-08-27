@@ -101,10 +101,23 @@ def _load_config(args):
     return config
 
 
+def _parse_timestamp_from_path(path):
+    """Parse a meteor-style path like .../20260826/23/full_00.jpg into a UTC Unix timestamp."""
+    m = re.search(r'(\d{4})(\d{2})(\d{2})/(\d{2})/full_(\d{2})', path)
+    if not m:
+        return None
+    year, month, day, hour, minute = map(int, m.groups())
+    try:
+        dt = datetime(year, month, day, hour, minute, 0, tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
 def _setup_observer(args, config):
     cfg = config if config.has_section('astronomy') else None
-    lat = args.latitude or (cfg.get('astronomy', 'latitude') if cfg else None)
-    lon = args.longitude or (cfg.get('astronomy', 'longitude') if cfg else None)
+    lat = args.latitude if args.latitude is not None else (cfg.get('astronomy', 'latitude') if cfg else None)
+    lon = args.longitude if args.longitude is not None else (cfg.get('astronomy', 'longitude') if cfg else None)
     if lat is None or lon is None:
         raise ValueError('Observer latitude/longitude are required (use -y/-x or a config file).')
     obs = ephem.Observer()
@@ -114,9 +127,18 @@ def _setup_observer(args, config):
     if cfg:
         obs.temp = cfg.getfloat('astronomy', 'temperature', fallback=10.0)
         obs.pressure = cfg.getfloat('astronomy', 'pressure', fallback=1010.0)
-    timestamp = args.timestamp if args.timestamp is not None else os.path.getmtime(args.image)
-    if args.verbose and args.timestamp is None:
-        print(f'Warning: no timestamp given, using image mtime: {timestamp}')
+
+    if args.timestamp is not None:
+        timestamp = args.timestamp
+    else:
+        timestamp = _parse_timestamp_from_path(args.image)
+        if timestamp is None:
+            timestamp = os.path.getmtime(args.image)
+            if args.verbose:
+                print(f'Warning: no timestamp given and path not recognised, using image mtime: {timestamp}')
+        elif args.verbose:
+            dt = datetime.fromtimestamp(timestamp, timezone.utc)
+            print(f'Parsed timestamp from path: {dt}')
     obs.date = datetime.fromtimestamp(float(timestamp), timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     return obs, timestamp
 

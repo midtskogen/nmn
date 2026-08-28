@@ -94,6 +94,8 @@ Original Tetra license notice:
 #   - Added _build_star_table_from_stars_py() and wired generate_database() to use
 #     the project's own stars.py catalogue instead of external catalogue files.
 #   - The generated pattern database is cached locally at data/tetra3_stars.npz.
+#   - Added equidistant and equisolid fisheye camera projections alongside the
+#     original rectilinear projection.
 # The original copyright notices and licenses above remain unchanged and must be
 # preserved in any redistribution.
 
@@ -184,40 +186,58 @@ def _key_to_index(key, bin_factor, max_index):
         hash_indices = (hash_indices*_MAGIC_RAND) % max_index
     return hash_indices
 
-def _compute_vectors(centroids, size, fov):
-    """Get unit vectors from star centroids (pinhole camera)."""
-    # compute list of (i,j,k) vectors given list of (y,x) star centroids and
-    # an estimate of the image's field-of-view in the x dimension
-    # by applying the pinhole camera equations
-    centroids = np.array(centroids, dtype=np.float32)
-    (height, width) = size[:2]
-    scale_factor = np.tan(fov/2)/width*2
-    star_vectors = np.ones((len(centroids), 3))
-    # Pixel centre of image
-    img_center = [height/2, width/2]
-    # Calculate normal vectors
-    star_vectors[:, 2:0:-1] = (img_center - centroids) * scale_factor
-    star_vectors = star_vectors / norm(star_vectors, axis=1)[:, None]
+def _compute_vectors(centroids, size, fov, projection='rectilinear'):
+    """Get camera unit vectors from (y, x) image centroids."""
+    centroids = np.asarray(centroids, dtype=np.float64)
+    height, width = size[:2]
+    offsets = np.array([height / 2, width / 2]) - centroids
+    if projection == 'rectilinear':
+        star_vectors = np.ones((len(centroids), 3))
+        star_vectors[:, 2:0:-1] = offsets * (2 * np.tan(fov / 2) / width)
+        return star_vectors / norm(star_vectors, axis=1)[:, None]
+    if projection not in ('equidistant', 'equisolid'):
+        raise ValueError(f'Unsupported camera projection: {projection}')
+
+    radius = norm(offsets, axis=1)
+    if projection == 'equidistant':
+        theta = radius * fov / width
+    else:
+        focal_length = width / (4 * np.sin(fov / 4))
+        theta = 2 * np.arcsin(np.clip(radius / (2 * focal_length), 0, 1))
+    radial_scale = np.divide(np.sin(theta), radius, out=np.zeros_like(radius), where=radius > 0)
+    star_vectors = np.empty((len(centroids), 3))
+    star_vectors[:, 0] = np.cos(theta)
+    star_vectors[:, 1] = offsets[:, 1] * radial_scale
+    star_vectors[:, 2] = offsets[:, 0] * radial_scale
     return star_vectors
 
-def _compute_centroids(vectors, size, fov, trim=True):
-    """Get (undistorted) centroids from a set of (derotated) unit vectors
-    vectors: Nx3 of (i,j,k) where i is boresight, j is x (horizontal)
-    size: (height, width) in pixels.
-    fov: horizontal field of view in radians.
-    trim: only keep ones within the field of view, also returns list of indices kept
-    """
-    (height, width) = size[:2]
-    scale_factor = -width/2/np.tan(fov/2)
-    centroids = scale_factor*vectors[:, 2:0:-1]/vectors[:, [0]]
-    centroids += [height/2, width/2]
+
+def _compute_centroids(vectors, size, fov, trim=True, projection='rectilinear'):
+    """Project derotated camera unit vectors to (y, x) image centroids."""
+    vectors = np.asarray(vectors, dtype=np.float64)
+    height, width = size[:2]
+    if projection == 'rectilinear':
+        scale_factor = -width / (2 * np.tan(fov / 2))
+        centroids = scale_factor * vectors[:, 2:0:-1] / vectors[:, [0]]
+    elif projection in ('equidistant', 'equisolid'):
+        theta = np.arctan2(norm(vectors[:, 1:], axis=1), vectors[:, 0])
+        if projection == 'equidistant':
+            radius = theta * width / fov
+        else:
+            radius = 2 * (width / (4 * np.sin(fov / 4))) * np.sin(theta / 2)
+        transverse = norm(vectors[:, 1:], axis=1)
+        radial_scale = np.divide(-radius, transverse, out=np.zeros_like(radius), where=transverse > 0)
+        centroids = vectors[:, 2:0:-1] * radial_scale[:, None]
+    else:
+        raise ValueError(f'Unsupported camera projection: {projection}')
+    centroids += [height / 2, width / 2]
     if not trim:
         return centroids
-    else:
-        keep = np.flatnonzero(np.logical_and(
-            np.all(centroids > [0, 0], axis=1),
-            np.all(centroids < [height, width], axis=1)))
-        return (centroids[keep, :], keep)
+    keep = np.flatnonzero(np.logical_and.reduce((
+        vectors[:, 0] > 0,
+        centroids[:, 0] > 0, centroids[:, 0] < height,
+        centroids[:, 1] > 0, centroids[:, 1] < width)))
+    return centroids[keep, :], keep
 
 def _undistort_centroids(centroids, size, k):
     """Apply r_u = r_d(1 - k'*r_d^2)/(1 - k) undistortion, where k'=k*(2/width)^2,
@@ -1008,7 +1028,7 @@ class Tetra3():
     def solve_from_image(self, image, fov_estimate=None, fov_max_error=None,
                          pattern_checking_stars=8, match_radius=.01, match_threshold=1e-3,
                          solve_timeout=None, target_pixel=None, distortion=0,
-                         return_matches=False, return_visual=False, **kwargs):
+                         projection='rectilinear', return_matches=False, return_visual=False, **kwargs):
         """Solve for the sky location of an image.
 
         Star locations (centroids) are found using :meth:`tetra3.get_centroids_from_image` and
@@ -1043,7 +1063,10 @@ class Tetra3():
             distortion (float or tuple, optional): Set the known distortion of the image as a scalar
                  or the range of distortions to search as a tuple (min, max). Negative distortion is
                  barrel, positive is pincushion. Given as amount of distortion at width/2 from centre.
-                 Can set to None to disable distortion calculation entirely. Default 0.
+                 Can set to None to disable distortion calculation entirely. Default 0. Only supported
+                 for rectilinear projection.
+            projection (str, optional): Camera projection: 'rectilinear' (default),
+                 'equidistant' for Hugin fisheye projections, or 'equisolid'.
             return_matches (bool, optional): If set to True, the catalogue entries of the mached
                 stars and their pixel coordinates in the image is returned.
             return_visual (bool, optional): If set to True, an image is returned that visualises
@@ -1107,7 +1130,7 @@ class Tetra3():
             fov_estimate=fov_estimate, fov_max_error=fov_max_error,
             pattern_checking_stars=pattern_checking_stars, match_radius=match_radius,
             match_threshold=match_threshold, solve_timeout=solve_timeout,
-            target_pixel=target_pixel, distortion=distortion,
+            target_pixel=target_pixel, distortion=distortion, projection=projection,
             return_matches=return_matches, return_visual=return_visual)
         # Add extraction time to results and return
         solution['T_extract'] = t_extract
@@ -1119,7 +1142,7 @@ class Tetra3():
     def solve_from_centroids(self, star_centroids, size, fov_estimate=None, fov_max_error=None,
                              pattern_checking_stars=8, match_radius=.01, match_threshold=1e-3,
                              solve_timeout=None, target_pixel=None, distortion=0,
-                             return_matches=False, return_visual=False):
+                             projection='rectilinear', return_matches=False, return_visual=False):
         """Solve for the sky location using a list of centroids.
 
         Use :meth:`tetra3.get_centroids_from_image` or your own centroiding algorithm to find an
@@ -1163,7 +1186,10 @@ class Tetra3():
             distortion (float or tuple, optional): Set the known distortion of the image as a scalar
                  or the range of distortions to search as a tuple (min, max). Negative distortion is
                  barrel, positive is pincushion. Given as amount of distortion at width/2 from centre.
-                 Can set to None to disable distortion calculation entirely. Default 0.
+                 Can set to None to disable distortion calculation entirely. Default 0. Only supported
+                 for rectilinear projection.
+            projection (str, optional): Camera projection: 'rectilinear' (default),
+                 'equidistant' for Hugin fisheye projections, or 'equisolid'.
             return_matches (bool, optional): If set to True, the catalogue entries of the mached
                 stars and their pixel coordinates in the image is returned.
             return_visual (bool, optional): If set to True, an image is returned that visualises
@@ -1212,6 +1238,12 @@ class Tetra3():
                                  return_matches, return_visual)))
 
         image_centroids = np.asarray(star_centroids)
+        if projection not in ('rectilinear', 'equidistant', 'equisolid'):
+            raise ValueError(f'Unsupported camera projection: {projection}')
+        if projection != 'rectilinear' and distortion == 0:
+            distortion = None
+        if projection != 'rectilinear' and distortion is not None:
+            raise ValueError('The scalar distortion model is only supported for rectilinear projection.')
         if fov_estimate is None:
             # If no FOV given at all, guess middle of the range for a start
             fov_initial = np.deg2rad((self._db_props['max_fov'] + self._db_props['min_fov'])/2)
@@ -1288,7 +1320,7 @@ class Tetra3():
             # No or already known distortion, use directly
             if distortion is None or isinstance(distortion, Number):
                 # Compute star vectors using an estimate for the field-of-view in the x dimension
-                image_pattern_vectors = _compute_vectors(image_pattern_centroids, (height, width), fov_initial)
+                image_pattern_vectors = _compute_vectors(image_pattern_centroids, (height, width), fov_initial, projection)
                 # Calculate what the edge ratios are and add p_max_err tolerance
                 edge_angles_sorted = np.sort(2 * np.arcsin(.5 * pdist(image_pattern_vectors)))
                 image_pattern_largest_edge = edge_angles_sorted[-1]
@@ -1300,7 +1332,7 @@ class Tetra3():
                 image_pattern_edge_ratio_preundist = np.zeros((len(distortion_range), pattlen))
                 for i in range(len(distortion_range)):
                     image_pattern_vectors = _compute_vectors(
-                        image_centroids_preundist[i, image_pattern_indices], (height, width), fov_initial)
+                        image_centroids_preundist[i, image_pattern_indices], (height, width), fov_initial, projection)
                     edge_angles_sorted = np.sort(2 * np.arcsin(.5 * pdist(image_pattern_vectors)))
                     image_pattern_largest_edge = edge_angles_sorted[-1]
                     image_pattern_edge_ratio_preundist[i, :] = edge_angles_sorted[:-1] / image_pattern_largest_edge
@@ -1424,7 +1456,7 @@ class Tetra3():
 
                     # Recalculate vectors and uniquely sort them by distance from centroid
                     image_pattern_vectors = _compute_vectors(
-                        image_centroids_undist[image_pattern_indices, :], (height, width), fov)
+                        image_centroids_undist[image_pattern_indices, :], (height, width), fov, projection)
                     # find the centroid, or average position, of the star pattern
                     pattern_centroid = np.mean(image_pattern_vectors, axis=0)
                     # calculate each star's radius, or Euclidean distance from the centroid
@@ -1449,13 +1481,21 @@ class Tetra3():
 
                     # Find all star vectors inside the (diagonal) field of view for matching
                     image_center_vector = rotation_matrix[0, :]
-                    fov_diagonal_rad = fov * np.sqrt(width**2 + height**2) / width
+                    corner_radius = np.hypot(width, height) / 2
+                    if projection == 'equidistant':
+                        fov_diagonal_rad = 2 * corner_radius * fov / width
+                    elif projection == 'equisolid':
+                        focal_length = width / (4 * np.sin(fov / 4))
+                        fov_diagonal_rad = 4 * np.arcsin(np.clip(corner_radius / (2 * focal_length), 0, 1))
+                    else:
+                        fov_diagonal_rad = fov * np.sqrt(width**2 + height**2) / width
                     nearby_star_inds = self._get_nearby_stars(image_center_vector, fov_diagonal_rad/2)
                     nearby_star_vectors = self.star_table[nearby_star_inds, 2:5]
 
                     # Derotate nearby stars and get their (undistorted) centroids using coarse fov
                     nearby_star_vectors_derot = np.dot(rotation_matrix, nearby_star_vectors.T).T
-                    (nearby_star_centroids, kept) = _compute_centroids(nearby_star_vectors_derot, (height, width), fov)
+                    (nearby_star_centroids, kept) = _compute_centroids(
+                        nearby_star_vectors_derot, (height, width), fov, projection=projection)
                     nearby_star_vectors = nearby_star_vectors[kept, :]
                     nearby_star_inds = nearby_star_inds[kept]
                     # Only keep as many as the centroids, they should ideally both be the num_stars brightest
@@ -1490,7 +1530,7 @@ class Tetra3():
                         # Get the vectors for all matches in the image using coarse fov
                         matched_image_centroids = image_centroids[matched_stars[:, 0], :]
                         matched_image_vectors = _compute_vectors(matched_image_centroids,
-                            (height, width), fov)
+                            (height, width), fov, projection)
                         matched_catalog_vectors = nearby_star_vectors[matched_stars[:, 1], :]
                         # Recompute rotation matrix for more accuracy
                         rotation_matrix = _find_rotation_matrix(matched_image_vectors, matched_catalog_vectors)
@@ -1539,7 +1579,7 @@ class Tetra3():
 
                         # Get vectors
                         final_match_vectors = _compute_vectors(
-                            matched_image_centroids_undist, (height, width), fov)
+                            matched_image_centroids_undist, (height, width), fov, projection)
                         # Rotate to the sky
                         final_match_vectors = np.dot(rotation_matrix.T, final_match_vectors.T).T
 
@@ -1565,9 +1605,10 @@ class Tetra3():
                             self._logger.debug('Calculate RA/Dec for targets: '
                                 + str(target_pixel))
                             # Calculate the vector in the sky of the target pixel(s)
-                            target_pixel = _undistort_centroids(target_pixel, (height, width), k)
+                            if k is not None:
+                                target_pixel = _undistort_centroids(target_pixel, (height, width), k)
                             target_vectors = _compute_vectors(
-                                target_pixel, (height, width), fov)
+                                target_pixel, (height, width), fov, projection)
                             rotated_target_vectors = np.dot(rotation_matrix.T, target_vectors.T).T
                             # Calculate and add RA/Dec to solution
                             target_ra = np.rad2deg(np.arctan2(rotated_target_vectors[:, 1],

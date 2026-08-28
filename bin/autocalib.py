@@ -101,6 +101,25 @@ def _load_config(args):
     return config
 
 
+def _camera_mask_path(path):
+    """Return the camera mask path for a /meteor/camN/YYYYMMDD/HH/ image path."""
+    m = re.search(r'(/meteor/cam[^/]+)/\d{8}/\d{2}/', path)
+    return f'{m.group(1)}/mask.png' if m else None
+
+
+def _apply_camera_mask(image, image_path, verbose=False):
+    """Remove foreground where the camera mask is black."""
+    mask_path = _camera_mask_path(image_path)
+    if not mask_path or not os.path.isfile(mask_path):
+        return image
+    mask = Image.open(mask_path).convert('L')
+    if mask.size != image.size:
+        mask = mask.resize(image.size, Image.Resampling.NEAREST)
+    if verbose:
+        print(f'Applying foreground mask: {mask_path}')
+    return ImageChops.multiply(image, mask)
+
+
 def _parse_timestamp_from_path(path):
     """Parse a meteor-style path like .../20260826/23/full_00.jpg into a UTC Unix timestamp."""
     m = re.search(r'(\d{4})(\d{2})(\d{2})/(\d{2})/full_(\d{2})', path)
@@ -144,24 +163,33 @@ def _setup_observer(args, config):
 
 
 def _solve_image(t3, image, verbose=False):
-    """Solve the central crop with tetra3, trying the original and a flipped version."""
+    """Solve a large fisheye crop, falling back to the former small rectilinear crop."""
     w, h = image.size
-    crop_w = int(round(w * 0.3))
-    left = (w - crop_w) // 2
-    top = (h - crop_w) // 2
-    crop = image.crop((left, top, left + crop_w, top + crop_w))
-    if verbose:
-        print(f'Central crop: {crop_w}x{crop_w} at ({left},{top})')
-
-    extract = {'sigma': 3, 'filtsize': 15, 'max_area': 500, 'min_area': 3, 'max_returned': 80}
-    for flip in (False, True):
-        test = crop.transpose(Image.FLIP_LEFT_RIGHT) if flip else crop
-        res = t3.solve_from_image(test, fov_estimate=25.0, fov_max_error=15.0,
-                                  distortion=0, return_matches=True, **extract)
-        if res and res.get('RA') is not None:
-            if verbose and flip:
-                print('Solved using a horizontally flipped crop.')
-            return res, (left, top, crop_w, crop_w), flip
+    extract = {'sigma': 3, 'filtsize': 15, 'max_area': 500, 'min_area': 3, 'max_returned': 100}
+    fisheye_width = int(round(w * 60.0 / INITIAL_FOV))
+    fallback_size = int(round(w * 0.3))
+    attempts = [
+        (min(w, fisheye_width), h, 'equidistant'),
+        (fallback_size, fallback_size, 'rectilinear'),
+    ]
+    for crop_w, crop_h, projection in attempts:
+        left = (w - crop_w) // 2
+        top = (h - crop_h) // 2
+        crop = image.crop((left, top, left + crop_w, top + crop_h))
+        fov_estimate = INITIAL_FOV * crop_w / w
+        if verbose:
+            print(f'Central {projection} crop: {crop_w}x{crop_h} at ({left},{top}), '
+                  f'estimated FOV {fov_estimate:.1f} deg')
+        for flip in (False, True):
+            test = crop.transpose(Image.FLIP_LEFT_RIGHT) if flip else crop
+            res = t3.solve_from_image(
+                test, fov_estimate=fov_estimate, fov_max_error=12.0,
+                projection=projection, distortion=None, return_matches=True,
+                pattern_checking_stars=12, match_radius=0.015, **extract)
+            if res and res.get('RA') is not None:
+                if verbose and flip:
+                    print('Solved using a horizontally flipped crop.')
+                return res, (left, top, crop_w, crop_h), flip
     return None, None, False
 
 
@@ -482,6 +510,7 @@ def main():
 
     # Open image and convert to luminance for solving.
     full_image = Image.open(args.image).convert('L')
+    full_image = _apply_camera_mask(full_image, args.image, verbose=args.verbose)
     width, height = full_image.size
 
     if args.verbose:

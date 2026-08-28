@@ -86,18 +86,23 @@ Original Tetra license notice:
     SOFTWARE.
 """
 
-# MODIFICATION NOTICE (norskmeteornettverk.no/nmn project):
-# This file has been vendored from upstream tetra3 and modified.
-# Changes made:
-#   - Replaced np.math.factorial usage with math.factorial for NumPy 2.x compatibility.
-#   - Removed built-in bsc5 / hip_main / tyc_main catalogue file loaders.
-#   - Added _build_star_table_from_stars_py() and wired generate_database() to use
-#     the project's own stars.py catalogue instead of external catalogue files.
-#   - The generated pattern database is cached locally at data/tetra3_stars.npz.
-#   - Added equidistant and equisolid fisheye camera projections alongside the
-#     original rectilinear projection.
-# The original copyright notices and licenses above remain unchanged and must be
-# preserved in any redistribution.
+# MODIFICATION NOTICE
+# Modified in 2026 by the norskmeteornettverk.no/nmn project from upstream ESA tetra3.
+# This is not an unmodified upstream tetra3 distribution. Project changes are:
+#   - Replaced np.math.factorial with math.factorial for NumPy 2.x compatibility.
+#   - Removed the bsc5, hip_main, and tyc_main catalogue-file loaders.
+#   - Added _build_star_table_from_stars_py() and changed database generation to
+#     use the project's stars.py catalogue.
+#   - Changed Tetra3's default database handling to generate and cache
+#     data/tetra3_stars.npz from stars.py when the cache is absent.
+#   - Added the projection argument to solve_from_image() and
+#     solve_from_centroids().
+#   - Extended _compute_vectors() and _compute_centroids() with equidistant and
+#     equisolid fisheye projection models while retaining rectilinear behavior.
+#   - Made catalogue selection, diagonal-FOV calculation, matching, residuals,
+#     target-coordinate conversion, and visualisation honor the selected projection.
+# The original copyright and license notices above remain unchanged and must be
+# preserved in redistributions of this modified file.
 
 # Standard imports:
 from pathlib import Path

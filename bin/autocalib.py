@@ -19,13 +19,12 @@ Example:
 
 import argparse
 import configparser
+import copy
 import io
 import json
 import math
 import os
 import re
-import shutil
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -239,19 +238,11 @@ def _collect_control_points(t3, full_image, observer, initial_pto_data,
         return [], initial_pto_data
 
     # 2. Refine yaw/pitch/roll/FOV on the seed points, keeping lens distortion fixed.
-    tmpdir = tempfile.mkdtemp(prefix='autocalib_')
-    seed_pto = os.path.join(tmpdir, 'seed.pto')
-    dummy_path = os.path.join(tmpdir, 'dummy_equirect.jpg')
-    Image.fromarray(np.zeros((180, 360, 3), dtype=np.uint8)).save(dummy_path)
-    with open(seed_pto, 'w') as f:
-        f.write(_build_optimisation_pto_from_data(
-            initial_pto_data, list(seed_points.values()), dummy_path,
-            var_lines='v v0\nv y0\nv p0\nv r0\nv\n'))
-    ok, output = _run_autooptimiser(seed_pto, seed_pto)
-    refined_pto_data = pto_mapper.parse_pto_file(seed_pto) if ok else initial_pto_data
-    if not ok and verbose:
-        print(f'  Seed refinement failed: {output}')
-    shutil.rmtree(tmpdir, ignore_errors=True)
+    refined_pto_data, _, seed_rmse, ok = _optimise_pto(
+        initial_pto_data, list(seed_points.values()), ('v', 'y', 'p', 'r'))
+    if verbose:
+        status = 'complete' if ok else 'did not converge'
+        print(f'  Seed refinement {status}: {seed_rmse:.3f} px RMSE')
 
     # 3. Match every detected star to the tetra3 catalogue via the refined model.
     if verbose:
@@ -359,7 +350,6 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
     """
     w, h = full_image.size
     current = pto_data
-    all_vars = 'v v0\nv y0\nv p0\nv r0\nv a0\nv b0\nv c0\nv d0\nv e0\nv\n'
     matches = []
     for i in range(iterations):
         expected = _project_catalog(current, observer, star_table, objects=objects)
@@ -378,28 +368,14 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
                 print(f'  Refine iter {i + 1}: only {len(matches)} remapped stars, stopping.')
             break
 
-        tmpdir = tempfile.mkdtemp(prefix='tetra3_refine_')
-        refine_pto = os.path.join(tmpdir, 'refine.pto')
-        dummy_path = os.path.join(tmpdir, 'dummy.jpg')
-        Image.fromarray(np.zeros((180, 360, 3), dtype=np.uint8)).save(dummy_path)
         cps = [(x, y, az, alt, None) for x, y, az, alt in matches]
-        control_points = cps
-        with open(refine_pto, 'w') as f:
-            f.write(_build_optimisation_pto_from_data(current, cps, dummy_path, var_lines=all_vars))
-        try:
-            subprocess.run(['cpclean', '-n', '1', '-o', refine_pto, refine_pto],
-                           check=True, capture_output=True)
-            subprocess.run(['autooptimiser', '-n', refine_pto, '-o', refine_pto],
-                           check=True, capture_output=True)
-            current = pto_mapper.parse_pto_file(refine_pto)
-            if verbose:
-                print(f'  Refine iter {i + 1}: remapped {len(matches)} stars, model updated.')
-        except subprocess.CalledProcessError as e:
-            if verbose:
-                print(f'  Refine iter {i + 1}: optimisation failed ({e}), stopping.')
+        current, control_points, rmse, ok = _optimise_pto(
+            current, cps, ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e'))
+        if verbose:
+            print(f'  Refine iter {i + 1}: {len(control_points)}/{len(matches)} inliers, '
+                  f'{rmse:.3f} px RMSE.')
+        if not ok:
             break
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
     return current, control_points
 
 
@@ -469,16 +445,63 @@ def _build_optimisation_pto_from_data(pto_data, control_points, dummy_path,
     )
 
 
-def _run_autooptimiser(input_pto, output_pto):
-    """Run Hugin autooptimiser and return True on success."""
-    try:
-        proc = subprocess.run(
-            ['autooptimiser', '-n', input_pto, '-o', output_pto],
-            capture_output=True, text=True, timeout=120,
-        )
-        return proc.returncode == 0, proc.stdout + proc.stderr
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        return False, str(exc)
+def _optimise_pto(pto_data, control_points, parameters):
+    """Robustly fit PTO image parameters directly to astrometric control points."""
+    from scipy.optimize import least_squares
+
+    result_data = copy.deepcopy(pto_data)
+    image = result_data[1][0]
+    x0 = np.array([float(image[name]) for name in parameters])
+    scales = {'v': 10, 'y': 10, 'p': 10, 'r': 10,
+              'a': 0.01, 'b': 0.01, 'c': 0.01, 'd': 50, 'e': 50}
+    limits = {'v': (30, 150), 'y': (-720, 720), 'p': (-90, 90), 'r': (-180, 180),
+              'a': (-0.5, 0.5), 'b': (-0.5, 0.5), 'c': (-0.5, 0.5),
+              'd': (-500, 500), 'e': (-500, 500)}
+
+    def residual(values, points):
+        for name, value in zip(parameters, values):
+            image[name] = float(value)
+        errors = []
+        for x, y, az, alt, *_ in points:
+            mapped = pto_mapper.map_pano_to_image(result_data, az * 100, (90 - alt) * 100)
+            if mapped is None:
+                errors.extend((1000.0, 1000.0))
+            else:
+                errors.extend((mapped[1] - x, mapped[2] - y))
+        return np.asarray(errors)
+
+    def jacobian(values, points):
+        steps = {'v': 1e-3, 'y': 1e-3, 'p': 1e-3, 'r': 1e-3,
+                 'a': 1e-5, 'b': 1e-5, 'c': 1e-5, 'd': 1e-3, 'e': 1e-3}
+        jac = np.empty((len(points) * 2, len(parameters)))
+        for column, name in enumerate(parameters):
+            step = steps[name]
+            high, low = values.copy(), values.copy()
+            high[column] += step
+            low[column] -= step
+            jac[:, column] = (residual(high, points) - residual(low, points)) / (2 * step)
+        residual(values, points)
+        return jac
+
+    lower = np.array([limits[name][0] for name in parameters])
+    upper = np.array([limits[name][1] for name in parameters])
+    fit = least_squares(residual, x0, jac=jacobian, args=(control_points,), bounds=(lower, upper),
+                        x_scale=[scales[name] for name in parameters], loss='soft_l1',
+                        f_scale=1.0, max_nfev=1000)
+    errors = residual(fit.x, control_points).reshape(-1, 2)
+    distances = np.linalg.norm(errors, axis=1)
+    median = np.median(distances)
+    mad = np.median(np.abs(distances - median))
+    cutoff = max(2.0, median + 4 * max(mad, 0.1))
+    inliers = [point for point, distance in zip(control_points, distances) if distance <= cutoff]
+    if len(inliers) >= max(8, len(parameters)):
+        fit = least_squares(residual, fit.x, jac=jacobian, args=(inliers,), bounds=(lower, upper),
+                            x_scale=[scales[name] for name in parameters], loss='linear',
+                            max_nfev=1000)
+    residual(fit.x, inliers)
+    final_errors = residual(fit.x, inliers).reshape(-1, 2)
+    rmse = float(np.sqrt(np.mean(np.sum(final_errors**2, axis=1))))
+    return result_data, inliers, rmse, fit.success
 
 
 def main():

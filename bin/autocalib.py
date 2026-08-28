@@ -390,6 +390,7 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
     best_control_points = []
     best_rmse = float('inf')
     best_iteration = None
+    solution_history = []
     matches = []
     for i in range(iterations):
         expected = _project_catalog(current, observer, star_table, objects=objects)
@@ -421,6 +422,19 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
             best_iteration = i + 1
         if not ok:
             break
+        image = current[1][0]
+        solution = tuple(float(image[name]) for name in ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e'))
+        repeated_iteration = next((
+            iteration for iteration, previous in enumerate(solution_history, start=1)
+            if np.allclose(solution, previous, rtol=1e-10, atol=1e-12)
+        ), None)
+        if repeated_iteration is not None:
+            if verbose:
+                cycle_length = i + 1 - repeated_iteration
+                print(f'  Refine iter {i + 1}: repeats iter {repeated_iteration} '
+                      f'(cycle length {cycle_length}), stopping.')
+            break
+        solution_history.append(solution)
     if verbose and best_iteration is not None:
         print(f'  Selected refine iter {best_iteration}: {best_rmse:.3f} px RMSE.')
     return best_data, best_control_points

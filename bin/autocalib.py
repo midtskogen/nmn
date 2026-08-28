@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+from numba import njit
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
@@ -57,6 +58,41 @@ INITIAL_B = -0.00658489763649841
 INITIAL_C = -0.0182364818863498
 INITIAL_D = 37.10688673257604
 INITIAL_E = 21.55064329950385
+
+
+@njit(cache=True, fastmath=True)
+def _project_stars_numba(azimuths, altitudes, params, width, height):
+    fov, yaw, pitch, roll, a, b, c, d, e = params
+    fov_rad = math.radians(fov)
+    focal = width / fov_rad
+    norm_radius = min(width, height) / 2.0
+    distortion_base = 1.0 - a - b - c
+    p = math.radians(pitch)
+    r = math.radians(-roll)
+    cp, sp = math.cos(p), math.sin(p)
+    cr, sr = math.cos(r), math.sin(r)
+    output = np.empty((len(azimuths), 2), dtype=np.float64)
+    for i in range(len(azimuths)):
+        altitude = math.radians(altitudes[i])
+        adjusted_yaw = math.radians(azimuths[i] - 180.0 - yaw)
+        ca = math.cos(altitude)
+        vx = ca * math.sin(adjusted_yaw)
+        vy = math.sin(altitude)
+        vz = -ca * math.cos(adjusted_yaw)
+        x_rot = cr*vx + cp*sr*vy + sp*sr*vz
+        y_rot = -sr*vx + cp*cr*vy + sp*cr*vz
+        z_rot = -sp*vy + cp*vz
+        theta = math.atan2(math.hypot(x_rot, y_rot), -z_rot)
+        phi = math.atan2(y_rot, x_rot)
+        radius = focal * theta
+        x_ideal = radius * math.cos(phi)
+        y_ideal = radius * math.sin(phi)
+        rn = radius / norm_radius
+        magnification = distortion_base + rn * (c + rn * (b + rn * a))
+        output[i, 0] = x_ideal * magnification + d + width / 2.0
+        output[i, 1] = -y_ideal * magnification + e + height / 2.0
+    return output
+
 
 # Ensure local project modules are importable even when this script is executed via symlink
 _SCRIPT_PATH = Path(__file__).resolve()
@@ -346,10 +382,14 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
     """
     Iteratively refine the calibration by masking the image to expected star
     positions, extracting the actual star centroids, and reoptimising all lens
-    and orientation parameters with Hugin.
+    and orientation parameters. Return the iteration with the lowest RMSE.
     """
     w, h = full_image.size
     current = pto_data
+    best_data = pto_data
+    best_control_points = []
+    best_rmse = float('inf')
+    best_iteration = None
     matches = []
     for i in range(iterations):
         expected = _project_catalog(current, observer, star_table, objects=objects)
@@ -374,9 +414,16 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
         if verbose:
             print(f'  Refine iter {i + 1}: {len(control_points)}/{len(matches)} inliers, '
                   f'{rmse:.3f} px RMSE.')
+        if ok and rmse < best_rmse:
+            best_data = copy.deepcopy(current)
+            best_control_points = list(control_points)
+            best_rmse = rmse
+            best_iteration = i + 1
         if not ok:
             break
-    return current, control_points
+    if verbose and best_iteration is not None:
+        print(f'  Selected refine iter {best_iteration}: {best_rmse:.3f} px RMSE.')
+    return best_data, best_control_points
 
 
 def _build_pto(image_path, width, height, fov, yaw, pitch, roll,
@@ -451,7 +498,10 @@ def _optimise_pto(pto_data, control_points, parameters):
 
     result_data = copy.deepcopy(pto_data)
     image = result_data[1][0]
-    x0 = np.array([float(image[name]) for name in parameters])
+    parameter_order = ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e')
+    base_params = np.array([float(image[name]) for name in parameter_order])
+    parameter_indices = np.array([parameter_order.index(name) for name in parameters])
+    x0 = base_params[parameter_indices]
     scales = {'v': 10, 'y': 10, 'p': 10, 'r': 10,
               'a': 0.01, 'b': 0.01, 'c': 0.01, 'd': 50, 'e': 50}
     limits = {'v': (30, 150), 'y': (-720, 720), 'p': (-90, 90), 'r': (-180, 180),
@@ -459,16 +509,14 @@ def _optimise_pto(pto_data, control_points, parameters):
               'd': (-500, 500), 'e': (-500, 500)}
 
     def residual(values, points):
-        for name, value in zip(parameters, values):
-            image[name] = float(value)
-        errors = []
-        for x, y, az, alt, *_ in points:
-            mapped = pto_mapper.map_pano_to_image(result_data, az * 100, (90 - alt) * 100)
-            if mapped is None:
-                errors.extend((1000.0, 1000.0))
-            else:
-                errors.extend((mapped[1] - x, mapped[2] - y))
-        return np.asarray(errors)
+        params = base_params.copy()
+        params[parameter_indices] = values
+        observed = np.asarray([(point[0], point[1]) for point in points])
+        azimuths = np.asarray([point[2] for point in points])
+        altitudes = np.asarray([point[3] for point in points])
+        predicted = _project_stars_numba(
+            azimuths, altitudes, params, float(image['w']), float(image['h']))
+        return (predicted - observed).ravel()
 
     def jacobian(values, points):
         steps = {'v': 1e-3, 'y': 1e-3, 'p': 1e-3, 'r': 1e-3,
@@ -498,7 +546,8 @@ def _optimise_pto(pto_data, control_points, parameters):
         fit = least_squares(residual, fit.x, jac=jacobian, args=(inliers,), bounds=(lower, upper),
                             x_scale=[scales[name] for name in parameters], loss='linear',
                             max_nfev=1000)
-    residual(fit.x, inliers)
+    for name, value in zip(parameters, fit.x):
+        image[name] = float(value)
     final_errors = residual(fit.x, inliers).reshape(-1, 2)
     rmse = float(np.sqrt(np.mean(np.sum(final_errors**2, axis=1))))
     return result_data, inliers, rmse, fit.success

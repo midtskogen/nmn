@@ -110,7 +110,13 @@ def _camera_mask_path(path):
 def _apply_camera_mask(image, image_path, verbose=False):
     """Remove foreground where the camera mask is black."""
     mask_path = _camera_mask_path(image_path)
-    if not mask_path or not os.path.isfile(mask_path):
+    if not mask_path:
+        if verbose:
+            print('No camera mask path inferred from input filename.')
+        return image
+    if not os.path.isfile(mask_path):
+        if verbose:
+            print(f'Camera mask not found: {mask_path}')
         return image
     mask = Image.open(mask_path).convert('L')
     if mask.size != image.size:
@@ -494,6 +500,8 @@ def main():
     parser.add_argument('--refine-radius', type=float, default=1.0,
                         help='Search radius in degrees for the masked-star refinement '
                              '(default: 1.0).')
+    parser.add_argument('--nomask', action='store_true',
+                        help='Do not load or apply the camera mask.png file.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     args = parser.parse_args()
 
@@ -510,7 +518,11 @@ def main():
 
     # Open image and convert to luminance for solving.
     full_image = Image.open(args.image).convert('L')
-    full_image = _apply_camera_mask(full_image, args.image, verbose=args.verbose)
+    if args.nomask:
+        if args.verbose:
+            print('Camera mask disabled by --nomask.')
+    else:
+        full_image = _apply_camera_mask(full_image, args.image, verbose=args.verbose)
     width, height = full_image.size
 
     if args.verbose:

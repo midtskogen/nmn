@@ -107,9 +107,9 @@ def _camera_mask_path(path):
     return f'{m.group(1)}/mask.png' if m else None
 
 
-def _apply_camera_mask(image, image_path, verbose=False):
-    """Remove foreground where the AMS camera mask is white."""
-    mask_path = _camera_mask_path(image_path)
+def _apply_camera_mask(image, image_path, mask_path=None, verbose=False):
+    """Remove foreground where the camera mask is black."""
+    mask_path = mask_path or _camera_mask_path(image_path)
     if not mask_path:
         if verbose:
             print('No camera mask path inferred from input filename.')
@@ -122,8 +122,8 @@ def _apply_camera_mask(image, image_path, verbose=False):
     if mask.size != image.size:
         mask = mask.resize(image.size, Image.Resampling.NEAREST)
     if verbose:
-        print(f'Applying foreground mask (white pixels excluded): {mask_path}')
-    return ImageChops.multiply(image, ImageChops.invert(mask))
+        print(f'Applying foreground mask (black pixels excluded): {mask_path}')
+    return ImageChops.multiply(image, mask)
 
 
 def _parse_timestamp_from_path(path):
@@ -500,8 +500,11 @@ def main():
     parser.add_argument('--refine-radius', type=float, default=1.0,
                         help='Search radius in degrees for the masked-star refinement '
                              '(default: 1.0).')
-    parser.add_argument('--nomask', action='store_true',
-                        help='Do not load or apply the camera mask.png file.')
+    mask_group = parser.add_mutually_exclusive_group()
+    mask_group.add_argument('--mask', metavar='FILE',
+                            help='Use this foreground mask instead of /meteor/camN/mask.png.')
+    mask_group.add_argument('--nomask', action='store_true',
+                            help='Do not load or apply a foreground mask.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     args = parser.parse_args()
 
@@ -522,7 +525,8 @@ def main():
         if args.verbose:
             print('Camera mask disabled by --nomask.')
     else:
-        full_image = _apply_camera_mask(full_image, args.image, verbose=args.verbose)
+        full_image = _apply_camera_mask(
+            full_image, args.image, mask_path=args.mask, verbose=args.verbose)
     width, height = full_image.size
 
     if args.verbose:

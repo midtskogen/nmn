@@ -108,7 +108,7 @@ def _camera_mask_path(path):
 
 
 def _apply_camera_mask(image, image_path, verbose=False):
-    """Remove foreground where the camera mask is black."""
+    """Remove foreground where the AMS camera mask is white."""
     mask_path = _camera_mask_path(image_path)
     if not mask_path:
         if verbose:
@@ -122,8 +122,8 @@ def _apply_camera_mask(image, image_path, verbose=False):
     if mask.size != image.size:
         mask = mask.resize(image.size, Image.Resampling.NEAREST)
     if verbose:
-        print(f'Applying foreground mask: {mask_path}')
-    return ImageChops.multiply(image, mask)
+        print(f'Applying foreground mask (white pixels excluded): {mask_path}')
+    return ImageChops.multiply(image, ImageChops.invert(mask))
 
 
 def _parse_timestamp_from_path(path):

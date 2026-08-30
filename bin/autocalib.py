@@ -61,10 +61,14 @@ INITIAL_E = 21.55064329950385
 
 
 @njit(cache=True, fastmath=True)
-def _project_stars_numba(azimuths, altitudes, params, width, height):
+def _project_stars_numba(azimuths, altitudes, params, width, height, projection=3):
     fov, yaw, pitch, roll, a, b, c, d, e = params
     fov_rad = math.radians(fov)
-    focal = width / fov_rad
+    if projection == 3:
+        focal = width / fov_rad
+    else:
+        half = math.tan(fov_rad / 2.0)
+        focal = width / (2.0 * half) if half > 1e-9 else width * 1e9
     norm_radius = min(width, height) / 2.0
     distortion_base = 1.0 - a - b - c
     p = math.radians(pitch)
@@ -82,11 +86,21 @@ def _project_stars_numba(azimuths, altitudes, params, width, height):
         x_rot = cr*vx + cp*sr*vy + sp*sr*vz
         y_rot = -sr*vx + cp*cr*vy + sp*cr*vz
         z_rot = -sp*vy + cp*vz
-        theta = math.atan2(math.hypot(x_rot, y_rot), -z_rot)
-        phi = math.atan2(y_rot, x_rot)
-        radius = focal * theta
-        x_ideal = radius * math.cos(phi)
-        y_ideal = radius * math.sin(phi)
+        if projection == 3:
+            theta = math.atan2(math.hypot(x_rot, y_rot), -z_rot)
+            phi = math.atan2(y_rot, x_rot)
+            radius = focal * theta
+            x_ideal = radius * math.cos(phi)
+            y_ideal = radius * math.sin(phi)
+        else:
+            if z_rot >= -1e-6:
+                x_ideal = 0.0
+                y_ideal = 0.0
+                radius = 0.0
+            else:
+                x_ideal = focal * x_rot / -z_rot
+                y_ideal = focal * y_rot / -z_rot
+                radius = math.hypot(x_ideal, y_ideal)
         rn = radius / norm_radius
         magnification = distortion_base + rn * (c + rn * (b + rn * a))
         output[i, 0] = x_ideal * magnification + d + width / 2.0
@@ -206,23 +220,29 @@ def _setup_observer(args, config):
 
 
 def _solve_image(t3, image, verbose=False):
-    """Solve a large fisheye crop, falling back to the former small rectilinear crop."""
+    """Solve the central sky; try several fisheye and rectilinear crops and pick the best."""
     w, h = image.size
     extract = {'sigma': 3, 'filtsize': 15, 'max_area': 500, 'min_area': 3, 'max_returned': 100}
-    fisheye_width = int(round(w * 60.0 / INITIAL_FOV))
-    fallback_size = int(round(w * 0.3))
-    attempts = [
-        (min(w, fisheye_width), h, 'equidistant'),
-        (fallback_size, fallback_size, 'rectilinear'),
-    ]
-    for crop_w, crop_h, projection in attempts:
+    attempts = []
+    for fov in (60, 50, 40, 30, 25, 20):
+        cw = min(w, int(round(w * fov / INITIAL_FOV)))
+        attempts.append((cw, cw, 'equidistant', float(fov)))
+    for size, fov in ((int(round(w * 0.3)), 25.0),
+                      (640, 20.0), (768, 30.0), (480, 15.0)):
+        attempts.append((size, size, 'rectilinear', fov))
+    candidates = []
+    for crop_w, crop_h, projection, fov_estimate in attempts:
+        crop_w = min(crop_w, w)
+        crop_h = min(crop_h, h)
+        if projection == 'equidistant':
+            fov_estimate = INITIAL_FOV * crop_w / w
         left = (w - crop_w) // 2
         top = (h - crop_h) // 2
         crop = image.crop((left, top, left + crop_w, top + crop_h))
-        fov_estimate = INITIAL_FOV * crop_w / w
         if verbose:
             print(f'Central {projection} crop: {crop_w}x{crop_h} at ({left},{top}), '
                   f'estimated FOV {fov_estimate:.1f} deg')
+        best = None
         for flip in (False, True):
             test = crop.transpose(Image.FLIP_LEFT_RIGHT) if flip else crop
             res = t3.solve_from_image(
@@ -230,10 +250,23 @@ def _solve_image(t3, image, verbose=False):
                 projection=projection, distortion=None, return_matches=True,
                 pattern_checking_stars=12, match_radius=0.015, **extract)
             if res and res.get('RA') is not None:
-                if verbose and flip:
-                    print('Solved using a horizontally flipped crop.')
-                return res, (left, top, crop_w, crop_h), flip
-    return None, None, False
+                prob = float(res.get('Prob', 0.0))
+                if best is None or prob > best[0]:
+                    best = (prob, res, (left, top, crop_w, crop_h), flip, projection)
+        if best is not None:
+            candidates.append(best)
+    if not candidates:
+        return None, None, False, None
+    best = max(candidates, key=lambda x: x[0])
+    if verbose:
+        p = best[0]
+        if p > 0:
+            one_in = 1.0 / p
+            chance = f'1 in {one_in:.2e}' if one_in >= 1e6 else f'1 in {one_in:,.0f}'
+            print(f'Selected {best[4]} crop: {chance} false-positive chance ({p * 100:.4g}%)')
+        else:
+            print(f'Selected {best[4]} crop (probability unknown)')
+    return best[1], best[2], best[3], best[4]
 
 
 def _radec_to_azel(ra_deg, dec_deg, observer):
@@ -441,10 +474,10 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
 
 
 def _build_pto(image_path, width, height, fov, yaw, pitch, roll,
-               control_points=(), dummy_path=None, var_lines='',
+               control_points=(), dummy_path=None, var_lines='', projection=3,
                a=INITIAL_A, b=INITIAL_B, c=INITIAL_C, d=INITIAL_D, e=INITIAL_E):
     """Build a Hugin .pto string. If dummy_path is given, add the dummy equirect image and variables."""
-    img_line = (f'i w{width} h{height} f3 v{fov} y{yaw} p{pitch} r{roll} '
+    img_line = (f'i w{width} h{height} f{projection} v{fov} y{yaw} p{pitch} r{roll} '
                 f'a{a} b{b} c{c} d{d} e{e} g0 t0 n"{os.path.basename(image_path)}" '
                 f'Ra0 Rb0 Rc0 Rd0 Re0 Eev0 Er1 Eb1 TrX0 TrY0 TrZ0 Tpy0 Tpp0 j0 Va1 Vb0 Vc0 Vd0 Vx0 Vy0 Vm5')
     lines = [
@@ -499,10 +532,11 @@ def _build_optimisation_pto_from_data(pto_data, control_points, dummy_path,
     c = float(img.get('c', INITIAL_C))
     d = float(img.get('d', INITIAL_D))
     e = float(img.get('e', INITIAL_E))
+    projection = int(img.get('f', 3))
     return _build_pto(
         image_name, width, height, fov, yaw, pitch, roll,
         control_points=control_points, dummy_path=dummy_path,
-        a=a, b=b, c=c, d=d, e=e, var_lines=var_lines,
+        a=a, b=b, c=c, d=d, e=e, var_lines=var_lines, projection=projection,
     )
 
 
@@ -512,6 +546,7 @@ def _optimise_pto(pto_data, control_points, parameters):
 
     result_data = copy.deepcopy(pto_data)
     image = result_data[1][0]
+    projection = int(image.get('f', 3))
     parameter_order = ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e')
     base_params = np.array([float(image[name]) for name in parameter_order])
     parameter_indices = np.array([parameter_order.index(name) for name in parameters])
@@ -529,7 +564,7 @@ def _optimise_pto(pto_data, control_points, parameters):
         azimuths = np.asarray([point[2] for point in points])
         altitudes = np.asarray([point[3] for point in points])
         predicted = _project_stars_numba(
-            azimuths, altitudes, params, float(image['w']), float(image['h']))
+            azimuths, altitudes, params, float(image['w']), float(image['h']), projection)
         return (predicted - observed).ravel()
 
     def jacobian(values, points):
@@ -624,7 +659,7 @@ def main():
 
     # Use the local tetra3 solver; its pattern database is built from stars.py.
     t3 = Tetra3()
-    result, crop_box, flipped = _solve_image(t3, full_image, verbose=args.verbose)
+    result, crop_box, flipped, projection = _solve_image(t3, full_image, verbose=args.verbose)
     if result is None:
         print('Error: tetra3 could not solve the image (or a central crop).', file=sys.stderr)
         sys.exit(1)
@@ -644,18 +679,35 @@ def main():
     hugin_pitch = centre_alt
     hugin_roll = 0.0
 
+    crop_w = crop_box[2]
+    solved_fov = float(result['FOV'])
+    if projection == 'equidistant':
+        full_fov = solved_fov * width / crop_w
+        pto_projection = 3
+    else:
+        full_fov = math.degrees(2 * math.atan(
+            (width * math.tan(math.radians(solved_fov) / 2.0)) / crop_w))
+        pto_projection = 0
+
     if args.verbose:
         print(f'tetra3 centre: RA={ra_deg:.4f} Dec={dec_deg:.4f}')
         print(f'Image centre Az/Alt: {centre_az:.4f} / {centre_alt:.4f}')
         print(f'Hugin yaw/pitch/roll: {hugin_yaw:.4f} / {hugin_pitch:.4f} / {hugin_roll:.4f}')
+        print(f'Full image FOV: {full_fov:.2f} deg, projection f{pto_projection}')
 
     # Build the initial PTO using the solved yaw/pitch/roll and a fixed set of
     # lens parameters taken from a known-good calibration. This gives a good
     # enough model to project the whole image and match stars across the field.
+    if pto_projection == 3:
+        init_a, init_b, init_c, init_d, init_e = INITIAL_A, INITIAL_B, INITIAL_C, INITIAL_D, INITIAL_E
+    else:
+        init_a = init_b = init_c = init_d = init_e = 0.0
     tmp_pto_path = tempfile.mktemp(suffix='.pto')
     with open(tmp_pto_path, 'w') as f:
-        f.write(_build_pto(args.image, width, height, INITIAL_FOV,
-                           hugin_yaw, hugin_pitch, hugin_roll))
+        f.write(_build_pto(args.image, width, height, full_fov,
+                           hugin_yaw, hugin_pitch, hugin_roll,
+                           projection=pto_projection,
+                           a=init_a, b=init_b, c=init_c, d=init_d, e=init_e))
     pto_data = pto_mapper.parse_pto_file(tmp_pto_path)
     os.unlink(tmp_pto_path)
 

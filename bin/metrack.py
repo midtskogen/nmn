@@ -967,99 +967,121 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         z=camera_center['z'] + camera_distance * np.tan(np.radians(elev_deg))
     )
 
-    frames = []; num_frames = 180
-    for k in range(num_frames):
-        theta = (k / num_frames) * 2 * np.pi
-        eye_x = camera_center['x'] + camera_distance * np.cos(theta)
-        eye_y = camera_center['y'] + camera_distance * np.sin(theta)
-        frames.append(go.Frame(layout=dict(scene=dict(camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']))))))
-    
+    elev_offset_z = float(initial_eye['z'] - camera_center['z'])
+
     layout = go.Layout(
-        title=translations.get("plot_map_interactive_title", "Meteor's Atmospheric Trajectory"), title_x=0.5, title_y=0.92, 
+        title=translations.get("plot_map_interactive_title", "Meteor's Atmospheric Trajectory"), title_x=0.5, title_y=0.92,
         showlegend=False,
         scene=dict(
-            xaxis=dict(title=translations.get("plot_map_interactive_xaxis", "East/West Distance (km)"), range=[x_min_km, x_max_km], showspikes=True, spikethickness=1), 
-            yaxis=dict(title=translations.get("plot_map_interactive_yaxis", "North/South Distance (km)"), range=[y_min_km, y_max_km], showspikes=True, spikethickness=1), 
-            zaxis=dict(title=translations.get("plot_map_interactive_zaxis", "Height (km)"), showspikes=False, spikethickness=1), 
-            aspectmode='data', dragmode='turntable', camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=initial_eye)), 
-        margin=dict(l=0, r=0, b=0, t=40), 
-        updatemenus=[dict(
-            type='buttons', active=0, showactive=True, y=0.95, x=0.05, xanchor='left', yanchor='top', 
-            pad=dict(t=0, r=10), font=dict(size=10), bgcolor='rgba(255, 255, 255, 0.5)', 
-            buttons=[
-                dict(label=translations.get("plot_interactive_play", "▶ Play"), method='animate', args=[None, dict(frame=dict(duration=50, redraw=True), transition=dict(duration=0), fromcurrent=True)]), 
-                dict(label=translations.get("plot_interactive_pause", "⏸ Pause"), method='animate', args=[[None], dict(frame=dict(duration=0, redraw=False), mode='immediate', transition=dict(duration=0))])
-            ])]
+            xaxis=dict(title=translations.get("plot_map_interactive_xaxis", "East/West Distance (km)"), range=[x_min_km, x_max_km], showspikes=True, spikethickness=1),
+            yaxis=dict(title=translations.get("plot_map_interactive_yaxis", "North/South Distance (km)"), range=[y_min_km, y_max_km], showspikes=True, spikethickness=1),
+            zaxis=dict(title=translations.get("plot_map_interactive_zaxis", "Height (km)"), showspikes=False, spikethickness=1),
+            aspectmode='data', dragmode='turntable', camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=initial_eye)),
+        margin=dict(l=0, r=0, b=0, t=40)
     )
-    
-    fig = go.Figure(data=traces, layout=layout, frames=frames)
+
+    fig = go.Figure(data=traces, layout=layout)
     fig.update_layout(showlegend=False)
     filename = output_filename or "map.html"
     fig.write_html(filename, include_plotlyjs='cdn')
 
-    # This javascript block is appended to the HTML file to add custom interaction.
-    # It finds the play button using its translated text content.
-    play_button_text = json.dumps(translations.get("plot_interactive_play", "▶ Play"))
-    with open(filename, "a", encoding="utf-8") as f:
-        f.write(f"""
+    # Rotate the camera with requestAnimationFrame instead of Plotly.animate frames.
+    # This updates only the camera eye, so the 3D scene does not have to redraw all
+    # traces/surface for every frame and the HTML stays small (no embedded frames).
+    center_json = json.dumps(camera_center)
+    distance_json = json.dumps(camera_distance)
+    elev_json = json.dumps(elev_offset_z)
+    play_text = translations.get("plot_interactive_play", "▶ Play")
+    pause_text = translations.get("plot_interactive_pause", "⏸ Pause")
+    controls_and_script = f"""
+<style>
+  html, body {{ margin: 0; padding: 0; overflow: hidden; height: 100%; }}
+</style>
+<div id="map-rotation-controls" style="position:fixed; top:10px; left:10px; z-index:1000; font-family:sans-serif;">
+  <button id="map-play-btn" style="margin-right:5px; padding:4px 10px; cursor:pointer;">{play_text}</button>
+  <button id="map-pause-btn" style="padding:4px 10px; cursor:pointer;">{pause_text}</button>
+</div>
 <script>
 document.addEventListener("DOMContentLoaded", function () {{
-    const plot = document.querySelector("div.js-plotly-plot");
+    const plot = document.querySelector(".js-plotly-plot");
+    if (!plot) return;
+
+    const center = {center_json};
+    const distance = {distance_json};
+    const elevOffsetZ = {elev_json};
+    const rotationPeriodMs = 18000; // one full revolution in 18 seconds
+    const speed = 2 * Math.PI / rotationPeriodMs;
+    let angle = 0;
+    let lastTime = performance.now();
     let animationPaused = false;
+    let reqId = null;
+
+    function setCamera(a) {{
+        Plotly.relayout(plot, {{
+            'scene.camera': {{
+                up: {{x: 0, y: 0, z: 1}},
+                center: center,
+                eye: {{
+                    x: center.x + distance * Math.cos(a),
+                    y: center.y + distance * Math.sin(a),
+                    z: center.z + elevOffsetZ
+                }}
+            }}
+        }});
+    }}
+
+    function step(now) {{
+        if (animationPaused) return;
+        const dt = now - lastTime;
+        lastTime = now;
+        angle += dt * speed;
+        setCamera(angle);
+        reqId = requestAnimationFrame(step);
+    }}
+
+    function startAnimation() {{
+        animationPaused = false;
+        lastTime = performance.now();
+        reqId = requestAnimationFrame(step);
+    }}
 
     function pauseAnimation() {{
         animationPaused = true;
-        console.log("Pausing animation");
-        Plotly.animate(plot, null, {{
-            mode: 'immediate',
-            frame: {{ duration: 0, redraw: false }},
-            transition: {{ duration: 0 }}
-        }}).catch((err) => {{
-            console.warn("Pause failed:", err);
-        }});
-    }}
-
-    function resumeAnimation() {{
-        animationPaused = false;
-        console.log("Resuming animation");
-        Plotly.animate(plot, null, {{
-            frame: {{ duration: 50, redraw: true }},
-            transition: {{ duration: 0 }},
-            mode: "next",
-            fromcurrent: true
-        }}).catch((err) => {{
-            console.warn("Resume failed:", err);
-        }});
+        if (reqId) {{
+            cancelAnimationFrame(reqId);
+            reqId = null;
+        }}
     }}
 
     function toggleAnimation(e) {{
-        e.preventDefault(); // prevent context menu
+        e.preventDefault();
         if (animationPaused) {{
-            resumeAnimation();
+            startAnimation();
         }} else {{
             pauseAnimation();
         }}
     }}
 
-    plot.addEventListener('plotly_animated', () => {{
-        console.log("Animation started — resetting paused flag");
-        animationPaused = false;
-    }});
-    if (plot) {{
-        // Right-click = toggle animation
-        plot.addEventListener("contextmenu", toggleAnimation);
-        // Hook the play button to resume and reset state
-        const playButton = [...document.querySelectorAll("button")].find(btn =>
-            btn.textContent === {play_button_text}
-        );
-        if (playButton) {{
-            playButton.addEventListener("click", () => {{
-                animationPaused = false;
-            }});
-        }}
-    }}
+    const playBtn = document.getElementById("map-play-btn");
+    const pauseBtn = document.getElementById("map-pause-btn");
+    if (playBtn) playBtn.addEventListener("click", startAnimation);
+    if (pauseBtn) pauseBtn.addEventListener("click", pauseAnimation);
+
+    plot.addEventListener("contextmenu", toggleAnimation);
+    plot.addEventListener("mousedown", pauseAnimation);
+    plot.addEventListener("touchstart", pauseAnimation);
+    startAnimation();
 }});
-</script>""")
+</script>"""
+    # Insert the controls inside the document body so the fixed-position panel
+    # does not create extra page overflow.
+    html_path = Path(filename)
+    html = html_path.read_text(encoding="utf-8")
+    if "</body>" in html:
+        html = html.replace("</body>", controls_and_script + "\n</body>", 1)
+    else:
+        html += controls_and_script
+    html_path.write_text(html, encoding="utf-8")
     print(f"Interactive 3D plot saved to {filename}")
 
 def chisq_of_fit(track_params, los_refs, los_vecs, weights):

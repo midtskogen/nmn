@@ -18,7 +18,24 @@ $DEFAULT_LANG = 'nb_NO';
 // --- Setup ---
 putenv('NMN_DATA_DIR=' . $BASE_DIR);
 putenv('NMN_LOCK_DIR=' . $LOCK_DIR);
+// Point Python at the private config/credential directory outside the web root.
+$SECRETS_DIR = realpath(__DIR__ . '/../../etc');
+if ($SECRETS_DIR && is_dir($SECRETS_DIR)) {
+    putenv('NMN_CONFIG_FILE=' . $SECRETS_DIR . '/config.json');
+    putenv('NMN_CREDENTIALS_FILE=' . $SECRETS_DIR . '/credentials.json');
+}
 if (!is_dir($LOCK_DIR)) { mkdir($LOCK_DIR, 0775, true); }
+
+// --- CSRF protection for state-changing endpoints ---
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
+// Release the session lock early; the token value is already captured.
+session_write_close();
+
+$STATE_ACTIONS = ['download', 'start_stream', 'cancel', 'cleanup', 'stop_stream', 'request_transcode', 'find_passes', 'find_aircraft_crossings'];
 
 /**
  * Gets the user's real IP address, safely handling requests that come through a proxy.
@@ -139,8 +156,12 @@ $action = $_GET['action'] ?? 'get_page';
 // Append a compact entry to access_log.json for the usage stats page.
 // Skip tile requests (too frequent) and internal polling actions.
 $_skip_log = ['tile', 'check_status', 'get_stream_status'];
-if (!in_array($action, $_skip_log)) {
+if (!in_array($action, $_skip_log, true)) {
     $_log_file = $BASE_DIR . '/access_log.json';
+    // Rotate the log once it exceeds a reasonable size (50 MB).
+    if (file_exists($_log_file) && filesize($_log_file) > 50 * 1024 * 1024) {
+        @rename($_log_file, $_log_file . '.old');
+    }
     $_log_entry = json_encode([
         'ts'     => date('Y-m-d H:i:s'),
         'date'   => date('Y-m-d'),
@@ -149,6 +170,16 @@ if (!in_array($action, $_skip_log)) {
         'station'=> $_GET['station_id'] ?? ($_GET['station'] ?? null),
     ]) . "\n";
     @file_put_contents($_log_file, $_log_entry, FILE_APPEND | LOCK_EX);
+}
+
+// --- CSRF gate for state-changing requests ---
+if (in_array($action, $STATE_ACTIONS, true)) {
+    $supplied_token = $_GET['csrf_token'] ?? $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+    if (!is_string($supplied_token) || !hash_equals($csrf_token, $supplied_token)) {
+        http_response_code(403);
+        echo json_encode(['error' => 'invalid_csrf']);
+        exit;
+    }
 }
 
 // --- Router ---
@@ -273,10 +304,16 @@ switch ($action) {
         $lang_file = $LANG_DIR . '/' . $lang_code . '.json';
         if (!file_exists($lang_file)) {
             http_response_code(500);
-            die("Language file not found for code: $lang_code");
+            die("Language file not found for code: " . htmlspecialchars($lang_code, ENT_QUOTES, 'UTF-8'));
         }
-        setcookie('lang', $lang_code, time() + (86400 * 365), "/"); // Set language cookie for 1 year
-        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($lang_file);
+        setcookie('lang', $lang_code, [
+            'expires'  => time() + 86400 * 365,
+            'path'     => '/',
+            'httponly' => true,
+            'secure'   => true,
+            'samesite' => 'Lax',
+        ]);
+        $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($lang_file) . ' ' . escapeshellarg($csrf_token);
         echo shell_exec($command);
         break;
 
@@ -618,19 +655,38 @@ switch ($action) {
         break;
 
     case 'download':
+        // Enforce a sane payload size before writing it to disk.
+        $max_payload_bytes = 5 * 1024 * 1024;
+        $raw_post = file_get_contents('php://input');
+        if (strlen($raw_post) > $max_payload_bytes) {
+            http_response_code(413);
+            echo json_encode(['error' => 'Download payload too large']);
+            exit;
+        }
+
+        // Use a counting semaphore so the limit is enforced atomically.
+        $sem_file = $LOCK_DIR . '/download_semaphore.lock';
+        $sem = fopen($sem_file, 'c');
+        if (!$sem || !flock($sem, LOCK_EX)) {
+            header('HTTP/1.1 503 Service Unavailable');
+            die(json_encode(['error' => 'Server is busy, could not acquire lock.']));
+        }
         $lock_files = glob($LOCK_DIR . '/master_task_*.lock');
         if (count($lock_files) >= $MAX_CONCURRENT_REQUESTS) {
+            flock($sem, LOCK_UN);
+            fclose($sem);
             header('HTTP/1.1 503 Service Unavailable');
             die(json_encode(['error' => 'Server is busy, too many concurrent downloads.']));
         }
         $task_id = uniqid('master_task_');
-        $post_data = file_get_contents('php://input');
-        $user_ip = get_user_ip();
-
-        // Write POST data to a temp file to avoid ARG_MAX limits on shell arguments.
         $payload_file = tempnam($LOCK_DIR, 'payload_');
-        file_put_contents($payload_file, $post_data);
+        file_put_contents($payload_file, $raw_post, LOCK_EX);
+        // Create the lock marker before releasing the semaphore.
+        touch($LOCK_DIR . '/' . $task_id . '.lock');
+        flock($sem, LOCK_UN);
+        fclose($sem);
 
+        $user_ip = get_user_ip();
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' download ' . escapeshellarg($task_id) . ' ' . escapeshellarg($payload_file) . ' ' . escapeshellarg($user_ip) . ' > /dev/null 2>&1 &';
         shell_exec($command);
         echo json_encode(['success' => true, 'task_id' => $task_id]);

@@ -7,6 +7,25 @@
 const API_BASE = 'index.php?action=';
 
 /**
+ * Read the CSRF token injected by the backend into a <meta name="csrf-token"> tag.
+ * All state-changing requests must carry this token for server-side validation.
+ */
+function getCsrfToken() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.content : '';
+}
+
+/**
+ * Parse a JSON response after verifying the HTTP status is successful.
+ */
+async function parseJson(response) {
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
+/**
  * Fetches all initial data required to bootstrap the application on startup.
  * This includes station information, camera fields of view, and recent observational data.
  * It uses Promise.all to fetch all resources in parallel for faster loading.
@@ -40,10 +59,11 @@ export async function fetchInitialData() {
  * @param {function} pollFn - The function to call for polling the status of the task. This function will be passed the new task_id.
  */
 async function startAsyncTask(action, pollFn, params = {}) {
-    const query = new URLSearchParams(params).toString();
-    const url = query ? `${API_BASE}${action}&${query}` : `${API_BASE}${action}`;
-    const response = await fetch(url);
-    const data = await response.json();
+    const query = new URLSearchParams(params);
+    // Pass-through token for the server-side CSRF gate on state-changing actions.
+    query.set('csrf_token', getCsrfToken());
+    const url = `${API_BASE}${action}&${query.toString()}`;
+    const data = await parseJson(await fetch(url));
     if (data.success && data.task_id) {
         // If the task was started successfully, begin polling for its status.
         // Return both, so callers can cancel the poll (e.g. clearInterval) if
@@ -99,8 +119,7 @@ export async function fetchStationStats(stationId, startDate, endDate) {
     let url = `${API_BASE}get_station_stats&station_id=${encodeURIComponent(stationId)}`;
     if (startDate) url += `&start_date=${encodeURIComponent(startDate)}`;
     if (endDate) url += `&end_date=${encodeURIComponent(endDate)}`;
-    const response = await fetch(url);
-    return response.json();
+    return parseJson(await fetch(url));
 }
 
 // --- Specific Task Functions ---
@@ -157,12 +176,14 @@ export function fetchAllAircraftCrossings(callbacks, filters = {}) {
  * @returns {Promise<string>} A promise that resolves to the task ID for the download.
  */
 export async function startDownload(payload) {
-    const response = await fetch(`${API_BASE}download`, {
+    const data = await parseJson(await fetch(`${API_BASE}download`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': getCsrfToken(),
+        },
         body: JSON.stringify(payload),
-    });
-    const data = await response.json();
+    }));
     if (data.success && data.task_id) {
         return data.task_id;
     }
@@ -185,7 +206,8 @@ export function pollDownloadStatus(taskId, callbacks) {
  * @param {string} taskId - The ID of the task to cancel.
  */
 export function cancelTask(taskId) {
-    fetch(`${API_BASE}cancel&id=${encodeURIComponent(taskId)}`);
+    fetch(`${API_BASE}cancel&id=${encodeURIComponent(taskId)}&csrf_token=${encodeURIComponent(getCsrfToken())}`)
+        .catch(err => console.warn('cancelTask failed:', err));
 }
 
 /**
@@ -193,7 +215,8 @@ export function cancelTask(taskId) {
  * @param {string} taskId - The ID of the task to clean up.
  */
 export function cleanupTask(taskId) {
-    fetch(`${API_BASE}cleanup&id=${encodeURIComponent(taskId)}`);
+    fetch(`${API_BASE}cleanup&id=${encodeURIComponent(taskId)}&csrf_token=${encodeURIComponent(getCsrfToken())}`)
+        .catch(err => console.warn('cleanupTask failed:', err));
 }
 
 
@@ -208,9 +231,8 @@ export function cleanupTask(taskId) {
  * @returns {Promise<string>} A promise that resolves to the stream task ID.
  */
 export async function startStream(stationId, cameraNum, resolution, hevcSupported) {
-    const url = `${API_BASE}start_stream&station_id=${encodeURIComponent(stationId)}&camera_num=${encodeURIComponent(cameraNum)}&resolution=${encodeURIComponent(resolution)}&hevc_supported=${encodeURIComponent(hevcSupported)}`;
-    const response = await fetch(url);
-    const data = await response.json();
+    const url = `${API_BASE}start_stream&station_id=${encodeURIComponent(stationId)}&camera_num=${encodeURIComponent(cameraNum)}&resolution=${encodeURIComponent(resolution)}&hevc_supported=${encodeURIComponent(hevcSupported)}&csrf_token=${encodeURIComponent(getCsrfToken())}`;
+    const data = await parseJson(await fetch(url));
     if (data.success && data.stream_task_id) {
         return data.stream_task_id;
     }
@@ -239,8 +261,7 @@ export async function fetchStreamGrid(streamTaskId, stationId, camNum) {
  */
 export async function fetchAnnotation(streamTaskId, stationId, camNum) {
     const url = `${API_BASE}fetch_annotation&stream_task_id=${encodeURIComponent(streamTaskId)}&station_id=${encodeURIComponent(stationId)}&cam_num=${encodeURIComponent(camNum)}`;
-    const response = await fetch(url);
-    return response.json();
+    return parseJson(await fetch(url));
 }
 
 /**
@@ -254,6 +275,7 @@ export function pollStreamStatus(taskId, { onStatusUpdate, onReady, onError }) {
     const intervalId = setInterval(async () => {
         try {
             const response = await fetch(`${API_BASE}stream_status&id=${encodeURIComponent(taskId)}`);
+            if (!response.ok) return; // transient HTTP errors should not stop polling
             const data = await response.json();
             if (!data || !data.status) return;
 
@@ -284,13 +306,15 @@ export function pollStreamStatus(taskId, { onStatusUpdate, onReady, onError }) {
 export function stopStream(taskId) {
     const payload = new FormData();
     payload.append('task_id', taskId);
+    payload.append('csrf_token', getCsrfToken());
     // Use `sendBeacon` for reliability on page unload, as it sends the request
     // asynchronously without expecting a response, making it more likely to succeed.
     if (navigator.sendBeacon) {
         navigator.sendBeacon(`${API_BASE}stop_stream`, payload);
     } else {
         // Fallback to fetch with `keepalive` for older browsers.
-        fetch(`${API_BASE}stop_stream`, { method: 'POST', body: payload, keepalive: true });
+        fetch(`${API_BASE}stop_stream`, { method: 'POST', body: payload, keepalive: true })
+            .catch(err => console.warn('stopStream failed:', err));
     }
 }
 
@@ -300,6 +324,6 @@ export function stopStream(taskId) {
  * @param {string} taskId - The active stream task ID.
  */
 export async function requestTranscode(taskId) {
-    const response = await fetch(`${API_BASE}request_transcode&task_id=${encodeURIComponent(taskId)}`);
-    return response.json();
+    const url = `${API_BASE}request_transcode&task_id=${encodeURIComponent(taskId)}&csrf_token=${encodeURIComponent(getCsrfToken())}`;
+    return parseJson(await fetch(url));
 }

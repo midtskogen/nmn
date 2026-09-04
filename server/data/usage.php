@@ -63,6 +63,7 @@ $stream_file  = $BASE_DIR . '/stream_time_tracker.json';
 $quota_file   = $BASE_DIR . '/quota_tracker.json';
 $access_file  = $BASE_DIR . '/access_log.json';
 $geoip_cache  = $BASE_DIR . '/cache/geoip_cache.json';
+$JSON_SAFE = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
 
 function mask_ip($ip) {
     // Mask the last octet/segment so full visitor IPs are never displayed.
@@ -81,13 +82,20 @@ function read_json($path) {
     return is_array($data) ? $data : [];
 }
 
-function read_ndjson($path) {
+function read_ndjson($path, $filter = null) {
     if (!file_exists($path)) return [];
     $rows = [];
-    foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+    $handle = fopen($path, 'r');
+    if (!$handle) return [];
+    while (($line = fgets($handle)) !== false) {
+        $line = trim($line);
+        if ($line === '') continue;
         $r = json_decode($line, true);
-        if (is_array($r)) $rows[] = $r;
+        if (!is_array($r)) continue;
+        if ($filter && !$filter($r)) continue;
+        $rows[] = $r;
     }
+    fclose($handle);
     return $rows;
 }
 
@@ -103,7 +111,7 @@ function resolve_geoip($ips, $cache_file) {
         $tmp = $cache_file . '.pending.' . getmypid() . '.' . bin2hex(random_bytes(4));
         @file_put_contents($tmp, implode("\n", $unknown));
         $script = __DIR__ . '/geoip_resolve.php';
-        @shell_exec("php {$script} " . escapeshellarg($cache_file) . " " . escapeshellarg($tmp) . " > /dev/null 2>&1 &");
+        @shell_exec(escapeshellarg('/usr/bin/php') . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($cache_file) . ' ' . escapeshellarg($tmp) . ' > /dev/null 2>&1 &');
     }
     return $cache;
 }
@@ -113,7 +121,13 @@ $range_options = ['1m' => 30, '6m' => 183, '1y' => 365, '3y' => 1095];
 $range = 'cookie';
 if (isset($_GET['range']) && isset($range_options[$_GET['range']])) {
     $range = $_GET['range'];
-    setcookie('usage_range', $range, time() + 86400 * 365, '/');
+    setcookie('usage_range', $range, [
+        'expires'  => time() + 86400 * 365,
+        'path'     => '/',
+        'httponly' => true,
+        'secure'   => true,
+        'samesite' => 'Lax',
+    ]);
 } elseif (isset($_COOKIE['usage_range']) && isset($range_options[$_COOKIE['usage_range']])) {
     $range = $_COOKIE['usage_range'];
 } else {
@@ -123,12 +137,11 @@ $cutoff_date = date('Y-m-d', strtotime('-' . $range_options[$range] . ' days'));
 
 $stream_data = read_json($stream_file);
 $quota_data  = read_json($quota_file);
-$access_data = read_ndjson($access_file);
+$access_data = read_ndjson($access_file, fn($r) => ($r['date'] ?? '') >= $cutoff_date);
 
 // Apply date cutoff
 foreach (array_keys($stream_data) as $d) { if ($d < $cutoff_date) unset($stream_data[$d]); }
 foreach (array_keys($quota_data)  as $d) { if ($d < $cutoff_date) unset($quota_data[$d]); }
-$access_data = array_filter($access_data, fn($r) => ($r['date'] ?? '') >= $cutoff_date);
 
 // --- Aggregate stream data ---
 // Result: $stream_by_day[date][ip][station] = {lowres, hires}
@@ -321,7 +334,7 @@ function fmt_bytes($bytes) {
   <img src="../nmn.png" height="40" alt="NMN">
   <div>
     <h1 class="mb-0" style="font-size:1.5rem"><?= t('usage_title', $lang) ?></h1>
-    <div class="text-muted" style="font-size:.85rem"><?= $lang['usage_subtitle'] ?? 'Norsk Meteornettverk' ?></div>
+    <div class="text-muted" style="font-size:.85rem"><?= htmlspecialchars($lang['usage_subtitle'] ?? 'Norsk Meteornettverk', ENT_QUOTES, 'UTF-8') ?></div>
   </div>
   <div class="ms-auto d-flex align-items-center gap-2 flex-wrap">
     <?php foreach (['1m'=>'usage_range_1m','6m'=>'usage_range_6m','1y'=>'usage_range_1y','3y'=>'usage_range_3y'] as $r => $key): ?>
@@ -528,9 +541,9 @@ $total_ips          = count($all_ips);
 
 <!-- Chart data injected server-side -->
 <script>
-const dailyDates  = <?= json_encode(array_reverse(array_keys($daily_summary))) ?>;
-const dailyStream = <?= json_encode(array_map(fn($r) => round($r['stream_s']/60, 1), array_reverse(array_values($daily_summary)))) ?>;
-const dailyBytes  = <?= json_encode(array_map(fn($r) => round($r['bytes']/1048576, 2), array_reverse(array_values($daily_summary)))) ?>;
+const dailyDates  = <?= json_encode(array_reverse(array_keys($daily_summary)), $JSON_SAFE) ?>;
+const dailyStream = <?= json_encode(array_map(fn($r) => round($r['stream_s']/60, 1), array_reverse(array_values($daily_summary))), $JSON_SAFE) ?>;
+const dailyBytes  = <?= json_encode(array_map(fn($r) => round($r['bytes']/1048576, 2), array_reverse(array_values($daily_summary))), $JSON_SAFE) ?>;
 
 <?php
 // Station colours palette
@@ -546,7 +559,7 @@ foreach ($stations_list as $i => $st) {
     $station_daily_json[] = ['label' => $st, 'data' => $vals, 'color' => $color];
 }
 ?>
-const stationDatasets = <?= json_encode($station_daily_json) ?>;
+const stationDatasets = <?= json_encode($station_daily_json, $JSON_SAFE) ?>;
 const stationDates    = dailyDates;
 </script>
 
@@ -562,14 +575,14 @@ new Chart(document.getElementById('chartStream'), {
   data: {
     labels: dailyDates,
     datasets: [{
-      label: <?= json_encode($lang['usage_chart_streaming'] ?? 'Streaming (min)') ?>,
+      label: <?= json_encode($lang['usage_chart_streaming'] ?? 'Streaming (min)', $JSON_SAFE) ?>,
       data: dailyStream,
       backgroundColor: 'rgba(31,111,235,0.7)',
       borderColor: '#1f6feb',
       borderWidth: 1,
       yAxisID: 'y',
     }, {
-      label: <?= json_encode($lang['usage_chart_downloaded'] ?? 'Downloaded (MB)') ?>,
+      label: <?= json_encode($lang['usage_chart_downloaded'] ?? 'Downloaded (MB)', $JSON_SAFE) ?>,
       data: dailyBytes,
       type: 'line',
       backgroundColor: 'rgba(63,185,80,0.15)',
@@ -586,7 +599,7 @@ new Chart(document.getElementById('chartStream'), {
     plugins: { legend: { labels: { color: '#8b949e' } } },
     scales: {
       x: { ticks: { maxTicksLimit: 20, maxRotation: 45 } },
-      y:  { title: { display: true, text: <?= json_encode($lang['usage_chart_minutes'] ?? 'minutes') ?> }, position: 'left' },
+      y:  { title: { display: true, text: <?= json_encode($lang['usage_chart_minutes'] ?? 'minutes', $JSON_SAFE) ?> }, position: 'left' },
       y2: { title: { display: true, text: 'MB' }, position: 'right', grid: { drawOnChartArea: false } },
     }
   }
@@ -610,15 +623,15 @@ new Chart(document.getElementById('chartStations'), {
     plugins: { legend: { labels: { color: '#8b949e' } } },
     scales: {
       x: { stacked: true, ticks: { maxTicksLimit: 20, maxRotation: 45 } },
-      y: { stacked: true, title: { display: true, text: <?= json_encode($lang['usage_chart_minutes'] ?? 'minutes') ?> } },
+      y: { stacked: true, title: { display: true, text: <?= json_encode($lang['usage_chart_minutes'] ?? 'minutes', $JSON_SAFE) ?> } },
     }
   }
 });
 
 // Country doughnut chart — data resolved server-side
 const palette = ['#1f6feb','#3fb950','#f78166','#d2a8ff','#ffa657','#79c0ff','#56d364','#ff7b72','#bc8cff','#e3b341','#58a6ff','#7ee787','#ffa198','#cae8ff','#ffd700'];
-const countryLabels = <?= json_encode(array_keys($chart_countries)) ?>;
-const countryValues = <?= json_encode(array_values(array_map(fn($s) => round($s/60), $chart_countries))) ?>;
+const countryLabels = <?= json_encode(array_keys($chart_countries), $JSON_SAFE) ?>;
+const countryValues = <?= json_encode(array_values(array_map(fn($s) => round($s/60), $chart_countries)), $JSON_SAFE) ?>;
 
 if (countryLabels.length === 0) {
     document.getElementById('chartCountries').parentElement.innerHTML = '<p class="text-muted p-3"><?= t('usage_no_ip_data', $lang) ?></p>';

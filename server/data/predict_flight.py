@@ -3,6 +3,7 @@
 import sys
 import json
 import os
+import stat
 import logging
 import argparse
 import hashlib
@@ -63,13 +64,14 @@ if PTO_MAPPER_AVAILABLE:
 # --- Configuration specific to this script ---
 TRACK_CACHE_DIR = os.path.join(CACHE_DIR, 'flight_tracks')
 def _resolve_credentials_file():
-    """Look for credentials.json in the environment override, the invocation
-    directory (so symlinks to the cron path work), the script directory, and
+    """Look for credentials.json in the environment override, the private
+    etc directory, the invocation directory, the script directory, and
     a sibling 'data' web-root folder if running from nmn/server/data."""
     if path := os.environ.get('NMN_CREDENTIALS_FILE'):
         return path
     real_dir = os.path.dirname(os.path.realpath(__file__))
     candidates = [
+        os.path.normpath(os.path.join(real_dir, '..', '..', 'etc', 'credentials.json')),
         os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])) if sys.argv and os.path.isfile(sys.argv[0]) else real_dir, 'credentials.json'),
         os.path.join(real_dir, 'credentials.json'),
         os.path.normpath(os.path.join(real_dir, '..', '..', '..', 'data', 'credentials.json')),
@@ -158,6 +160,10 @@ def get_opensky_token(task_id, client_id, client_secret):
         data = response.json()
         data['expires_at'] = time.time() + data.get('expires_in', 300)
         with open(TOKEN_CACHE_FILE, 'w') as f: json.dump(data, f)
+        try:
+            os.chmod(TOKEN_CACHE_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
         return data.get('access_token')
     except requests.exceptions.RequestException as e:
         logging.error(f"Task {task_id}: Failed to get access token from OpenSky. Error: {e}")

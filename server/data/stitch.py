@@ -14,12 +14,14 @@ timestamp erasure and fisheye masking) is all done by nmn/bin/stitcher.py.
 
 import argparse
 import concurrent.futures
+import io
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import shutil
 
@@ -138,13 +140,16 @@ def scp_lens_batch(station_id: str, cams: list, workdir: str) -> dict:
             stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ''
             logging.warning(f"stitch scp_lens_batch: ssh/tar failed rc={result.returncode} stderr={stderr!r}")
             return _scp_lens_fallback(station_id, cams, workdir)
-        extract = subprocess.run(
-            ["tar", "-x", "-f", "-", "-C", tar_subdir],
-            input=result.stdout, capture_output=True, timeout=60
-        )
-        if extract.returncode != 0:
-            stderr = extract.stderr.decode('utf-8', errors='ignore') if extract.stderr else ''
-            logging.warning(f"stitch scp_lens_batch: tar extract failed: {stderr!r}")
+        try:
+            with tarfile.open(fileobj=io.BytesIO(result.stdout), mode='r:') as tar:
+                for member in tar.getmembers():
+                    dest_path = os.path.realpath(os.path.join(tar_subdir, member.name))
+                    if not dest_path.startswith(os.path.realpath(tar_subdir) + os.sep):
+                        logging.warning(f"stitch scp_lens_batch: refusing tar member {member.name!r}: escapes tar_subdir")
+                        continue
+                    tar.extract(member, tar_subdir)
+        except (tarfile.TarError, OSError) as e:
+            logging.warning(f"stitch scp_lens_batch: tar extract failed: {e}")
             return _scp_lens_fallback(station_id, cams, workdir)
     except (subprocess.TimeoutExpired, OSError) as e:
         logging.warning(f"stitch scp_lens_batch: exception: {e}")
@@ -338,6 +343,20 @@ def main():
     parser.add_argument('--fisheye',       action='store_true')
     parser.add_argument('--equirect',      action='store_true')
     args = parser.parse_args()
+
+    # Validate station id and output directory to prevent directory traversal.
+    safe_id_re = re.compile(r'^[A-Za-z0-9_\-]+$')
+    if not safe_id_re.fullmatch(args.station_id):
+        print(json.dumps({"error": "invalid station-id"}))
+        sys.exit(1)
+    if not safe_id_re.fullmatch(args.station_code):
+        print(json.dumps({"error": "invalid station-code"}))
+        sys.exit(1)
+    real_output = os.path.realpath(args.output_dir)
+    allowed_root = os.path.realpath(os.path.join(BASE_DIR, 'download'))
+    if not real_output.startswith(allowed_root + os.sep) and real_output != allowed_root:
+        print(json.dumps({"error": "output-dir must be inside the download directory"}))
+        sys.exit(1)
 
     if len(args.image_paths) != len(args.cameras):
         print(json.dumps({"error": "image-paths and cameras must have the same length"}))

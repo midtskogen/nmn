@@ -8,8 +8,14 @@
  */
 if ($argc < 3) exit(1);
 
-$cache_file   = $argv[1];
-$pending_file = $argv[2];
+$cache_file   = realpath($argv[1]) ?: $argv[1];
+$pending_file = realpath($argv[2]) ?: $argv[2];
+
+// Constrain both files to the same directory as this script (i.e. server/data/cache).
+$base_dir = realpath(__DIR__ . '/cache');
+if ($base_dir === false || strpos($cache_file, $base_dir . DIRECTORY_SEPARATOR) !== 0 || strpos($pending_file, $base_dir . DIRECTORY_SEPARATOR) !== 0) {
+    exit(1);
+}
 
 if (!file_exists($pending_file)) exit(0);
 
@@ -38,8 +44,8 @@ if (file_exists($cache_file)) {
 foreach ($ips as $ip) {
     if (isset($cache[$ip])) continue;
     if (!filter_var($ip, FILTER_VALIDATE_IP)) continue;
-    $url  = "http://ip-api.com/json/{$ip}?fields=country,countryCode,status";
-    $ctx  = stream_context_create(['http' => ['timeout' => 3]]);
+    $url  = "https://ip-api.com/json/{$ip}?fields=country,countryCode,status";
+    $ctx  = stream_context_create(['http' => ['timeout' => 3], 'ssl' => ['verify_peer' => true, 'verify_peer_name' => true]]);
     $json = @file_get_contents($url, false, $ctx);
     if ($json) {
         $d = json_decode($json, true);
@@ -52,7 +58,7 @@ foreach ($ips as $ip) {
     usleep(250000); // 250ms — stay within free tier (45 req/min)
 }
 
-file_put_contents($cache_file, json_encode($cache, JSON_PRETTY_PRINT));
+file_put_contents($cache_file, json_encode($cache), LOCK_EX);
 flock($lf, LOCK_UN);
 fclose($lf);
 // Do NOT unlink the lock file: a process blocked on flock of the unlinked inode

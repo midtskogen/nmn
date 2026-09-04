@@ -50,49 +50,77 @@ for d in [LOG_DIR, LOCK_DIR, DOWNLOAD_DIR, CACHE_DIR, STREAM_DIR]: os.makedirs(d
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler(LOG_FILE)])
 
+# --- Security helpers for CLI entry points ---
+_SAFE_ID_RE = re.compile(r'^[A-Za-z0-9_\-]+$')
+
+def _safe_id(value, name='id'):
+    """Validate a CLI id/path component so it cannot traverse directories."""
+    if not value or not _SAFE_ID_RE.fullmatch(value):
+        raise ValueError(f"invalid {name}: {value!r}")
+    return value
+
+def _constrain_to_dir(path, allowed_dir):
+    """Resolve *path* and ensure it is inside *allowed_dir*."""
+    real_allowed = os.path.realpath(allowed_dir)
+    real_path = os.path.realpath(path)
+    if not real_path.startswith(real_allowed + os.sep):
+        raise ValueError(f"path escapes allowed directory: {path!r}")
+    return real_path
+
+def _internal_blend_overlay_wrapper(base_media_path, overlay_path, output_path):
+    """Validate paths before calling ffmpeg overlay."""
+    _constrain_to_dir(base_media_path, DOWNLOAD_DIR)
+    _constrain_to_dir(overlay_path, DOWNLOAD_DIR)
+    _constrain_to_dir(output_path, DOWNLOAD_DIR)
+    return apply_ffmpeg_overlay(base_media_path, overlay_path, output_path)
+
 # --- Inline Helper: Robust Video Probing ---
 # Defined here to prevent ImportError crashes if media_processor.py is out of sync.
-def internal_probe_duration(filepath):
-    """Return video duration in seconds, or None if it cannot be determined."""
+_PROBE_CACHE = {}
+
+def _probe_media_file(filepath):
+    """Probe duration, start_time and video codec in a single ffprobe call."""
+    try:
+        mtime = os.path.getmtime(filepath)
+    except OSError:
+        return None
+    key = (filepath, mtime)
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "format=duration,start_time", "stream=codec_name",
+             "-of", "json", filepath],
             capture_output=True, text=True, timeout=10
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
     except Exception:
-        pass
-    return None
+        return None
+    fmt = data.get('format', {})
+    info = {
+        'duration': float(fmt['duration']) if fmt.get('duration') else None,
+        'start_time': float(fmt['start_time']) if fmt.get('start_time') else None,
+        'codec': (data.get('streams', [{}])[0].get('codec_name') or 'unknown').lower(),
+    }
+    _PROBE_CACHE[key] = info
+    return info
+
+def internal_probe_duration(filepath):
+    """Return video duration in seconds, or None if it cannot be determined."""
+    info = _probe_media_file(filepath)
+    return info.get('duration') if info else None
 
 def internal_probe_start_time(filepath):
     """Return container start_time in seconds, or None if it cannot be determined."""
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=start_time",
-             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
-    except Exception:
-        pass
-    return None
+    info = _probe_media_file(filepath)
+    return info.get('start_time') if info else None
 
 def internal_probe_codec(filepath):
-    try:
-        command = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=codec_name",
-            "-of", "default=noprint_wrappers=1:nokey=1", filepath
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            return result.stdout.strip().lower()
-    except Exception:
-        pass
-    return 'unknown'
+    info = _probe_media_file(filepath)
+    return info.get('codec', 'unknown') if info else 'unknown'
 
 # --- Enhance Filter Functions ---
 @numba.jit(nopython=True, cache=True, parallel=True)
@@ -256,6 +284,7 @@ except SyntaxError as e:
 
 HTML_TEMPLATE = """
 <!DOCTYPE html><html lang="en"><head><title>__{{html_title}}__</title>
+<meta name="csrf-token" content="__{{csrf_token}}__">
 <link rel="stylesheet" href="//unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="//unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="//cdn.jsdelivr.net/npm/chart.js"></script>
@@ -1115,8 +1144,12 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                 local_path = os.path.join(DOWNLOAD_DIR, local_name)
                 if not os.path.exists(local_path):
                     by_dir.setdefault(remote_dir, []).append((remote_file, local_path))
+            _safe_remote_name_re = re.compile(r'^[A-Za-z0-9_.\-]+$')
             for remote_dir, file_list in by_dir.items():
                 filenames = [rf for rf, _ in file_list]
+                if not all(_safe_remote_name_re.fullmatch(rf) for rf in filenames):
+                    logging.warning(f"Worker {task_id} - skipping unsafe remote filenames")
+                    continue
                 local_map = {rf: lp for rf, lp in file_list}
                 ssh_cmd = ["ssh"]
                 if ssh_control_socket and os.path.exists(ssh_control_socket):
@@ -1326,13 +1359,6 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             remaining_stitch_jobs = []
             _STITCH_CAM = {'equirect': 8, 'fisheye': 9}
 
-            def get_stitch_display_name(proj, is_hires, is_long):
-                """Generate display name for stitch output based on projection, resolution, and exposure."""
-                prefix = 'eq' if proj == 'equirect' else 'fe'
-                res = 'h' if is_hires else 'l'
-                long = 'l' if is_long else ''
-                return f"{prefix}{res}{long}"
-
             for sjob in stitch_jobs:
                 # Parse res_suffix to determine is_hires and is_long
                 is_hires = 'hires' in sjob['res_suffix']
@@ -1492,6 +1518,7 @@ def cleanup_lock_dir(lock_dir, age_in_days, task_id):
 
 
 def main_download_coordinator(master_task_id, json_payload, user_ip):
+    _safe_id(master_task_id, 'master_task_id')
     status_file = os.path.join(LOCK_DIR, f"{master_task_id}.json")
     pid_file = os.path.join(LOCK_DIR, f"{master_task_id}.pid")
     lock_file = os.path.join(LOCK_DIR, f"{master_task_id}.lock")
@@ -1672,6 +1699,9 @@ def render_template(template, lang_data):
 
 def _download_from_file(master_task_id, payload_file, user_ip):
     """Reads the download JSON payload from a temp file and delegates to the coordinator."""
+    _safe_id(master_task_id, 'master_task_id')
+    # Only accept payload files placed in the lock directory by our PHP front-end.
+    _constrain_to_dir(payload_file, LOCK_DIR)
     try:
         with open(payload_file, 'r') as f:
             json_payload = f.read()
@@ -1697,17 +1727,21 @@ def main():
 
     # Helper function to prevent FFmpeg crashes by ensuring stream directory exists
     def handle_start_stream():
-        task_id = sys.argv[2]
-        station_id = sys.argv[3]
+        task_id = _safe_id(sys.argv[2], 'task_id')
+        station_id = _safe_id(sys.argv[3], 'station_id')
         cam_num = sys.argv[4]
         resolution = sys.argv[5]
         hevc_supported = sys.argv[6].lower() == 'true'
         user_ip = sys.argv[7]
-        
+        if not cam_num.isdigit():
+            raise ValueError(f"invalid camera number: {cam_num!r}")
+        if resolution not in ('lowres', 'hires'):
+            raise ValueError(f"invalid resolution: {resolution!r}")
+
         # Explicitly create the stream subdirectory (e.g., streams/ams173_1_hires)
         stream_subdir = os.path.join(STREAM_DIR, f"{station_id}_{cam_num}_{resolution}")
         os.makedirs(stream_subdir, exist_ok=True)
-        
+
         start_stream_relay(task_id, station_id, cam_num, resolution, user_ip, hevc_supported)
 
     # --- Global Exception Handling Wrapper ---
@@ -1753,20 +1787,25 @@ def main():
             "_internal_start_stream": handle_start_stream,
             "stop_stream": lambda: stop_stream_relay(sys.argv[2]),
             "request_transcode": lambda: print(json.dumps(request_stream_transcode(sys.argv[2]))),
-            "_internal_blend_overlay": lambda: sys.exit(0 if apply_ffmpeg_overlay(sys.argv[2], sys.argv[3], sys.argv[4]) else 1)
+            "_internal_blend_overlay": lambda: sys.exit(0 if _internal_blend_overlay_wrapper(sys.argv[2], sys.argv[3], sys.argv[4]) else 1)
         }
 
         if action in actions:
             actions[action]()
         elif action == "get_page":
-            lang_file = sys.argv[2]
+            lang_dir = os.path.join(BASE_DIR, 'lang')
+            lang_file = os.path.realpath(os.path.join(lang_dir, os.path.basename(sys.argv[2])))
+            _constrain_to_dir(lang_file, lang_dir)
             with open(lang_file, 'r', encoding='utf-8') as f:
                 lang_data = json.load(f)
+            # Inject CSRF token supplied by index.php via an extra CLI argument.
+            lang_data['csrf_token'] = sys.argv[3] if len(sys.argv) > 3 else ''
             print(render_template(HTML_TEMPLATE, lang_data))
         elif action in ["cancel", "cleanup"]:
-            master_task_id = sys.argv[2]
+            master_task_id = _safe_id(sys.argv[2], 'master_task_id')
             if action == "cancel":
                 pid_file = os.path.join(LOCK_DIR, f"{master_task_id}.pid")
+                _constrain_to_dir(pid_file, LOCK_DIR)
                 if os.path.exists(pid_file):
                     try:
                         with open(pid_file, 'r') as f: pid = int(f.read().strip())
@@ -1786,15 +1825,15 @@ def main():
                     try: os.remove(os.path.join(LOCK_DIR, f))
                     except OSError: pass
             for f in os.listdir(DOWNLOAD_DIR):
-                if f.endswith(".part") or ".tmp" in f:
+                if f.endswith(".part") or f.endswith(".tmp"):
                     try: os.remove(os.path.join(DOWNLOAD_DIR, f))
                     except OSError: pass
     except Exception as e:
         # Prevent "Unexpected end of JSON input" by ensuring valid JSON error is printed
         # Note: Do not print for 'download' action as it runs in background/detached
+        logging.exception(f"Unhandled exception in controller action {action}: {e}")
         if action != 'download' and action != '_internal_download_station':
-            error_json = json.dumps({"error": f"Internal Server Error: {str(e)}"})
-            print(error_json)
+            print(json.dumps({"error": "error_internal"}))
         sys.exit(1)
 
 if __name__ == "__main__":

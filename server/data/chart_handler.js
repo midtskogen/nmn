@@ -67,14 +67,20 @@ export function initChart(translationFunc) {
  */
 export function plotAuroraChart(ctx, data, onBarClick) {
     chartData = data;
+    const labels = [], values = [], colors = [];
+    data.forEach(d => {
+        labels.push(d.label);
+        values.push(d.value);
+        colors.push(d.value >= 5 ? 'rgba(255, 99, 132, 0.9)' : d.value >= 4 ? 'rgba(255, 206, 86, 0.9)' : 'rgba(75, 192, 192, 0.9)');
+    });
     auroraChart = new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: data.map(d => d.label),
+            labels,
             datasets: [{
                 label: t('chart_kp_label'),
-                data: data.map(d => d.value),
-                backgroundColor: data.map(d => d.value >= 5 ? 'rgba(255, 99, 132, 0.9)' : d.value >= 4 ? 'rgba(255, 206, 86, 0.9)' : 'rgba(75, 192, 192, 0.9)'),
+                data: values,
+                backgroundColor: colors,
                 borderColor: 'rgba(100, 100, 100, 0.5)',
                 borderWidth: 1
             }]

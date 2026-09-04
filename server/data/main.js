@@ -152,7 +152,7 @@ function initializeApp() {
             mapHandler.setLightningData(lightning);
 
             // Refresh station markers now that meteor counts are available
-            Object.entries(mapHandler.getStationMarkers()).forEach(([id, marker]) => {
+            mapHandler.getStationMarkers().forEach((marker, id) => {
                 if (!selectedStations.has(id)) {
                     marker.setIcon(getBaseIconForStation(id));
                 }
@@ -405,8 +405,8 @@ function initializeApp() {
             uiManager.showStationStatsLoading(stationCode);
             api.fetchStationStats(stationId, stationStatsStart, stationStatsEnd).then(data => {
                 if (selectedStations.size !== 1 || !selectedStations.has(stationId)) return;
-                const codeToId = {};
-                Object.entries(stationsData).forEach(([id, s]) => { codeToId[s.station.code] = id; });
+                const codeToId = new Map();
+                Object.entries(stationsData).forEach(([id, s]) => { codeToId.set(s.station.code, id); });
                 uiManager.displayStationStats(data, {
                     onDateRangeChange: (s, e) => { stationStatsStart = s; stationStatsEnd = e; refreshStationStats(); },
                     onEventClick: (timestamp) => {
@@ -421,16 +421,18 @@ function initializeApp() {
                     onEventHover: (stationCodes) => {
                         const markers = mapHandler.getStationMarkers();
                         stationCodes.forEach(code => {
-                            const sid = codeToId[code];
-                            if (sid && markers[sid]) markers[sid].setIcon(mapHandler.yellowIcon);
+                            const sid = codeToId.get(code);
+                            const marker = sid && markers.get(sid);
+                            if (marker) marker.setIcon(mapHandler.yellowIcon);
                         });
                     },
                     onEventLeave: (stationCodes) => {
                         const markers = mapHandler.getStationMarkers();
                         stationCodes.forEach(code => {
-                            const sid = codeToId[code];
-                            if (sid && markers[sid]) {
-                                markers[sid].setIcon(selectedStations.has(sid) ? mapHandler.redIcon : getBaseIconForStation(sid));
+                            const sid = codeToId.get(code);
+                            const marker = sid && markers.get(sid);
+                            if (marker) {
+                                marker.setIcon(selectedStations.has(sid) ? mapHandler.redIcon : getBaseIconForStation(sid));
                             }
                         });
                     }
@@ -522,7 +524,7 @@ passData.passes : aircraftData.crossings;
         handlePassHeaderClick(pass.pass_id || pass.crossing_id, type);
         const clickedStationId = event.station_id;
         const clickedCamera = event.camera;
-        const camCheckbox = document.querySelector(`input[name="cameras"][value="${clickedCamera}"]`);
+        const camCheckbox = [...document.querySelectorAll('input[name="cameras"]')].find(cb => String(cb.value) === String(clickedCamera));
         if (isFirstCameraClickSincePassChange || activeStationForSelection !== clickedStationId) {
             document.querySelectorAll('input[name="cameras"]').forEach(cb => cb.checked = false);
             activeStationForSelection = clickedStationId;
@@ -550,9 +552,9 @@ passData.passes : aircraftData.crossings;
         if (cameraGroup) cameraGroup.style.opacity = '';
         document.querySelectorAll('input[name="cameras"]').forEach(cb => { cb.disabled = false; });
 
-        Object.keys(mapHandler.getStationMarkers()).forEach(stationId => {
+        mapHandler.getStationMarkers().forEach((marker, stationId) => {
             const baseIcon = getBaseIconForStation(stationId);
-            mapHandler.updateStationMarkerIcon(stationId, selectedStations.has(stationId) ? mapHandler.redIcon : baseIcon);
+            marker.setIcon(selectedStations.has(stationId) ? mapHandler.redIcon : baseIcon);
         });
         uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
         uiManager.updateFormFromSelection(dom, selectedStations, pass.pass_id || pass.crossing_id, pass, mapHandler, stationsData);
@@ -575,7 +577,7 @@ passData.passes : aircraftData.crossings;
         if (nearestStation) {
             selectedStations.clear();
             selectedStations.add(nearestStation.station.id);
-            Object.values(mapHandler.getStationMarkers()).forEach(m => {
+            mapHandler.getStationMarkers().forEach(m => {
                 const baseIcon = getBaseIconForStation(m.stationId);
                 m.setIcon(selectedStations.has(m.stationId) ? mapHandler.redIcon : baseIcon);
             });
@@ -617,7 +619,7 @@ passData.passes : aircraftData.crossings;
         dom.dateInput.dispatchEvent(new Event('change'));
         selectedStations.clear();
         (meteor.station_ids || []).forEach(id => selectedStations.add(id));
-        Object.entries(mapHandler.getStationMarkers()).forEach(([id, marker]) => {
+        mapHandler.getStationMarkers().forEach((marker, id) => {
             const baseIcon = getBaseIconForStation(id);
             marker.setIcon(selectedStations.has(id) ? mapHandler.redIcon : baseIcon);
         });
@@ -626,14 +628,14 @@ passData.passes : aircraftData.crossings;
 
     function handleMeteorMouseover(meteor) {
         (meteor.station_ids || []).forEach(id => {
-            const marker = mapHandler.getStationMarkers()[id];
+            const marker = mapHandler.getStationMarkers().get(id);
             if (marker) marker.setIcon(mapHandler.yellowIcon);
         });
     }
 
     function handleMeteorMouseout(meteor) {
         (meteor.station_ids || []).forEach(id => {
-            const marker = mapHandler.getStationMarkers()[id];
+            const marker = mapHandler.getStationMarkers().get(id);
             if (marker) {
                 const baseIcon = getBaseIconForStation(id);
                 marker.setIcon(selectedStations.has(id) ? mapHandler.redIcon : baseIcon);
@@ -779,7 +781,7 @@ passData.passes : aircraftData.crossings;
     function resetAll() {
         uiManager.setDefaultFormValues();
         selectedStations.clear();
-        Object.values(mapHandler.getStationMarkers()).forEach(marker => {
+        mapHandler.getStationMarkers().forEach(marker => {
             marker.setIcon(getBaseIconForStation(marker.stationId));
         });
         uiManager.updateSelectedStationsUI(selectedStations, stationsData, startLiveStream);
@@ -811,7 +813,8 @@ passData.passes : aircraftData.crossings;
     function initEventListeners() {
         document.getElementById('language-selector').addEventListener('click', (e) => {
             if (e.target.dataset.lang) {
-                document.cookie = `lang=${e.target.dataset.lang};path=/;max-age=31536000`;
+                const isHttps = location.protocol === 'https:';
+                document.cookie = `lang=${encodeURIComponent(e.target.dataset.lang)}; Path=/; Max-Age=31536000; SameSite=Lax${isHttps ? '; Secure' : ''}`;
                 location.reload();
             }
       
@@ -1341,6 +1344,8 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
             } else {
                 const script = document.createElement('script');
                 script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                script.integrity = 'sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H';
+                script.crossOrigin = 'anonymous';
                 script.onload = () => {
                     isProcessingSnapshot = false;
                     const btn = document.getElementById('map-snapshot-btn');
@@ -1469,7 +1474,10 @@ new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(
             if (!currentTaskId) return;
             clearInterval(statusInterval);
             api.cancelTask(currentTaskId);
-            dom.resultsLog.prepend(createEl('p', { innerHTML: `<strong>${t('download_cancelled')}</strong>`, className: 'error-msg' }));
+            const cancelMsg = createEl('p', { className: 'error-msg' });
+            const strong = createEl('strong', { textContent: t('download_cancelled') });
+            cancelMsg.appendChild(strong);
+            dom.resultsLog.prepend(cancelMsg);
             currentTaskId = null;
             dom.progressContainer.style.display = 'none';
        

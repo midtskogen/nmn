@@ -2766,7 +2766,7 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
         // whenever either changes (initial load, enhance filter, checkbox toggle).
         const mirrorLayer = (sourceImg, rollLayer) => {
             const sync = () => {
-                rollLayer.style.backgroundImage = sourceImg.src ? `url("${sourceImg.src}")` : 'none';
+                rollLayer.style.backgroundImage = sourceImg.src ? `url("${encodeURI(sourceImg.src).replace(/"/g, '%22')}")` : 'none';
             };
             new MutationObserver(sync).observe(sourceImg, { attributes: true, attributeFilter: ['src'] });
             sync();
@@ -3340,8 +3340,8 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
 
             // 3. Wait a moment for backend FFmpeg to restart (1.5s is usually enough)
             setTimeout(() => {
-                const playlistUrl = `streams/${data.station_id}_${cameraNum}_${data.resolution}/playlist.m3u8`;
-                
+                const playlistUrl = `streams/${stationId}_${cameraNum}_${resolution}/playlist.m3u8`;
+
                 if (hls) {
                     hls.stopLoad();
                     // hls.recoverMediaError() might not be enough if codec changed completely
@@ -4186,7 +4186,25 @@ export function updateTaskProgress(panelType, data) {
     if (!container) {
         const listEl = document.getElementById(`${panelType}-list`);
         if (listEl) {
-            listEl.innerHTML = `<div id="${containerId}" style="width: 95%; margin: 0 auto;"><p>${t('progress_please_wait', { message: `<span id="${panelType}-progress-text">${t('progress_calculating')}</span>`})}</p><div class="progress-bar-outline"><div id="${panelType}-progress-bar-inner" class="progress-bar-inner" style="width: 0%;"></div></div></div>`;
+            const progressTextId = `${panelType}-progress-text`;
+            const barId = `${panelType}-progress-bar-inner`;
+            container = createEl('div', { id: containerId, style: 'width: 95%; margin: 0 auto;' });
+            const progressText = createEl('span', { id: progressTextId, textContent: t('progress_calculating') });
+            // Insert the progress text span into the {message} placeholder of the
+            // translation, without using innerHTML on user/remote data.
+            const messageTemplate = t('progress_please_wait', { message: '{message}' });
+            const [before, after] = messageTemplate.split('{message}');
+            const para = createEl('p');
+            if (before) para.appendChild(document.createTextNode(before));
+            para.appendChild(progressText);
+            if (after) para.appendChild(document.createTextNode(after));
+            const bar = createEl('div', { id: barId, className: 'progress-bar-inner', style: 'width: 0%;' });
+            const barOutline = createEl('div', { className: 'progress-bar-outline' });
+            barOutline.appendChild(bar);
+            container.appendChild(para);
+            container.appendChild(barOutline);
+            listEl.innerHTML = '';
+            listEl.appendChild(container);
         }
     }
     const progressBar = document.getElementById(`${panelType}-progress-bar-inner`);

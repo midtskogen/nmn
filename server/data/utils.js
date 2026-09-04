@@ -13,24 +13,39 @@ export const TO_DEG = 180 / Math.PI;
  * or `dataset` for data-* attributes.
  * @returns {HTMLElement} The newly created and configured HTML element.
  */
+const FORBIDDEN_KEYS = ['__proto__', 'constructor', 'prototype'];
+
 export const createEl = (tag, options = {}) => {
     const el = document.createElement(tag);
     // Destructure the options to handle 'dataset' and 'style' as special cases.
     const { dataset, style, ...otherOptions } = options;
     // Assign all standard properties (like className, textContent, id, etc.) directly to the element.
-    Object.assign(el, otherOptions);
+    for (const [key, value] of Object.entries(otherOptions)) {
+        if (FORBIDDEN_KEYS.includes(key)) continue;
+        if (key === 'innerHTML') {
+            el.textContent = value;
+        } else {
+            el[key] = value;
+        }
+    }
     // Handle style: support both string (cssText) and object (individual properties).
     if (style) {
         if (typeof style === 'string') {
             el.style.cssText = style;
         } else {
-            Object.assign(el.style, style);
+            for (const [key, value] of Object.entries(style)) {
+                if (FORBIDDEN_KEYS.includes(key)) continue;
+                el.style[key] = value;
+            }
         }
     }
     // If a `dataset` object was provided in the options, iterate over its keys
     // and assign them as `data-*` attributes on the element.
     if (dataset) {
-        Object.assign(el.dataset, dataset);
+        for (const [key, value] of Object.entries(dataset)) {
+            if (FORBIDDEN_KEYS.includes(key)) continue;
+            el.dataset[key] = value;
+        }
     }
 
     return el;

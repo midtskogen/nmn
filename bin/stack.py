@@ -6,6 +6,7 @@ import typing
 import logging
 import subprocess
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -217,27 +218,43 @@ def video_stack_worker(task: dict, resize_factor: float = 1.0, use_hw_accel: boo
     ffmpeg_command.extend(["-f", "rawvideo", "-pix_fmt", output_pix_fmt, "pipe:1"])
     
     proc = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
+
+    # Drain stderr asynchronously so ffmpeg cannot deadlock if it logs > pipe buffer.
+    stderr_lines = []
+    def _drain_stderr():
+        for line in iter(proc.stderr.readline, b''):
+            stderr_lines.append(line)
+        proc.stderr.close()
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     y_size, uv_size = width * height, (width // 2) * (height // 2)
     frame_size = y_size + uv_size * 2
-    
-    while True:
-        frame_data = proc.stdout.read(frame_size)
-        if len(frame_data) < frame_size:
-            break
-        
-        y_plane = np.frombuffer(frame_data, dtype=np.uint8, count=y_size, offset=0).reshape((height, width))
-        u_plane = np.frombuffer(frame_data, dtype=np.uint8, count=uv_size, offset=y_size).reshape((height // 2, width // 2))
-        v_plane = np.frombuffer(frame_data, dtype=np.uint8, count=uv_size, offset=y_size + uv_size).reshape((height // 2, width // 2))
-        jit_stack_planes(luma_stack, chroma_u_stack, chroma_v_stack, y_plane, u_plane, v_plane)
 
-    return_code = proc.wait()
+    try:
+        while True:
+            frame_data = proc.stdout.read(frame_size)
+            if len(frame_data) < frame_size:
+                break
+
+            y_plane = np.frombuffer(frame_data, dtype=np.uint8, count=y_size, offset=0).reshape((height, width))
+            u_plane = np.frombuffer(frame_data, dtype=np.uint8, count=uv_size, offset=y_size).reshape((height // 2, width // 2))
+            v_plane = np.frombuffer(frame_data, dtype=np.uint8, count=uv_size, offset=y_size + uv_size).reshape((height // 2, width // 2))
+            jit_stack_planes(luma_stack, chroma_u_stack, chroma_v_stack, y_plane, u_plane, v_plane)
+
+        return_code = proc.wait(timeout=1800)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stderr_thread.join(timeout=2)
+        raise StackingError(f"ffmpeg timed out for {video_path}")
+    finally:
+        proc.stdout.close()
+
+    stderr_thread.join(timeout=5)
     if return_code != 0:
-        stderr_output = proc.stderr.read().decode('utf-8')
+        stderr_output = b''.join(stderr_lines).decode('utf-8')
         log.error(f"ffmpeg process for {video_path} failed with exit code {return_code}:\n{stderr_output}")
 
-    proc.stdout.close(); proc.stderr.close()
-    
     return luma_stack, chroma_u_stack, chroma_v_stack, task
 
 def stack_video_frames(video_paths: list, output_path: str,

@@ -2,5 +2,9 @@ __pycache__/
 *.pyc
 *.pyo
 server/data/cameras.json
+# Private configuration / credentials outside the web root
+/etc/
+server/data/credentials.json
+server/data/config.json
 # Generated tetra3 pattern database (built from stars.py on first run)
 bin/data/tetra3_stars*.npz

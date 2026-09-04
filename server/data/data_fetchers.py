@@ -33,10 +33,20 @@ CAMERAS_FILE = os.path.join(BASE_DIR, 'cameras.json')
 CAMERA_FOV_CACHE_FILE = os.path.join(CACHE_DIR, 'camera_fov_cache.json')
 # Defines the path to the meteor data directory, which is located outside the web application's root.
 METEOR_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'meteor'))
+# Private configuration/credential directory outside the web root.
+SECRETS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'etc'))
 
 # A cache for API credentials and the nearest weather station lookup to avoid repeated API calls
 FROST_API_CREDS = None
 NEAREST_STATION_CACHE = {}
+
+def _default_config_path():
+    if path := os.environ.get('NMN_CONFIG_FILE'):
+        return path
+    secret_path = os.path.join(SECRETS_DIR, 'config.json')
+    if os.path.isfile(secret_path):
+        return secret_path
+    return os.path.join(BASE_DIR, 'config.json')
 
 def _load_frost_api_creds():
     """Loads and caches Frost API credentials from config.json."""
@@ -44,7 +54,7 @@ def _load_frost_api_creds():
     if FROST_API_CREDS is not None:
         return FROST_API_CREDS
     try:
-        with open(os.environ.get('NMN_CONFIG_FILE', os.path.join(BASE_DIR, 'config.json')), 'r') as f:
+        with open(_default_config_path(), 'r') as f:
             config = json.load(f)
         FROST_API_CREDS = (config['frost_api']['client_id'], config['frost_api']['client_secret'])
         return FROST_API_CREDS

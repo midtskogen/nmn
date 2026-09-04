@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import io
 import json
 import subprocess
 import logging
@@ -36,12 +37,62 @@ STREAM_TIME_LIMITS_SECONDS = {
     'quota': {'lowres': 30 * 60, 'hires': 10 * 60}    # Quota stations: 30min low-res, 10min high-res
 }
 
+_SAFE_ID_RE = re.compile(r'^[A-Za-z0-9_\-]+$')
+_SAFE_STATUS_MSG_RE = re.compile(r'^[a-zA-Z0-9_\-|]+$')
+
+
+def _safe_id(value, name='id'):
+    """Validate a CLI/path token so it cannot traverse directories."""
+    if not value or not _SAFE_ID_RE.fullmatch(str(value)):
+        raise ValueError(f"invalid {name}: {value!r}")
+    return value
+
+
+def _safe_status_message(exc):
+    """Return a translation-key error string, never raw stderr/paths."""
+    msg = str(exc)
+    return msg if _SAFE_STATUS_MSG_RE.fullmatch(msg) else "error_camera_failed"
+
+
+def _load_stations_data():
+    if not os.path.exists(STATIONS_FILE):
+        return {}
+    try:
+        return read_json_file(STATIONS_FILE) or {}
+    except Exception:
+        return {}
+
+
+def _validate_station(station_id, stations_data):
+    _safe_id(station_id, 'station_id')
+    if station_id not in stations_data:
+        raise ValueError(f"unknown station: {station_id}")
+    return station_id
+
+
+def _validate_camera(cam_num):
+    if not str(cam_num).isdigit():
+        raise ValueError(f"invalid camera number: {cam_num}")
+    return int(cam_num)
+
+
+def _validate_timestamp(ts):
+    try:
+        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    except ValueError as e:
+        raise ValueError(f"invalid timestamp: {ts!r}") from e
+
 
 def fetch_grid_file(stream_task_id, station_id, camera_num):
     """
     Fetches the calibration grid image for a specific camera from a remote station.
     This allows the user to overlay a grid on the live video stream for reference.
     """
+    _safe_id(stream_task_id, 'stream_task_id')
+    stations_data = _load_stations_data()
+    _validate_station(station_id, stations_data)
+    _validate_camera(camera_num)
+
     log_prefix = f"GridFetch for {stream_task_id} -"
    
     logging.info(f"{log_prefix} Request for {station_id} cam {camera_num}.")
@@ -113,6 +164,11 @@ def fetch_annotation_file(stream_task_id, station_id, camera_num):
     Uses the cached grid PNG as a base and draws star positions on top using drawgrid.py.
     Requires the lens.pto calibration file from the remote station.
     """
+    _safe_id(stream_task_id, 'stream_task_id')
+    stations_data = _load_stations_data()
+    _validate_station(station_id, stations_data)
+    _validate_camera(camera_num)
+
     log_prefix = f"AnnotationFetch for {stream_task_id} -"
     logging.info(f"{log_prefix} Request for {station_id} cam {camera_num}.")
 
@@ -203,6 +259,8 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
     For archive videos, we use the current grid.png (calibration doesn't change often).
     Returns a web-accessible URL path.
     """
+    _validate_camera(cam_num)
+    _validate_timestamp(timestamp)
     # Map station code to station ID
     station_id = None
     for sid, s in stations_data.items():
@@ -213,6 +271,7 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
     if not station_id:
         logging.error(f"[ArchiveGrid] Station code {station_code} not found in stations data")
         return {"success": False, "error": "error_station_not_found"}
+    _safe_id(station_id, 'station_id')
 
     log_prefix = f"[ArchiveGrid {station_id}_cam{cam_num}]"
     logging.info(f"{log_prefix} Request for timestamp={timestamp}")
@@ -325,6 +384,7 @@ def get_stitch_cam_boundaries(station_id_arg: str, projection: str, stations_dat
     if not station_data:
         return {"success": False, "error": "error_station_not_found"}
 
+    _safe_id(station_id, 'station_id')
     resolution = resolution if resolution in ('hires', 'lowres') else 'hires'
     log_prefix = f"[CamBounds {station_id} {projection} {resolution}]"
 
@@ -398,8 +458,14 @@ def get_stitch_cam_boundaries(station_id_arg: str, projection: str, stations_dat
 
         tar_dir = os.path.join(workdir, "tar")
         os.makedirs(tar_dir, exist_ok=True)
-        subprocess.run(["tar", "-x", "-f", "-", "-C", tar_dir],
-                       input=result.stdout, capture_output=True, timeout=30)
+        import tarfile
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode='r:') as tar:
+            for member in tar.getmembers():
+                dest_path = os.path.realpath(os.path.join(tar_dir, member.name))
+                if not dest_path.startswith(os.path.realpath(tar_dir) + os.sep):
+                    logging.warning(f"{log_prefix} Refusing tar member {member.name!r}: escapes tar_dir")
+                    continue
+                tar.extract(member, tar_dir)
 
         lens_files = []
         for c in cam_nums:
@@ -548,6 +614,8 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
     Uses the video's timestamp to calculate star positions.
     Returns a web-accessible URL path.
     """
+    _validate_camera(cam_num)
+    _validate_timestamp(timestamp)
     # Map station code to station ID
     station_id = None
     for sid, s in stations_data.items():
@@ -558,6 +626,7 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
     if not station_id:
         logging.error(f"[ArchiveAnnotation] Station code {station_code} not found in stations data")
         return {"success": False, "error": "error_station_not_found"}
+    _safe_id(station_id, 'station_id')
 
     log_prefix = f"[ArchiveAnnotation {station_id}_cam{cam_num}]"
     logging.info(f"{log_prefix} Request for timestamp={timestamp}")
@@ -647,6 +716,7 @@ def get_archive_mask_overlay(station_code, cam_num, stations_data):
     image/video visually masks out everything but the sky.
     Returns a web-accessible URL path.
     """
+    _validate_camera(cam_num)
     # Map station code to station ID
     station_id = None
     for sid, s in stations_data.items():
@@ -657,6 +727,7 @@ def get_archive_mask_overlay(station_code, cam_num, stations_data):
     if not station_id:
         logging.error(f"[ArchiveMask] Station code {station_code} not found in stations data")
         return {"success": False, "error": "error_station_not_found"}
+    _safe_id(station_id, 'station_id')
 
     log_prefix = f"[ArchiveMask {station_id}_cam{cam_num}]"
     logging.info(f"{log_prefix} Request")
@@ -787,6 +858,7 @@ def request_stream_transcode(task_id):
     Sets the hot-swap command in an active stream's status file, asking the
     stream's monitor loop to restart FFmpeg with H.264 transcoding.
     """
+    _safe_id(task_id, 'task_id')
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     if not os.path.exists(status_file):
         return {"success": False, "error": "stream_not_found"}
@@ -804,6 +876,7 @@ def stop_stream_relay(task_id):
     """
     Stops all processes associated with a stream task and cleans up all related files.
     """
+    _safe_id(task_id, 'task_id')
     logging.info(f"Stopping stream task: {task_id}")
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     
@@ -836,10 +909,13 @@ def stop_stream_relay(task_id):
             if os.path.exists(f):
                 try: os.remove(f)
                 except OSError as e: logging.error(f"Error removing control file {f}: {e}")
-        if os.path.exists(stream_dir):
-         
+        real_stream_dir = os.path.realpath(stream_dir)
+        real_stream_dir_parent = os.path.realpath(STREAM_DIR)
+        if real_stream_dir.startswith(real_stream_dir_parent + os.sep) and os.path.exists(stream_dir):
             shutil.rmtree(stream_dir, ignore_errors=True)
             logging.info(f"Removed stream directory: {stream_dir}")
+        else:
+            logging.error(f"Refusing to remove non-stream directory: {stream_dir}")
 
 
 def _cleanup_stale_stream_locks(log_prefix):
@@ -876,11 +952,31 @@ def _start_ssh_tunnel(station_id, camera_num):
     Establishes an SSH tunnel to a remote station.
     This forwards a local port to the camera's RTSP stream port on the station's internal network.
     """
+    stations_data = _load_stations_data()
+    _validate_station(station_id, stations_data)
+    camera_num = _validate_camera(camera_num)
     log_prefix = f"SSH-Tunnel {station_id}-{camera_num} -"
     local_port = _get_free_port()
+    # Use a persistent host-key file instead of /dev/null.  The key file is
+    # created lazily with restrictive permissions below.
+    host_key_file = os.path.join(LOCK_DIR, 'ssh_known_hosts')
+    try:
+        # Best-effort: ensure www-data can write the accept-new key file.
+        if not os.path.exists(host_key_file):
+            open(host_key_file, 'a').close()
+        os.chmod(host_key_file, 0o600)
+    except OSError:
+        pass
     # The command forwards the local port to the camera's fixed IP and port.
-    ssh_command = ["ssh", "-o", "RequestTTY=no", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ExitOnForwardFailure=yes", "-N", "-L", f"{local_port}:192.168.76.7{camera_num}:554", station_id]
-    
+    ssh_command = [
+        "ssh", "-o", "RequestTTY=no",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={host_key_file}",
+        "-o", "ExitOnForwardFailure=yes", "-N", "-L",
+        f"{local_port}:192.168.76.7{camera_num}:554",
+        station_id
+    ]
+
     logging.info(f"{log_prefix} Attempting to establish tunnel on port {local_port} with command: {' '.join(ssh_command)}")
     process = subprocess.Popen(ssh_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     # Avoid a fixed sleep here; instead, quickly detect failure or readiness.
@@ -888,8 +984,8 @@ def _start_ssh_tunnel(station_id, camera_num):
     while True:
         if process.poll() is not None:
             stderr_output = process.stderr.read().decode('utf-8', errors='ignore').strip()
-            error_message = f"error_ssh_tunnel_failed_with_msg|error={stderr_output}" if stderr_output else "error_ssh_process_terminated"
-            logging.error(f"{log_prefix} FAILED. {error_message}")
+            error_message = "error_ssh_tunnel_failed"
+            logging.error(f"{log_prefix} FAILED. {error_message}: {stderr_output}")
             raise RuntimeError(error_message)
         try:
             with socket.create_connection(("127.0.0.1", local_port), timeout=0.3):
@@ -1069,6 +1165,13 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
     Main function to orchestrate the entire live stream setup process.
     Supports dynamic switching to H.264 transcoding without dropping the SSH tunnel.
     """
+    _safe_id(task_id, 'task_id')
+    stations_data = _load_stations_data()
+    _validate_station(station_id, stations_data)
+    camera_num = _validate_camera(camera_num)
+    if resolution not in ('lowres', 'hires'):
+        raise ValueError(f"invalid resolution: {resolution!r}")
+
     stream_start_time = time.time()
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     log_prefix = f"StreamRelay {task_id} -"
@@ -1154,8 +1257,9 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
 
         # Ensure playlist is ready (or error) before marking ready.
         waiter_thread.join(timeout=12)
-        if playlist_ready["error"]:
-            raise playlist_ready["error"]
+        playlist_error = playlist_ready["error"]
+        if playlist_error is not None:
+            raise playlist_error
         if not playlist_ready["ts"]:
             raise RuntimeError("Playlist waiter did not finish in time.")
 
@@ -1240,7 +1344,7 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
     except Exception as e:
  
         logging.error(f"Error in stream task {task_id}: {e}")
-        update_status(status_file, "camera_failed", {"message": str(e)})
+        update_status(status_file, "camera_failed", {"message": _safe_status_message(e)})
     finally:
         # Ensures all spawned processes are killed on exit.
         if ssh_process and ssh_process.poll() is None:

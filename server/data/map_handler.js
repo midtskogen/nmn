@@ -1,12 +1,12 @@
 import { createEl, TO_RAD, TO_DEG } from './utils.js';
-import { calculateBearing, destinationPoint } from './calculations.js';
+import { calculateBearing, destinationPoint, getSunAltitude } from './calculations.js';
 
 // --- Module-scoped variables to hold map state ---
 let map;
 let cloudLayer = null, auroraLayer = null, terminatorLayer = null;
 let lightningLayer = null, selectedLightningMarker = null, meteorLayer = null;
 let meteorCountLayer = null;
-let stationMarkers = {}, groundTrackLayers = {}, bearingLineLayer = null;
+let stationMarkers = new Map(), groundTrackLayers = new Map(), bearingLineLayer = null;
 let passData = {}, aircraftData = {}, lightningData = [], meteorData = [];
 let meteorCounts = null;
 let trackClickCallback = null;
@@ -20,65 +20,7 @@ export const yellowIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/poi
 export const greyIcon = new L.Icon({ iconUrl: '//raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-grey.png', ...iconOptions, shadowUrl: '//cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png' });
 const createLightningIcon = (color, size) => L.divIcon({ className: `lightning-icon lightning-icon-${color} icon-size-${size}`, html: '⚡', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
-/**
- * Calculates the sun's altitude for a given time and location.
- * @param {Date} date The date object for the calculation.
- * @param {number} lat Latitude in degrees.
- * @param {number} lon Longitude in degrees.
- * @returns {number} The sun's altitude in degrees.
- */
-function getSunAltitude(date, lat, lon) {
-    const dayOfYear = (Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - Date.UTC(date.getUTCFullYear(), 0, 0)) / 864e5;
-    const latRad = lat * TO_RAD;
-
-    const solarDeclination = (0.006918 - 0.399912 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
-        + 0.070257 * Math.sin(2 * Math.PI * (dayOfYear - 1) / 365.24)
-        - 0.006758 * Math.cos(4 * Math.PI * (dayOfYear - 1) / 365.24)
-        + 0.000907 * Math.sin(4 * Math.PI * (dayOfYear - 1) / 365.24)
-        - 0.002697 * Math.cos(6 * Math.PI * (dayOfYear - 1) / 365.24)
-        + 0.00148 * Math.sin(6 * Math.PI * (dayOfYear - 1) / 365.24));
-
-    const eqtime = 229.18 * (0.000075 + 0.001868 * Math.cos(2 * Math.PI * (dayOfYear - 1) / 365.24)
-        - 0.032077 * Math.sin(2 * Math.PI * (dayOfYear - 1) / 365.24)
-        - 0.014615 * Math.cos(4 * Math.PI * (dayOfYear - 1) / 365.24)
-        - 0.040849 * Math.sin(4 * Math.PI * (dayOfYear - 1) / 365.24));
-    
-    const timeOffset = eqtime + 4 * lon;
-    const trueSolarTime = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60 + timeOffset;
-    const hourAngle = (trueSolarTime / 4) - 180;
-    const hourAngleRad = hourAngle * TO_RAD;
-
-    const sinAltitude = Math.sin(latRad) * Math.sin(solarDeclination) + Math.cos(latRad) * Math.cos(solarDeclination) * Math.cos(hourAngleRad);
-    return TO_DEG * Math.asin(sinAltitude);
-}
-
 // --- Custom Leaflet Layer Extensions ---
-L.TileLayer.WhiteToTransparent = L.TileLayer.extend({
-    createTile: function (coords, done) {
-        const tile = document.createElement('canvas');
-        const size = this.getTileSize();
-        tile.width = size.x*2;
-        tile.height = size.y*2;
-        const ctx = tile.getContext('2d');
-        const img = document.createElement('img');
-
-        img.onload = () => {
-            ctx.drawImage(img, 0, 0);
-            const imageData = ctx.getImageData(0, 0, size.x*2, size.y*2);
-            const data = imageData.data;
-            for (let i = 0; i < data.length; i += 4) {
-                data[i] = data[i + 1] = data[i + 2] = data[i + 3] = 255 - data[i];
-            }
-            ctx.putImageData(imageData, 0, 0);
-            done(null, tile);
-        };
-        img.onerror = () => done(new Error('Tile load error'), tile);
-        img.crossOrigin = "Anonymous";
-        img.src = this.getTileUrl(coords);
-        return tile;
-    }
-});
-
 L.GridLayer.Terminator = L.GridLayer.extend({
     options: { date: null },
     createTile: function (coords) {
@@ -208,7 +150,7 @@ function updateMeteorStationCountBadges() {
 
     meteorCountLayer = L.layerGroup();
     Object.entries(countsByStation || derivedCountsByStation).forEach(([stationId, counts]) => {
-        const stationMarker = stationMarkers[stationId];
+        const stationMarker = stationMarkers.get(stationId);
         if (!stationMarker) return;
 
         let total = null;
@@ -243,11 +185,13 @@ export function addStationMarker(stationId, station, onClick, initialIcon = blue
     marker.stationId = stationId;
     const n = station.station.name || '';
     const stationDisplayName = station.station.display_name || (n.charAt(0).toUpperCase() + n.slice(1));
-    marker.bindTooltip(`<b>${station.station.code} ${stationDisplayName} ${stationId}</b>`).on('click', onClick);
-    stationMarkers[stationId] = marker;
+    const tooltipEl = document.createElement('b');
+    tooltipEl.textContent = `${station.station.code} ${stationDisplayName} ${stationId}`;
+    marker.bindTooltip(tooltipEl).on('click', onClick);
+    stationMarkers.set(stationId, marker);
     return marker;
 }
-export function updateStationMarkerIcon(stationId, icon) { if (stationMarkers[stationId]) stationMarkers[stationId].setIcon(icon);
+export function updateStationMarkerIcon(stationId, icon) { const m = stationMarkers.get(stationId); if (m) m.setIcon(icon);
 }
 export function getStationMarkers() { return stationMarkers; }
 
@@ -348,9 +292,9 @@ export function clearBearingLines() {
 }
 
 export function highlightTrack(id, type, isSatView, isAircraftView) {
-    Object.values(groundTrackLayers).forEach(layer => { if (layer) map.removeLayer(layer); });
+    groundTrackLayers.forEach(layer => { if (layer) map.removeLayer(layer); });
     if (bearingLineLayer) map.removeLayer(bearingLineLayer);
-    groundTrackLayers = {};
+    groundTrackLayers.clear();
     bearingLineLayer = null;
     
     if (passData.passes) {
@@ -359,8 +303,8 @@ export function highlightTrack(id, type, isSatView, isAircraftView) {
             const style = { color: isHighlighted ? 'red' : 'grey', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6, interactive: true };
             const track = createSegmentedPolyline(pass.ground_track, style);
             const timeMarkers = drawTimeMarkers(pass, 'red');
-            groundTrackLayers[pass.pass_id] = track;
-            groundTrackLayers[pass.pass_id + '_markers'] = timeMarkers;
+            groundTrackLayers.set(pass.pass_id, track);
+            groundTrackLayers.set(pass.pass_id + '_markers', timeMarkers);
             if (trackClickCallback) {
                 track.on('click', () => trackClickCallback(pass.pass_id, 'satellite'));
             }
@@ -377,8 +321,8 @@ export function highlightTrack(id, type, isSatView, isAircraftView) {
             const style = { color: isHighlighted ? 'yellow' : '#a0522d', weight: isHighlighted ? 3 : 2, opacity: isHighlighted ? 1.0 : 0.6, interactive: true };
             const track = createSegmentedPolyline(crossing.ground_track, style);
             const timeMarkers = drawTimeMarkers(crossing, 'yellow');
-            groundTrackLayers[crossing.crossing_id] = track;
-            groundTrackLayers[crossing.crossing_id + '_markers'] = timeMarkers;
+            groundTrackLayers.set(crossing.crossing_id, track);
+            groundTrackLayers.set(crossing.crossing_id + '_markers', timeMarkers);
             if (trackClickCallback) {
                 track.on('click', () => trackClickCallback(crossing.crossing_id, 'aircraft'));
             }

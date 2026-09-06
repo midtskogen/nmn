@@ -680,16 +680,16 @@ class RetrainApp(Tk):
         is_progress = overwrite or bool(_PROGRESS_RE.search(line))
         self.log_box.configure(state='normal')
         if is_progress:
+            # Remove the previous progress line if it exists.
             try:
-                first = self.log_box.index('progress.first')
-                last = self.log_box.index('progress.last')
-                self.log_box.delete(first, last)
-                insert_at = first
+                self.log_box.delete('progress.first', 'progress.last')
             except Exception:
-                insert_at = END
-            self.log_box.insert(insert_at, line)
+                pass
+            # Append the new progress text (without a newline) and tag it.
+            self.log_box.insert(END, line)
+            start = self.log_box.index(f"end - {len(line)} chars")
             self.log_box.tag_remove('progress', '1.0', END)
-            self.log_box.tag_add('progress', insert_at, f"{insert_at} + {len(line)} chars")
+            self.log_box.tag_add('progress', start, END)
         else:
             # If a progress line is currently the last thing in the log,
             # finalize it with a newline before appending the new line.

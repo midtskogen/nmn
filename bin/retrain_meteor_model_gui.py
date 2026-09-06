@@ -22,6 +22,7 @@ import shutil
 import queue
 import random
 import pathlib
+import fnmatch
 import subprocess
 import threading
 import importlib.util
@@ -121,12 +122,25 @@ def _unique_name(dst_dir: pathlib.Path, src: pathlib.Path) -> str:
     return candidate
 
 
-def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None):
+def _iter_matching_files(src: pathlib.Path, pattern: str):
+    """Yield matching file paths under src, using os.walk for speed."""
+    use_glob = '*' in pattern or '?' in pattern or '[' in pattern
+    src_str = str(src)
+    for root, dirs, files in os.walk(src_str):
+        if use_glob:
+            matches = fnmatch.filter(files, pattern)
+        else:
+            matches = [pattern] if pattern in files else []
+        for f in matches:
+            yield pathlib.Path(root) / f
+
+
+def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None, label=''):
     """Efficiently collect image files matching pattern from src_root into dst_root.
 
     Files are hardlinked when possible; otherwise copied.  The relative path of each
     source file is used as the destination name so identical filenames from different
-    events do not collide.
+    events do not collide.  Progress messages are posted to msg_queue every 50 files.
     """
     src = pathlib.Path(src_root)
     dst = pathlib.Path(dst_root)
@@ -139,8 +153,12 @@ def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None):
         if existing.is_file():
             existing.unlink()
 
+    if msg_queue:
+        msg_queue.put(('fetch_status', f"Scanning {label}..."))
+
     copied = 0
-    for p in src.rglob(pattern):
+    update_every = 50
+    for p in _iter_matching_files(src, pattern):
         if not p.is_file():
             continue
         name = '_'.join(p.relative_to(src).parts)
@@ -148,8 +166,9 @@ def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None):
             name = _unique_name(dst, p)
         link_or_copy(p, dst / name)
         copied += 1
-        if msg_queue and copied % 500 == 0:
-            msg_queue.put(('fetch_status', f"Copied {copied} files from {src}..."))
+        if msg_queue and copied % update_every == 0:
+            msg_queue.put(('fetch_progress', (copied, 0)))
+            msg_queue.put(('fetch_status', f"Fetching {label}: {copied} files copied..."))
     return copied
 
 
@@ -411,6 +430,9 @@ class RetrainApp(Tk):
         self.fetch_btn.pack(side=LEFT)
         self.fetch_status = ttk.Label(fetch_btn_frame, text="Ready to fetch.", wraplength=700, justify=LEFT)
         self.fetch_status.pack(side=LEFT, padx=(10, 0))
+
+        self.fetch_progress = ttk.Progressbar(fetch_frame, orient=HORIZONTAL, mode='indeterminate')
+        self.fetch_progress.pack(fill=X, pady=(5, 0))
 
         self.data_stats = ttk.Label(p1, text="No data scanned yet.", wraplength=800, justify=LEFT)
         self.data_stats.pack(anchor=W, pady=10)
@@ -676,7 +698,8 @@ class RetrainApp(Tk):
             return
 
         self.fetch_btn.configure(state=DISABLED)
-        self.fetch_status.configure(text="Fetching...")
+        self.fetch_progress.configure(mode='indeterminate')
+        self.fetch_progress.start()
         t = threading.Thread(
             target=self.fetch_worker,
             args=(pos_src, neg_src, pattern, pos_out, neg_out),
@@ -686,10 +709,8 @@ class RetrainApp(Tk):
 
     def fetch_worker(self, pos_src, neg_src, pattern, pos_out, neg_out):
         try:
-            self.msg_queue.put(('fetch_status', f"Fetching positives from {pos_src} ..."))
-            pos_count = fetch_detection_images(pos_src, pos_out, pattern, self.msg_queue)
-            self.msg_queue.put(('fetch_status', f"Fetching negatives from {neg_src} ..."))
-            neg_count = fetch_detection_images(neg_src, neg_out, pattern, self.msg_queue)
+            pos_count = fetch_detection_images(pos_src, pos_out, pattern, self.msg_queue, label='positives')
+            neg_count = fetch_detection_images(neg_src, neg_out, pattern, self.msg_queue, label='negatives')
 
             summary = f"Fetched {pos_count} positives and {neg_count} negatives."
             self.msg_queue.put(('fetch_status', summary))
@@ -941,7 +962,16 @@ class RetrainApp(Tk):
                     self.show_results()
                 elif kind == 'fetch_status':
                     self.fetch_status.configure(text=payload)
+                elif kind == 'fetch_progress':
+                    current, total = payload
+                    if total > 0:
+                        self.fetch_progress.configure(mode='determinate', maximum=total, value=current)
+                    else:
+                        # Indeterminate: keep pulsing and show count in the status text.
+                        pass
                 elif kind == 'fetch_done':
+                    self.fetch_progress.stop()
+                    self.fetch_progress.configure(mode='determinate', value=100)
                     self.fetch_btn.configure(state=NORMAL)
                     if payload:
                         self.pos_dir.set(payload[0])

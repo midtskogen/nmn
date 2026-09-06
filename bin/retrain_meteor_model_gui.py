@@ -472,6 +472,8 @@ class RetrainApp(Tk):
         prepare_btn_frame.pack(anchor=W, pady=10)
         self.prepare_btn = ttk.Button(prepare_btn_frame, text="Scan & prepare split", command=self.start_prepare)
         self.prepare_btn.pack(side=LEFT)
+        self.check_scanned_btn = ttk.Button(prepare_btn_frame, text="Check scanned", command=self.check_scanned)
+        self.check_scanned_btn.pack(side=LEFT, padx=(10, 0))
         self.prepare_status = ttk.Label(prepare_btn_frame, text="", wraplength=500, justify=LEFT)
         self.prepare_status.pack(side=LEFT, padx=(10, 0))
 
@@ -713,6 +715,15 @@ class RetrainApp(Tk):
 
         # Store state for validation
         self.deps_ok = all_ok
+
+    def check_scanned(self):
+        pos = self.pos_dir.get().strip()
+        neg = self.neg_dir.get().strip()
+        pos_path = pathlib.Path(pos) if pos else None
+        neg_path = pathlib.Path(neg) if neg else None
+        pos_count = _count_images_dir(pos_path, 'positives') if pos_path and pos_path.is_dir() else 0
+        neg_count = _count_images_dir(neg_path, 'negatives') if neg_path and neg_path.is_dir() else 0
+        self.prepare_status.configure(text=f"Scanned: {pos_count} positives, {neg_count} negatives")
 
     def start_prepare(self):
         pos = self.pos_dir.get().strip()

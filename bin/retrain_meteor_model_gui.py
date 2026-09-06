@@ -45,6 +45,11 @@ NMN_DIR = BIN_DIR.parent
 CLASSIFY_PY = BIN_DIR / 'classify.py'
 MODEL_DIR = NMN_DIR / 'model'
 
+# Default locations for fetching verified / false detections
+POS_SOURCE_DEFAULT = NMN_DIR.parent / 'meteor'
+NEG_SOURCE_DEFAULT = pathlib.Path('/var/www/html/wrongs')
+FETCH_PATTERN_DEFAULT = 'fireball.jpg'
+
 # -----------------------------------------------------------------------------
 # Dependency information
 # -----------------------------------------------------------------------------
@@ -102,6 +107,50 @@ def link_or_copy(src, dst):
             shutil.copy2(src, dst)
     except (OSError, AttributeError):
         shutil.copy2(src, dst)
+
+
+def _unique_name(dst_dir: pathlib.Path, src: pathlib.Path) -> str:
+    """Return a unique destination filename, preserving extension."""
+    base = src.stem
+    ext = src.suffix
+    candidate = base + ext
+    counter = 1
+    while (dst_dir / candidate).exists():
+        candidate = f"{base}_{counter}{ext}"
+        counter += 1
+    return candidate
+
+
+def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None):
+    """Efficiently collect image files matching pattern from src_root into dst_root.
+
+    Files are hardlinked when possible; otherwise copied.  The relative path of each
+    source file is used as the destination name so identical filenames from different
+    events do not collide.
+    """
+    src = pathlib.Path(src_root)
+    dst = pathlib.Path(dst_root)
+    if not src.is_dir():
+        raise ValueError(f"Source directory does not exist: {src}")
+    dst.mkdir(parents=True, exist_ok=True)
+
+    # Clear any stale files from previous fetches so the destination is deterministic.
+    for existing in dst.iterdir():
+        if existing.is_file():
+            existing.unlink()
+
+    copied = 0
+    for p in src.rglob(pattern):
+        if not p.is_file():
+            continue
+        name = '_'.join(p.relative_to(src).parts)
+        if (dst / name).exists():
+            name = _unique_name(dst, p)
+        link_or_copy(p, dst / name)
+        copied += 1
+        if msg_queue and copied % 500 == 0:
+            msg_queue.put(('fetch_status', f"Copied {copied} files from {src}..."))
+    return copied
 
 
 def compute_image_stats(image_paths, max_sample=200):
@@ -314,7 +363,7 @@ class RetrainApp(Tk):
         f3 = ttk.Frame(p1)
         f3.pack(fill=X, pady=5)
         ttk.Label(f3, text="Working directory (train/verify split will be created here):").pack(anchor=W)
-        self.work_dir = StringVar(value=str(NMN_DIR / 'retrain_work'))
+        self.work_dir = StringVar(value=str(NMN_DIR.parent / 'retrain_work'))
         e3 = ttk.Entry(f3, textvariable=self.work_dir)
         e3.pack(side=LEFT, fill=X, expand=True)
         ttk.Button(f3, text="Browse...", command=lambda: self.browse_dir(self.work_dir, create=True)).pack(side=LEFT, padx=5)
@@ -328,6 +377,40 @@ class RetrainApp(Tk):
         ttk.Label(f4, text="(fraction kept unseen for final evaluation)").pack(side=LEFT)
 
         ttk.Button(p1, text="Scan & prepare split", command=self.prepare_data).pack(anchor=W, pady=10)
+
+        # ----------------------------------------------------------------------
+        # Fetch detections from report directories
+        # ----------------------------------------------------------------------
+        fetch_frame = ttk.LabelFrame(p1, text="Fetch detections from report directories", padding=10)
+        fetch_frame.pack(fill=X, pady=15)
+
+        self.pos_source = StringVar(value=str(POS_SOURCE_DEFAULT) if POS_SOURCE_DEFAULT.is_dir() else '')
+        self.neg_source = StringVar(value=str(NEG_SOURCE_DEFAULT) if NEG_SOURCE_DEFAULT.is_dir() else '')
+        self.fetch_pattern = StringVar(value=FETCH_PATTERN_DEFAULT)
+        self.fetch_pos_out = StringVar(value=str(pathlib.Path(self.work_dir.get()) / 'positive_fetched'))
+        self.fetch_neg_out = StringVar(value=str(pathlib.Path(self.work_dir.get()) / 'negative_fetched'))
+
+        def make_fetch_row(parent, label, var, create=False):
+            ff = ttk.Frame(parent)
+            ff.pack(fill=X, pady=2)
+            ttk.Label(ff, text=label, width=26).pack(side=LEFT)
+            ent = ttk.Entry(ff, textvariable=var)
+            ent.pack(side=LEFT, fill=X, expand=True, padx=(5, 0))
+            ttk.Button(ff, text="Browse...", command=lambda: self.browse_dir(var, create=create)).pack(side=LEFT, padx=5)
+            return ent
+
+        make_fetch_row(fetch_frame, "Verified meteor reports:", self.pos_source)
+        make_fetch_row(fetch_frame, "False detections (wrongs):", self.neg_source)
+        make_fetch_row(fetch_frame, "File pattern to collect:", self.fetch_pattern)
+        make_fetch_row(fetch_frame, "Output positive dir:", self.fetch_pos_out, create=True)
+        make_fetch_row(fetch_frame, "Output negative dir:", self.fetch_neg_out, create=True)
+
+        fetch_btn_frame = ttk.Frame(fetch_frame)
+        fetch_btn_frame.pack(fill=X, pady=(10, 0))
+        self.fetch_btn = ttk.Button(fetch_btn_frame, text="Fetch detections", command=self.start_fetch)
+        self.fetch_btn.pack(side=LEFT)
+        self.fetch_status = ttk.Label(fetch_btn_frame, text="Ready to fetch.", wraplength=700, justify=LEFT)
+        self.fetch_status.pack(side=LEFT, padx=(10, 0))
 
         self.data_stats = ttk.Label(p1, text="No data scanned yet.", wraplength=800, justify=LEFT)
         self.data_stats.pack(anchor=W, pady=10)
@@ -578,6 +661,43 @@ class RetrainApp(Tk):
 
         self.data_stats.configure(text=summary)
 
+    def start_fetch(self):
+        pos_src = self.pos_source.get().strip()
+        neg_src = self.neg_source.get().strip()
+        pattern = self.fetch_pattern.get().strip() or FETCH_PATTERN_DEFAULT
+        pos_out = self.fetch_pos_out.get().strip()
+        neg_out = self.fetch_neg_out.get().strip()
+
+        if not pos_src or not pathlib.Path(pos_src).is_dir():
+            messagebox.showerror("Error", "Please select a valid verified meteor report directory.")
+            return
+        if not neg_src or not pathlib.Path(neg_src).is_dir():
+            messagebox.showerror("Error", "Please select a valid false detections directory.")
+            return
+
+        self.fetch_btn.configure(state=DISABLED)
+        self.fetch_status.configure(text="Fetching...")
+        t = threading.Thread(
+            target=self.fetch_worker,
+            args=(pos_src, neg_src, pattern, pos_out, neg_out),
+            daemon=True,
+        )
+        t.start()
+
+    def fetch_worker(self, pos_src, neg_src, pattern, pos_out, neg_out):
+        try:
+            self.msg_queue.put(('fetch_status', f"Fetching positives from {pos_src} ..."))
+            pos_count = fetch_detection_images(pos_src, pos_out, pattern, self.msg_queue)
+            self.msg_queue.put(('fetch_status', f"Fetching negatives from {neg_src} ..."))
+            neg_count = fetch_detection_images(neg_src, neg_out, pattern, self.msg_queue)
+
+            summary = f"Fetched {pos_count} positives and {neg_count} negatives."
+            self.msg_queue.put(('fetch_status', summary))
+            self.msg_queue.put(('fetch_done', (pos_out, neg_out)))
+        except Exception as exc:
+            self.msg_queue.put(('fetch_status', f"Fetch failed: {exc}"))
+            self.msg_queue.put(('fetch_done', None))
+
     def selected_cluster_counts(self):
         sel = self.cluster_listbox.curselection()
         if not sel:
@@ -794,6 +914,13 @@ class RetrainApp(Tk):
                     self.populate_results_table()
                 elif kind == 'finished':
                     self.show_results()
+                elif kind == 'fetch_status':
+                    self.fetch_status.configure(text=payload)
+                elif kind == 'fetch_done':
+                    self.fetch_btn.configure(state=NORMAL)
+                    if payload:
+                        self.pos_dir.set(payload[0])
+                        self.neg_dir.set(payload[1])
         except queue.Empty:
             pass
         self.after(100, self.process_queue)

@@ -464,8 +464,13 @@ class RetrainApp(Tk):
         prepare_btn_frame.pack(anchor=W, pady=10)
         self.prepare_btn = ttk.Button(prepare_btn_frame, text="Scan & prepare split", command=self.start_prepare)
         self.prepare_btn.pack(side=LEFT)
-        self.prepare_status = ttk.Label(prepare_btn_frame, text="", wraplength=700, justify=LEFT)
+        self.prepare_status = ttk.Label(prepare_btn_frame, text="", wraplength=500, justify=LEFT)
         self.prepare_status.pack(side=LEFT, padx=(10, 0))
+        self.prepare_next_btn = ttk.Button(
+            prepare_btn_frame,
+            text="Next: Training Options →",
+            command=self.go_next,
+        )
 
         self.prepare_progress = ttk.Progressbar(p1, orient=HORIZONTAL, mode='indeterminate')
         self.prepare_progress.pack(fill=X, pady=(5, 0))
@@ -515,12 +520,6 @@ class RetrainApp(Tk):
         self.data_stats = scrolledtext.ScrolledText(p1, height=10, wrap=WORD, state='disabled', bg='#f5f5f5')
         self.data_stats.pack(anchor=W, fill=X, pady=10)
         self.set_text(self.data_stats, "No data scanned yet.")
-
-        self.prepare_next_btn = ttk.Button(
-            p1,
-            text="Continue to Training Options →",
-            command=self.go_next,
-        )
         self.pages.append(p1)
 
         # ---- Page 2: Options ----
@@ -1146,7 +1145,7 @@ class RetrainApp(Tk):
                     else:
                         self.set_text(self.data_stats, payload['summary'])
                         self.split_info = payload['split_info']
-                        self.prepare_next_btn.pack(anchor=E, pady=(5, 0))
+                        self.prepare_next_btn.pack(side=LEFT, padx=(10, 0))
         except queue.Empty:
             pass
         self.after(100, self.process_queue)

@@ -92,6 +92,23 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 import joblib
 
+
+def _get_usable_device():
+    """Return 'cuda' only if a small GPU kernel actually executes."""
+    if not torch.cuda.is_available():
+        return 'cpu'
+    try:
+        # A minimal end-to-end GPU smoke test. If the ROCm/CUDA runtime is
+        # present but the device kernels are broken, this will fail and we
+        # fall back to CPU instead of crashing in the middle of training.
+        _ = (torch.tensor([1.0, 2.0, 3.0], device='cuda') * 2.0).cpu().numpy()
+        return 'cuda'
+    except Exception as exc:
+        err = str(exc).splitlines()[0]
+        logging.warning(f"GPU reported available but a test kernel failed: {err}. Falling back to CPU.")
+        return 'cpu'
+
+
 CONFIG = {
     "DEFAULT_IMG_HEIGHT": 96,
     "DEFAULT_IMG_WIDTH": 192,
@@ -364,7 +381,7 @@ def _run_epoch_loop(model, device, num_epochs, start_epoch, train_loader, val_lo
 
 
 def _run_training(args, data_dir, model_path, params_file):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _get_usable_device()
     model_name = getattr(args, 'model_name', 'custom_image' if args.input_type == 'image' else 'custom_video')
     logging.info(f"--- Starting Training for '{model_name}' on {device} ---")
 
@@ -495,7 +512,7 @@ def _run_clustering(model_path: str, args: argparse.Namespace):
 
 def _run_evaluation(args, data_dir, model_path):
     """Runs evaluation on a single model, calculating and printing key metrics."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _get_usable_device()
     model_name = getattr(args, 'model_name', 'unknown')
     logging.info(f"--- Starting Evaluation for '{model_name}' on {device} ---")
     
@@ -541,7 +558,7 @@ def _run_evaluation(args, data_dir, model_path):
         print(f"  - Recall:        {best_recall:.4f}\n" + "="*50)
 
 def _run_tuning(args, data_dir, params_path):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _get_usable_device()
     model_name = getattr(args, 'model_name', 'custom_image' if args.input_type == 'image' else 'custom_video')
     logging.info(f"--- Starting Hyperparameter Tuning for {model_name} on {device} ---")
     
@@ -1253,9 +1270,9 @@ def main():
 
     args = parser.parse_args()
     setup_logging(args.verbose)
-    if not torch.cuda.is_available():
-        logging.warning("CUDA is not available, running on CPU. This will be very slow for training.")
-    if not torch.backends.mps.is_available() and not torch.cuda.is_available():
+    if _get_usable_device() == 'cpu':
+        logging.warning("Running on CPU. This will be very slow for training.")
+    if not torch.backends.mps.is_available():
         logging.warning("MPS is not available for accelerated training on Apple Silicon.")
     
     # --- Mode Dispatcher ---

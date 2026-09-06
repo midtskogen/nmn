@@ -1097,6 +1097,9 @@ class RetrainApp(Tk):
                 self.msg_queue.put(('status', f"Clustered model for K={k} not found."))
                 continue
 
+            # The per-K copy of the base .pth is only needed for clustering.
+            (k_dir / 'meteor_efficientnet_b0_model.pth').unlink(missing_ok=True)
+
             # Evaluate on held-out verification data
             self.msg_queue.put(('status', f"Evaluating K={k} on held-out data..."))
             eval_cmd = [

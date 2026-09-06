@@ -335,8 +335,8 @@ class RetrainApp(Tk):
     def __init__(self):
         super().__init__()
         self.title("NMN meteor model retraining wizard")
-        self.geometry("1000x800")
-        self.minsize(900, 700)
+        self.geometry("1000x700")
+        self.minsize(850, 600)
 
         self.steps = [
             "1. Dependencies",
@@ -373,6 +373,16 @@ class RetrainApp(Tk):
             "and evaluating on held-out verification images."
         )).pack(anchor=W, pady=(2, 0))
 
+        # Bottom navigation: pack before the expanding main frame so it is
+        # never pushed below the visible window when the content is tall.
+        footer = ttk.Frame(self, padding=10)
+        footer.pack(fill=X, side=BOTTOM)
+
+        self.back_btn = ttk.Button(footer, text="Back", command=self.go_back)
+        self.back_btn.pack(side=LEFT)
+        self.next_btn = ttk.Button(footer, text="Next", command=self.go_next)
+        self.next_btn.pack(side=RIGHT)
+
         # Sidebar + content
         main = ttk.Frame(self)
         main.pack(fill=BOTH, expand=True, padx=10, pady=5)
@@ -398,15 +408,6 @@ class RetrainApp(Tk):
 
         self.content = ttk.Frame(main, padding=10)
         self.content.pack(side=LEFT, fill=BOTH, expand=True)
-
-        # Bottom navigation
-        footer = ttk.Frame(self, padding=10)
-        footer.pack(fill=X, side=BOTTOM)
-
-        self.back_btn = ttk.Button(footer, text="Back", command=self.go_back)
-        self.back_btn.pack(side=LEFT)
-        self.next_btn = ttk.Button(footer, text="Next", command=self.go_next)
-        self.next_btn.pack(side=RIGHT)
 
         self.build_pages()
 
@@ -522,8 +523,8 @@ class RetrainApp(Tk):
         self.source_count_status = ttk.Label(fetch_frame, text="", wraplength=700, justify=LEFT)
         self.source_count_status.pack(anchor=W, pady=(5, 0))
 
-        self.data_stats = scrolledtext.ScrolledText(p1, height=10, wrap=WORD, state='disabled', bg='#f5f5f5')
-        self.data_stats.pack(anchor=W, fill=X, pady=10)
+        self.data_stats = scrolledtext.ScrolledText(p1, height=5, wrap=WORD, state='disabled', bg='#f5f5f5')
+        self.data_stats.pack(fill=BOTH, expand=True, pady=10)
         self.set_text(self.data_stats, "No data scanned yet.")
         self.pages.append(p1)
 
@@ -597,7 +598,7 @@ class RetrainApp(Tk):
         ttk.Button(btn_frame, text="Stop", command=self.stop_training).pack(side=LEFT, padx=5)
 
         ttk.Label(p3, text="Log output:").pack(anchor=W, pady=(10, 0))
-        self.log_box = scrolledtext.ScrolledText(p3, height=20, state='disabled', wrap=WORD)
+        self.log_box = scrolledtext.ScrolledText(p3, height=12, state='disabled', wrap=WORD)
         self.log_box.pack(fill=BOTH, expand=True, pady=5)
 
         self.pages.append(p3)

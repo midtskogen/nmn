@@ -1043,8 +1043,10 @@ def _process_single_model(task_args):
     try:
         # _run_training now handles its own OOM errors and will not raise them.
         # It will either succeed and save a model, or fail and log an error.
-        if not resolve_model_path(None, model_path):
-             _run_training(train_args, data_dir, model_path, params_file=None)
+        # Unless --resume is set, always train (overwriting any stale model file).
+        if resolve_model_path(None, model_path):
+            logging.warning(f"Existing model '{model_path}' found; overwriting because --resume was not specified.")
+        _run_training(train_args, data_dir, model_path, params_file=None)
 
         # Proceed to clustering only if the base model was created successfully.
         if getattr(args, 'cluster', False) and resolve_model_path(None, model_path):

@@ -508,7 +508,7 @@ class RetrainApp(Tk):
 
         rbtn = ttk.Frame(p4)
         rbtn.pack(fill=X)
-        ttk.Button(rbtn, text="Install selected model to nmn/model/", command=self.install_model).pack(side=LEFT, padx=5)
+        ttk.Button(rbtn, text="Replace current model with selected", command=self.install_model).pack(side=LEFT, padx=5)
         ttk.Button(rbtn, text="Save results to JSON", command=self.save_results_json).pack(side=LEFT, padx=5)
 
         self.pages.append(p4)
@@ -749,13 +749,16 @@ class RetrainApp(Tk):
     # -------------------------------------------------------------------------
     def training_worker(self, output_dir, clusters):
         start_time = time.time()
-        total_jobs = 1 + len(clusters)  # base train + one cluster/eval per K
-        done_jobs = 0
 
         train_pos = self.split_info['work_dir'] / 'train' / 'meteor'
         train_neg = self.split_info['work_dir'] / 'train' / 'non_meteor'
         verify_pos = self.split_info['work_dir'] / 'verify' / 'meteor'
         verify_neg = self.split_info['work_dir'] / 'verify' / 'non_meteor'
+
+        current_model = MODEL_DIR / 'meteor_efficientnet_b0_model_clustered.pth.zst'
+        evaluate_current = current_model.is_file()
+        total_jobs = 1 + len(clusters) + (1 if evaluate_current else 0)
+        done_jobs = 0
 
         # ---- Base training (unclustered) ----
         self.msg_queue.put(('status', "Training base EfficientNet-B0 model..."))
@@ -785,6 +788,28 @@ class RetrainApp(Tk):
             self.msg_queue.put(('status', "Base model file not found after training."))
             self.msg_queue.put(('finished', None))
             return
+
+        # ---- Evaluate current live model as a baseline ----
+        if evaluate_current and not self.stop_requested:
+            self.msg_queue.put(('status', "Evaluating current live model as baseline..."))
+            eval_cmd = [
+                sys.executable, str(CLASSIFY_PY), '-v', 'evaluate',
+                '-m', str(current_model),
+                str(verify_pos), str(verify_neg),
+                '--img-width', '192', '--img-height', '96',
+                '--batch-size', str(self.batch_size.get()),
+            ]
+            eval_stdout, rc = self.run_command_with_output(eval_cmd, cwd=str(output_dir))
+            metrics = parse_evaluate_output(eval_stdout) if rc == 0 else {}
+            self.results.append({
+                'k': 'current',
+                'path': str(current_model),
+                'size': current_model.stat().st_size,
+                'metrics': metrics,
+            })
+            self.msg_queue.put(('result', self.results[-1]))
+            done_jobs += 1
+            self.msg_queue.put(('progress', int(100 * done_jobs / total_jobs)))
 
         # ---- Cluster sweep ----
         for k in clusters:
@@ -941,10 +966,18 @@ class RetrainApp(Tk):
     def populate_results_table(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for r in sorted(self.results, key=lambda x: x['k']):
+
+        def sort_key(r):
+            k = r['k']
+            if k == 'current':
+                return (0, 0)
+            return (1, k)
+
+        for r in sorted(self.results, key=sort_key):
             m = r['metrics']
+            k_label = 'Current' if r['k'] == 'current' else r['k']
             self.tree.insert('', 'end', values=(
-                r['k'],
+                k_label,
                 human_size(r['size']),
                 f"{m.get('f1', 0):.4f}" if 'f1' in m else 'N/A',
                 f"{m.get('precision', 0):.4f}" if 'precision' in m else 'N/A',
@@ -969,8 +1002,11 @@ class RetrainApp(Tk):
         if not src.exists():
             messagebox.showerror("Error", f"Model file not found: {src}")
             return
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
         dst = MODEL_DIR / 'meteor_efficientnet_b0_model_clustered.pth.zst'
+        if src.resolve() == dst.resolve():
+            messagebox.showinfo("Info", "The selected model is already the current live model.")
+            return
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
         if dst.exists():
             backup = dst.with_suffix('.zst.bak')
             counter = 1

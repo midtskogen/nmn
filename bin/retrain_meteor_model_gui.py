@@ -515,6 +515,12 @@ class RetrainApp(Tk):
         self.data_stats = scrolledtext.ScrolledText(p1, height=10, wrap=WORD, state='disabled', bg='#f5f5f5')
         self.data_stats.pack(anchor=W, fill=X, pady=10)
         self.set_text(self.data_stats, "No data scanned yet.")
+
+        self.prepare_next_btn = ttk.Button(
+            p1,
+            text="Continue to Training Options →",
+            command=self.go_next,
+        )
         self.pages.append(p1)
 
         # ---- Page 2: Options ----
@@ -561,7 +567,7 @@ class RetrainApp(Tk):
         self.cluster_listbox.selection_set(2)
 
         # Options checkboxes
-        self.balance = BooleanVar(value=False)
+        self.balance = BooleanVar(value=True)
         self.scheduler = BooleanVar(value=False)
         ttk.Checkbutton(p2, text="Balance classes by generating synthetic negatives", variable=self.balance).pack(anchor=W, pady=2)
         ttk.Checkbutton(p2, text="Use learning-rate scheduler (ReduceLROnPlateau)", variable=self.scheduler).pack(anchor=W, pady=2)
@@ -729,6 +735,7 @@ class RetrainApp(Tk):
         self.prepare_progress.stop()
         self.prepare_progress.configure(mode='determinate', maximum=100, value=0)
         self.prepare_status.configure(text="Preparing data...")
+        self.prepare_next_btn.pack_forget()
 
         t = threading.Thread(
             target=self.prepare_worker,
@@ -1133,6 +1140,7 @@ class RetrainApp(Tk):
                     else:
                         self.set_text(self.data_stats, payload['summary'])
                         self.split_info = payload['split_info']
+                        self.prepare_next_btn.pack(anchor=E, pady=(5, 0))
         except queue.Empty:
             pass
         self.after(100, self.process_queue)

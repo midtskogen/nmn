@@ -25,6 +25,7 @@ import pathlib
 import fnmatch
 import subprocess
 import threading
+import concurrent.futures
 import importlib.util
 from datetime import timedelta
 
@@ -135,6 +136,25 @@ def _iter_matching_files(src: pathlib.Path, pattern: str):
             yield pathlib.Path(root) / f
 
 
+def _collect_matching_files(src: pathlib.Path, pattern: str, max_workers: int = 16):
+    """Collect all matching file paths under src in parallel across top-level dirs.
+
+    Over NFS this is much faster than a single-threaded walk because the latency
+    of many directory lookups can be overlapped.
+    """
+    src_str = str(src)
+    top = [entry.path for entry in os.scandir(src_str) if entry.is_dir()]
+    if not top:
+        return list(_iter_matching_files(src, pattern))
+
+    files = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        results = ex.map(lambda p: list(_iter_matching_files(pathlib.Path(p), pattern)), top)
+    for r in results:
+        files.extend(r)
+    return files
+
+
 def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None, label=''):
     """Efficiently collect image files matching pattern from src_root into dst_root.
 
@@ -154,11 +174,16 @@ def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None, label=''
             existing.unlink()
 
     if msg_queue:
-        msg_queue.put(('fetch_status', f"Scanning {label}..."))
+        msg_queue.put(('fetch_status', f"Scanning {label} (parallel)..."))
+
+    files = _collect_matching_files(src, pattern)
+
+    if msg_queue:
+        msg_queue.put(('fetch_status', f"Fetching {label}: copying {len(files)} files..."))
 
     copied = 0
     update_every = 50
-    for p in _iter_matching_files(src, pattern):
+    for p in files:
         if not p.is_file():
             continue
         name = '_'.join(p.relative_to(src).parts)
@@ -168,7 +193,7 @@ def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None, label=''
         copied += 1
         if msg_queue and copied % update_every == 0:
             msg_queue.put(('fetch_progress', (copied, 0)))
-            msg_queue.put(('fetch_status', f"Fetching {label}: {copied} files copied..."))
+            msg_queue.put(('fetch_status', f"Fetching {label}: {copied}/{len(files)} files copied..."))
     return copied
 
 
@@ -786,8 +811,8 @@ class RetrainApp(Tk):
 
     def count_worker(self, pos_src, neg_src, pattern):
         try:
-            pos_count = sum(1 for _ in _iter_matching_files(pathlib.Path(pos_src), pattern))
-            neg_count = sum(1 for _ in _iter_matching_files(pathlib.Path(neg_src), pattern))
+            pos_count = len(_collect_matching_files(pathlib.Path(pos_src), pattern))
+            neg_count = len(_collect_matching_files(pathlib.Path(neg_src), pattern))
             self.msg_queue.put(('source_counts', (pos_count, neg_count)))
             self.msg_queue.put(('fetch_status', f"Found {pos_count} positives and {neg_count} negatives matching '{pattern}'"))
         except Exception as exc:

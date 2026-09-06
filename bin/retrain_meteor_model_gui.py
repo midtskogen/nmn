@@ -388,6 +388,14 @@ class RetrainApp(Tk):
             lbl.pack(fill=X, pady=2)
             self.step_labels.append(lbl)
 
+        self.sidebar_next_btn = ttk.Button(
+            self.sidebar,
+            text="Next →",
+            command=self.go_next,
+        )
+        # shown only when a page explicitly requests it (e.g. after data prepare)
+        self.sidebar_next_btn.pack_forget()
+
         self.content = ttk.Frame(main, padding=10)
         self.content.pack(side=LEFT, fill=BOTH, expand=True)
 
@@ -466,11 +474,6 @@ class RetrainApp(Tk):
         self.prepare_btn.pack(side=LEFT)
         self.prepare_status = ttk.Label(prepare_btn_frame, text="", wraplength=500, justify=LEFT)
         self.prepare_status.pack(side=LEFT, padx=(10, 0))
-        self.prepare_next_btn = ttk.Button(
-            prepare_btn_frame,
-            text="Next: Training Options →",
-            command=self.go_next,
-        )
 
         self.prepare_progress = ttk.Progressbar(p1, orient=HORIZONTAL, mode='indeterminate')
         self.prepare_progress.pack(fill=X, pady=(5, 0))
@@ -734,7 +737,7 @@ class RetrainApp(Tk):
         self.prepare_progress.stop()
         self.prepare_progress.configure(mode='determinate', maximum=100, value=0)
         self.prepare_status.configure(text="Preparing data...")
-        self.prepare_next_btn.pack_forget()
+        self.sidebar_next_btn.pack_forget()
 
         t = threading.Thread(
             target=self.prepare_worker,
@@ -1145,7 +1148,7 @@ class RetrainApp(Tk):
                     else:
                         self.set_text(self.data_stats, payload['summary'])
                         self.split_info = payload['split_info']
-                        self.prepare_next_btn.pack(side=LEFT, padx=(10, 0))
+                        self.sidebar_next_btn.pack(side=BOTTOM, fill=X, padx=5, pady=10)
         except queue.Empty:
             pass
         self.after(100, self.process_queue)

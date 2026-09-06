@@ -359,6 +359,7 @@ class RetrainApp(Tk):
         ]
         self.current_step = 0
         self.results = []  # list of dicts for each cluster count
+        self.progress_log_line = None  # line number of the active tqdm/progress line
 
         # Thread / subprocess control
         self.worker_thread = None
@@ -675,30 +676,27 @@ class RetrainApp(Tk):
         widget.configure(state='disabled')
 
     def log(self, line, overwrite=False):
-        """Append a line to the log. Progress lines overwrite the last
+        """Append a line to the log. Progress lines overwrite the active
         progress line instead of creating a new one."""
         is_progress = overwrite or bool(_PROGRESS_RE.search(line))
         self.log_box.configure(state='normal')
         if is_progress:
-            # Remove the previous progress line if it exists.
-            try:
-                self.log_box.delete('progress.first', 'progress.last')
-            except Exception:
-                pass
-            # Append the new progress text (without a newline) and tag it.
-            self.log_box.insert(END, line)
-            start = self.log_box.index(f"end - {len(line)} chars")
-            self.log_box.tag_remove('progress', '1.0', END)
-            self.log_box.tag_add('progress', start, END)
+            # Remove the previous progress line and rewrite it at the end.
+            if self.progress_log_line is not None:
+                try:
+                    self.log_box.delete(
+                        f"{self.progress_log_line}.0",
+                        f"{self.progress_log_line + 1}.0",
+                    )
+                except Exception:
+                    pass
+            self.log_box.insert(END, line + '\n')
+            # The Text widget always keeps a trailing empty line after a \n,
+            # so the line we just wrote is two lines above 'end'.
+            end_line = int(self.log_box.index('end').split('.')[0])
+            self.progress_log_line = end_line - 2
         else:
-            # If a progress line is currently the last thing in the log,
-            # finalize it with a newline before appending the new line.
-            try:
-                if self.log_box.index('progress.last') == self.log_box.index('end'):
-                    self.log_box.insert('progress.last', '\n')
-                    self.log_box.tag_remove('progress', '1.0', END)
-            except Exception:
-                pass
+            self.progress_log_line = None
             self.log_box.insert(END, line + '\n')
         self.log_box.see(END)
         self.log_box.configure(state='disabled')
@@ -976,6 +974,7 @@ class RetrainApp(Tk):
             return
 
         self.results = []
+        self.progress_log_line = None
         self.stop_requested = False
         self.progress['value'] = 0
         self.set_text(self.log_box, "")

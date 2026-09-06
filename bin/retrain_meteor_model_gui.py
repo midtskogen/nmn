@@ -662,9 +662,31 @@ class RetrainApp(Tk):
         widget.insert('1.0', text)
         widget.configure(state='disabled')
 
-    def log(self, line):
+    def log(self, line, overwrite=False):
+        """Append a line to the log. If overwrite=True, replace the last
+        progress line instead of creating a new one."""
         self.log_box.configure(state='normal')
-        self.log_box.insert(END, line + '\n')
+        if overwrite:
+            try:
+                first = self.log_box.index('progress.first')
+                last = self.log_box.index('progress.last')
+                self.log_box.delete(first, last)
+                insert_at = first
+            except Exception:
+                insert_at = END
+            self.log_box.insert(insert_at, line)
+            self.log_box.tag_remove('progress', '1.0', END)
+            self.log_box.tag_add('progress', insert_at, f"{insert_at} + {len(line)} chars")
+        else:
+            # If a progress line is currently the last thing in the log,
+            # finalize it with a newline before appending the new line.
+            try:
+                if self.log_box.index('progress.last') == self.log_box.index('end'):
+                    self.log_box.insert('progress.last', '\n')
+                    self.log_box.tag_remove('progress', '1.0', END)
+            except Exception:
+                pass
+            self.log_box.insert(END, line + '\n')
         self.log_box.see(END)
         self.log_box.configure(state='disabled')
 
@@ -1106,7 +1128,9 @@ class RetrainApp(Tk):
                     if self.stop_requested:
                         proc.terminate()
                         break
-                    self.msg_queue.put(('log', line.rstrip()))
+                    overwrite = line.endswith('\r')
+                    text = line.rstrip('\r\n')
+                    self.msg_queue.put(('log_overwrite' if overwrite else 'log', text))
                 rc = proc.wait()
         except Exception as exc:
             self.msg_queue.put(('log', f"Exception running command: {exc}"))
@@ -1131,8 +1155,11 @@ class RetrainApp(Tk):
                     if self.stop_requested:
                         proc.terminate()
                         break
-                    self.msg_queue.put(('log', line.rstrip()))
-                    out.append(line)
+                    overwrite = line.endswith('\r')
+                    text = line.rstrip('\r\n')
+                    self.msg_queue.put(('log_overwrite' if overwrite else 'log', text))
+                    if not overwrite:
+                        out.append(line)
                 rc = proc.wait()
         except Exception as exc:
             self.msg_queue.put(('log', f"Exception running command: {exc}"))
@@ -1150,6 +1177,8 @@ class RetrainApp(Tk):
                 kind, payload = msg
                 if kind == 'log':
                     self.log(payload)
+                elif kind == 'log_overwrite':
+                    self.log(payload, overwrite=True)
                 elif kind == 'status':
                     self.train_status.configure(text=payload)
                 elif kind == 'progress':

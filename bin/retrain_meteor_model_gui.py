@@ -748,6 +748,7 @@ class RetrainApp(Tk):
         try:
             work_p = pathlib.Path(work)
             if work_p.exists():
+                self.msg_queue.put(('prepare_status', 'Cleaning previous train/verify split...'))
                 try:
                     shutil.rmtree(work_p / 'train', ignore_errors=True)
                     shutil.rmtree(work_p / 'verify', ignore_errors=True)

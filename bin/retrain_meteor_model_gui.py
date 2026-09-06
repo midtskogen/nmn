@@ -298,7 +298,7 @@ def split_datasets(pos_dir, neg_dir, work_dir, verify_ratio, msg_queue=None, pos
             link_or_copy(f, d / f.name)
             copied += 1
             if msg_queue and copied % 50 == 0:
-                msg_queue.put(('prepare_progress', (copied, total_files)))
+                msg_queue.put(('prepare_copy_progress', (copied, total_files)))
 
     return {
         'train_pos': len(dirs['train/meteor']),
@@ -726,8 +726,8 @@ class RetrainApp(Tk):
             return
 
         self.prepare_btn.configure(state=DISABLED)
-        self.prepare_progress.configure(mode='indeterminate')
-        self.prepare_progress.start()
+        self.prepare_progress.stop()
+        self.prepare_progress.configure(mode='determinate', maximum=100, value=0)
         self.prepare_status.configure(text="Preparing data...")
 
         t = threading.Thread(
@@ -748,10 +748,12 @@ class RetrainApp(Tk):
                     pass
 
             self.msg_queue.put(('prepare_status', 'Scanning positive images...'))
+            self.msg_queue.put(('prepare_progress', (0, 100)))
             pos_files = find_images(pos)
             pos_stats = compute_image_stats(pos_files)
 
             self.msg_queue.put(('prepare_status', 'Scanning negative images...'))
+            self.msg_queue.put(('prepare_progress', (20, 100)))
             neg_files = find_images(neg)
             neg_stats = compute_image_stats(neg_files)
 
@@ -763,6 +765,7 @@ class RetrainApp(Tk):
             )
 
             self.msg_queue.put(('prepare_status', 'Splitting dataset...'))
+            self.msg_queue.put(('prepare_progress', (40, 100)))
             split_info = split_datasets(pos, neg, work, ratio, self.msg_queue, pos_files=pos_files, neg_files=neg_files)
             summary += (
                 f"Split created under: {work_p}\n"
@@ -774,6 +777,7 @@ class RetrainApp(Tk):
             if abs(split_info['train_pos'] - split_info['train_neg']) / max(split_info['train_pos'] + split_info['train_neg'], 1) > 0.7:
                 summary += "NOTE: Classes are imbalanced. Enable 'Balance classes' or collect more of the minority class.\n"
 
+            self.msg_queue.put(('prepare_progress', (100, 100)))
             self.msg_queue.put(('prepare_done', {'summary': summary, 'split_info': split_info, 'error': None}))
         except Exception as exc:
             self.msg_queue.put(('prepare_done', {'summary': '', 'split_info': None, 'error': str(exc)}))
@@ -1114,6 +1118,12 @@ class RetrainApp(Tk):
                     if total > 0:
                         self.prepare_progress.stop()
                         self.prepare_progress.configure(mode='determinate', maximum=total, value=current)
+                elif kind == 'prepare_copy_progress':
+                    current, total = payload
+                    if total > 0:
+                        pct = int(50 + 50 * current / total)
+                        self.prepare_progress.stop()
+                        self.prepare_progress.configure(mode='determinate', maximum=100, value=pct)
                 elif kind == 'prepare_done':
                     self.prepare_progress.stop()
                     self.prepare_progress.configure(mode='determinate', value=100)

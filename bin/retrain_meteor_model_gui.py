@@ -203,10 +203,14 @@ def compute_image_stats(image_paths, max_sample=200):
     }
 
 
-def split_datasets(pos_dir, neg_dir, work_dir, verify_ratio):
-    """Split positive/negative images into train and held-out verification sets."""
-    pos_files = find_images(pos_dir)
-    neg_files = find_images(neg_dir)
+def split_datasets(pos_dir, neg_dir, work_dir, verify_ratio, msg_queue=None, pos_files=None, neg_files=None):
+    """Split positive/negative images into train and held-out verification sets.
+
+    If pos_files/neg_files are already known they can be passed in to avoid
+    re-scanning.  Copy progress is reported to msg_queue every 50 files.
+    """
+    pos_files = pos_files or find_images(pos_dir)
+    neg_files = neg_files or find_images(neg_dir)
     if not pos_files:
         raise ValueError(f"No images found in positive directory: {pos_dir}")
     if not neg_files:
@@ -231,11 +235,18 @@ def split_datasets(pos_dir, neg_dir, work_dir, verify_ratio):
     }
 
     work = pathlib.Path(work_dir)
+    total_files = sum(len(files) for files in dirs.values())
+    copied = 0
     for name, files in dirs.items():
         d = work / name
         d.mkdir(parents=True, exist_ok=True)
+        if msg_queue:
+            msg_queue.put(('prepare_status', f"Copying {len(files)} files to {name}..."))
         for f in files:
             link_or_copy(f, d / f.name)
+            copied += 1
+            if msg_queue and copied % 50 == 0:
+                msg_queue.put(('prepare_progress', (copied, total_files)))
 
     return {
         'train_pos': len(dirs['train/meteor']),
@@ -395,7 +406,15 @@ class RetrainApp(Tk):
         ttk.Spinbox(f4, from_=0.05, to=0.50, increment=0.05, textvariable=self.split_ratio, width=5).pack(side=LEFT, padx=5)
         ttk.Label(f4, text="(fraction kept unseen for final evaluation)").pack(side=LEFT)
 
-        ttk.Button(p1, text="Scan & prepare split", command=self.prepare_data).pack(anchor=W, pady=10)
+        prepare_btn_frame = ttk.Frame(p1)
+        prepare_btn_frame.pack(anchor=W, pady=10)
+        self.prepare_btn = ttk.Button(prepare_btn_frame, text="Scan & prepare split", command=self.start_prepare)
+        self.prepare_btn.pack(side=LEFT)
+        self.prepare_status = ttk.Label(prepare_btn_frame, text="", wraplength=700, justify=LEFT)
+        self.prepare_status.pack(side=LEFT, padx=(10, 0))
+
+        self.prepare_progress = ttk.Progressbar(p1, orient=HORIZONTAL, mode='indeterminate')
+        self.prepare_progress.pack(fill=X, pady=(5, 0))
 
         # ----------------------------------------------------------------------
         # Fetch detections from report directories
@@ -428,14 +447,20 @@ class RetrainApp(Tk):
         fetch_btn_frame.pack(fill=X, pady=(10, 0))
         self.fetch_btn = ttk.Button(fetch_btn_frame, text="Fetch detections", command=self.start_fetch)
         self.fetch_btn.pack(side=LEFT)
+        self.scan_counts_btn = ttk.Button(fetch_btn_frame, text="Count matches", command=self.count_sources)
+        self.scan_counts_btn.pack(side=LEFT, padx=(10, 0))
         self.fetch_status = ttk.Label(fetch_btn_frame, text="Ready to fetch.", wraplength=700, justify=LEFT)
         self.fetch_status.pack(side=LEFT, padx=(10, 0))
 
         self.fetch_progress = ttk.Progressbar(fetch_frame, orient=HORIZONTAL, mode='indeterminate')
         self.fetch_progress.pack(fill=X, pady=(5, 0))
 
-        self.data_stats = ttk.Label(p1, text="No data scanned yet.", wraplength=800, justify=LEFT)
-        self.data_stats.pack(anchor=W, pady=10)
+        self.source_count_status = ttk.Label(fetch_frame, text="", wraplength=700, justify=LEFT)
+        self.source_count_status.pack(anchor=W, pady=(5, 0))
+
+        self.data_stats = scrolledtext.ScrolledText(p1, height=10, wrap=WORD, state='disabled', bg='#f5f5f5')
+        self.data_stats.pack(anchor=W, fill=X, pady=10)
+        self.set_text(self.data_stats, "No data scanned yet.")
         self.pages.append(p1)
 
         # ---- Page 2: Options ----
@@ -627,7 +652,7 @@ class RetrainApp(Tk):
         # Store state for validation
         self.deps_ok = all_ok
 
-    def prepare_data(self):
+    def start_prepare(self):
         pos = self.pos_dir.get().strip()
         neg = self.neg_dir.get().strip()
         work = self.work_dir.get().strip()
@@ -646,27 +671,45 @@ class RetrainApp(Tk):
             messagebox.showerror("Error", "Verification split ratio must be between 0 and 1.")
             return
 
-        # Clean previous split
-        work_p = pathlib.Path(work)
-        if work_p.exists():
-            try:
-                shutil.rmtree(work_p / 'train', ignore_errors=True)
-                shutil.rmtree(work_p / 'verify', ignore_errors=True)
-            except Exception:
-                pass
+        self.prepare_btn.configure(state=DISABLED)
+        self.prepare_progress.configure(mode='indeterminate')
+        self.prepare_progress.start()
+        self.prepare_status.configure(text="Preparing data...")
 
-        pos_stats = compute_image_stats(find_images(pos))
-        neg_stats = compute_image_stats(find_images(neg))
-
-        summary = (
-            f"Positive class: {pos_stats['count']} images {pos_stats['ext_counts']}\n"
-            f"Negative class: {neg_stats['count']} images {neg_stats['ext_counts']}\n"
-            f"Mean dimensions (sample): {pos_stats['mean_width']:.0f}x{pos_stats['mean_height']:.0f} (positive), "
-            f"{neg_stats['mean_width']:.0f}x{neg_stats['mean_height']:.0f} (negative)\n\n"
+        t = threading.Thread(
+            target=self.prepare_worker,
+            args=(pos, neg, work, ratio),
+            daemon=True,
         )
+        t.start()
 
+    def prepare_worker(self, pos, neg, work, ratio):
         try:
-            split_info = split_datasets(pos, neg, work, ratio)
+            work_p = pathlib.Path(work)
+            if work_p.exists():
+                try:
+                    shutil.rmtree(work_p / 'train', ignore_errors=True)
+                    shutil.rmtree(work_p / 'verify', ignore_errors=True)
+                except Exception:
+                    pass
+
+            self.msg_queue.put(('prepare_status', 'Scanning positive images...'))
+            pos_files = find_images(pos)
+            pos_stats = compute_image_stats(pos_files)
+
+            self.msg_queue.put(('prepare_status', 'Scanning negative images...'))
+            neg_files = find_images(neg)
+            neg_stats = compute_image_stats(neg_files)
+
+            summary = (
+                f"Positive class: {pos_stats['count']} images {pos_stats['ext_counts']}\n"
+                f"Negative class: {neg_stats['count']} images {neg_stats['ext_counts']}\n"
+                f"Mean dimensions (sample): {pos_stats['mean_width']:.0f}x{pos_stats['mean_height']:.0f} (positive), "
+                f"{neg_stats['mean_width']:.0f}x{neg_stats['mean_height']:.0f} (negative)\n\n"
+            )
+
+            self.msg_queue.put(('prepare_status', 'Splitting dataset...'))
+            split_info = split_datasets(pos, neg, work, ratio, self.msg_queue, pos_files=pos_files, neg_files=neg_files)
             summary += (
                 f"Split created under: {work_p}\n"
                 f"  Training:   {split_info['train_pos']} meteors, {split_info['train_neg']} non-meteors\n"
@@ -676,12 +719,10 @@ class RetrainApp(Tk):
                 summary += "WARNING: Very small training set. Consider collecting more samples.\n"
             if abs(split_info['train_pos'] - split_info['train_neg']) / max(split_info['train_pos'] + split_info['train_neg'], 1) > 0.7:
                 summary += "NOTE: Classes are imbalanced. Enable 'Balance classes' or collect more of the minority class.\n"
-            self.split_info = split_info
-        except Exception as exc:
-            messagebox.showerror("Error", f"Failed to prepare data: {exc}")
-            return
 
-        self.data_stats.configure(text=summary)
+            self.msg_queue.put(('prepare_done', {'summary': summary, 'split_info': split_info, 'error': None}))
+        except Exception as exc:
+            self.msg_queue.put(('prepare_done', {'summary': '', 'split_info': None, 'error': str(exc)}))
 
     def start_fetch(self):
         pos_src = self.pos_source.get().strip()
@@ -717,6 +758,41 @@ class RetrainApp(Tk):
             self.msg_queue.put(('fetch_done', (pos_out, neg_out)))
         except Exception as exc:
             self.msg_queue.put(('fetch_status', f"Fetch failed: {exc}"))
+            self.msg_queue.put(('fetch_done', None))
+
+    def count_sources(self):
+        pos_src = self.pos_source.get().strip()
+        neg_src = self.neg_source.get().strip()
+        pattern = self.fetch_pattern.get().strip() or FETCH_PATTERN_DEFAULT
+        if not pos_src or not pathlib.Path(pos_src).is_dir():
+            messagebox.showerror("Error", "Please select a valid verified meteor report directory.")
+            return
+        if not neg_src or not pathlib.Path(neg_src).is_dir():
+            messagebox.showerror("Error", "Please select a valid false detections directory.")
+            return
+
+        self.fetch_btn.configure(state=DISABLED)
+        self.scan_counts_btn.configure(state=DISABLED)
+        self.fetch_progress.configure(mode='indeterminate')
+        self.fetch_progress.start()
+        self.fetch_status.configure(text=f"Counting matches for '{pattern}'...")
+
+        t = threading.Thread(
+            target=self.count_worker,
+            args=(pos_src, neg_src, pattern),
+            daemon=True,
+        )
+        t.start()
+
+    def count_worker(self, pos_src, neg_src, pattern):
+        try:
+            pos_count = sum(1 for _ in _iter_matching_files(pathlib.Path(pos_src), pattern))
+            neg_count = sum(1 for _ in _iter_matching_files(pathlib.Path(neg_src), pattern))
+            self.msg_queue.put(('source_counts', (pos_count, neg_count)))
+            self.msg_queue.put(('fetch_status', f"Found {pos_count} positives and {neg_count} negatives matching '{pattern}'"))
+        except Exception as exc:
+            self.msg_queue.put(('fetch_status', f"Count failed: {exc}"))
+        finally:
             self.msg_queue.put(('fetch_done', None))
 
     def selected_cluster_counts(self):
@@ -973,9 +1049,31 @@ class RetrainApp(Tk):
                     self.fetch_progress.stop()
                     self.fetch_progress.configure(mode='determinate', value=100)
                     self.fetch_btn.configure(state=NORMAL)
+                    self.scan_counts_btn.configure(state=NORMAL)
                     if payload:
                         self.pos_dir.set(payload[0])
                         self.neg_dir.set(payload[1])
+                elif kind == 'source_counts':
+                    pos_count, neg_count = payload
+                    self.source_count_status.configure(
+                        text=f"Source matches: {pos_count} positives, {neg_count} negatives"
+                    )
+                elif kind == 'prepare_status':
+                    self.prepare_status.configure(text=payload)
+                elif kind == 'prepare_progress':
+                    current, total = payload
+                    if total > 0:
+                        self.prepare_progress.stop()
+                        self.prepare_progress.configure(mode='determinate', maximum=total, value=current)
+                elif kind == 'prepare_done':
+                    self.prepare_progress.stop()
+                    self.prepare_progress.configure(mode='determinate', value=100)
+                    self.prepare_btn.configure(state=NORMAL)
+                    if payload.get('error'):
+                        messagebox.showerror("Error", f"Failed to prepare data: {payload['error']}")
+                    else:
+                        self.set_text(self.data_stats, payload['summary'])
+                        self.split_info = payload['split_info']
         except queue.Empty:
             pass
         self.after(100, self.process_queue)

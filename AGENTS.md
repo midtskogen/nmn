@@ -197,3 +197,10 @@
   directories, trains EfficientNet-B0, sweeps K-Means cluster counts
   (64/128/256/512) to compare model size vs. F1/precision/recall, and
   installs the chosen model into `nmn/model/`.
+- The GUI can also fetch training images directly from the report directories:
+  verified meteors live under `<repo_root>/meteor/YYYYMMDD/HHMMSS/<station>/camN/`,
+  while false detections moved by `nmn/server/false.py` are stored under
+  `/var/www/html/wrongs/` by default.  It collects a chosen file pattern
+  (default `fireball.jpg`) from every leaf directory, hardlinks/copies them
+  into separate positive/negative output folders, and then uses those folders
+  for the train/verify split.

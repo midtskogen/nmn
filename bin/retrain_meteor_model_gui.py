@@ -47,7 +47,7 @@ MODEL_DIR = NMN_DIR / 'model'
 
 # Default locations for fetching verified / false detections
 POS_SOURCE_DEFAULT = NMN_DIR.parent / 'meteor'
-NEG_SOURCE_DEFAULT = pathlib.Path('/var/www/html/wrongs')
+NEG_SOURCE_DEFAULT = NMN_DIR.parent / 'wrongs'
 FETCH_PATTERN_DEFAULT = 'fireball.jpg'
 
 # -----------------------------------------------------------------------------

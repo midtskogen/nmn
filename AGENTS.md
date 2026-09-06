@@ -201,7 +201,7 @@
   verified meteors live under `<repo_root>/meteor/YYYYMMDD/HHMMSS/<station>/camN/`,
   while false detections moved by `nmn/server/false.py` are stored under
   `<repo_root>/wrongs/` (equivalent to `/var/www/html/wrongs/` on a deployed
-  web-root host).  It collects a chosen file pattern (default `fireball.jpg`)
+  web-root host).  It collects a chosen file pattern (default `fireball_orig.jpg`)
   from every leaf directory, hardlinks/copies them into separate
   positive/negative output folders, and then uses those folders for the
   train/verify split.

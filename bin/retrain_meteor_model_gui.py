@@ -757,11 +757,16 @@ class RetrainApp(Tk):
             self.msg_queue.put(('prepare_status', 'Scanning positive images...'))
             self.msg_queue.put(('prepare_progress', (0, 100)))
             pos_files = find_images(pos)
-            pos_stats = compute_image_stats(pos_files)
 
             self.msg_queue.put(('prepare_status', 'Scanning negative images...'))
             self.msg_queue.put(('prepare_progress', (20, 100)))
             neg_files = find_images(neg)
+
+            if len(pos_files) > len(neg_files) and len(neg_files) >= 2000:
+                pos_files = random.Random(42).sample(pos_files, len(neg_files))
+                self.msg_queue.put(('prepare_status', f"Undersampled positives to {len(pos_files)} to balance classes"))
+
+            pos_stats = compute_image_stats(pos_files)
             neg_stats = compute_image_stats(neg_files)
 
             summary = (

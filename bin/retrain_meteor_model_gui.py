@@ -720,11 +720,53 @@ class RetrainApp(Tk):
     def check_scanned(self):
         pos = self.pos_dir.get().strip()
         neg = self.neg_dir.get().strip()
+        work = self.work_dir.get().strip()
+
         pos_path = pathlib.Path(pos) if pos else None
         neg_path = pathlib.Path(neg) if neg else None
+        work_p = pathlib.Path(work) if work else None
+
         pos_count = _count_images_dir(pos_path, 'positives') if pos_path and pos_path.is_dir() else 0
         neg_count = _count_images_dir(neg_path, 'negatives') if neg_path and neg_path.is_dir() else 0
-        self.prepare_status.configure(text=f"Scanned: {pos_count} positives, {neg_count} negatives")
+
+        status = f"Scanned: {pos_count} positives, {neg_count} negatives"
+
+        # If a previous train/verify split exists under the work directory,
+        # allow training to proceed without re-running 'Scan & prepare split'.
+        if work_p and work_p.is_dir():
+            train_pos = _count_images_dir(work_p / 'train' / 'meteor', 'train positives')
+            train_neg = _count_images_dir(work_p / 'train' / 'non_meteor', 'train negatives')
+            verify_pos = _count_images_dir(work_p / 'verify' / 'meteor', 'verify positives')
+            verify_neg = _count_images_dir(work_p / 'verify' / 'non_meteor', 'verify negatives')
+
+            if train_pos + train_neg + verify_pos + verify_neg > 0:
+                self.split_info = {
+                    'train_pos': train_pos,
+                    'train_neg': train_neg,
+                    'verify_pos': verify_pos,
+                    'verify_neg': verify_neg,
+                    'work_dir': work_p,
+                }
+                summary = (
+                    f"Reusing existing split under: {work_p}\n"
+                    f"  Training:     {train_pos} meteors, {train_neg} non-meteors\n"
+                    f"  Verification: {verify_pos} meteors, {verify_neg} non-meteors\n"
+                )
+                if train_pos < 10 or train_neg < 10:
+                    summary += "WARNING: Very small training set.\n"
+                self.set_text(self.data_stats, summary)
+                self.sidebar_next_btn.pack(side=BOTTOM, fill=X, padx=5, pady=10)
+                status += ". Split found; ready to train."
+            else:
+                self.split_info = None
+                self.sidebar_next_btn.pack_forget()
+                status += " (no existing split; use Scan & prepare split)"
+        else:
+            self.split_info = None
+            self.sidebar_next_btn.pack_forget()
+            status += " (no work directory set)"
+
+        self.prepare_status.configure(text=status)
 
     def start_prepare(self):
         pos = self.pos_dir.get().strip()

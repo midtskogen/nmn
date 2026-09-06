@@ -136,11 +136,13 @@ def _iter_matching_files(src: pathlib.Path, pattern: str):
             yield pathlib.Path(root) / f
 
 
-def _collect_matching_files(src: pathlib.Path, pattern: str, max_workers: int = 16):
+def _collect_matching_files(src: pathlib.Path, pattern: str, max_workers: int = 16,
+                            progress_callback=None):
     """Collect all matching file paths under src in parallel across top-level dirs.
 
     Over NFS this is much faster than a single-threaded walk because the latency
-    of many directory lookups can be overlapped.
+    of many directory lookups can be overlapped.  If given, progress_callback(done,
+    total) is called each time a top-level directory finishes scanning.
     """
     src_str = str(src)
     top = [entry.path for entry in os.scandir(src_str) if entry.is_dir()]
@@ -148,10 +150,18 @@ def _collect_matching_files(src: pathlib.Path, pattern: str, max_workers: int = 
         return list(_iter_matching_files(src, pattern))
 
     files = []
+    done = 0
+    total = len(top)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        results = ex.map(lambda p: list(_iter_matching_files(pathlib.Path(p), pattern)), top)
-    for r in results:
-        files.extend(r)
+        future_to_path = {
+            ex.submit(lambda p: list(_iter_matching_files(pathlib.Path(p), pattern)), p): p
+            for p in top
+        }
+        for future in concurrent.futures.as_completed(future_to_path):
+            files.extend(future.result())
+            done += 1
+            if progress_callback:
+                progress_callback(done, total)
     return files
 
 
@@ -173,10 +183,14 @@ def fetch_detection_images(src_root, dst_root, pattern, msg_queue=None, label=''
         if existing.is_file():
             existing.unlink()
 
+    def scan_progress(done, total):
+        if msg_queue and (done % 10 == 0 or done == total):
+            msg_queue.put(('fetch_status', f"Scanning {label}: {done}/{total} subdirs..."))
+
     if msg_queue:
         msg_queue.put(('fetch_status', f"Scanning {label} (parallel)..."))
 
-    files = _collect_matching_files(src, pattern)
+    files = _collect_matching_files(src, pattern, progress_callback=scan_progress)
 
     if msg_queue:
         msg_queue.put(('fetch_status', f"Fetching {label}: copying {len(files)} files..."))
@@ -396,11 +410,13 @@ class RetrainApp(Tk):
         p1 = ttk.Frame(self.content)
         ttk.Label(p1, text="Training data", font=('Helvetica', 12, 'bold')).pack(anchor=W, pady=(0, 10))
 
+        work_default = NMN_DIR.parent / 'retrain_work'
+
         # Positive dir
         f1 = ttk.Frame(p1)
         f1.pack(fill=X, pady=5)
         ttk.Label(f1, text="Positive directory (meteors):").pack(anchor=W)
-        self.pos_dir = StringVar()
+        self.pos_dir = StringVar(value=str(work_default / 'positive_fetched'))
         e1 = ttk.Entry(f1, textvariable=self.pos_dir)
         e1.pack(side=LEFT, fill=X, expand=True)
         ttk.Button(f1, text="Browse...", command=lambda: self.browse_dir(self.pos_dir)).pack(side=LEFT, padx=5)
@@ -409,7 +425,7 @@ class RetrainApp(Tk):
         f2 = ttk.Frame(p1)
         f2.pack(fill=X, pady=5)
         ttk.Label(f2, text="Negative directory (non-meteors / false detections):").pack(anchor=W)
-        self.neg_dir = StringVar()
+        self.neg_dir = StringVar(value=str(work_default / 'negative_fetched'))
         e2 = ttk.Entry(f2, textvariable=self.neg_dir)
         e2.pack(side=LEFT, fill=X, expand=True)
         ttk.Button(f2, text="Browse...", command=lambda: self.browse_dir(self.neg_dir)).pack(side=LEFT, padx=5)
@@ -811,8 +827,16 @@ class RetrainApp(Tk):
 
     def count_worker(self, pos_src, neg_src, pattern):
         try:
-            pos_count = len(_collect_matching_files(pathlib.Path(pos_src), pattern))
-            neg_count = len(_collect_matching_files(pathlib.Path(neg_src), pattern))
+            def pos_progress(done, total):
+                if done % 10 == 0 or done == total:
+                    self.msg_queue.put(('fetch_status', f"Counting positives: {done}/{total} subdirs..."))
+
+            def neg_progress(done, total):
+                if done % 10 == 0 or done == total:
+                    self.msg_queue.put(('fetch_status', f"Counting negatives: {done}/{total} subdirs..."))
+
+            pos_count = len(_collect_matching_files(pathlib.Path(pos_src), pattern, progress_callback=pos_progress))
+            neg_count = len(_collect_matching_files(pathlib.Path(neg_src), pattern, progress_callback=neg_progress))
             self.msg_queue.put(('source_counts', (pos_count, neg_count)))
             self.msg_queue.put(('fetch_status', f"Found {pos_count} positives and {neg_count} negatives matching '{pattern}'"))
         except Exception as exc:

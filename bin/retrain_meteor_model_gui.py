@@ -100,6 +100,19 @@ def find_images(root):
     return files
 
 
+def _count_images_dir(path, label, msg_queue=None):
+    """Count image files in a flat directory, posting progress every 500 files."""
+    count = 0
+    if not path.is_dir():
+        return 0
+    for entry in os.scandir(str(path)):
+        if entry.is_file() and entry.name.lower().endswith(tuple(IMAGE_EXTS)):
+            count += 1
+        if msg_queue and count and count % 500 == 0:
+            msg_queue.put(('fetch_status', f"Counting {label}: {count} files..."))
+    return count
+
+
 def link_or_copy(src, dst):
     """Hardlink if possible (Linux), otherwise copy."""
     try:
@@ -822,8 +835,8 @@ class RetrainApp(Tk):
         try:
             pos_path = pathlib.Path(pos_out)
             neg_path = pathlib.Path(neg_out)
-            pos_count = len(find_images(pos_path)) if pos_path.is_dir() else 0
-            neg_count = len(find_images(neg_path)) if neg_path.is_dir() else 0
+            pos_count = _count_images_dir(pos_path, 'positives', self.msg_queue) if pos_path.is_dir() else 0
+            neg_count = _count_images_dir(neg_path, 'negatives', self.msg_queue) if neg_path.is_dir() else 0
             self.msg_queue.put(('source_counts', (pos_count, neg_count)))
             self.msg_queue.put(('fetch_status', f"Found {pos_count} positives and {neg_count} negatives already fetched"))
         except Exception as exc:

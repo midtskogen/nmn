@@ -52,6 +52,9 @@ POS_SOURCE_DEFAULT = NMN_DIR.parent / 'meteor'
 NEG_SOURCE_DEFAULT = NMN_DIR.parent / 'wrongs'
 FETCH_PATTERN_DEFAULT = 'fireball_orig.jpg'
 
+# tqdm progress bars print a percentage followed by a vertical bar.
+_PROGRESS_RE = re.compile(r'\d+%\|')
+
 # -----------------------------------------------------------------------------
 # Dependency information
 # -----------------------------------------------------------------------------
@@ -663,10 +666,11 @@ class RetrainApp(Tk):
         widget.configure(state='disabled')
 
     def log(self, line, overwrite=False):
-        """Append a line to the log. If overwrite=True, replace the last
+        """Append a line to the log. Progress lines overwrite the last
         progress line instead of creating a new one."""
+        is_progress = overwrite or bool(_PROGRESS_RE.search(line))
         self.log_box.configure(state='normal')
-        if overwrite:
+        if is_progress:
             try:
                 first = self.log_box.index('progress.first')
                 last = self.log_box.index('progress.last')
@@ -1128,9 +1132,11 @@ class RetrainApp(Tk):
                     if self.stop_requested:
                         proc.terminate()
                         break
-                    overwrite = line.endswith('\r')
                     text = line.rstrip('\r\n')
-                    self.msg_queue.put(('log_overwrite' if overwrite else 'log', text))
+                    if not text:
+                        continue
+                    is_progress = bool(_PROGRESS_RE.search(text))
+                    self.msg_queue.put(('log_overwrite' if is_progress else 'log', text))
                 rc = proc.wait()
         except Exception as exc:
             self.msg_queue.put(('log', f"Exception running command: {exc}"))
@@ -1155,10 +1161,12 @@ class RetrainApp(Tk):
                     if self.stop_requested:
                         proc.terminate()
                         break
-                    overwrite = line.endswith('\r')
                     text = line.rstrip('\r\n')
-                    self.msg_queue.put(('log_overwrite' if overwrite else 'log', text))
-                    if not overwrite:
+                    if not text:
+                        continue
+                    is_progress = bool(_PROGRESS_RE.search(text))
+                    self.msg_queue.put(('log_overwrite' if is_progress else 'log', text))
+                    if not is_progress:
                         out.append(line)
                 rc = proc.wait()
         except Exception as exc:

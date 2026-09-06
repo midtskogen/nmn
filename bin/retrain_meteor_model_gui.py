@@ -117,14 +117,23 @@ def _count_images_dir(path, label, msg_queue=None):
 
 
 def link_or_copy(src, dst):
-    """Hardlink if possible (Linux), otherwise copy."""
+    """Hardlink if possible (Linux), otherwise copy. Overwrites dst."""
+    src_p = pathlib.Path(src)
+    dst_p = pathlib.Path(dst)
+    if dst_p.exists():
+        try:
+            if dst_p.samefile(src_p):
+                return
+        except OSError:
+            pass
+        dst_p.unlink()
     try:
         if sys.platform.startswith('linux'):
-            os.link(src, dst)
+            os.link(src_p, dst_p)
         else:
-            shutil.copy2(src, dst)
+            shutil.copy2(src_p, dst_p)
     except (OSError, AttributeError):
-        shutil.copy2(src, dst)
+        shutil.copy2(src_p, dst_p)
 
 
 def _unique_name(dst_dir: pathlib.Path, src: pathlib.Path) -> str:

@@ -488,7 +488,7 @@ class RetrainApp(Tk):
         fetch_btn_frame.pack(fill=X, pady=(10, 0))
         self.fetch_btn = ttk.Button(fetch_btn_frame, text="Fetch detections", command=self.start_fetch)
         self.fetch_btn.pack(side=LEFT)
-        self.scan_counts_btn = ttk.Button(fetch_btn_frame, text="Count matches", command=self.count_sources)
+        self.scan_counts_btn = ttk.Button(fetch_btn_frame, text="Count fetched", command=self.count_sources)
         self.scan_counts_btn.pack(side=LEFT, padx=(10, 0))
         self.fetch_status = ttk.Label(fetch_btn_frame, text="Ready to fetch.", wraplength=700, justify=LEFT)
         self.fetch_status.pack(side=LEFT, padx=(10, 0))
@@ -802,43 +802,30 @@ class RetrainApp(Tk):
             self.msg_queue.put(('fetch_done', None))
 
     def count_sources(self):
-        pos_src = self.pos_source.get().strip()
-        neg_src = self.neg_source.get().strip()
-        pattern = self.fetch_pattern.get().strip() or FETCH_PATTERN_DEFAULT
-        if not pos_src or not pathlib.Path(pos_src).is_dir():
-            messagebox.showerror("Error", "Please select a valid verified meteor report directory.")
-            return
-        if not neg_src or not pathlib.Path(neg_src).is_dir():
-            messagebox.showerror("Error", "Please select a valid false detections directory.")
-            return
+        pos_out = self.fetch_pos_out.get().strip()
+        neg_out = self.fetch_neg_out.get().strip()
 
         self.fetch_btn.configure(state=DISABLED)
         self.scan_counts_btn.configure(state=DISABLED)
         self.fetch_progress.configure(mode='indeterminate')
         self.fetch_progress.start()
-        self.fetch_status.configure(text=f"Counting matches for '{pattern}'...")
+        self.fetch_status.configure(text="Counting already-fetched images...")
 
         t = threading.Thread(
             target=self.count_worker,
-            args=(pos_src, neg_src, pattern),
+            args=(pos_out, neg_out),
             daemon=True,
         )
         t.start()
 
-    def count_worker(self, pos_src, neg_src, pattern):
+    def count_worker(self, pos_out, neg_out):
         try:
-            def pos_progress(done, total):
-                if done % 10 == 0 or done == total:
-                    self.msg_queue.put(('fetch_status', f"Counting positives: {done}/{total} subdirs..."))
-
-            def neg_progress(done, total):
-                if done % 10 == 0 or done == total:
-                    self.msg_queue.put(('fetch_status', f"Counting negatives: {done}/{total} subdirs..."))
-
-            pos_count = len(_collect_matching_files(pathlib.Path(pos_src), pattern, progress_callback=pos_progress))
-            neg_count = len(_collect_matching_files(pathlib.Path(neg_src), pattern, progress_callback=neg_progress))
+            pos_path = pathlib.Path(pos_out)
+            neg_path = pathlib.Path(neg_out)
+            pos_count = len(find_images(pos_path)) if pos_path.is_dir() else 0
+            neg_count = len(find_images(neg_path)) if neg_path.is_dir() else 0
             self.msg_queue.put(('source_counts', (pos_count, neg_count)))
-            self.msg_queue.put(('fetch_status', f"Found {pos_count} positives and {neg_count} negatives matching '{pattern}'"))
+            self.msg_queue.put(('fetch_status', f"Found {pos_count} positives and {neg_count} negatives already fetched"))
         except Exception as exc:
             self.msg_queue.put(('fetch_status', f"Count failed: {exc}"))
         finally:

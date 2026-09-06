@@ -192,3 +192,8 @@
   This prints precision/recall/F1 and the optimal threshold. If you only
   want to train the unclustered `.pth`, omit `--cluster`; if you want the
   full image+video+stacking ensemble, use `buildensemble` instead.
+- For a guided, graphical workflow use `nmn/bin/retrain_meteor_model_gui.py`.
+  It checks dependencies, helps select/split positive and negative image
+  directories, trains EfficientNet-B0, sweeps K-Means cluster counts
+  (64/128/256/512) to compare model size vs. F1/precision/recall, and
+  installs the chosen model into `nmn/model/`.

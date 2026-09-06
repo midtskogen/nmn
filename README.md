@@ -73,6 +73,7 @@ Scripts used directly on each camera station and for offline processing:
 #### Classification & Reporting
 
 - **`classify.py`** — PyTorch meteor image/video classification (2D and 3D CNNs). Supports train, predict, and `buildensemble` modes, optional K-Means clustering, and synthetic balancing.
+- **`retrain_meteor_model_gui.py`** — Tkinter wizard that checks dependencies, splits data into training/verification sets, trains and evaluates the EfficientNet-B0 meteor classifier, and compares model-size/performance tradeoffs.
 - **`process.py`** — Processes a single meteor event detection: validation, video/classification calls, Metrack data generation, and translated brightness plots.
 - **`report.py`** — Classifies an event, produces plots/reports, and reports to the central NMN server if it passes the probability threshold.
 

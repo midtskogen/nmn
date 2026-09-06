@@ -16,7 +16,7 @@ This repository contains the software that runs the Norsk meteornettverk (NMN), 
 ├── model/             # Machine-learning model files for meteor detection/classification
 ├── src/               # C source code for compiled helper programs
 ├── .clang-format      # Formatting rules for C/C++ code
-└── ../AGENTS.md       # Project notes for contributors (repo root)
+└── AGENTS.md          # Project notes for contributors
 ```
 
 ## Main Components
@@ -203,7 +203,7 @@ Optional enhancements: cairosvg, scour, scikit-image.
 
 - **Numba cache issues:** `multiblend.py` uses Numba with `cache=True`. If you encounter strange Numba errors after changing import paths, clear the cache directories (`nmn/bin/__pycache__` and Numba's own cache, normally `~/.cache/numba` or `$NUMBA_CACHE_DIR`).
 - **C helpers:** `src/metdetect.c` and `src/parsexy.c`, and `bin/compile.sh`, are legacy code and are not rebuilt or used by the active pipeline.
-- See `../AGENTS.md` for detailed operational notes on the mask pipeline, `sgp4` performance, web-root data directory pitfalls, and other contributor guidance.
+- See `AGENTS.md` for detailed operational notes on the mask pipeline, `sgp4` performance, web-root data directory pitfalls, and other contributor guidance.
 
 ---
 

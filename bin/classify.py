@@ -480,9 +480,19 @@ def _run_clustering(model_path: str, args: argparse.Namespace):
 
     all_weights = torch.cat(weights_to_cluster).cpu().numpy().reshape(-1, 1)
     
-    # 3. Run K-Means
-    logging.info(f"Running K-Means with {args.clusters} clusters on {len(all_weights)} weights...")
-    kmeans = KMeans(n_clusters=args.clusters, random_state=0, n_init='auto', max_iter=100).fit(all_weights)
+    # 3. Run K-Means on a sample if the model is large (e.g. EfficientNet-B0
+    # has ~4M weights). Fitting on the full set is very slow on CPU and the
+    # centroids are already well-estimated from a representative subset.
+    MAX_KMEANS_SAMPLES = 200_000
+    if len(all_weights) > MAX_KMEANS_SAMPLES:
+        rng = np.random.default_rng(0)
+        sample_idx = rng.choice(len(all_weights), size=MAX_KMEANS_SAMPLES, replace=False, shuffle=False)
+        sample = all_weights[sample_idx]
+        logging.info(f"Running K-Means with {args.clusters} clusters on {len(sample)} sampled weights (from {len(all_weights)} total)...")
+    else:
+        sample = all_weights
+        logging.info(f"Running K-Means with {args.clusters} clusters on {len(all_weights)} weights...")
+    kmeans = KMeans(n_clusters=args.clusters, random_state=0, n_init='auto', max_iter=100).fit(sample)
     centroids = kmeans.cluster_centers_.flatten()
     
     # 4. Apply clusters back to a new state_dict

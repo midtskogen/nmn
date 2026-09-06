@@ -200,7 +200,8 @@
 - The GUI can also fetch training images directly from the report directories:
   verified meteors live under `<repo_root>/meteor/YYYYMMDD/HHMMSS/<station>/camN/`,
   while false detections moved by `nmn/server/false.py` are stored under
-  `/var/www/html/wrongs/` by default.  It collects a chosen file pattern
-  (default `fireball.jpg`) from every leaf directory, hardlinks/copies them
-  into separate positive/negative output folders, and then uses those folders
-  for the train/verify split.
+  `<repo_root>/wrongs/` (equivalent to `/var/www/html/wrongs/` on a deployed
+  web-root host).  It collects a chosen file pattern (default `fireball.jpg`)
+  from every leaf directory, hardlinks/copies them into separate
+  positive/negative output folders, and then uses those folders for the
+  train/verify split.

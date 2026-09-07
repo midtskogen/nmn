@@ -66,11 +66,13 @@ except ImportError:
         return iterable
 
 try:
-    from sklearn.cluster import KMeans
+    from sklearn.cluster import KMeans, MiniBatchKMeans
 except ImportError:
-    def KMeans(*args, **kwargs):
+    def _missing_sklearn(*args, **kwargs):
         logging.error("scikit-learn not found. To use clustering, please run: pip install scikit-learn")
         sys.exit(1)
+    KMeans = _missing_sklearn
+    MiniBatchKMeans = _missing_sklearn
 
 try:
     import zstandard as zstd
@@ -467,45 +469,41 @@ def _run_clustering(model_path: str, args: argparse.Namespace):
     # 1. Load the dense model
     model = load_model_helper(model_name, model_path.replace('.zst', ''), args)
     
-    # 2. Extract weights to cluster
-    weights_to_cluster = []
-    logging.info("Extracting weights for clustering...")
-    for name, param in model.named_parameters():
-        if param.dim() > 1:
-            weights_to_cluster.append(param.data.flatten())
-
-    if not weights_to_cluster:
-        logging.warning("No weights found to cluster. Skipping.")
-        return
-
-    all_weights = torch.cat(weights_to_cluster).cpu().numpy().reshape(-1, 1)
-    
-    # 3. Run K-Means on a sample if the model is large (e.g. EfficientNet-B0
-    # has ~4M weights). Fitting on the full set is very slow on CPU and the
-    # centroids are already well-estimated from a representative subset.
-    MAX_KMEANS_SAMPLES = 200_000
-    if len(all_weights) > MAX_KMEANS_SAMPLES:
-        rng = np.random.default_rng(0)
-        sample_idx = rng.choice(len(all_weights), size=MAX_KMEANS_SAMPLES, replace=False, shuffle=False)
-        sample = all_weights[sample_idx]
-        logging.info(f"Running K-Means with {args.clusters} clusters on {len(sample)} sampled weights (from {len(all_weights)} total)...")
-    else:
-        sample = all_weights
-        logging.info(f"Running K-Means with {args.clusters} clusters on {len(all_weights)} weights...")
-    kmeans = KMeans(n_clusters=args.clusters, random_state=0, n_init='auto', max_iter=100).fit(sample)
-    centroids = kmeans.cluster_centers_.flatten()
-    
-    # 4. Apply clusters back to a new state_dict
-    logging.info("Applying cluster centroids back to the model weights...")
+    # 2. Cluster each weight tensor independently.  Using a single global
+    # codebook for the whole model forces the classifier head and the early
+    # convolutional layers to share the same 256 centroids, which can badly
+    # damage the learned decision boundary.  Per-tensor clustering keeps the
+    # centroids adapted to each parameter's distribution.
     new_state_dict = model.state_dict()
+    total_weights = 0
+    clustered_count = 0
     for name, param in model.named_parameters():
         if param.dim() > 1:
             original_weights = param.data.cpu().numpy()
-            labels = kmeans.predict(original_weights.reshape(-1, 1))
+            w = original_weights.reshape(-1, 1)
+            k = min(int(args.clusters), len(w))
+            total_weights += len(w)
+            if k < 2:
+                continue
+            if len(w) > 200_000:
+                logging.info(f"Clustering {name}: {len(w)} weights with K={k} (MiniBatchKMeans)...")
+                kmeans = MiniBatchKMeans(n_clusters=k, random_state=0, n_init=3, max_iter=50, batch_size=8192).fit(w)
+            else:
+                logging.info(f"Clustering {name}: {len(w)} weights with K={k}...")
+                kmeans = KMeans(n_clusters=k, random_state=0, n_init='auto', max_iter=100).fit(w)
+            centroids = kmeans.cluster_centers_.flatten()
+            labels = kmeans.predict(w)
             clustered_weights = centroids[labels].reshape(original_weights.shape)
             new_state_dict[name] = torch.from_numpy(clustered_weights).to(param.device, dtype=param.dtype)
+            clustered_count += 1
+    
+    if not clustered_count:
+        logging.warning("No weights found to cluster. Skipping.")
+        return
 
-    # 5. Save and compress the clustered model
+    logging.info(f"Clustered {clustered_count} parameter tensors ({total_weights} weights total).")
+
+    # 3. Save and compress the clustered model
     clustered_model_path = model_path.replace('.pth', '_clustered.pth')
     torch.save(new_state_dict, clustered_model_path)
     

@@ -17,7 +17,7 @@ from PIL import Image
 
 # Import from our new shared utility library
 # Imports utility functions shared across multiple backend scripts.
-from shared_utils import atomic_json_rw, update_status, uniqid, read_json_file, pid_cmdline_matches
+from shared_utils import atomic_json_rw, update_status, uniqid, read_json_file, pid_cmdline_matches, update_quota_tracker
 
 # --- Configuration (specific to streaming) ---
 # Establishes base paths for all necessary directories and configuration files.
@@ -27,6 +27,7 @@ DOWNLOAD_DIR = os.path.join(BASE_DIR, 'download')
 STREAM_DIR = os.path.join(BASE_DIR, 'streams')
 STATIONS_FILE = os.path.join(BASE_DIR, 'stations.json')
 STREAM_TIME_TRACKER_FILE = os.path.join(BASE_DIR, 'stream_time_tracker.json')
+QUOTA_TRACKER_FILE = os.path.join(BASE_DIR, 'quota_tracker.json')
 
 GRID_CACHE_DIR = DOWNLOAD_DIR
 
@@ -83,28 +84,42 @@ def _validate_timestamp(ts):
         raise ValueError(f"invalid timestamp: {ts!r}") from e
 
 
-def fetch_grid_file(stream_task_id, station_id, camera_num):
+def _resolve_station_id(stations_data, code_or_id):
+    """Accept either a station ID (amsN) or a station short code (e.g. GAU)."""
+    if not code_or_id:
+        return None
+    if code_or_id in stations_data:
+        return code_or_id
+    code = code_or_id.upper()
+    for sid, s in stations_data.items():
+        if s.get('station', {}).get('code', '').upper() == code:
+            return sid
+    return None
+
+
+def fetch_grid_file(stream_task_id, station_id, camera_num, user_ip=None):
     """
     Fetches the calibration grid image for a specific camera from a remote station.
     This allows the user to overlay a grid on the live video stream for reference.
     """
-    _safe_id(stream_task_id, 'stream_task_id')
     stations_data = _load_stations_data()
     _validate_station(station_id, stations_data)
     _validate_camera(camera_num)
 
     log_prefix = f"GridFetch for {stream_task_id} -"
-   
+
     logging.info(f"{log_prefix} Request for {station_id} cam {camera_num}.")
-    status_file = os.path.join(LOCK_DIR, f"{stream_task_id}.json")
-    
+    status_file = os.path.join(LOCK_DIR, f"{stream_task_id}.json") if stream_task_id else None
+
     # Waits for the main stream task's status file to be created.
-    for _ in range(50): # Wait up to 10 seconds for status file
-        if os.path.exists(status_file): break
-        time.sleep(0.2)
-    else:
-        logging.error(f"{log_prefix} Status file not found after waiting.")
-        return {"success": False, "error": "Stream task not found."}
+    if status_file:
+        _safe_id(stream_task_id, 'stream_task_id')
+        for _ in range(50): # Wait up to 10 seconds for status file
+            if os.path.exists(status_file): break
+            time.sleep(0.2)
+        else:
+            logging.error(f"{log_prefix} Status file not found after waiting.")
+            return {"success": False, "error": "Stream task not found."}
 
     try:
         os.makedirs(GRID_CACHE_DIR, exist_ok=True)
@@ -137,10 +152,18 @@ def fetch_grid_file(stream_task_id, station_id, camera_num):
             cached_filename = os.path.basename(cached_filepath)
 
         # Updates the stream's status file with the path to the downloaded grid.
-        with atomic_json_rw(status_file, stream_task_id) as data:
-            data['grid_local_path'] = cached_filepath
-            data['grid_cached'] = (cached_filepath == os.path.join(GRID_CACHE_DIR, f"grid_{station_id}_cam{camera_num}.png"))
-        
+        if status_file:
+            with atomic_json_rw(status_file, stream_task_id) as data:
+                data['grid_local_path'] = cached_filepath
+                data['grid_cached'] = (cached_filepath == os.path.join(GRID_CACHE_DIR, f"grid_{station_id}_cam{camera_num}.png"))
+
+        # Count overlay bytes against the shared daily download quota.
+        if user_ip and os.path.exists(cached_filepath):
+            try:
+                update_quota_tracker({station_id: os.path.getsize(cached_filepath)}, stream_task_id or 'grid_overlay', user_ip, QUOTA_TRACKER_FILE)
+            except Exception as e:
+                logging.warning(f"{log_prefix} Could not update quota tracker: {e}")
+
         return {"success": True, "grid_url": f"download/{cached_filename}"}
 
     except subprocess.TimeoutExpired:
@@ -158,13 +181,12 @@ DRAWGRID_SCRIPT = os.path.join(os.path.dirname(BASE_DIR), 'bin', 'drawgrid.py')
 PTO_CACHE_DIR = DOWNLOAD_DIR
 
 
-def fetch_annotation_file(stream_task_id, station_id, camera_num):
+def fetch_annotation_file(stream_task_id, station_id, camera_num, user_ip=None):
     """
     Generates a star annotation overlay for the live stream.
     Uses the cached grid PNG as a base and draws star positions on top using drawgrid.py.
     Requires the lens.pto calibration file from the remote station.
     """
-    _safe_id(stream_task_id, 'stream_task_id')
     stations_data = _load_stations_data()
     _validate_station(station_id, stations_data)
     _validate_camera(camera_num)
@@ -172,14 +194,16 @@ def fetch_annotation_file(stream_task_id, station_id, camera_num):
     log_prefix = f"AnnotationFetch for {stream_task_id} -"
     logging.info(f"{log_prefix} Request for {station_id} cam {camera_num}.")
 
-    status_file = os.path.join(LOCK_DIR, f"{stream_task_id}.json")
-    for _ in range(50):
-        if os.path.exists(status_file):
-            break
-        time.sleep(0.2)
-    else:
-        logging.error(f"{log_prefix} Status file not found after waiting.")
-        return {"success": False, "error": "Stream task not found."}
+    status_file = os.path.join(LOCK_DIR, f"{stream_task_id}.json") if stream_task_id else None
+    if status_file:
+        _safe_id(stream_task_id, 'stream_task_id')
+        for _ in range(50):
+            if os.path.exists(status_file):
+                break
+            time.sleep(0.2)
+        else:
+            logging.error(f"{log_prefix} Status file not found after waiting.")
+            return {"success": False, "error": "Stream task not found."}
 
     try:
         os.makedirs(PTO_CACHE_DIR, exist_ok=True)
@@ -197,6 +221,7 @@ def fetch_annotation_file(stream_task_id, station_id, camera_num):
                 pto_fresh = True
                 logging.info(f"{log_prefix} Using cached lens.pto: {pto_filepath}")
 
+        pto_bytes = 0
         if not pto_fresh:
             tmp_pto = os.path.join(DOWNLOAD_DIR, f"lens_{station_id}_cam{camera_num}_{uniqid()}.pto")
             command = ["scp", "-B", "-o", "ConnectTimeout=10",
@@ -207,6 +232,15 @@ def fetch_annotation_file(stream_task_id, station_id, camera_num):
                 os.replace(tmp_pto, pto_filepath)
             except OSError:
                 pto_filepath = tmp_pto
+            if os.path.exists(pto_filepath):
+                pto_bytes = os.path.getsize(pto_filepath)
+
+        # Count lens.pto bytes against the shared daily download quota.
+        if user_ip and pto_bytes:
+            try:
+                update_quota_tracker({station_id: pto_bytes}, stream_task_id or 'annotation_overlay', user_ip, QUOTA_TRACKER_FILE)
+            except Exception as e:
+                logging.warning(f"{log_prefix} Could not update quota tracker: {e}")
 
         # 2. Get station latitude/longitude from stations.json
         with open(STATIONS_FILE, 'r') as f:
@@ -253,7 +287,7 @@ def fetch_annotation_file(stream_task_id, station_id, camera_num):
 
 # --- Archive Video Overlay Functions (separate from live stream) ---
 
-def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
+def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data, user_ip=None):
     """
     Fetches or generates a grid overlay for an archive video.
     For archive videos, we use the current grid.png (calibration doesn't change often).
@@ -261,15 +295,11 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
     """
     _validate_camera(cam_num)
     _validate_timestamp(timestamp)
-    # Map station code to station ID
-    station_id = None
-    for sid, s in stations_data.items():
-        if s.get('station', {}).get('code', '').upper() == station_code.upper():
-            station_id = sid
-            break
+    # Map station code or station ID to the canonical station ID
+    station_id = _resolve_station_id(stations_data, station_code)
 
     if not station_id:
-        logging.error(f"[ArchiveGrid] Station code {station_code} not found in stations data")
+        logging.error(f"[ArchiveGrid] Station code/id {station_code} not found in stations data")
         return {"success": False, "error": "error_station_not_found"}
     _safe_id(station_id, 'station_id')
 
@@ -323,6 +353,14 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data):
             cached_filename = os.path.basename(tmp_path)
 
         logging.info(f"{log_prefix} Grid fetched: {cached_filename}")
+
+        # Count archive grid bytes against the shared daily download quota.
+        if user_ip and os.path.exists(cached_filepath):
+            try:
+                update_quota_tracker({station_id: os.path.getsize(cached_filepath)}, 'archive_grid_overlay', user_ip, QUOTA_TRACKER_FILE)
+            except Exception as e:
+                logging.warning(f"{log_prefix} Could not update quota tracker: {e}")
+
         return {"success": True, "grid_url": f"download/{cached_filename}"}
 
     except subprocess.TimeoutExpired:
@@ -608,7 +646,7 @@ def get_stitch_cam_boundaries(station_id_arg: str, projection: str, stations_dat
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_data):
+def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_data, user_ip=None):
     """
     Generates a star annotation overlay for an archive video using drawgrid.py.
     Uses the video's timestamp to calculate star positions.
@@ -616,15 +654,11 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
     """
     _validate_camera(cam_num)
     _validate_timestamp(timestamp)
-    # Map station code to station ID
-    station_id = None
-    for sid, s in stations_data.items():
-        if s.get('station', {}).get('code', '').upper() == station_code.upper():
-            station_id = sid
-            break
+    # Map station code or station ID to the canonical station ID
+    station_id = _resolve_station_id(stations_data, station_code)
 
     if not station_id:
-        logging.error(f"[ArchiveAnnotation] Station code {station_code} not found in stations data")
+        logging.error(f"[ArchiveAnnotation] Station code/id {station_code} not found in stations data")
         return {"success": False, "error": "error_station_not_found"}
     _safe_id(station_id, 'station_id')
 
@@ -658,6 +692,7 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
         pto_filename = f"lens_{station_id}_cam{cam_num}.pto"
         pto_path = os.path.join(DOWNLOAD_DIR, pto_filename)
 
+        pto_bytes = 0
         if not os.path.exists(pto_path) or os.path.getsize(pto_path) == 0:
             hostname = station_id
             remote_pto = f"/meteor/cam{cam_num}/lens.pto"
@@ -668,6 +703,15 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
             if result.returncode != 0:
                 logging.error(f"{log_prefix} Failed to fetch lens.pto: {result.stderr}")
                 return {"success": False, "error": "error_annotation_pto_not_found"}
+            if os.path.exists(pto_path):
+                pto_bytes = os.path.getsize(pto_path)
+
+        # Count archive annotation pto bytes against the shared daily quota.
+        if user_ip and pto_bytes:
+            try:
+                update_quota_tracker({station_id: pto_bytes}, 'archive_annotation_overlay', user_ip, QUOTA_TRACKER_FILE)
+            except Exception as e:
+                logging.warning(f"{log_prefix} Could not update quota tracker: {e}")
 
         # Parse timestamp to Unix epoch. Keep the datetime timezone-aware so
         # .timestamp() is interpreted as UTC regardless of server local time.
@@ -707,7 +751,7 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
         return {"success": False, "error": "error_internal"}
 
 
-def get_archive_mask_overlay(station_code, cam_num, stations_data):
+def get_archive_mask_overlay(station_code, cam_num, stations_data, user_ip=None):
     """
     Fetches a camera's foreground mask (/meteor/camN/mask.png on the station,
     white=non-sky/foreground, black=sky - see automask.py) and turns it into
@@ -717,15 +761,11 @@ def get_archive_mask_overlay(station_code, cam_num, stations_data):
     Returns a web-accessible URL path.
     """
     _validate_camera(cam_num)
-    # Map station code to station ID
-    station_id = None
-    for sid, s in stations_data.items():
-        if s.get('station', {}).get('code', '').upper() == station_code.upper():
-            station_id = sid
-            break
+    # Map station code or station ID to the canonical station ID
+    station_id = _resolve_station_id(stations_data, station_code)
 
     if not station_id:
-        logging.error(f"[ArchiveMask] Station code {station_code} not found in stations data")
+        logging.error(f"[ArchiveMask] Station code/id {station_code} not found in stations data")
         return {"success": False, "error": "error_station_not_found"}
     _safe_id(station_id, 'station_id')
 
@@ -775,6 +815,14 @@ def get_archive_mask_overlay(station_code, cam_num, stations_data):
                 pass
 
         logging.info(f"{log_prefix} Mask overlay generated: {cached_filename}")
+
+        # Count mask overlay bytes against the shared daily download quota.
+        if user_ip and os.path.exists(cached_filepath):
+            try:
+                update_quota_tracker({station_id: os.path.getsize(cached_filepath)}, 'archive_mask_overlay', user_ip, QUOTA_TRACKER_FILE)
+            except Exception as e:
+                logging.warning(f"{log_prefix} Could not update quota tracker: {e}")
+
         return {"success": True, "mask_url": f"download/{cached_filename}"}
 
     except subprocess.TimeoutExpired:

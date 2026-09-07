@@ -145,7 +145,7 @@ def trim_log_file(log_path, max_lines):
     except Exception as e:
         logging.error(f"Could not trim log file {log_path}: {e}")
 
-def get_tle_data(ts):
+def get_tle_data(ts, status_file=None):
     """
     Fetches and caches Two-Line Element (TLE) data for satellites from CelesTrak.
     TLE data describes the orbits of satellites and is required for position prediction.
@@ -164,6 +164,8 @@ def get_tle_data(ts):
     logging.info("Cache is stale or missing. Forcing fresh TLE download.")
     tle_data = {}
     last_error = None
+    if status_file:
+        update_status(status_file, "progress", {"step": 1, "total": 100, "message": "status_loading_tle"})
     # List of CelesTrak TLE sources to query, tagged with a category used to
     # assign a default absolute magnitude to satellites we don't have a
     # hand-curated estimate for (see CATEGORY_DEFAULT_ABS_MAG).
@@ -175,7 +177,7 @@ def get_tle_data(ts):
         ("https://celestrak.org/NORAD/elements/gp.php?GROUP=radar&FORMAT=tle", 'radar'),
         ("https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle", 'active'),
     ]
-    for source_url, category in sources:
+    for idx, (source_url, category) in enumerate(sources, start=1):
         try:
             req = urllib.request.Request(source_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -230,6 +232,9 @@ def get_tle_data(ts):
             # could not refresh.
             logging.error(f"Could not process TLE from {source_url}: {e}")
             last_error = e
+        if status_file:
+            progress = 1 + int((idx / len(sources)) * 3)
+            update_status(status_file, "progress", {"step": progress, "total": 100, "message": "status_loading_tle"})
 
     # Some curated satellites aren't members of any of the group downloads
     # above (e.g. CelesTrak's GROUP=active only lists satellites it
@@ -251,6 +256,9 @@ def get_tle_data(ts):
         except Exception as e:
             logging.error(f"Could not fetch individual TLE for curated satellite '{name}' (NORAD {satnum}): {e}")
             last_error = e
+
+    if status_file:
+        update_status(status_file, "progress", {"step": 4, "total": 100, "message": "status_loading_tle"})
 
     if cached_data:
         # Fill in any satellites we failed to refresh this round with their
@@ -555,7 +563,9 @@ def _compute_and_cache_stations(station_items, tle_data, tle_names, status_file=
     tasks = [(sid, sinfo, tle_data) for sid, sinfo in station_items]
     total = len(tasks)
     done = 0
-    with ProcessPoolExecutor(initializer=init_worker) as executor:
+    import os as _os
+    _pool_workers = int(_os.environ.get('NMN_MAX_WORKERS', _os.cpu_count() or 1))
+    with ProcessPoolExecutor(initializer=init_worker, max_workers=max(1, _pool_workers)) as executor:
         futures = {executor.submit(process_station, task): task[0] for task in tasks}
         for future in as_completed(futures):
             station_id = futures[future]
@@ -567,7 +577,8 @@ def _compute_and_cache_stations(station_items, tle_data, tle_names, status_file=
                 logging.error(f"A station task generated an exception for {station_id}: {exc}")
             done += 1
             if status_file:
-                progress = 5 + int((done / total) * 90)
+                # Compute phase spans 10-90%
+                progress = 10 + int((done / total) * 80)
                 message = f"status_calculating_for_station|processed={done},total={total}"
                 update_status(status_file, "progress", {"step": progress, "total": 100, "message": message})
     return all_passes_found
@@ -617,6 +628,7 @@ def find_all_passes(task_id, station_ids=None, days=None, start_iso=None, end_is
     """
     status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     try:
+        update_status(status_file, "progress", {"step": 0, "total": 100, "message": "status_starting"})
         ts = load.timescale()
         with open(STATIONS_FILE, 'r') as f: stations_data = json.load(f)
 
@@ -628,7 +640,7 @@ def find_all_passes(task_id, station_ids=None, days=None, start_iso=None, end_is
         else:
             target_items = list(stations_data.items())
 
-        tle_data = get_tle_data(ts)
+        tle_data = get_tle_data(ts, status_file=status_file)
         if "error" in tle_data:
             update_status(status_file, "error", {"message": tle_data["error"]})
             return
@@ -637,12 +649,16 @@ def find_all_passes(task_id, station_ids=None, days=None, start_iso=None, end_is
         update_status(status_file, "progress", {"step": 5, "total": 100, "message": "status_calculating"})
 
         cached_passes, to_compute = [], []
-        for sid, sinfo in target_items:
+        total_items = len(target_items)
+        for idx, (sid, sinfo) in enumerate(target_items, start=1):
             station_cached = _load_station_cache(sid, tle_names)
             if station_cached is None:
                 to_compute.append((sid, sinfo))
             else:
                 cached_passes.extend(station_cached)
+            if status_file and idx % 5 == 0:
+                progress = 5 + int((idx / total_items) * 5)
+                update_status(status_file, "progress", {"step": progress, "total": 100, "message": "status_calculating"})
 
         logging.info(f"Task {task_id}: {len(target_items) - len(to_compute)} station(s) served from cache, {len(to_compute)} need computation.")
         computed_passes = _compute_and_cache_stations(to_compute, tle_data, tle_names, status_file=status_file)

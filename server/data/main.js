@@ -254,7 +254,8 @@ function initializeApp() {
         if (scopeNote) scopeNote.textContent = t('satellite_scope_selected', { count: stationIds.length });
         const range = uiManager.getSatelliteRangeIso() || {};
 
-        uiManager.showPanelError('satellite', t('loading_passes'));
+        // Show a progress bar immediately; the backend will push granular updates.
+        uiManager.updateTaskProgress('satellite', { step: 0, total: 100, message: 'status_starting' });
         api.fetchAllPasses({
             onProgress: (data) => { if (requestSeq === satelliteRequestSeq) uiManager.updateTaskProgress('satellite', data); },
             onComplete: (data) => {

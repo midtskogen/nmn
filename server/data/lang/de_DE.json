@@ -112,6 +112,7 @@
     "status_stream_ready": "Videostream ist bereit.",
     "status_fetching_aircraft_track": "Rufe Spur für Flugzeug {i} von {total} ab...",
     "status_calculating": "Berechne...",
+    "status_loading_tle": "Satellitendaten werden geladen...",
     "status_calculating_for_station": "Berechne für Station {processed} von {total}...",
     "status_grouping_results": "Gruppiere und finalisiere Ergebnisse...",
     "download_cancelled": "Herunterladen abgebrochen.",

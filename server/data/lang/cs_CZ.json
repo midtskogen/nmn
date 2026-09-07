@@ -112,6 +112,7 @@
     "status_stream_ready": "Živé vysílání je připravo.",
     "status_fetching_aircraft_track": "Načítám dráhu letadla {i} z {total}...",
     "status_calculating": "Počítám...",
+    "status_loading_tle": "Načítám satelitní data...",
     "status_calculating_for_station": "Počítám pro stanici {processed} z {total}...",
     "status_grouping_results": "Seskupuji a dokončuji výsledky...",
     "download_cancelled": "Stahování zrušeno.",

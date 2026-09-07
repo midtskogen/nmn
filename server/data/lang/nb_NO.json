@@ -112,6 +112,7 @@
     "status_stream_ready": "Videostrømmen er klar.",
     "status_fetching_aircraft_track": "Henter spor for fly {i}/{total}...",
     "status_calculating": "Beregner...",
+    "status_loading_tle": "Laster satellittdata...",
     "status_calculating_for_station": "Beregner for stasjon {processed}/{total}...",
     "status_grouping_results": "Grupperer og ferdigstiller resultatet...",
     "download_cancelled": "Nedlasting avbrutt.",

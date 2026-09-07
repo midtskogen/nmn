@@ -112,6 +112,7 @@
     "status_stream_ready": "Video straume ir gatava.",
     "status_fetching_aircraft_track": "Iegūst trasi lidaparātam {i} no {total}...",
     "status_calculating": "Aprēķina...",
+    "status_loading_tle": "Ielādē satelīta datus...",
     "status_calculating_for_station": "Aprēķina stacijai {processed} no {total}...",
     "status_grouping_results": "Grupē un pabeidz rezultātus...",
     "download_cancelled": "Lejupielāde atcelta.",

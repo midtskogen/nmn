@@ -112,6 +112,7 @@
     "status_stream_ready": "Video stream is ready.",
     "status_fetching_aircraft_track": "Fetching track for aircraft {i} of {total}...",
     "status_calculating": "Calculating...",
+    "status_loading_tle": "Loading satellite data...",
     "status_calculating_for_station": "Calculating for station {processed} of {total}...",
     "status_grouping_results": "Grouping and finalising results...",
     "download_cancelled": "Download cancelled.",

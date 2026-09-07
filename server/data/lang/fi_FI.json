@@ -112,6 +112,7 @@
     "status_stream_ready": "Videolähetys on valmis.",
     "status_fetching_aircraft_track": "Haetaan lentokoneen {i}/{total} reittiä...",
     "status_calculating": "Lasketaan...",
+    "status_loading_tle": "Ladataan satelliittidataa...",
     "status_calculating_for_station": "Lasketaan asemalle {processed}/{total}...",
     "status_grouping_results": "Ryhmitellään ja viimeistellään tuloksia...",
     "download_cancelled": "Lataus peruutettu.",

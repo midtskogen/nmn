@@ -41,13 +41,11 @@ from data_fetchers import get_air_pressure
 from shared_utils import atomic_json_write, read_json_file
 
 # The 7-day flight archive, airport/flight DBs, and OpenSky token cache must be
-# the same files no matter how this script is invoked: through the web-root
-# symlinks (index.php sets NMN_DATA_DIR to the directory it was accessed
-# through, e.g. /var/www/html/data) or directly/via cron (no NMN_DATA_DIR, so
-# prediction_utils.BASE_DIR falls back to this file's own real directory).
-# Without pinning these to one canonical location, the web path and the cron
-# job silently build up two separate, mostly-empty archives and caches.
-_REAL_DATA_DIR = os.path.dirname(os.path.realpath(__file__))
+# the same files no matter how this script is invoked. Pin them to the
+# project-root runtime data directory, outside the public nmn git repository.
+# Without pinning these to one canonical location, web and cron invocations can
+# build separate archives and token caches.
+_REAL_DATA_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..', 'data'))
 CACHE_DIR = os.path.join(_REAL_DATA_DIR, 'cache')
 LOG_DIR = os.path.join(_REAL_DATA_DIR, 'logs')
 
@@ -71,7 +69,7 @@ def _resolve_credentials_file():
         return path
     real_dir = os.path.dirname(os.path.realpath(__file__))
     candidates = [
-        os.path.normpath(os.path.join(real_dir, '..', '..', 'etc', 'credentials.json')),
+        os.path.normpath(os.path.join(real_dir, '..', '..', '..', 'etc', 'credentials.json')),
         os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])) if sys.argv and os.path.isfile(sys.argv[0]) else real_dir, 'credentials.json'),
         os.path.join(real_dir, 'credentials.json'),
         os.path.normpath(os.path.join(real_dir, '..', '..', '..', 'data', 'credentials.json')),

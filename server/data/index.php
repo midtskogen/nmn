@@ -19,7 +19,7 @@ $DEFAULT_LANG = 'nb_NO';
 putenv('NMN_DATA_DIR=' . $BASE_DIR);
 putenv('NMN_LOCK_DIR=' . $LOCK_DIR);
 // Point Python at the private config/credential directory outside the web root.
-$SECRETS_DIR = realpath(__DIR__ . '/../../etc');
+$SECRETS_DIR = realpath(__DIR__ . '/../../../etc');
 if ($SECRETS_DIR && is_dir($SECRETS_DIR)) {
     putenv('NMN_CONFIG_FILE=' . $SECRETS_DIR . '/config.json');
     putenv('NMN_CREDENTIALS_FILE=' . $SECRETS_DIR . '/credentials.json');

@@ -139,6 +139,13 @@ $stream_data = read_json($stream_file);
 $quota_data  = read_json($quota_file);
 $access_data = read_ndjson($access_file, fn($r) => ($r['date'] ?? '') >= $cutoff_date);
 
+// --- API usage logs ---
+$api_dir           = dirname($BASE_DIR) . '/api';
+$api_query_file    = $api_dir . '/query_log.json';
+$api_abuse_file    = $api_dir . '/abuse_log.json';
+$api_query_data    = read_ndjson($api_query_file, fn($r) => ($r['date'] ?? '') >= $cutoff_date);
+$api_abuse_data    = read_ndjson($api_abuse_file, fn($r) => ($r['date'] ?? '') >= $cutoff_date);
+
 // Apply date cutoff
 foreach (array_keys($stream_data) as $d) { if ($d < $cutoff_date) unset($stream_data[$d]); }
 foreach (array_keys($quota_data)  as $d) { if ($d < $cutoff_date) unset($quota_data[$d]); }
@@ -273,6 +280,42 @@ foreach ($access_data as $entry) {
 }
 arsort($access_summary);
 
+// --- API usage aggregation ---
+$api_daily           = [];
+$api_endpoints       = [];
+$api_ips             = [];
+$api_keys            = [];
+$api_total_requests  = 0;
+$api_total_bytes     = 0;
+$api_quota_hits      = 0;
+foreach ($api_query_data as $r) {
+    $date    = $r['date']    ?? '';
+    $ip      = $r['ip']      ?? 'unknown';
+    $key     = $r['key_id']  ?? null;
+    $bytes   = (int)($r['bytes'] ?? 0);
+    $endpoint = $r['endpoint'] ?? 'unknown';
+    if ($date < $cutoff_date) continue;
+    $api_daily[$date]['requests'] = ($api_daily[$date]['requests'] ?? 0) + 1;
+    $api_daily[$date]['bytes']    = ($api_daily[$date]['bytes']    ?? 0) + $bytes;
+    $api_endpoints[$endpoint] = ($api_endpoints[$endpoint] ?? 0) + 1;
+    $api_ips[$ip] = ($api_ips[$ip] ?? 0) + 1;
+    if ($key) $api_keys[$key] = ($api_keys[$key] ?? 0) + 1;
+    $api_total_requests++;
+    $api_total_bytes += $bytes;
+    if (!empty($r['quota_hit'])) $api_quota_hits++;
+}
+ksort($api_daily);
+
+$api_abuse_summary = [];
+foreach ($api_abuse_data as $r) {
+    $type = $r['type'] ?? 'unknown';
+    $api_abuse_summary[$type] = ($api_abuse_summary[$type] ?? 0) + 1;
+}
+arsort($api_endpoints);
+arsort($api_ips);
+arsort($api_keys);
+arsort($api_abuse_summary);
+
 function utf8_codepoint($cp) {
     // Encode a Unicode codepoint as a UTF-8 byte string (supports full 4-byte range)
     if ($cp <= 0x7F)     return chr($cp);
@@ -368,6 +411,14 @@ $total_ips          = count($all_ips);
     <div class="stat-num"><?= fmt_bytes($total_bytes_all) ?></div>
     <div class="stat-label"><?= t('usage_total_downloaded', $lang) ?></div>
   </div></div>
+  <div class="col-6 col-md-3"><div class="card p-3 text-center">
+    <div class="stat-num"><?= number_format($api_total_requests) ?></div>
+    <div class="stat-label"><?= htmlspecialchars($lang['usage_api_requests'] ?? 'API requests') ?></div>
+  </div></div>
+  <div class="col-6 col-md-3"><div class="card p-3 text-center">
+    <div class="stat-num"><?= fmt_bytes($api_total_bytes) ?></div>
+    <div class="stat-label"><?= htmlspecialchars($lang['usage_api_downloaded'] ?? 'API downloaded') ?></div>
+  </div></div>
 </div>
 
 <!-- Tabs -->
@@ -376,6 +427,7 @@ $total_ips          = count($all_ips);
   <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-stations"><?= t('usage_tab_stations', $lang) ?></button></li>
   <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ips"><?= t('usage_tab_ips', $lang) ?></button></li>
   <?php if ($access_summary): ?><li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-access"><?= t('usage_tab_actions', $lang) ?></button></li><?php endif; ?>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-api"><?= htmlspecialchars($lang['usage_tab_api'] ?? 'API') ?></button></li>
   <li class="nav-item ms-auto"><button class="nav-link" onclick="document.cookie='lang=nb_NO;path=/;max-age=31536000';location.reload()" title="Norsk">🇳🇴</button></li>
   <li class="nav-item"><button class="nav-link" onclick="document.cookie='lang=en_GB;path=/;max-age=31536000';location.reload()" title="English">🇬🇧</button></li>
   <li class="nav-item"><button class="nav-link" onclick="document.cookie='lang=lv_LV;path=/;max-age=31536000';location.reload()" title="Latviešu">🇱🇻</button></li>
@@ -536,6 +588,83 @@ $total_ips          = count($all_ips);
 </div>
 <?php endif; ?>
 
+<!-- API TAB -->
+<div class="tab-pane fade" id="tab-api">
+  <div class="row g-3 mb-3">
+    <div class="col-6 col-md-3"><div class="card p-3 text-center">
+      <div class="stat-num"><?= number_format($api_total_requests) ?></div>
+      <div class="stat-label"><?= htmlspecialchars($lang['usage_api_requests_total'] ?? 'API requests') ?></div>
+    </div></div>
+    <div class="col-6 col-md-3"><div class="card p-3 text-center">
+      <div class="stat-num"><?= fmt_bytes($api_total_bytes) ?></div>
+      <div class="stat-label"><?= htmlspecialchars($lang['usage_api_bytes_total'] ?? 'API traffic') ?></div>
+    </div></div>
+    <div class="col-6 col-md-3"><div class="card p-3 text-center">
+      <div class="stat-num"><?= number_format($api_quota_hits) ?></div>
+      <div class="stat-label"><?= htmlspecialchars($lang['usage_api_quota_hits'] ?? 'Quota hits') ?></div>
+    </div></div>
+    <div class="col-6 col-md-3"><div class="card p-3 text-center">
+      <div class="stat-num"><?= number_format(array_sum($api_abuse_summary)) ?></div>
+      <div class="stat-label"><?= htmlspecialchars($lang['usage_api_abuse_events'] ?? 'Abuse events') ?></div>
+    </div></div>
+  </div>
+
+  <div class="card p-3 mb-3">
+    <canvas id="chartApiDaily"></canvas>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-md-6">
+      <div class="card p-3">
+        <h3 style="font-size:1rem" class="mb-3"><?= htmlspecialchars($lang['usage_api_top_endpoints'] ?? 'Top endpoints') ?></h3>
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th><?= htmlspecialchars($lang['usage_col_endpoint'] ?? 'Endpoint') ?></th><th><?= htmlspecialchars($lang['usage_col_count'] ?? 'Count') ?></th></tr></thead>
+          <tbody>
+          <?php foreach (array_slice($api_endpoints, 0, 15, true) as $ep => $cnt): ?>
+          <tr><td><code><?= htmlspecialchars($ep) ?></code></td><td><?= number_format($cnt) ?></td></tr>
+          <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="card p-3">
+        <h3 style="font-size:1rem" class="mb-3"><?= htmlspecialchars($lang['usage_api_top_ips'] ?? 'Top API IPs') ?></h3>
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th><?= htmlspecialchars($lang['usage_col_ip'] ?? 'IP / Key') ?></th><th><?= htmlspecialchars($lang['usage_col_count'] ?? 'Requests') ?></th></tr></thead>
+          <tbody>
+          <?php foreach (array_slice($api_ips, 0, 15, true) as $ip => $cnt): ?>
+          <tr><td><?= htmlspecialchars(mask_ip($ip)) ?></td><td><?= number_format($cnt) ?></td></tr>
+          <?php endforeach; ?>
+          </tbody>
+        </table>
+        <?php if ($api_keys): ?>
+        <h3 style="font-size:1rem" class="mb-3 mt-4"><?= htmlspecialchars($lang['usage_api_top_keys'] ?? 'Top API keys') ?></h3>
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th><?= htmlspecialchars($lang['usage_col_key'] ?? 'Key ID') ?></th><th><?= htmlspecialchars($lang['usage_col_count'] ?? 'Requests') ?></th></tr></thead>
+          <tbody>
+          <?php foreach (array_slice($api_keys, 0, 15, true) as $key => $cnt): ?>
+          <tr><td><code><?= htmlspecialchars($key) ?></code></td><td><?= number_format($cnt) ?></td></tr>
+          <?php endforeach; ?>
+          </tbody>
+        </table>
+        <?php endif; ?>
+        <?php if ($api_abuse_summary): ?>
+        <h3 style="font-size:1rem" class="mb-3 mt-4"><?= htmlspecialchars($lang['usage_api_abuse_types'] ?? 'Abuse events') ?></h3>
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th><?= htmlspecialchars($lang['usage_col_type'] ?? 'Type') ?></th><th><?= htmlspecialchars($lang['usage_col_count'] ?? 'Count') ?></th></tr></thead>
+          <tbody>
+          <?php foreach ($api_abuse_summary as $type => $cnt): ?>
+          <tr><td><?= htmlspecialchars($type) ?></td><td><?= number_format($cnt) ?></td></tr>
+          <?php endforeach; ?>
+          </tbody>
+        </table>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div><!-- tab-content -->
 </div><!-- container -->
 
@@ -561,6 +690,19 @@ foreach ($stations_list as $i => $st) {
 ?>
 const stationDatasets = <?= json_encode($station_daily_json, $JSON_SAFE) ?>;
 const stationDates    = dailyDates;
+
+<?php
+$api_dates_for_chart = array_keys($api_daily);
+sort($api_dates_for_chart);
+$api_requests_for_chart = array_map(fn($d) => $api_daily[$d]['requests'] ?? 0, $api_dates_for_chart);
+$api_bytes_for_chart    = array_map(fn($d) => round(($api_daily[$d]['bytes'] ?? 0) / 1048576, 2), $api_dates_for_chart);
+$api_top_endpoints_for_chart = array_slice($api_endpoints, 0, 10, true);
+?>
+const apiDates     = <?= json_encode($api_dates_for_chart, $JSON_SAFE) ?>;
+const apiRequests  = <?= json_encode($api_requests_for_chart, $JSON_SAFE) ?>;
+const apiBytes     = <?= json_encode($api_bytes_for_chart, $JSON_SAFE) ?>;
+const apiEndpointLabels = <?= json_encode(array_keys($api_top_endpoints_for_chart), $JSON_SAFE) ?>;
+const apiEndpointValues = <?= json_encode(array_values($api_top_endpoints_for_chart), $JSON_SAFE) ?>;
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
@@ -647,6 +789,46 @@ if (countryLabels.length === 0) {
         plugins: {
           legend: { position: 'right', labels: { color: '#8b949e' } },
           tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.raw} min` } }
+        }
+      }
+    });
+}
+
+// API daily requests / traffic chart
+if (apiDates.length === 0) {
+    document.getElementById('chartApiDaily').parentElement.innerHTML = '<p class="text-muted p-3"><?= htmlspecialchars($lang['usage_no_api_data'] ?? 'No API data for the selected range.') ?></p>';
+} else {
+    new Chart(document.getElementById('chartApiDaily'), {
+      type: 'bar',
+      data: {
+        labels: apiDates,
+        datasets: [{
+          label: <?= json_encode($lang['usage_api_chart_requests'] ?? 'API requests', $JSON_SAFE) ?>,
+          data: apiRequests,
+          backgroundColor: 'rgba(31,111,235,0.7)',
+          borderColor: '#1f6feb',
+          borderWidth: 1,
+          yAxisID: 'y',
+        }, {
+          label: <?= json_encode($lang['usage_api_chart_traffic'] ?? 'API traffic (MB)', $JSON_SAFE) ?>,
+          data: apiBytes,
+          type: 'line',
+          backgroundColor: 'rgba(217,142,255,0.15)',
+          borderColor: '#d2a8ff',
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.3,
+          yAxisID: 'y2',
+        }]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { labels: { color: '#8b949e' } } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 20, maxRotation: 45 } },
+          y:  { title: { display: true, text: <?= json_encode($lang['usage_col_count'] ?? 'requests', $JSON_SAFE) ?> }, position: 'left' },
+          y2: { title: { display: true, text: 'MB' }, position: 'right', grid: { drawOnChartArea: false } },
         }
       }
     });

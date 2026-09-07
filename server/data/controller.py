@@ -1759,15 +1759,18 @@ def main():
             "fetch_grid": lambda: print(json.dumps(fetch_grid_file(
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 sys.argv[3] if len(sys.argv) > 3 else '',
-                sys.argv[4] if len(sys.argv) > 4 else ''))),
+                sys.argv[4] if len(sys.argv) > 4 else '',
+                sys.argv[5] if len(sys.argv) > 5 else None))),
             "fetch_annotation": lambda: print(json.dumps(fetch_annotation_file(
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 sys.argv[3] if len(sys.argv) > 3 else '',
-                sys.argv[4] if len(sys.argv) > 4 else ''))),
+                sys.argv[4] if len(sys.argv) > 4 else '',
+                sys.argv[5] if len(sys.argv) > 5 else None))),
             "fetch_archive_grid": lambda: print(json.dumps(get_archive_grid_overlay(
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 sys.argv[3] if len(sys.argv) > 3 else '',
-                sys.argv[4] if len(sys.argv) > 4 else '', stations_data))),
+                sys.argv[4] if len(sys.argv) > 4 else '', stations_data,
+                sys.argv[5] if len(sys.argv) > 5 else None))),
             "fetch_stitch_cam_boundaries": lambda: print(json.dumps(get_stitch_cam_boundaries(
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 sys.argv[3] if len(sys.argv) > 3 else '', stations_data,
@@ -1775,10 +1778,12 @@ def main():
             "fetch_archive_annotation": lambda: print(json.dumps(get_archive_annotation_overlay(
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 sys.argv[3] if len(sys.argv) > 3 else '',
-                sys.argv[4] if len(sys.argv) > 4 else '', stations_data))),
+                sys.argv[4] if len(sys.argv) > 4 else '', stations_data,
+                sys.argv[5] if len(sys.argv) > 5 else None))),
             "fetch_archive_mask": lambda: print(json.dumps(get_archive_mask_overlay(
                 sys.argv[2] if len(sys.argv) > 2 else '',
-                sys.argv[3] if len(sys.argv) > 3 else '', stations_data))),
+                sys.argv[3] if len(sys.argv) > 3 else '', stations_data,
+                sys.argv[5] if len(sys.argv) > 5 else None))),
             "enhance_filter": lambda: print(json.dumps({"image": apply_enhance_filter(
                 sys.argv[2] if len(sys.argv) > 2 else '',
                 int(sys.argv[3]) if len(sys.argv) > 3 else 0)})),

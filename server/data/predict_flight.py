@@ -1189,7 +1189,8 @@ def find_all_crossings(task_id, station_ids=None, days=None, start_iso=None, end
             pressure_cache = manager.dict()
             tasks = [(flight, stations_data, task_id, access_token, pressure_cache) for flight in candidate_flights]
 
-            with ProcessPoolExecutor() as executor:
+            _pool_workers = int(os.environ.get('NMN_MAX_WORKERS', os.cpu_count() or 1))
+            with ProcessPoolExecutor(max_workers=max(1, _pool_workers)) as executor:
                 futures = []
                 for task in tasks:
                     futures.append(executor.submit(fetch_and_process_track, task))

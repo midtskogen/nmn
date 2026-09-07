@@ -2,9 +2,23 @@ __pycache__/
 *.pyc
 *.pyo
 server/data/cameras.json
-# Private configuration / credentials outside the web root
-/etc/
-server/data/credentials.json
-server/data/config.json
+# Private configuration / credentials (canonical files live in ../etc/)
+**/credentials.json
+**/config.json
+**/api_config.json
+**/api_keys.json
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+# API runtime logs / rate / queue files
+api/query_log.json*
+api/abuse_log.json*
+api/rate_limit.json*
+api/task_queue.jsonl*
+api/queue_worker.pid
+api/queue_worker.log
 # Generated tetra3 pattern database (built from stars.py on first run)
 bin/data/tetra3_stars*.npz

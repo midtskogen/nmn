@@ -3668,9 +3668,9 @@ export function getCamerasInView(station, strike, cameraFovs) {
         for (const camName in stationFovs) {
             const camNum = camName.replace('cam', '');
             const fov = stationFovs[camName];
-            const halfFov = fov.hFov / 2;
-            let lowerBound = fov.centerAzimuth - halfFov,
-                upperBound = fov.centerAzimuth + halfFov,
+            const halfSpan = fov.span / 2;
+            let lowerBound = fov.centerAzimuth - halfSpan,
+                upperBound = fov.centerAzimuth + halfSpan,
                 inFov = false;
             if (lowerBound < 0) {
                 inFov = (bearing >= lowerBound + 360 && bearing <= 360) || (bearing >= 0 && bearing <= upperBound);

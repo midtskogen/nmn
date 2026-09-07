@@ -624,15 +624,17 @@ def get_station_stats(station_id, start_date=None, end_date=None):
 
 def get_camera_fovs():
     """
-    Calculates and caches
-    the center azimuth and horizontal Field of View (FOV) for all cameras.
-    It uses the pto_mapper library to transform pixel coordinates at the edges of an image
-    to panoramic (azimuth/altitude) coordinates, thereby determining the FOV.
+    Calculates and caches the center azimuth, PTO field-of-view parameter, and
+    horizontal azimuth span for all cameras. It uses the pto_mapper library to
+    transform pixel coordinates at the edges of an image to panoramic coordinates.
     """
     # Checks if the cache file is newer than the source camera calibration file.
     if os.path.exists(CAMERA_FOV_CACHE_FILE) and os.path.exists(CAMERAS_FILE):
         if os.path.getmtime(CAMERA_FOV_CACHE_FILE) >= os.path.getmtime(CAMERAS_FILE):
-             if cached := read_json_file(CAMERA_FOV_CACHE_FILE): return cached
+            if cached := read_json_file(CAMERA_FOV_CACHE_FILE):
+                cameras = [cam for station in cached.values() if isinstance(station, dict) for cam in station.values() if isinstance(cam, dict)]
+                if cameras and all('fov' in cam and 'span' in cam for cam in cameras):
+                    return cached
 
     # Returns empty if the required pto_mapper library is not available.
     if not PTO_MAPPER_AVAILABLE:
@@ -671,11 +673,11 @@ def get_camera_fovs():
                     pano_w = pto_data[0]['w']
                     # Converts panoramic x-coordinates to azimuth in degrees.
                     center_az, left_az, right_az = (p[0] / pano_w * 360 for p in [center_pano, left_pano, right_pano])
-                    # Calculates the horizontal FOV, handling the 360/0 degree wrap-around.
-                    h_fov = right_az - left_az
-                    if h_fov < -180: h_fov += 360
-                    if h_fov > 180: h_fov -= 360
-                    fov_data[station_id][cam_name] = {"centerAzimuth": (center_az + 360) % 360, "hFov": abs(h_fov)}
+                    # Calculates the horizontal azimuth span, handling the 360/0 degree wrap-around.
+                    span = right_az - left_az
+                    if span < -180: span += 360
+                    if span > 180: span -= 360
+                    fov_data[station_id][cam_name] = {"centerAzimuth": (center_az + 360) % 360, "fov": img_params.get('v'), "span": abs(span)}
             except Exception as e:
                 logging.warning(f"Could not calculate FOV for {station_id}/{cam_name}: {e}")
                 continue

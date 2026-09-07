@@ -360,6 +360,8 @@ class RetrainApp(Tk):
         self.current_step = 0
         self.results = []  # list of dicts for each cluster count
         self.progress_log_line = None  # line number of the active tqdm/progress line
+        self.deps_ok = False
+        self.split_info = None
 
         # Thread / subprocess control
         self.worker_thread = None
@@ -410,14 +412,6 @@ class RetrainApp(Tk):
                             font=('Helvetica', 10, 'bold'))
             lbl.pack(fill=X, pady=2)
             self.step_labels.append(lbl)
-
-        self.sidebar_next_btn = ttk.Button(
-            self.sidebar,
-            text="Next →",
-            command=self.go_next,
-        )
-        # shown only when a page explicitly requests it (e.g. after data prepare)
-        self.sidebar_next_btn.pack_forget()
 
         self.content = ttk.Frame(main, padding=10)
         self.content.pack(side=LEFT, fill=BOTH, expand=True)
@@ -506,18 +500,18 @@ class RetrainApp(Tk):
         self.fetch_pos_out = StringVar(value=str(pathlib.Path(self.work_dir.get()) / 'positive_fetched'))
         self.fetch_neg_out = StringVar(value=str(pathlib.Path(self.work_dir.get()) / 'negative_fetched'))
 
-        def make_fetch_row(parent, label, var, create=False):
+        def make_fetch_row(parent, label, var, create=False, browse=True):
             ff = ttk.Frame(parent)
             ff.pack(fill=X, pady=2)
             ttk.Label(ff, text=label, width=26).pack(side=LEFT)
             ent = ttk.Entry(ff, textvariable=var)
             ent.pack(side=LEFT, fill=X, expand=True, padx=(5, 0))
-            ttk.Button(ff, text="Browse...", command=lambda: self.browse_dir(var, create=create)).pack(side=LEFT, padx=5)
-            return ent
+            if browse:
+                ttk.Button(ff, text="Browse...", command=lambda: self.browse_dir(var, create=create)).pack(side=LEFT, padx=5)
 
         make_fetch_row(fetch_frame, "Verified meteor reports:", self.pos_source)
         make_fetch_row(fetch_frame, "False detections (wrongs):", self.neg_source)
-        make_fetch_row(fetch_frame, "File pattern to collect:", self.fetch_pattern)
+        make_fetch_row(fetch_frame, "File pattern to collect:", self.fetch_pattern, browse=False)
         make_fetch_row(fetch_frame, "Output positive dir:", self.fetch_pos_out, create=True)
         make_fetch_row(fetch_frame, "Output negative dir:", self.fetch_neg_out, create=True)
 
@@ -573,20 +567,20 @@ class RetrainApp(Tk):
         self.cluster_frame.pack(fill=X, pady=5)
 
         ttk.Label(self.cluster_frame,
-                  text="Select one or more cluster counts to evaluate. "
+                  text="Select one cluster count to evaluate. "
                        "Lower K = smaller model, lower fidelity. Higher K = larger model, closer to original.",
                   wraplength=800).pack(anchor=W)
 
-        self.cluster_listbox = Listbox(self.cluster_frame, selectmode=MULTIPLE, height=6, exportselection=False)
+        self.cluster_listbox = Listbox(self.cluster_frame, selectmode=SINGLE, height=6, exportselection=False)
         for k in [64, 128, 256, 512]:
             self.cluster_listbox.insert(END, str(k))
         self.cluster_listbox.pack(anchor=W, pady=5)
-        # Default select 256
-        self.cluster_listbox.selection_set(2)
+        # Default select 128
+        self.cluster_listbox.selection_set(1)
 
         # Options checkboxes
         self.balance = BooleanVar(value=True)
-        self.scheduler = BooleanVar(value=False)
+        self.scheduler = BooleanVar(value=True)
         ttk.Checkbutton(p2, text="Balance classes by generating synthetic negatives", variable=self.balance).pack(anchor=W, pady=2)
         ttk.Checkbutton(p2, text="Use learning-rate scheduler (ReduceLROnPlateau)", variable=self.scheduler).pack(anchor=W, pady=2)
 
@@ -607,8 +601,10 @@ class RetrainApp(Tk):
 
         btn_frame = ttk.Frame(p3)
         btn_frame.pack(fill=X, pady=5)
-        ttk.Button(btn_frame, text="Start training", command=self.start_training).pack(side=LEFT, padx=5)
-        ttk.Button(btn_frame, text="Stop", command=self.stop_training).pack(side=LEFT, padx=5)
+        self.start_train_btn = ttk.Button(btn_frame, text="Start training", command=self.start_training)
+        self.start_train_btn.pack(side=LEFT, padx=5)
+        self.stop_train_btn = ttk.Button(btn_frame, text="Stop", command=self.stop_training, state=DISABLED)
+        self.stop_train_btn.pack(side=LEFT, padx=5)
 
         ttk.Label(p3, text="Log output:").pack(anchor=W, pady=(10, 0))
         self.log_box = scrolledtext.ScrolledText(p3, height=12, state='disabled', wrap=WORD)
@@ -651,12 +647,16 @@ class RetrainApp(Tk):
             p.pack_forget()
         self.pages[idx].pack(fill=BOTH, expand=True)
         self.current_step = idx
-        self.back_btn.configure(state=NORMAL if idx > 0 else DISABLED)
-        self.next_btn.configure(state=NORMAL if idx < len(self.steps) - 1 else DISABLED)
-        if idx == len(self.steps) - 1:
-            self.next_btn.configure(text="Finish")
-        else:
-            self.next_btn.configure(text="Next")
+        self.update_navigation()
+
+    def update_navigation(self):
+        self.back_btn.configure(state=NORMAL if self.current_step > 0 else DISABLED)
+        can_advance = self.current_step < 3
+        if self.current_step == 0:
+            can_advance = self.deps_ok
+        elif self.current_step == 1:
+            can_advance = self.split_info is not None
+        self.next_btn.configure(text="Next", state=NORMAL if can_advance else DISABLED)
 
     def go_back(self):
         if self.current_step > 0:
@@ -747,8 +747,8 @@ class RetrainApp(Tk):
                                           foreground=header_color, font=('Helvetica', 10, 'bold'))
         self.dep_status_header.pack(anchor=W, pady=(10, 0))
 
-        # Store state for validation
         self.deps_ok = all_ok
+        self.update_navigation()
 
     def check_scanned(self):
         pos = self.pos_dir.get().strip()
@@ -772,7 +772,7 @@ class RetrainApp(Tk):
             verify_pos = _count_images_dir(work_p / 'verify' / 'meteor', 'verify positives')
             verify_neg = _count_images_dir(work_p / 'verify' / 'non_meteor', 'verify negatives')
 
-            if train_pos + train_neg + verify_pos + verify_neg > 0:
+            if all((train_pos, train_neg, verify_pos, verify_neg)):
                 self.split_info = {
                     'train_pos': train_pos,
                     'train_neg': train_neg,
@@ -788,18 +788,16 @@ class RetrainApp(Tk):
                 if train_pos < 10 or train_neg < 10:
                     summary += "WARNING: Very small training set.\n"
                 self.set_text(self.data_stats, summary)
-                self.sidebar_next_btn.pack(side=BOTTOM, fill=X, padx=5, pady=10)
                 status += ". Split found; ready to train."
             else:
                 self.split_info = None
-                self.sidebar_next_btn.pack_forget()
-                status += " (no existing split; use Scan & prepare split)"
+                status += " (no complete existing split; use Scan & prepare split)"
         else:
             self.split_info = None
-            self.sidebar_next_btn.pack_forget()
             status += " (no work directory set)"
 
         self.prepare_status.configure(text=status)
+        self.update_navigation()
 
     def start_prepare(self):
         pos = self.pos_dir.get().strip()
@@ -820,11 +818,12 @@ class RetrainApp(Tk):
             messagebox.showerror("Error", "Verification split ratio must be between 0 and 1.")
             return
 
+        self.split_info = None
+        self.update_navigation()
         self.prepare_btn.configure(state=DISABLED)
         self.prepare_progress.stop()
         self.prepare_progress.configure(mode='determinate', maximum=100, value=0)
         self.prepare_status.configure(text="Preparing data...")
-        self.sidebar_next_btn.pack_forget()
 
         t = threading.Thread(
             target=self.prepare_worker,
@@ -978,6 +977,8 @@ class RetrainApp(Tk):
         self.stop_requested = False
         self.progress['value'] = 0
         self.set_text(self.log_box, "")
+        self.start_train_btn.configure(state=DISABLED)
+        self.stop_train_btn.configure(state=NORMAL)
         self.show_step(3)
 
         t = threading.Thread(
@@ -1205,6 +1206,9 @@ class RetrainApp(Tk):
                 elif kind == 'result':
                     self.populate_results_table()
                 elif kind == 'finished':
+                    self.start_train_btn.configure(state=NORMAL)
+                    self.stop_train_btn.configure(state=DISABLED)
+                    self.worker_thread = None
                     self.show_results()
                 elif kind == 'fetch_status':
                     self.fetch_status.configure(text=payload)
@@ -1226,7 +1230,7 @@ class RetrainApp(Tk):
                 elif kind == 'source_counts':
                     pos_count, neg_count = payload
                     self.source_count_status.configure(
-                        text=f"Source matches: {pos_count} positives, {neg_count} negatives"
+                        text=f"Already fetched: {pos_count} positives, {neg_count} negatives"
                     )
                 elif kind == 'prepare_status':
                     self.prepare_status.configure(text=payload)
@@ -1250,7 +1254,7 @@ class RetrainApp(Tk):
                     else:
                         self.set_text(self.data_stats, payload['summary'])
                         self.split_info = payload['split_info']
-                        self.sidebar_next_btn.pack(side=BOTTOM, fill=X, padx=5, pady=10)
+                    self.update_navigation()
         except queue.Empty:
             pass
         self.after(100, self.process_queue)

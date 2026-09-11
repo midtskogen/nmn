@@ -5,8 +5,6 @@
 
 import json
 import argparse
-import configparser
-import hashlib
 import math
 import os
 import os.path
@@ -40,6 +38,7 @@ parser = argparse.ArgumentParser(description='Convert AMS json meteor detection 
 parser.add_argument('-m', '--manual', help='manually verified event', action='store_true')
 parser.add_argument('-p', '--path', dest='path', help='top level path to NMN videos (default: "/meteor")', default="/meteor")
 parser.add_argument('-e', '--execute', dest='exefile', help='program to pass event file to (default: "/home/meteor/bin/report.py")', default="/home/meteor/bin/report.py")
+parser.add_argument('--overwrite', help='overwrite an existing event.txt file', action='store_true')
 parser.add_argument(action='store', dest='infile', help='input .json file')
 parser.add_argument(action='store', dest='outfile', help='output event file (default "event.txt")', nargs='?', default="event.txt")
 args = parser.parse_args()
@@ -60,32 +59,7 @@ def midpoint(az1, alt1, az2, alt2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return math.degrees(x3), math.degrees(y3), math.degrees(c)
 
-def _md5_file(path):
-    """Return the MD5 hex digest of a file's raw contents."""
-    h = hashlib.md5()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _event_config_md5(eventfile):
-    """Return the stored source_md5 from an existing event.txt, or None."""
-    if not os.path.exists(eventfile):
-        return None
-    try:
-        cp = configparser.ConfigParser(interpolation=None)
-        cp.read(eventfile)
-        if 'config' in cp:
-            return cp['config'].get('source_md5')
-    except Exception:
-        pass
-    return None
-
-
 if __name__ == '__main__':
-    infile_md5 = _md5_file(args.infile)
-
     with open(args.infile) as f:
         data = json.load(f)
         device = data['device_name']
@@ -100,10 +74,9 @@ if __name__ == '__main__':
         ptofile = args.path + '/cam' + cam + '/lens.pto'
         have_pto = os.path.exists(ptofile)
 
-        # Skip if the source JSON has not changed since the last run.
-        existing_md5 = _event_config_md5(eventfile)
-        if existing_md5 == infile_md5:
-            print(f"Skipping {eventfile}: source JSON is unchanged.")
+        # Skip if the output already exists and --overwrite was not given.
+        if os.path.exists(eventfile) and not args.overwrite:
+            print(f"Skipping {eventfile}: already exists. Use --overwrite to regenerate.")
             sys.exit(0)
 
         # To be populated with coordinate data
@@ -237,8 +210,6 @@ if __name__ == '__main__':
         
             print(file=output)
             print('[config]', file=output)
-            print('source_md5 = ' + infile_md5, file=output)
-            print('source_file = ' + args.infile, file=output)
             if have_pto and img_w is not None:
                 print('ptofile = ' + ptofile, file=output)
                 print('ptowidth = ' + str(img_w), file=output)

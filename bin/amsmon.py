@@ -63,8 +63,9 @@ for event in events:
                 if not os.path.exists(nmnfile2) or count > 9:
                     break
             nmnfile = nmnfile2
-        os.symlink(eventfile, "/tmp/amsmon_link")
-        os.rename("/tmp/amsmon_link", nmnfile)
+        tmplink = nmnfile + ".tmp"
+        os.symlink(eventfile, tmplink)
+        os.rename(tmplink, nmnfile)
         
         ip = "192.168.76.7" + camid
         if minute == "00" and quality == "HD":

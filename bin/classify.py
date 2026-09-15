@@ -428,7 +428,7 @@ def _run_training(args, data_dir, model_path, params_file):
                 
                 # --- Phase 2: Unfreeze and Fine-tune ---
                 logging.info(f"--- Starting Fine-Tuning Phase 2: Unfreezing from block {args.unfreeze_from_block} ---")
-                model.load_state_dict(torch.load(model_path, map_location=device)) # Load best head
+                model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True)) # Load best head
                 
                 if model_name == 'efficientnet_b0' and hasattr(model, 'features'):
                     for i, child in enumerate(model.features.children()):
@@ -714,7 +714,7 @@ def load_model_helper(model_name: str, model_file: str, args: argparse.Namespace
     
     model = get_model(model_name, args, params)
     model.to(device)
-    model.load_state_dict(torch.load(buffer, map_location=device))
+    model.load_state_dict(torch.load(buffer, map_location=device, weights_only=True))
     model.eval()
     return model
 
@@ -1015,8 +1015,7 @@ def run_single_model_prediction(args: argparse.Namespace, device: str):
                 tensor = torch.stack([transform(f) for f in frames], dim=1)
                 if tensor.dim() == 4: # Add batch dimension
                     tensor = tensor.unsqueeze(0)
-                # Permute from (B, F, C, H, W) to (B, C, F, H, W) for the model
-                tensor = tensor.permute(0, 2, 1, 3, 4).to(device)
+                tensor = tensor.to(device)
             else: # Image model
                 img_path = next((f for f in [f"{basename}.jpg", f"{basename}.jpeg", f"{basename}.png"] if os.path.exists(f)), None)
                 if not img_path:

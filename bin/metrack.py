@@ -405,11 +405,11 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
     by_label = dict(zip(labels, handles))
     pylab.legend(by_label.values(), by_label.keys())
     
-    if 'save' in options['doplot']:
+    if 'save' in options.get('doplot', ''):
         filename = output_filename or 'height.svg'
         pylab.savefig(filename)
         clean_svg(filename)
-    if 'show' in options['doplot']: pylab.show()
+    if 'show' in options.get('doplot', ''): pylab.show()
     pylab.close()
 
 def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, options,
@@ -640,7 +640,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         print("Cannot plot interactive map, missing required libraries."); return
 
     site_lons, site_lats = obs_data['longitudes'], obs_data['latitudes']; n_obs = len(site_lons) // 2; all_lons = list(site_lons); all_lats = list(site_lats)
-    if not options['azonly'] and track_start is not None:
+    if not options.get('azonly', False) and track_start is not None:
         start_lon, start_lat, _ = xyz2lonlat(track_start); end_lon, end_lat, _ = xyz2lonlat(track_end); all_lons.extend([start_lon, end_lon]); all_lats.extend([start_lat, end_lat])
 
     # Ensure extra overlays influence map borders (e.g., infrasound sites/rings)
@@ -731,7 +731,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         showscale=False, hoverinfo='none'
     ))
 
-    if not options['azonly'] and track_start is not None:
+    if not options.get('azonly', False) and track_start is not None:
         # --- Segmentation Logic for Earth Grazers ---
         # Instead of a simple start/end line, we segment the track to account for Earth curvature on the flat map.
         total_dist_km = np.linalg.norm(track_end - track_start)
@@ -804,8 +804,15 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     
     unique_stations = {obs_data['names'][i]: (site_lons[i], site_lats[i]) for i in range(n_obs)}; station_is_inlier = {name: False for name in unique_stations}
     for i in inlier_indices: station_is_inlier[obs_data['names'][i]] = True
-    for name, (lon, lat) in unique_stations.items(): x, y = project_points([lon], [lat])
-    if not options['azonly'] and cross_pos:
+    for name, (lon, lat) in unique_stations.items():
+        x, y = project_points([lon], [lat])
+        is_inlier = station_is_inlier[name]
+        traces.append(go.Scatter3d(
+            x=x, y=y, z=[0], mode='markers+text',
+            marker=dict(size=6, color='red' if is_inlier else 'black', symbol='circle'),
+            text=[name], textposition='top center',
+            name=name, showlegend=False, hoverinfo='text'))
+    if not options.get('azonly', False) and cross_pos:
         for i in range(n_obs):
             station_x, station_y = project_points([site_lons[i]], [site_lats[i]]); start_los_lon, start_los_lat, start_los_h = xyz2lonlat(cross_pos[i]); start_los_x, start_los_y = project_points([start_los_lon], [start_los_lat]); end_los_lon, end_los_lat, end_los_h = xyz2lonlat(cross_pos[i + n_obs]); end_los_x, end_los_y = project_points([end_los_lon], [end_los_lat]); linestyle = 'solid' if i in inlier_indices else 'dash'
             traces.extend([go.Scatter3d(x=[station_x[0], start_los_x[0]], y=[station_y[0], start_los_y[0]], z=[0, start_los_h], mode='lines', line=dict(color='#5499c7', width=2, dash=linestyle), showlegend=False, hoverinfo='none'), go.Scatter3d(x=[station_x[0], end_los_x[0]], y=[station_y[0], end_los_y[0]], z=[0, end_los_h], mode='lines', line=dict(color='#1a5276', width=2, dash=linestyle), showlegend=False, hoverinfo='none')])

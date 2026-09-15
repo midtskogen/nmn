@@ -45,11 +45,14 @@ args = parser.parse_args()
 
 def altaz(timestamp, ra, dec):
     pos = ephem.Observer()
-    pos.lat = config.get('astronomy', 'latitude')
-    pos.lon = config.get('astronomy', 'longitude')
-    pos.elevation = float(config.get('astronomy', 'elevation'))
-    pos.temp = float(config.get('astronomy', 'temperature'))
-    pos.pressure = float(config.get('astronomy', 'pressure'))
+    try:
+        pos.lat = config.get('astronomy', 'latitude')
+        pos.lon = config.get('astronomy', 'longitude')
+        pos.elevation = float(config.get('astronomy', 'elevation'))
+    except configparser.Error as e:
+        sys.exit(f"Missing astronomy settings in meteor.cfg: {e}")
+    pos.temp = float(config.get('astronomy', 'temperature', fallback=5.0))
+    pos.pressure = float(config.get('astronomy', 'pressure', fallback=1013.0))
     pos.date = datetime.fromtimestamp(timestamp, UTC).strftime('%Y-%m-%d %H:%M:%S')
 
     if args.longitude:
@@ -70,7 +73,7 @@ def altaz(timestamp, ra, dec):
 
 with open(args.stars) as f:
     cols = len(f.readline().split())
-rows = 1 + sum(1 for line in open(args.stars))
+    rows = 1 + sum(1 for _ in f)
 
 with open(args.id) as id:
     idlines = id.readlines()

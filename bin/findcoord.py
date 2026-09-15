@@ -35,7 +35,10 @@ parser.add_argument('-m', '--magnitude', action='store_const', dest='mag', const
 
 args = parser.parse_args()
 
-match = difflib.get_close_matches(args.star, [x[5] for x in cat])[0]
+matches = difflib.get_close_matches(args.star, [x[5] for x in cat])
+if not matches:
+    sys.exit(f"No close match found for star '{args.star}'")
+match = matches[0]
 
 for (ra2, p_ra2, dec2, p_dec2, mag, name) in cat:
     if match == name:

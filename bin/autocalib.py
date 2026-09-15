@@ -821,14 +821,6 @@ def main():
               + '; '.join(stats['failures']), file=sys.stderr)
         sys.exit(1)
 
-    print(f'Confidence: prob={prob if prob is not None else "?"}, matches={n_matches}, '
-          f'rmse={rmse_px if rmse_px is None else f"{rmse_px:.3f}px"}, '
-          f'inliers={inliers}/{matched_candidates} ({inlier_frac:.2f}), coverage={coverage:.2f}')
-    if failures and not args.force:
-        print('Error: solve rejected as low confidence (clouds?): '
-              + '; '.join(failures), file=sys.stderr)
-        sys.exit(1)
-
     dummy_path = 'dummy_equirect.jpg'
 
     # Write a Hugin project with the camera image and a dummy equirect image,

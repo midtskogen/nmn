@@ -71,7 +71,10 @@ temp_dirs = []
 # Large video-decode scratch space: decoded full-resolution frames are
 # multi-GB, so keep them on real disk instead of a RAM-backed /tmp.
 _USER_SCRATCH_DIR = os.path.expanduser('~/nmn_reducer_scratch')
-os.makedirs(_USER_SCRATCH_DIR, exist_ok=True)
+
+def _scratch_dir():
+    os.makedirs(_USER_SCRATCH_DIR, exist_ok=True)
+    return _USER_SCRATCH_DIR
 
 def cleanup_temp_resources():
     """Cleans up all temporary directories and files created by the script."""
@@ -266,58 +269,68 @@ class LauncherDialog:
         remote_pto_path = f"/meteor/cam{cam_num}/lens.pto"
         self.upload_target = f"{hostname}:/meteor/cam{cam_num}"
 
-        try:
-            self.status_label.config(text=f"Fetching config from {hostname}...")
-            self.root.update_idletasks()
-            local_cfg = scp_file(hostname, remote_cfg_path)
-            if local_cfg:
-                temp_files_to_clean.append(local_cfg)
-            else:
-                raise Exception(f"Failed to fetch config file: {remote_cfg_path}")
+        # Run the scp sequence on a worker thread so the Tk mainloop stays
+        # responsive; all widget updates are marshalled via after().
+        def _set_status(text):
+            try: self.root.after(0, lambda: self.status_label.config(text=text))
+            except Exception: pass
 
-            self.status_label.config(text=f"Fetching PTO from {hostname}...")
-            self.root.update_idletasks()
-            local_pto = scp_file(hostname, remote_pto_path)
-            if local_pto:
-                temp_files_to_clean.append(local_pto)
-            else:
-                raise Exception(f"Failed to fetch PTO file: {remote_pto_path}")
-
-            local_videos = []
-            for i in range(duration):
-                current_dt = start_dt + timedelta(minutes=i)
-                c_date = current_dt.strftime("%Y%m%d")
-                c_hour = current_dt.strftime("%H")
-                c_min = current_dt.strftime("%M")
-                
-                remote_video_path = f"/meteor/cam{cam_num}/{c_date}/{c_hour}/full_{c_min}.mp4"
-                
-                self.status_label.config(text=f"Fetching video {i+1}/{duration} ({c_hour}:{c_min})...")
-                self.root.update_idletasks()
-                
-                local_vid = scp_file(hostname, remote_video_path)
-                if local_vid:
-                    temp_files_to_clean.append(local_vid)
-                    local_videos.append(local_vid)
+        def _fetch_worker():
+            try:
+                _set_status(f"Fetching config from {hostname}...")
+                local_cfg = scp_file(hostname, remote_cfg_path)
+                if local_cfg:
+                    temp_files_to_clean.append(local_cfg)
                 else:
-                    print(f"Warning: Could not fetch {remote_video_path}", file=sys.stderr)
+                    raise Exception(f"Failed to fetch config file: {remote_cfg_path}")
 
-            if not local_videos:
-                raise Exception("Failed to fetch any video files.")
+                _set_status(f"Fetching PTO from {hostname}...")
+                local_pto = scp_file(hostname, remote_pto_path)
+                if local_pto:
+                    temp_files_to_clean.append(local_pto)
+                else:
+                    raise Exception(f"Failed to fetch PTO file: {remote_pto_path}")
 
-            self.status_label.config(text="Success! Launching...")
-            self.fetched_files = {
-                'config': local_cfg,
-                'pto': local_pto,
-                'video': local_videos,
-                'selected_datetime': start_dt
-            }
-            self.main_tk.destroy()
+                local_videos = []
+                for i in range(duration):
+                    current_dt = start_dt + timedelta(minutes=i)
+                    c_date = current_dt.strftime("%Y%m%d")
+                    c_hour = current_dt.strftime("%H")
+                    c_min = current_dt.strftime("%M")
 
-        except Exception as e:
-            messagebox.showerror("Fetch Failed", str(e))
-            self.status_label.config(text="Fetch failed. Please try again.")
-            self.fetch_button.config(state=tk.NORMAL)
+                    remote_video_path = f"/meteor/cam{cam_num}/{c_date}/{c_hour}/full_{c_min}.mp4"
+                    _set_status(f"Fetching video {i+1}/{duration} ({c_hour}:{c_min})...")
+
+                    local_vid = scp_file(hostname, remote_video_path)
+                    if local_vid:
+                        temp_files_to_clean.append(local_vid)
+                        local_videos.append(local_vid)
+                    else:
+                        print(f"Warning: Could not fetch {remote_video_path}", file=sys.stderr)
+
+                if not local_videos:
+                    raise Exception("Failed to fetch any video files.")
+
+                def _finish():
+                    _set_status("Success! Launching...")
+                    self.fetched_files = {
+                        'config': local_cfg,
+                        'pto': local_pto,
+                        'video': local_videos,
+                        'selected_datetime': start_dt
+                    }
+                    self.main_tk.destroy()
+                self.root.after(0, _finish)
+
+            except Exception as e:
+                def _fail(e=e):
+                    messagebox.showerror("Fetch Failed", str(e))
+                    self.status_label.config(text="Fetch failed. Please try again.")
+                    self.fetch_button.config(state=tk.NORMAL)
+                try: self.root.after(0, _fail)
+                except Exception: pass
+
+        threading.Thread(target=_fetch_worker, daemon=True).start()
 
 
 class RecalibrateDialog:
@@ -372,18 +385,12 @@ class RecalibrateDialog:
         label.grid(row=row, column=0, sticky='w')
         slider_frame = ttk.Frame(self.parent)
         slider_frame.grid(row=row, column=1, sticky='w')
-        slider = ttk.Scale(slider_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, variable=variable, command=lambda val: self.update_slider_label(val))
-        slider.pack(pady=5)
         value_label = tk.Label(slider_frame, text=f"{variable.get():.2f}")
+        slider = ttk.Scale(slider_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, variable=variable,
+                           command=lambda val, lbl=value_label: lbl.config(text=f"{float(val):.2f}"))
+        slider.pack(pady=5)
         value_label.pack()
         slider.value_label = value_label
-
-    def update_slider_label(self, value):
-        for child in self.parent.winfo_children():
-            if isinstance(child, ttk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, ttk.Scale) and subchild.cget('variable') == self.radius_var:
-                         subchild.value_label.config(text=f"{float(value):.2f}")
 
     def reset(self):
         self.zoom.img_data.clear()
@@ -392,12 +399,11 @@ class RecalibrateDialog:
 
     def recal(self):
         self.rms_label.config(text="Solving...")
-        self.parent.update_idletasks()
-        
+
         with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".png") as img_f:
             self.image.save(img_f, format='PNG')
             img_temp_filename = img_f.name
-        
+
         img_idx = self.zoom.image_index
         vars_to_optimize = [f'v{img_idx}', f'r{img_idx}', f'p{img_idx}', f'y{img_idx}']
         if self.lens_optimize_var.get():
@@ -407,49 +413,62 @@ class RecalibrateDialog:
             pto_mapper.write_pto_file(self.pto_data, pto_f.name, optimize_vars=vars_to_optimize)
             old_lens_filename = pto_f.name
 
-        new_lens_filename = tempfile.NamedTemporaryFile(delete=True, dir="/tmp", suffix=".pto").name
-        log_file_path = tempfile.mktemp(suffix=".log", dir="/tmp")
+        with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".pto") as new_pto_f:
+            new_lens_filename = new_pto_f.name
+        with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".log") as log_f_:
+            log_file_path = log_f_.name
 
-        try:
-            starttime = None
-            try:
-                if getattr(self.zoom, 'timestamps', None):
-                    starttime = float(self.zoom.timestamps[0])
-            except Exception:
-                starttime = None
-            if starttime is None:
-                starttime = datetime.now(timezone.utc).timestamp()
+        radius = self.radius_var.get()
+        blur = self.blur_var.get()
+        sigma = self.sigma_var.get()
+        lensopt = self.lens_optimize_var.get()
 
-            with open(log_file_path, 'w') as log_f:
-                with contextlib.redirect_stdout(log_f):
-                    recalibrate(
-                        starttime, old_lens_filename, img_temp_filename, new_lens_filename, pos,
-                        image=self.zoom.image_index, radius=self.radius_var.get(),
-                        lensopt=self.lens_optimize_var.get(), faintest=4, brightest=-5,
-                        objects=500, blur=self.blur_var.get(), verbose=True, sigma=self.sigma_var.get()
-                    )
-
-            with open(log_file_path, 'r') as log_f: output = log_f.read()
-            rms_values = re.findall(r"after \d+ iteration\(s\):\s*([\d.]+)\s*units", str(output))
-            if rms_values:
-                self.rms_label.config(text=f"Final RMS: {float(rms_values[-1]):.2f}")
-            else:
-                self.rms_label.config(text="RMS: Not found")
-
-            _, new_images_data = pto_mapper.parse_pto_file(new_lens_filename)
-            new_img_data = new_images_data[self.zoom.image_index]
+        def _apply_result(rms_text, new_img_data):
+            self.rms_label.config(text=rms_text)
             for param in ['p', 'y', 'r', 'v', 'a', 'b', 'c', 'd', 'e']:
                 if param in new_img_data: self.img_data[param] = new_img_data[param]
-
             self.zoom.show_image()
             self.zoom.pto_dirty = True
-        except Exception as e:
-            self.rms_label.config(text=f"Error: {e}")
-        finally:
-            if os.path.exists(img_temp_filename): os.remove(img_temp_filename)
-            if os.path.exists(old_lens_filename): os.remove(old_lens_filename)
-            if os.path.exists(new_lens_filename): os.remove(new_lens_filename)
-            if os.path.exists(log_file_path): os.remove(log_file_path)
+
+        def _worker():
+            try:
+                starttime = None
+                try:
+                    if getattr(self.zoom, 'timestamps', None):
+                        starttime = float(self.zoom.timestamps[0])
+                except Exception:
+                    starttime = None
+                if starttime is None:
+                    starttime = datetime.now(timezone.utc).timestamp()
+
+                with open(log_file_path, 'w') as log_f:
+                    with contextlib.redirect_stdout(log_f):
+                        recalibrate(
+                            starttime, old_lens_filename, img_temp_filename, new_lens_filename, pos,
+                            image=self.zoom.image_index, radius=radius,
+                            lensopt=lensopt, faintest=4, brightest=-5,
+                            objects=500, blur=blur, verbose=True, sigma=sigma
+                        )
+
+                with open(log_file_path, 'r') as log_f: output = log_f.read()
+                rms_values = re.findall(r"after \d+ iteration\(s\):\s*([\d.]+)\s*units", str(output))
+                rms_text = f"Final RMS: {float(rms_values[-1]):.2f}" if rms_values else "RMS: Not found"
+
+                if not os.path.exists(new_lens_filename) or os.path.getsize(new_lens_filename) == 0:
+                    raise RuntimeError("Calibration did not produce a new PTO file.")
+                _, new_images_data = pto_mapper.parse_pto_file(new_lens_filename)
+                new_img_data = new_images_data[self.zoom.image_index]
+                self.parent.after_idle(lambda: _apply_result(rms_text, new_img_data))
+            except Exception as e:
+                err_msg = str(e)
+                self.parent.after_idle(lambda: self.rms_label.config(text=f"Error: {err_msg}"))
+            finally:
+                for p in (img_temp_filename, old_lens_filename, new_lens_filename, log_file_path):
+                    if p and os.path.exists(p):
+                        try: os.remove(p)
+                        except OSError: pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 def read_frames(filename, directory, skip_seconds=0, total_seconds=None):
     try:
@@ -484,7 +503,7 @@ def read_frames(filename, directory, skip_seconds=0, total_seconds=None):
         match = re.search(r'frame=\s*(\d+)', line)
         if match:
             current_frame = int(match.group(1))
-            progress = current_frame / total_frames
+            progress = min(current_frame / total_frames, 1.0)
             block = int(round(bar_length * progress))
             sys.stdout.write(f"\rProgress: [{'#' * block + '-' * (bar_length - block)}] {current_frame}/{total_frames} ({progress*100:.0f}%)")
             sys.stdout.flush()
@@ -546,6 +565,7 @@ def timestamp(timestamps, files, i):
 
 def interpolate_timestamps(timestamps):
     if not timestamps: return []
+    if len(timestamps) <= 1: return list(timestamps)
     interpolated_stamps = list(timestamps)
     fractions = []
     prev = interpolated_stamps[0]
@@ -575,11 +595,18 @@ def interpolate_timestamps(timestamps):
     f = 0.0
     if len(fractions) >= 2 and fractions[1] != 0: f = 1 - fractions[0] / fractions[1]
     fi = 0
-    if fractions and fractions[0] != 0: fractions[0] = fractions[1]
-    
-    for i in range(1, len(interpolated_stamps)):
-        if interpolated_stamps[i] is None: interpolated_stamps[i] = interpolated_stamps[i - 1]
-    
+    if len(fractions) >= 2 and fractions[0] != 0: fractions[0] = fractions[1]
+
+    # Backfill leading Nones with the first valid timestamp, then forward-fill
+    # the rest, so the fraction loop below never does arithmetic on None.
+    first_valid = next((t for t in interpolated_stamps if t is not None), None)
+    if first_valid is None:
+        return interpolated_stamps
+    for i in range(len(interpolated_stamps)):
+        if interpolated_stamps[i] is None:
+            interpolated_stamps[i] = interpolated_stamps[i - 1] if i > 0 else first_valid
+    prev = interpolated_stamps[0]
+
     for i in range(len(interpolated_stamps)):
         if interpolated_stamps[i] == prev:
             if fi < len(fractions) and fractions[fi] > 0: f = f + 1.0 / fractions[fi]
@@ -643,7 +670,6 @@ class Zoom_Advanced(ttk.Frame):
         self.undo_stack = []
         self.redo_stack = []
         self.dragged_point_index = None
-        self.canvas.bind('<ButtonRelease-1>', self.drag_release)
         self.background_removal_active = False
         self.background_image = None
         self._create_background_image()
@@ -697,10 +723,17 @@ class Zoom_Advanced(ttk.Frame):
     def set_sequence(self, files, timestamps):
         self.files = files
         self.timestamps = timestamps
+        # New sequence: drop markers/centroids from the previous sequence so
+        # same-length videos don't inherit stale data.
+        self.positions = []
+        self.centroid = [None] * len(self.files)
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.curve_coeffs = None
+        self.curve_orientation = None
+        self.predicted_point = None
         if self.num >= len(self.files):
             self.num = 0
-        if len(self.centroid) != len(self.files):
-            self.centroid = [None] * len(self.files)
         self.frames_ready = True
         try:
             self.image = Image.open(self.files[self.num])
@@ -711,17 +744,25 @@ class Zoom_Advanced(ttk.Frame):
         self.show_image()
         
     def _image_coords_to_celestial(self, x, y):
-        pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
-        if pano_coords:
-            pano_x, pano_y = pano_coords
-            pano_w = self.global_options.get('w')
-            pano_h = self.global_options.get('h')
-            if self.global_options.get('f', 2) == 2:
-                az_rad = (pano_x / pano_w) * 2 * math.pi
-                alt_rad = (0.5 - pano_y / pano_h) * math.pi
-                return math.degrees(az_rad), math.degrees(alt_rad)
-            else: return -998, -998
-        else: return -999, -999
+        """Return (az, alt) degrees for image coords, or None if unmappable.
+
+        Callers must handle None; previously sentinel values like -998/-999
+        were written into centroid.txt/event.txt as if they were real
+        coordinates (-999 % 360 = 81.0 looked like valid data)."""
+        try:
+            pano_coords = pto_mapper.map_image_to_pano(self.pto_data, self.image_index, x, y)
+        except (ValueError, KeyError, IndexError):
+            return None
+        if not pano_coords or self.global_options.get('f', 2) != 2:
+            return None
+        pano_w = self.global_options.get('w')
+        pano_h = self.global_options.get('h')
+        if not pano_w or not pano_h:
+            return None
+        pano_x, pano_y = pano_coords
+        az_rad = (pano_x / pano_w) * 2 * math.pi
+        alt_rad = (0.5 - pano_y / pano_h) * math.pi
+        return math.degrees(az_rad), math.degrees(alt_rad)
 
     def _create_background_image(self):
         if not self.files: return
@@ -980,8 +1021,10 @@ class Zoom_Advanced(ttk.Frame):
             with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".pto") as pto_f:
                 pto_mapper.write_pto_file(self.pto_data, pto_f.name, optimize_vars=vars_to_optimize)
                 old_lens_filename = pto_f.name
-            new_lens_filename = tempfile.NamedTemporaryFile(delete=True, dir="/tmp", suffix=".pto").name
-            log_file_path = tempfile.mktemp(suffix=".log", dir="/tmp")
+            with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".pto") as new_pto_f:
+                new_lens_filename = new_pto_f.name
+            with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".log") as log_f_:
+                log_file_path = log_f_.name
             with open(log_file_path, 'w') as log_f:
                 with contextlib.redirect_stdout(log_f):
                     recalibrate(starttime, old_lens_filename, img_temp_filename, new_lens_filename, pos,
@@ -1020,7 +1063,9 @@ class Zoom_Advanced(ttk.Frame):
     def _update_centroid_entry(self, frame_num, xy_coords):
         if self.centroid[frame_num] is None: return
         x, y = xy_coords
-        az_deg, alt_deg = self._image_coords_to_celestial(x, y)
+        celestial = self._image_coords_to_celestial(x, y)
+        if celestial is None: return
+        az_deg, alt_deg = celestial
         parts = self.centroid[frame_num].split(' ')
         parts[2] = f"{alt_deg:.2f}"
         parts[3] = f"{az_deg % 360:.2f}"
@@ -1089,9 +1134,18 @@ class Zoom_Advanced(ttk.Frame):
                 brightness += self._estimate_saturation_brightness(image_to_analyze, xy_coords)
 
         x, y = xy_coords
-        az_deg, alt_deg = self._image_coords_to_celestial(x, y)
-        diff = self.timestamps[frame_num] - self.timestamps[0]
-        ts = datetime.fromtimestamp(self.timestamps[frame_num], timezone.utc)
+        celestial = self._image_coords_to_celestial(x, y)
+        if celestial is None:
+            return
+        az_deg, alt_deg = celestial
+        ts_val = self.timestamps[frame_num] if frame_num < len(self.timestamps) else None
+        ts0 = self.timestamps[0] if self.timestamps else None
+        if ts_val is None and ts0 is not None:
+            ts_val = ts0 + frame_num / args.fps
+        if ts_val is None:
+            return
+        diff = ts_val - ts0 if ts0 is not None else frame_num / args.fps
+        ts = datetime.fromtimestamp(ts_val, timezone.utc)
         self.centroid[frame_num] = f'{frame_num} {diff:.2f} {alt_deg:.2f} {az_deg % 360:.2f} {brightness:.2f} {args.name} {ts.strftime("%Y-%m-%d %H:%M:%S.%f UTC")}'
 
     def _draw_brightness_graph(self, canvas_bbox):
@@ -1103,6 +1157,7 @@ class Zoom_Advanced(ttk.Frame):
             if self.centroid and frame < len(self.centroid) and self.centroid[frame]:
                 try:
                     time = self.timestamps[frame]
+                    if time is None: continue
                     brightness = float(self.centroid[frame].split(' ')[4])
                     point = (time, brightness)
                     graph_data.append(point)
@@ -1156,7 +1211,10 @@ class Zoom_Advanced(ttk.Frame):
             print(f"positions = {pos_str}", file=f)
             coord_str_list = [f"{i.split(' ')[3]},{i.split(' ')[2]}" for i in centroid2]
             print(f"coordinates = {' '.join(coord_str_list)}", file=f)
-            ts_str = " ".join([str(self.timestamps[int(i.split(' ')[0])]) for i in centroid2])
+            def _ts(idx):
+                t = self.timestamps[idx] if 0 <= idx < len(self.timestamps) else None
+                return str(t) if t is not None else '0'
+            ts_str = " ".join(_ts(int(i.split(' ')[0])) for i in centroid2)
             print(f"timestamps = {ts_str}", file=f)
             midaz, midalt, arc = midpoint(float(centroid2[0].split(" ")[3]), float(centroid2[0].split(" ")[2]),
                                           float(centroid2[-1].split(" ")[3]), float(centroid2[-1].split(" ")[2]))
@@ -1169,10 +1227,10 @@ class Zoom_Advanced(ttk.Frame):
             print("manual = 1\n", file=f)
             print("[video]", file=f)
             start_info = " ".join(centroid2[0].split(" ")[6:])
-            start_ts = self.timestamps[int(centroid2[0].split(" ")[0])]
+            start_ts = _ts(int(centroid2[0].split(" ")[0]))
             print(f"start = {start_info} ({start_ts})", file=f)
             end_info = " ".join(centroid2[-1].split(" ")[6:])
-            end_ts = self.timestamps[int(centroid2[-1].split(" ")[0])]
+            end_ts = _ts(int(centroid2[-1].split(" ")[0]))
             print(f"end = {end_info} ({end_ts})", file=f)
             print(f"width = {self.width}\nheight = {self.height}\n", file=f)
             print("[summary]", file=f)
@@ -1204,7 +1262,10 @@ class Zoom_Advanced(ttk.Frame):
 
         if self.positions:
             first_point_frame = self.positions[0]['frame']
-            first_timestamp = self.timestamps[first_point_frame]
+            first_timestamp = self.timestamps[first_point_frame] if first_point_frame < len(self.timestamps) else None
+            if first_timestamp is None:
+                messagebox.showwarning("Upload Error", "First marked frame has no timestamp. Nothing to upload.")
+                return
         else:
             # Use current time for calibration-only upload
             first_timestamp = datetime.now(timezone.utc).timestamp()
@@ -1309,7 +1370,12 @@ class Zoom_Advanced(ttk.Frame):
                 point_data = {'frame': frame_idx, 'original': pos_xy, 'current': pos_xy}
                 self.positions.append(point_data)
                 x, y = pos_xy
-                az_deg, alt_deg = self._image_coords_to_celestial(x, y)
+                celestial = self._image_coords_to_celestial(x, y)
+                if celestial is None:
+                    continue
+                az_deg, alt_deg = celestial
+                if self.timestamps[frame_idx] is None or self.timestamps[0] is None:
+                    continue
                 diff = self.timestamps[frame_idx] - self.timestamps[0]
                 ts_obj = datetime.fromtimestamp(self.timestamps[frame_idx], timezone.utc)
                 brightness_val = event_brightnesses[i] if i < len(event_brightnesses) else "0.0"
@@ -1354,7 +1420,10 @@ class Zoom_Advanced(ttk.Frame):
             point_widget_x = (px - self.x - self.offsetx) * self.imscale
             point_widget_y = (py - self.y - self.offsety) * self.imscale
             distance = math.sqrt((event.x - point_widget_x)**2 + (event.y - point_widget_y)**2)
-            if distance <= 5: self.dragged_point_index = i; return
+            if distance <= 5:
+                self.dragged_point_index = i
+                self._save_state_for_undo()  # snapshot before the drag mutates 'current'
+                return
         self.canvas.scan_mark(event.x, event.y)
 
     def move_to(self, event):
@@ -1367,7 +1436,6 @@ class Zoom_Advanced(ttk.Frame):
 
     def drag_release(self, event):
         if self.dragged_point_index is not None:
-            self._save_state_for_undo()
             dragged_point_data = self.positions[self.dragged_point_index]
             frame_num = dragged_point_data['frame']
             final_coords = dragged_point_data['current']
@@ -1427,7 +1495,9 @@ class Zoom_Advanced(ttk.Frame):
         self.offsety = (bbox2[1] - bbox1[1]) / self.imscale if bbox2[1] < bbox1[1] else 0
         if int(x2 - x1) <= 0 or int(y2 - y1) <= 0: return
 
-        pos.date = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
+        ts_now = self.timestamps[self.num] if self.num < len(self.timestamps) else None
+        if ts_now is not None:
+            pos.date = datetime.fromtimestamp(ts_now, timezone.utc)
         point_info_text = ""
         for p in self.positions:
             if p['frame'] == self.num:
@@ -1535,8 +1605,12 @@ class Zoom_Advanced(ttk.Frame):
 
         if self.show_graph: self._draw_brightness_graph(bbox2)
 
-        ts = datetime.fromtimestamp(self.timestamps[self.num], timezone.utc)
-        info_text = (f"  time = {ts.strftime('%Y-%m-%d %H:%M:%S.%f UTC')} ({self.timestamps[self.num]:.2f})\n"
+        if ts_now is not None:
+            ts = datetime.fromtimestamp(ts_now, timezone.utc)
+            time_text = f"  time = {ts.strftime('%Y-%m-%d %H:%M:%S.%f UTC')} ({ts_now:.2f})\n"
+        else:
+            time_text = "  time = unknown\n"
+        info_text = (time_text +
                      f"  pitch={self.img_data.get('p', 0):.2f}° yaw={self.img_data.get('y', 0):.2f}° roll={self.img_data.get('r', 0):.2f}° hfov={self.img_data.get('v', 0):.2f}°\n"
                      f"  radial=({self.img_data.get('a', 0):.3f}, {self.img_data.get('b', 0):.3f}, {self.img_data.get('c', 0):.3f}) radial shift=({-self.img_data.get('d', 0):.1f}, {self.img_data.get('e', 0):.1f})"
                      f"{self.mousepos}{point_info_text}\n  h = toggle help text")
@@ -1609,6 +1683,7 @@ class Zoom_Advanced(ttk.Frame):
             t_prev = self.timestamps[self.positions[i-1]['frame']]
             t_curr = self.timestamps[self.positions[i]['frame']]
             t_next = self.timestamps[self.positions[i+1]['frame']]
+            if t_prev is None or t_curr is None or t_next is None: continue
             arc_prev, arc_next = original_arc_lengths[i-1], original_arc_lengths[i+1]
             local_duration = t_next - t_prev
             if local_duration <= 0: continue
@@ -1673,11 +1748,22 @@ class Zoom_Advanced(ttk.Frame):
                         self.positions = self.positions[:truncate_index]
         x, y = event.x / self.imscale + self.x, event.y / self.imscale + self.y
         x += self.offsetx; y += self.offsety
-        new_point = {'frame': self.num, 'original': (x,y), 'current': (x,y)}
-        insert_index = len(self.positions)
-        for i, pos_data in enumerate(self.positions):
-            if pos_data['frame'] > self.num: insert_index = i; break
-        self.positions.insert(insert_index, new_point)
+        # Re-clicking an already-marked frame replaces the existing point
+        # instead of adding a second entry for the same frame (which would
+        # make 'positions' longer than the other trail arrays in event.txt).
+        replaced = False
+        for pos_data in self.positions:
+            if pos_data['frame'] == self.num:
+                pos_data['original'] = (x, y)
+                pos_data['current'] = (x, y)
+                replaced = True
+                break
+        if not replaced:
+            new_point = {'frame': self.num, 'original': (x,y), 'current': (x,y)}
+            insert_index = len(self.positions)
+            for i, pos_data in enumerate(self.positions):
+                if pos_data['frame'] > self.num: insert_index = i; break
+            self.positions.insert(insert_index, new_point)
         if len(self.positions) >= 2: self.update_prediction()
         else: self.predicted_point = None
         if len(self.positions) >= 3: self.update_curve_fit()
@@ -1759,7 +1845,7 @@ def scp_file(hostname, remote_path):
         proc = subprocess.run(['scp', remote_full_path, local_path], check=True, capture_output=True, text=True, errors='ignore')
         print(f"Copy successful: {remote_full_path}")
         return local_path
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+    except Exception as e:
         print(f"Error copying file: {e}", file=sys.stderr)
         if 'local_path' in locals() and os.path.exists(local_path): os.remove(local_path)
         return None
@@ -2099,7 +2185,7 @@ if __name__ == '__main__':
 
         if is_video_mode:
             frames_ready = False
-            temp_dir_first = tempfile.TemporaryDirectory(prefix="clickcoords_first_", dir=_USER_SCRATCH_DIR)
+            temp_dir_first = tempfile.TemporaryDirectory(prefix="clickcoords_first_", dir=_scratch_dir())
             temp_dirs.append(temp_dir_first)
             try:
                 read_first_frame(args.imgfiles[0], temp_dir_first.name, skip_seconds=args.skip)
@@ -2230,7 +2316,7 @@ if __name__ == '__main__':
                             if current_file_load_duration <= 0:
                                 break
 
-                        temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir=_USER_SCRATCH_DIR)
+                        temp_dir = tempfile.TemporaryDirectory(prefix="clickcoords_", dir=_scratch_dir())
                         temp_dirs.append(temp_dir)
                         read_frames(f, temp_dir.name, skip_seconds=current_file_skip, total_seconds=current_file_load_duration)
                         decoded_files = sorted(glob.glob(temp_dir.name + "/*.tif"))

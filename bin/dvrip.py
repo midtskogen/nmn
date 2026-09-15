@@ -137,7 +137,7 @@ class DVRIPCam(object):
                 self.socket_recv = self.udp_socket_recv
                 self.socket = socket(AF_INET, SOCK_DGRAM)
             else:
-                raise f"Unsupported protocol {self.proto}"
+                raise ValueError(f"Unsupported protocol {self.proto}")
 
             # it's important to extend timeout for upgrade procedure
             self.timeout = timeout
@@ -179,9 +179,16 @@ class DVRIPCam(object):
 
         while True:
             data = self.socket_recv(length - received)
+            if not data:
+                if data is None:
+                    return None
+                elapsed_time = time.time() - start_time
+                if elapsed_time > self.timeout:
+                    return None
+                continue
             buf.extend(data)
             received += len(data)
-            if length == received:
+            if received >= length:
                 break
             elapsed_time = time.time() - start_time
             if elapsed_time > self.timeout:
@@ -195,7 +202,10 @@ class DVRIPCam(object):
 
         self.packet_count += 1
         self.logger.debug("<= %s", data)
-        reply = json.loads(data[:-2])
+        try:
+            reply = json.loads(bytes(data[:-2]))
+        except (json.JSONDecodeError, ValueError):
+            return {}
         return reply
 
     def send(self, msg, data={}, wait_response=True):
@@ -389,7 +399,7 @@ class DVRIPCam(object):
             {
                 "EncryptType": "MD5",
                 "NewPassWord": self.sofia_hash(newpass),
-                "PassWord": oldpass or self.password,
+                "PassWord": oldpass or self.hash_pass,
                 "SessionID": "0x%08X" % self.session,
                 "UserName": user or self.user,
             },

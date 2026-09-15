@@ -1946,9 +1946,11 @@ def format_fit_report(event_dir: Path, result: Dict) -> str:
             hmin_ch_km = f"{float(hmin_ch)/1000.0:.1f}" if hmin_ch is not None and math.isfinite(float(hmin_ch)) else "nan"
             hmid_ch_km = f"{float(hmid_ch)/1000.0:.1f}" if hmid_ch is not None and math.isfinite(float(hmid_ch)) else "nan"
             hmin_ch_in_km = f"{float(hmin_ch_in)/1000.0:.1f}" if hmin_ch_in is not None and math.isfinite(float(hmin_ch_in)) else "nan"
+            weight_val = s.get('weight')
+            weight_str = f"{float(weight_val):.2f}" if weight_val is not None else "1.00"
             lines.append(
                 f"{s.get('code','')} {s.get('station','')} {s.get('arrival_unix'):.3f} {s.get('predicted_unix'):.3f} "
-                f"{s.get('residual_s'):+.3f} {float(s.get('travel_time_s') or 0.0):.2f} {s.get('distance_km'):.1f} {cel_str} {s.get('path_km'):.1f} {s.get('c_eff_ms'):.1f} {float(s.get('weight') or 1.0):.2f} "
+                f"{s.get('residual_s'):+.3f} {float(s.get('travel_time_s') or 0.0):.2f} {s.get('distance_km'):.1f} {cel_str} {s.get('path_km'):.1f} {s.get('c_eff_ms'):.1f} {weight_str} "
                 f"{hmin_lin_km} {hmid_lin_km} {hmax_lin_km} {hmin_ch_km} {hmid_ch_km} {hmin_ch_in_km}"
             )
         except Exception:

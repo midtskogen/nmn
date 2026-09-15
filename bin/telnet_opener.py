@@ -103,13 +103,16 @@ def make_zip(filename, data):
 
 
 def check_port(host_ip, port):
-    a_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    result_of_check = a_socket.connect_ex((host_ip, port))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as a_socket:
+        result_of_check = a_socket.connect_ex((host_ip, port))
     return result_of_check == 0
 
 
 def extract_gen(swver):
-    return swver.split(".")[3]
+    parts = swver.split(".")
+    if len(parts) < 4:
+        raise ValueError(f"Unexpected software version format: {swver!r}")
+    return parts[3]
 
 
 def cmd_armebenv(swver):

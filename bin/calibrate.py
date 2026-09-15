@@ -58,8 +58,13 @@ def process_image(input_path, output_path):
         return offset_x, offset_y
 
 def solve_astrometry(image_path, pos, offset_x, offset_y, cpu_limit=30, scale_low=20):
-    axy_file = tempfile.NamedTemporaryFile(delete=True, dir="/tmp").name
-    subprocess.run(["solve-field", "-l", str(cpu_limit), "-p", "--scale-low", str(scale_low), "--odds-to-solve", "10000000", "-c", "0.1", "--sigma", "20", "--overwrite", "--axy", axy_file, image_path])
+    axy_tmp = tempfile.NamedTemporaryFile(delete=True, dir="/tmp")
+    axy_file = axy_tmp.name
+    wcs_file = image_path + ".wcs"
+    res = subprocess.run(["solve-field", "-l", str(cpu_limit), "-p", "--scale-low", str(scale_low), "--odds-to-solve", "10000000", "-c", "0.1", "--sigma", "20", "--overwrite", "--axy", axy_file, "--wcs", wcs_file, image_path])
+    if res.returncode != 0 or not os.path.exists(axy_file) or os.path.getsize(axy_file) == 0:
+        print(f"Error: solve-field failed (exit {res.returncode}) for '{image_path}'", file=sys.stderr)
+        sys.exit(1)
     with fits.open(axy_file) as hdul:
         stars = hdul[1].data
 
@@ -91,7 +96,7 @@ v
 # control points
 """)
     for x, y, _, _ in stars:
-        res = subprocess.run(["wcs-xy2rd", "-x", str(x), "-y", str(y), "-w", "stars.wcs"], capture_output=True, text=True)
+        res = subprocess.run(["wcs-xy2rd", "-x", str(x), "-y", str(y), "-w", wcs_file], capture_output=True, text=True)
         if res.returncode == 0:
             pattern = r"Pixel \((?P<x>[\d.]+), (?P<y>[\d.]+)\) -> RA,Dec \((?P<ra>[\d.]+), (?P<dec>[\d.]+)\)"
             for line in res.stdout.splitlines():
@@ -108,7 +113,10 @@ v
 
 def timestamp(img):
     ts = subprocess.run([str(pathlib.Path.home()) + "/bin/timestamp", img], stdout=subprocess.PIPE, text=True)
-    return int(ts.stdout.rstrip().lstrip())
+    try:
+        return int(ts.stdout.rstrip().lstrip())
+    except ValueError:
+        raise RuntimeError(f"Could not extract timestamp from '{img}'")
 
 def read_frame(filename, output):
     out, err = (
@@ -136,19 +144,28 @@ if __name__ == "__main__":
     config = configparser.ConfigParser()
     config.read([args.config, os.path.expanduser('~/meteor.cfg')])
 
-    input_img = tempfile.NamedTemporaryFile(delete=True, suffix=".png", dir="/tmp").name
+    input_tmp = tempfile.NamedTemporaryFile(delete=True, suffix=".png", dir="/tmp")
+    input_img = input_tmp.name
     read_frame(args.input, input_img)
 
     if not args.timestamp:
         args.timestamp = timestamp(args.input)
-        
+
     pos = ephem.Observer()
-    pos.lat = config.get('astronomy', 'latitude')
-    pos.lon = config.get('astronomy', 'longitude')
-    pos.elevation = float(config.get('astronomy', 'elevation'))
-    pos.temp = float(config.get('astronomy', 'temperature'))
-    pos.pressure = float(config.get('astronomy', 'pressure'))
-    pos.date = args.timestamp
+    try:
+        pos.lat = config.get('astronomy', 'latitude')
+        pos.lon = config.get('astronomy', 'longitude')
+        pos.elevation = float(config.get('astronomy', 'elevation'))
+    except configparser.Error as e:
+        sys.exit(f"Missing astronomy settings in meteor.cfg: {e}")
+    pos.temp = float(config.get('astronomy', 'temperature', fallback=5.0))
+    pos.pressure = float(config.get('astronomy', 'pressure', fallback=1013.0))
+    try:
+        # Unix timestamp -> ephem.Date (UTC)
+        pos.date = ephem.Date(datetime.datetime.fromtimestamp(float(args.timestamp), tz=datetime.timezone.utc))
+    except (ValueError, TypeError):
+        # Otherwise assume an ephem-parseable date string like '2026/8/26 01:41:51'
+        pos.date = args.timestamp
 
     if args.longitude:
         pos.lon = str(args.longitude)
@@ -161,6 +178,7 @@ if __name__ == "__main__":
     if args.pressure:
         pos.pressure = args.pressure
 
-    processed_img = tempfile.NamedTemporaryFile(delete=True, dir="/tmp").name
+    processed_tmp = tempfile.NamedTemporaryFile(delete=True, dir="/tmp")
+    processed_img = processed_tmp.name
     offset_x, offset_y = process_image(input_img, processed_img)
     solve_astrometry(processed_img, pos, offset_x, offset_y)

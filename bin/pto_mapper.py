@@ -137,6 +137,8 @@ def get_pto_data_from_json(json_path, selector):
 
     # The calibration string includes the 'i', so we pass the rest of the string
     # to the parser.
+    if ' ' not in i_line:
+        raise ValueError(f"Malformed calibration string (expected 'i <params>'): {i_line!r}")
     image_params = _parse_pto_params(i_line.split(' ', 1)[1])
     
     return global_options, [image_params]

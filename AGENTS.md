@@ -1,5 +1,39 @@
 # Project notes
 
+## Event reprocessing caveats (learned 2026-09, meteor/20260826/014151)
+
+- Detected trails can be *phantom*: the detector may lock onto a noise/star
+  path while the real meteor is a bright streak elsewhere in the frame.
+  Verify by sampling `-clean.jpg` pixel values along `positions` — real
+  trail points sit well above background. A 2-station trajectory fit can
+  still look plausible on a bogus track (two lines of sight almost always
+  intersect), so a clean fit is not proof the inputs are good.
+- To repair a phantom trail: measure the streak in the *gnomonic* image,
+  back-project its endpoints to az/alt via `gnomonic_corr_grid.pto`
+  (`map_image_to_pano` -> pano -> az/alt) and write `positions`,
+  `coordinates`, `startpos`, `endpos` in event.txt, then reprocess.
+- `recalibrated=1` events: `lens.pto` carries the stale orientation;
+  `gnomonic_corr_grid.pto` is the star-calibrated (authoritative)
+  image->az/alt mapping. `calculate_refined_endpoints()` mixes frames
+  (positions -> lens.pto -> az/alt -> corr_grid), so its initial guess can
+  land tens of px off the streak and refinetrack won't reach it.
+- `<name>-gnomonic-clean.jpg` was previously snapshotted only-if-missing,
+  so a stale render in the old view geometry survived reprocessing and
+  broke meteorcrop rotation/centering (fixed: snapshot now refreshes
+  every run).
+- `metrack.py`: `_fit_good_enough()`/`is_plausible`/`_is_implausible_info`
+  now reject `min(start_h, end_h) < 5 km` — a degenerate all-inlier fit
+  diving to ~1 km altitude used to pass the `max < 10 km` check and skip
+  subset evaluation entirely.
+- `meteorcrop.py` video trimming: source videos are ~12 s ring-buffer clips
+  that can start many seconds before the event (burned-in clock ≠ the
+  `[video] start` event-window timestamp). `detect_meteor_activity()` now
+  uses a whole-clip median baseline, anchors on the peak-brightness frame,
+  and expands contiguously through a lower `EDGE_FRACTION` threshold with
+  `GAP_TOLERANCE_FRAMES` flicker bridging — the old first/last-above-
+  threshold logic both missed short (3-frame) meteors and let stray noise
+  spikes stretch the window.
+
 ## stitcher.py / multiblend.py
 
 - Full-360 equirect blends use wrap-aware horizontal handling end to end

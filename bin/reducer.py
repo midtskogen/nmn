@@ -362,6 +362,9 @@ class RecalibrateDialog:
         reset_btn = tk.Button(self.parent, text="Reset", command=self.reset)
         reset_btn.grid(row=4, column=1, pady=10, sticky='e')
 
+        blind_btn = tk.Button(self.parent, text="Blind calibration", command=self.zoom._start_blind_calibrate)
+        blind_btn.grid(row=4, column=2, pady=10, padx=(10, 0), sticky='w')
+
         self.rms_label = tk.Label(self.parent, text="", justify=tk.LEFT)
         self.rms_label.grid(row=5, column=0, columnspan=2, pady=5, sticky='w')
 
@@ -371,7 +374,7 @@ class RecalibrateDialog:
         help_label = tk.Label(self.parent, font=("Helvetica", 14, "bold"), text="Fine-tuning the calibration")
         help_label.grid(row=0, column=3, sticky='w', padx=(10, 0))
 
-        help_text = "The sliders controls the following values:\n- Radius: search mask size.\n- Blur: mask blurring.\n- Sigma: noise assumption.\n- Optimize lens: full recalibration."
+        help_text = "The sliders controls the following values:\n- Radius: search mask size.\n- Blur: mask blurring.\n- Sigma: noise assumption.\n- Optimize lens: full recalibration.\n- Blind calibration: full tetra3 plate solve (replaces all params; N undoes)."
         help_text_label = tk.Label(self.parent, text=help_text, justify=tk.LEFT)
         help_text_label.grid(row=1, column=3, rowspan=6, sticky='w', padx=(10, 0))
 
@@ -966,7 +969,10 @@ class Zoom_Advanced(ttk.Frame):
                                             'r': self.img_data.get('r', 0), 'v': self.img_data.get('v', 0)}
             threading.Thread(target=self._optimize_orientation, daemon=True).start()
             return
-        elif key_char == 'O':
+        elif key_char == 'n':
+            self._start_blind_calibrate()
+            return
+        elif key_char == 'O' or key_char == 'N':
             if self.last_orientation_backup:
                 self.img_data.update(self.last_orientation_backup)
                 self.last_orientation_backup = None
@@ -1056,6 +1062,72 @@ class Zoom_Advanced(ttk.Frame):
                 if old_lens_filename and os.path.exists(old_lens_filename): os.remove(old_lens_filename)
                 if new_lens_filename and os.path.exists(new_lens_filename): os.remove(new_lens_filename)
                 if log_file_path and os.path.exists(log_file_path): os.remove(log_file_path)
+                self.canvas.config(cursor="draft_small")
+                self.show_image()
+            self.master.after_idle(_update_gui_finish)
+
+    def _start_blind_calibrate(self):
+        # Backup all lens+orientation params: the blind solve replaces the full
+        # model, unlike 'o' which only refines orientation. N/O restores it.
+        self.last_orientation_backup = {
+            p: self.img_data.get(p, 0) for p in ('p', 'y', 'r', 'v', 'a', 'b', 'c', 'd', 'e')}
+        threading.Thread(target=self._blind_calibrate, daemon=True).start()
+
+    def _blind_calibrate(self):
+        """Worker: run autocalib.py (tetra3 blind solve) on the current frame."""
+        def _update_ui_start(): self.canvas.config(cursor="watch")
+        self.master.after_idle(_update_ui_start)
+
+        img_temp_filename, out_pto_path = None, None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".png") as img_f:
+                self.image.save(img_f, format='PNG')
+                img_temp_filename = img_f.name
+            with tempfile.NamedTemporaryFile(delete=False, dir="/tmp", suffix=".pto") as pto_f:
+                out_pto_path = pto_f.name
+
+            starttime = None
+            try:
+                if getattr(self, 'timestamps', None) and self.num < len(self.timestamps):
+                    starttime = float(self.timestamps[self.num])
+            except Exception:
+                starttime = None
+            if starttime is None:
+                starttime = datetime.now(timezone.utc).timestamp()
+
+            autocalib = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autocalib.py')
+            cmd = [sys.executable, autocalib, img_temp_filename, out_pto_path,
+                   '-y', str(math.degrees(float(pos.lat))),
+                   '-x', str(math.degrees(float(pos.lon))),
+                   '-e', str(pos.elevation),
+                   '-T', str(starttime)]
+            proc = subprocess.run(cmd, capture_output=True, text=True, errors='ignore', timeout=900)
+            if proc.returncode != 0 or not os.path.exists(out_pto_path) or os.path.getsize(out_pto_path) == 0:
+                detail = (proc.stderr or proc.stdout or '').strip()
+                raise RuntimeError(f"Blind calibration failed: {detail[:400]}")
+            _, new_images_data = pto_mapper.parse_pto_file(out_pto_path)
+            new_img_data = new_images_data[0]
+
+            def _update_gui_success():
+                for param in ['p', 'y', 'r', 'v', 'a', 'b', 'c', 'd', 'e']:
+                    if param in new_img_data: self.img_data[param] = new_img_data[param]
+                self.pto_dirty = True
+                self.show_image()
+            self.master.after_idle(_update_gui_success)
+        except Exception as e:
+            err_msg = str(e)
+            def _update_gui_error(err_msg=err_msg):
+                messagebox.showerror("Blind Calibration Error", err_msg)
+                if self.last_orientation_backup:
+                    self.img_data.update(self.last_orientation_backup)
+                    self.last_orientation_backup = None
+                    self.pto_dirty = True
+                self.show_image()
+            self.master.after_idle(_update_gui_error)
+        finally:
+            def _update_gui_finish():
+                if img_temp_filename and os.path.exists(img_temp_filename): os.remove(img_temp_filename)
+                if out_pto_path and os.path.exists(out_pto_path): os.remove(out_pto_path)
                 self.canvas.config(cursor="draft_small")
                 self.show_image()
             self.master.after_idle(_update_gui_finish)
@@ -1622,7 +1694,7 @@ class Zoom_Advanced(ttk.Frame):
                 "  MAIN: q=quit, h=toggle help, i=toggle star info, g=toggle brightness graph\n" +
                 "  STARS: red dots=stars, i=toggle star labels, Ins/Del=more/less stars (10..500, brightest)\n" +
                 "  EDITING: Ctrl+Z=undo, Ctrl+Y=redo, x=snap to line, X=undo snap, t=temp. space, T=undo temp.\n" +
-                "  CALIBRATION: ?=open dialog, o=optimise orientation, O=undo optimisation, *=reset orientation\n" +
+                "  CALIBRATION: ?=open dialog, o=optimise, O=undo optimise, n=blind calib, N=undo, *=reset\n" +
                 "  FINE-TUNE: p/P=pitch, y/Y=yaw, r/R=roll, z/Z=hfov, a/A,b/B,c/C=radial, d/D,e/E=radial shift\n" +
                 "  IMAGE: -/+=bg removal, 1/2=contrast, 3/4=brightness, 5/6=color, 7/8=sharpness, 0=reset\n" +
                 "  SAVE/UPLOAD: l=save pto, s=save event.txt, S=save centroid.txt" + (f", u=upload to {self.upload_hostname}\n" if self.upload_hostname else "\n") +

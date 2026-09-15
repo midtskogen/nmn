@@ -730,6 +730,103 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
 
 # --- Core Script Logic ---
 
+def _trail_endpoint_span(pixels):
+    """
+    Returns (first, last) indices of the robust track interval for a pixel trail.
+
+    Terminal-flash blobs or other junk detections often append far-off points
+    at either end of the trail. These corrupt the start/end direction used for
+    gnomonic refinement and fireball rotation. This helper iteratively trims
+    end points that BOTH take an unusually large step from their neighbour AND
+    lie far off the line fitted to the remaining points.
+    """
+    n = len(pixels)
+    if n < 4:
+        return 0, n - 1
+
+    lo, hi = 0, n - 1
+
+    def fit_line(pts):
+        mx = sum(p[0] for p in pts) / len(pts)
+        my = sum(p[1] for p in pts) / len(pts)
+        sxx = syy = sxy = 0.0
+        for x, y in pts:
+            dx, dy = x - mx, y - my
+            sxx += dx * dx
+            syy += dy * dy
+            sxy += dx * dy
+        theta = 0.5 * math.atan2(2.0 * sxy, sxx - syy)
+        return mx, my, math.cos(theta), math.sin(theta)
+
+    def perp_dist(p, line):
+        mx, my, ax, ay = line
+        vx, vy = p[0] - mx, p[1] - my
+        return abs(vx * ay - vy * ax)
+
+    while hi - lo + 1 >= 4:
+        trimmed = False
+        for at_front in (True, False):
+            cand_idx = lo if at_front else hi
+            candidate = pixels[cand_idx]
+            others = pixels[lo + 1:hi + 1] if at_front else pixels[lo:hi]
+            if len(others) < 3:
+                break
+            neighbour = pixels[cand_idx + 1] if at_front else pixels[cand_idx - 1]
+            step = math.hypot(candidate[0] - neighbour[0], candidate[1] - neighbour[1])
+
+            line = fit_line(others)
+            resid = perp_dist(candidate, line)
+            res_others = [perp_dist(p, line) for p in others]
+            med_res = sorted(res_others)[len(res_others) // 2]
+            steps_others = [math.hypot(others[i + 1][0] - others[i][0],
+                                       others[i + 1][1] - others[i][1])
+                            for i in range(len(others) - 1)]
+            med_step = sorted(steps_others)[len(steps_others) // 2]
+
+            step_limit = max(4.0 * med_step, 12.0)
+            res_limit = max(3.0 * med_res, 6.0)
+            if step > step_limit and resid > res_limit:
+                if at_front:
+                    lo += 1
+                else:
+                    hi -= 1
+                trimmed = True
+                break
+        if not trimmed:
+            break
+    return lo, hi
+
+
+def _apply_robust_trail_endpoints(data):
+    """Replaces raw first/last trail endpoints with robust, line-fit endpoints."""
+    pos_tokens = data.get('positions')
+    if not pos_tokens:
+        return
+    data['begin'], data['end'] = pos_tokens[0], pos_tokens[-1]
+    coords = data.get('coordinates')
+    if coords:
+        data['start_azalt'], data['end_azalt'] = coords[0], coords[-1]
+
+    pixels = []
+    for tok in pos_tokens:
+        try:
+            x_str, y_str = tok.split(',', 1)
+            pixels.append((float(x_str), float(y_str)))
+        except Exception:
+            return
+    if len(pixels) < 4:
+        return
+
+    lo, hi = _trail_endpoint_span(pixels)
+    if lo == 0 and hi == len(pixels) - 1:
+        return
+
+    print(f"-> Trimmed spurious trail endpoints: {lo} leading, {len(pixels) - 1 - hi} trailing point(s).")
+    data['begin'], data['end'] = pos_tokens[lo], pos_tokens[hi]
+    if coords and len(coords) == len(pos_tokens):
+        data['start_azalt'], data['end_azalt'] = coords[lo], coords[hi]
+
+
 def get_event_data(event_file):
     """Parses the event.txt file to extract key information."""
     data = {}
@@ -753,9 +850,9 @@ def get_event_data(event_file):
                     if key == 'duration':
                         data['duration'] = int(float(value) + 0.5)
                     elif key == 'positions':
-                        data['begin'], data['end'] = parts[0], parts[-1]
+                        data['positions'] = parts
                     elif key == 'coordinates':
-                        data['start_azalt'], data['end_azalt'] = parts[0], parts[-1]
+                        data['coordinates'] = parts
                     elif key == 'frames':
                         data['frames'] = int(value)
                     elif key == 'brightness':
@@ -786,6 +883,8 @@ def get_event_data(event_file):
     except (ValueError, IndexError) as e:
         print(f"Error parsing '{event_file}': {e}", file=sys.stderr)
         sys.exit(1)
+
+    _apply_robust_trail_endpoints(data)
     return data
 
 def update_event_file(event_data, filepath="event.txt"):
@@ -1485,7 +1584,7 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
 
             try:
                 clean_gnomonic = Path(f"{filenames['name']}-gnomonic-clean.jpg")
-                if Path(filenames['gnomonic']).exists() and not clean_gnomonic.exists():
+                if Path(filenames['gnomonic']).exists():
                     shutil.copyfile(filenames['gnomonic'], str(clean_gnomonic))
             except Exception:
                 pass

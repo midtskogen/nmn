@@ -9,6 +9,7 @@ import argparse
 import configparser
 import ctypes
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -59,7 +60,7 @@ class ScriptError(Exception):
     pass
 
 
-class FileNotFoundError(ScriptError):
+class MissingFileError(ScriptError):
     """Raised when a required file (config, pto, image) is not found."""
     pass
 
@@ -284,7 +285,6 @@ def _refine_gnomonic_coords(event_dir: Path, start_xy: List[float], end_xy: List
 def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) -> Tuple[List[float], List[float]]:
     """Uses pto_mapper to transform celestial coordinates (az/alt) to pixels."""
     try:
-        recalibrated = config.getint("summary", "recalibrated", fallback=1)
         start_pos_str = config.get("summary", "startpos")
         end_pos_str = config.get("summary", "endpos")
     except (configparser.NoSectionError, configparser.NoOptionError) as e:
@@ -294,11 +294,14 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
     start_pos_str = start_pos_str.replace("b'", "").replace("'", "")
     end_pos_str = end_pos_str.replace("b'", "").replace("'", "")
 
-    # Determine which grid file to use based on calibration status
-    pto_filename = "gnomonic_grid.pto" if recalibrated != 0 else "gnomonic_corr_grid.pto"
-    pto_file = event_dir / pto_filename
+    # The recalibrated (star-calibrated) grid is authoritative when present;
+    # it always exists after processing (makevideos copies the uncorrected
+    # grid into it when recalibration is skipped or fails).
+    pto_file = event_dir / "gnomonic_corr_grid.pto"
     if not pto_file.is_file():
-        raise FileNotFoundError(f"Projection file not found at '{pto_file}'")
+        pto_file = event_dir / "gnomonic_grid.pto"
+    if not pto_file.is_file():
+        raise MissingFileError(f"Projection file not found in '{event_dir}'")
 
     try:
         pto_data = pto_mapper.parse_pto_file(str(pto_file))
@@ -714,7 +717,7 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
     source_video_path = hevc_vid if hevc_vid else std_vid
 
     if not source_video_path:
-        raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
+        raise MissingFileError(f"Could not find a source video in '{event_dir}'")
     
     stitcher_path = Path(__file__).parent.resolve() / "stitcher.py"
     temp_stitched_video = event_dir / Settings.TEMP_STITCHED_VID
@@ -783,7 +786,7 @@ def process_image_mode(event_dir: Path, pto_path: Path, background_plate_path: P
         if fallback_path.is_file():
             source_image_path = fallback_path
         else:
-            raise FileNotFoundError(f"Could not find corresponding source image '{source_image_path.name}'")
+            raise MissingFileError(f"Could not find corresponding source image '{source_image_path.name}'")
     
     track_image = extract_meteor_track(source_image_path, pto_path, event_dir, background_plate_path)
     output_path = event_dir / Settings.OUTPUT_FILENAME
@@ -807,11 +810,11 @@ def main():
 
     try:
         if not event_dir.is_dir():
-            raise FileNotFoundError(f"The specified event directory does not exist: '{event_dir}'")
+            raise MissingFileError(f"The specified event directory does not exist: '{event_dir}'")
 
         config_path = event_dir / "event.txt"
         if not config_path.is_file():
-            raise FileNotFoundError(f"'event.txt' not found in directory '{event_dir}'")
+            raise MissingFileError(f"'event.txt' not found in directory '{event_dir}'")
         
         config = configparser.ConfigParser()
         config.read(config_path)
@@ -821,7 +824,7 @@ def main():
         
         gnomonic_base_pto_path = event_dir / "gnomonic.pto"
         if not gnomonic_base_pto_path.is_file():
-            raise FileNotFoundError(f"Base projection PTO file not found at '{gnomonic_base_pto_path}'")
+            raise MissingFileError(f"Base projection PTO file not found at '{gnomonic_base_pto_path}'")
 
         final_w, final_h = create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
         
@@ -842,10 +845,10 @@ def main():
             source_video_path = hevc_vid if hevc_vid else std_vid
 
         if not source_video_path:
-            raise FileNotFoundError(f"Could not find a source video in '{event_dir}'")
+            raise MissingFileError(f"Could not find a source video in '{event_dir}'")
 
         if not source_video_path.is_file():
-            raise FileNotFoundError(f"Source video not found: '{source_video_path}'")
+            raise MissingFileError(f"Source video not found: '{source_video_path}'")
         
         background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
 

@@ -64,8 +64,19 @@ if __name__ == '__main__':
         data = json.load(f)
         device = data['device_name']
         cam = device[-1]
-        start_ts = datetime.strptime(data['meteor_frame_data'][0][0], '%Y-%m-%d %H:%M:%S.%f')
-        end_ts = datetime.strptime(data['meteor_frame_data'][-1][0], '%Y-%m-%d %H:%M:%S.%f')
+        frames = data.get('meteor_frame_data')
+        if not isinstance(frames, list) or not frames:
+            sys.exit(f"Error: '{args.infile}' has no meteor_frame_data entries.")
+        for i, fr in enumerate(frames):
+            if not isinstance(fr, (list, tuple)) or len(fr) < 11:
+                sys.exit(f"Error: meteor_frame_data[{i}] in '{args.infile}' is malformed "
+                         f"(expected a list with at least 11 fields).")
+        data['meteor_frame_data'] = frames
+        try:
+            start_ts = datetime.strptime(data['meteor_frame_data'][0][0], '%Y-%m-%d %H:%M:%S.%f')
+            end_ts = datetime.strptime(data['meteor_frame_data'][-1][0], '%Y-%m-%d %H:%M:%S.%f')
+        except (ValueError, TypeError, IndexError) as e:
+            sys.exit(f"Error: cannot parse frame timestamps in '{args.infile}': {e}")
         duration = (end_ts - start_ts).total_seconds()
 
         eventpath = args.path + '/cam' + cam + '/amsevents'

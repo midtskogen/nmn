@@ -254,8 +254,8 @@ class GrazerSolver:
         except:
             inlier_mask = model_lin.inlier_mask_
             
-        valid_t = np.array(obs_t)[inlier_mask]
-        t_max_inlier = np.max(valid_t)
+        valid_t = np.array(obs_t)[inlier_mask] if inlier_mask is not None else np.array(obs_t)
+        t_max_inlier = np.max(valid_t) if valid_t.size else self.t_max_raw
         
         print(f"  Valid Trajectory Duration: {t_max_inlier:.2f}s (Raw: {self.t_max_raw:.2f}s)")
 
@@ -293,6 +293,8 @@ def collect_centroids(event_dir, station_map):
     
     for cfile in files:
         path_parts = Path(cfile).parts
+        if len(path_parts) < 3:
+            continue
         station_name_dir = path_parts[-3] 
         with open(cfile, 'r') as f:
             for line in f:

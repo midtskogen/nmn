@@ -16,6 +16,7 @@ import os
 import argparse
 import base64
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1005,9 +1006,8 @@ def run_command(command, description, verbose=False):
         stderr_dest = subprocess.PIPE if do_capture else None
 
         result = subprocess.run(
-            command, 
-            check=True, 
-            shell=True, 
+            shlex.split(command),
+            check=True,
             stdout=stdout_dest,
             stderr=stderr_dest,
             text=True

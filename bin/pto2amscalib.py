@@ -674,7 +674,7 @@ def convert_pto_file(args):
         'user_stars': [],
         'crop_box': [0, 0, w, h],
         'close_stars': [],
-        'cat_image_stars': _generate_cat_image_stars(pto_data, observer),
+        'cat_image_stars': _generate_cat_image_stars(pto_data, observer) if observer is not None else [],
     }
 
     os.makedirs(Path(args.outfile).parent, exist_ok=True)

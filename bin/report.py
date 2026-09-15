@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
@@ -208,6 +209,14 @@ def generate_reports(config: configparser.ConfigParser, video_output: list, even
     frame_brightness = config.get('trail', 'frame_brightness').split()
     size = config.get('trail', 'size').split()
 
+    n = len(timestamps)
+    for name, lst in (('coordinates', coordinates), ('brightness', brightness),
+                      ('frame_brightness', frame_brightness), ('size', size)):
+        if len(lst) != n:
+            print(f"Error: trail.{name} has {len(lst)} entries but trail.timestamps has {n}; "
+                  "skipping centroid/light report generation", file=sys.stderr)
+            return
+
     with open(event_dir / 'centroid.txt', 'w') as f_centroid, \
          open(event_dir / 'light.txt', 'w') as f_light:
         for i, t in enumerate(timestamps):
@@ -313,15 +322,22 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
     if int(port) == 0:
         print("SSH tunnel port is 0, using lftp to upload...")
         remote_path = f"upload/meteor/{station_name}/"
-        command = ['lftp', '-e', f'mirror -R {event_dir} {remote_path}', 'norskmeteornettverk.no']
+        # lftp -e interprets ';', quotes etc. as its own command syntax —
+        # quote both paths so metacharacters can't inject lftp commands.
+        lftp_cmd = 'mirror -R {} {}'.format(
+            "'" + str(event_dir).replace("'", "'\\''") + "'",
+            "'" + remote_path.replace("'", "'\\''") + "'")
+        command = ['lftp', '-e', lftp_cmd, 'norskmeteornettverk.no']
         subprocess.run(command)
     else:
         print(f"SSH tunnel is active on port {port}. Not using lftp.")
 
     print("Pinging report URL...")
+    query = urllib.parse.urlencode({
+        'station': station_name, 'port': port, 'dir': str(event_dir)})
     report_command = [
         'curl', '-s', '-o', '/dev/null',
-        f'{REMOTE_REPORT_URL}?station={station_name}&port={port}&dir={str(event_dir)}'
+        f'{REMOTE_REPORT_URL}?{query}'
     ]
     subprocess.run(report_command)
     print("Upload and reporting complete.")

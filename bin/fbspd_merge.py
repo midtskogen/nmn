@@ -114,6 +114,7 @@ def readres(inname: str) -> ResData:
         for line in f:
             if not line.strip() or line.startswith('#'): continue
             words = line.split()
+            if len(words) < 6: continue
             data["long1"].append(float(words[0])); data["lat1"].append(float(words[1])); data["long2"].append(float(words[2])); data["lat2"].append(float(words[3])); data["height"].append(float(words[4])); data["desc"].append(words[5])
     res = ResData()
     res.ndata=len(data["long1"])
@@ -128,6 +129,7 @@ def readcen(inname: str) -> CenData:
         for line in f:
             if not line.strip() or line.startswith('#'): continue
             words = line.split()
+            if len(words) < 8: continue
             data["seqid"].append(int(words[0])); data["reltime"].append(float(words[1])); data["cenalt"].append(float(words[2])); data["cenaz"].append(float(words[3])); data["censig"].append(float(words[4])); data["sitestr"].append(words[5]); data["datestr"].append(words[6]); data["timestr"].append(words[7])
     cen = CenData()
     cen.ndata = len(data["seqid"])

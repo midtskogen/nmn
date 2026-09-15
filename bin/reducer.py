@@ -374,7 +374,7 @@ class RecalibrateDialog:
         help_label = tk.Label(self.parent, font=("Helvetica", 14, "bold"), text="Fine-tuning the calibration")
         help_label.grid(row=0, column=3, sticky='w', padx=(10, 0))
 
-        help_text = "The sliders controls the following values:\n- Radius: search mask size.\n- Blur: mask blurring.\n- Sigma: noise assumption.\n- Optimize lens: full recalibration.\n- Blind calibration: full tetra3 plate solve (replaces all params; N undoes)."
+        help_text = "The sliders controls the following values:\n- Radius: search mask size.\n- Blur: mask blurring.\n- Sigma: noise assumption.\n- Optimize lens: full recalibration.\n- Blind calibration: full tetra3 plate solve (replaces all params; Reset undoes)."
         help_text_label = tk.Label(self.parent, text=help_text, justify=tk.LEFT)
         help_text_label.grid(row=1, column=3, rowspan=6, sticky='w', padx=(10, 0))
 
@@ -396,8 +396,15 @@ class RecalibrateDialog:
         slider.value_label = value_label
 
     def reset(self):
-        self.zoom.img_data.clear()
-        self.zoom.img_data.update(self.original_params)
+        # If a blind calibrate/optimise ran, undo it by restoring the backup;
+        # otherwise restore the parameters as they were when the dialog opened.
+        if self.zoom.last_orientation_backup:
+            self.zoom.img_data.update(self.zoom.last_orientation_backup)
+            self.zoom.last_orientation_backup = None
+            self.zoom.pto_dirty = True
+        else:
+            self.zoom.img_data.clear()
+            self.zoom.img_data.update(self.original_params)
         self.zoom.show_image()
 
     def recal(self):

@@ -736,6 +736,8 @@ class DVRIPCam(object):
 
         while True:
             data = self.receive_with_timeout(20)
+            if data is None:
+                return None
             (
                 head,
                 version,
@@ -747,6 +749,8 @@ class DVRIPCam(object):
                 len_data,
             ) = struct.unpack("BB2xIIBBHI", data)
             packet = self.receive_with_timeout(len_data)
+            if packet is None:
+                return None
             frame_len = 0
             if length == 0:
                 media = None

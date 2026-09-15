@@ -122,8 +122,10 @@ class Settings:
         ENABLED: bool = True
         BASELINE_FRAMES: int = 30
         NOISE_RANGE_FACTOR: float = 2.0
-        MIN_EVENT_DURATION_S: float = 0.2
+        MIN_EVENT_DURATION_S: float = 0.08
         PADDING_S: float = 0.5
+        EDGE_FRACTION: float = 0.08
+        GAP_TOLERANCE_FRAMES: int = 2
 
 
 # ==============================================================================
@@ -562,25 +564,53 @@ def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) ->
             print("Warning: Could not parse brightness values. Skipping trim.")
             return None
         
-        # Establish a baseline brightness and noise level from the start of the video.
-        baseline_frames = min(trim_config.BASELINE_FRAMES, num_frames)
-        if baseline_frames < 2:
-            return None
-        
-        initial_brightness = brightness[:baseline_frames]
-        baseline = np.median(initial_brightness) + 0.02
-        noise_range = np.max(initial_brightness) - np.min(initial_brightness)
-        threshold = baseline + (trim_config.NOISE_RANGE_FACTOR * noise_range)
+        num = len(brightness)
 
-        # Find all frames where brightness exceeds the noise threshold.
-        active_indices = [i for i, b in enumerate(brightness) if b > threshold]
-        if not active_indices:
+        # Use the median of the whole clip as the baseline: the meteor occupies
+        # only a small fraction of the frames, and a leading-only baseline is
+        # biased when the background brightness drifts over the clip.
+        baseline = float(np.median(brightness))
+        initial_brightness = brightness[:min(trim_config.BASELINE_FRAMES, num)]
+        if len(initial_brightness) < 2:
+            return None
+        noise_range = max(initial_brightness) - min(initial_brightness)
+
+        # The meteor must produce a clearly significant peak somewhere.
+        peak_idx = int(np.argmax(brightness))
+        peak = brightness[peak_idx]
+        significance = baseline + (trim_config.NOISE_RANGE_FACTOR * noise_range)
+        if peak <= significance:
             print("No significant activity detected. Skipping trim.")
             return None
 
-        timestamps = [i / frame_rate for i in range(num_frames)]
-        start_time = timestamps[active_indices[0]]
-        end_time = timestamps[active_indices[-1]]
+        # Expand around the peak while brightness stays above a fraction of the
+        # peak height (catches the meteor's faint leading/trailing frames that a
+        # fixed noise threshold misses). Short sub-threshold gaps are bridged so
+        # a single flickering frame doesn't split the event.
+        edge = baseline + max(noise_range, trim_config.EDGE_FRACTION * (peak - baseline))
+        mask = [b > edge for b in brightness]
+        gap_tol = trim_config.GAP_TOLERANCE_FRAMES
+        lo = hi = peak_idx
+        gap = 0
+        for i in range(peak_idx - 1, -1, -1):
+            if mask[i]:
+                lo, gap = i, 0
+            else:
+                gap += 1
+                if gap > gap_tol:
+                    break
+        gap = 0
+        for i in range(peak_idx + 1, num):
+            if mask[i]:
+                hi, gap = i, 0
+            else:
+                gap += 1
+                if gap > gap_tol:
+                    break
+
+        timestamps = [i / frame_rate for i in range(num)]
+        start_time = timestamps[lo]
+        end_time = timestamps[hi]
 
         if (end_time - start_time) < trim_config.MIN_EVENT_DURATION_S:
             print(f"Detected event is too short ({end_time - start_time:.2f}s). Skipping trim.")

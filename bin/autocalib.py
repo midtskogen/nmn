@@ -59,6 +59,69 @@ INITIAL_C = -0.0182364818863498
 INITIAL_D = 37.10688673257604
 INITIAL_E = 21.55064329950385
 
+# Acceptance gates for the blind solve. A marginal solve (e.g. clouds producing
+# cloud-edge centroids instead of stars) should be reported as a failure rather
+# than silently adopted as a calibration.
+ACCEPT_MAX_PROB = 1e-3        # tetra3 false-positive probability (upper bound)
+ACCEPT_MIN_MATCHES = 8        # stars matched in the central tetra3 solve
+ACCEPT_MAX_RMSE_PX = 8.0      # final pixel RMSE of inlier control points
+ACCEPT_MIN_INLIERS = 30       # control points surviving outlier rejection
+ACCEPT_MIN_INLIER_FRAC = 0.5  # inliers / matched centroid candidates
+ACCEPT_MIN_COVERAGE = 0.4     # fraction of a 4x4 image grid containing control points
+
+
+def _coverage_fraction(control_points, width, height, grid=4):
+    """Fraction of grid cells containing at least one control point.
+
+    A cloud bank covering part of the sky leaves matched stars clustered in
+    one region; full-sky solutions spread across most cells."""
+    if not control_points or not width or not height:
+        return 0.0
+    cells = set()
+    for x, y, *_ in control_points:
+        cells.add((min(grid - 1, int(x / width * grid)),
+                   min(grid - 1, int(y / height * grid))))
+    return len(cells) / (grid * grid)
+
+
+def evaluate_solve(result, rmse_px, control_points, matched_candidates,
+                   width, height):
+    """Score a blind solve against the acceptance gates.
+
+    Returns a dict with the individual metrics, a human-readable 'summary',
+    and a 'failures' list (empty = accept)."""
+    prob = float(result['Prob']) if result.get('Prob') is not None else None
+    n_matches = result.get('Matches')
+    inliers = len(control_points)
+    inlier_frac = inliers / matched_candidates if matched_candidates else 0.0
+    coverage = _coverage_fraction(control_points, width, height)
+
+    failures = []
+    if prob is not None and prob > ACCEPT_MAX_PROB:
+        failures.append(f'tetra3 false-positive probability {prob:.3g} > {ACCEPT_MAX_PROB:g}')
+    if n_matches is not None and n_matches < ACCEPT_MIN_MATCHES:
+        failures.append(f'only {n_matches} matched stars (< {ACCEPT_MIN_MATCHES})')
+    if rmse_px is None or rmse_px > ACCEPT_MAX_RMSE_PX:
+        failures.append(f'pixel RMSE {"infinite" if rmse_px is None else f"{rmse_px:.2f}px"} '
+                        f'over limit {ACCEPT_MAX_RMSE_PX}px')
+    if inliers < ACCEPT_MIN_INLIERS:
+        failures.append(f'only {inliers} inlier control points (< {ACCEPT_MIN_INLIERS})')
+    if inlier_frac < ACCEPT_MIN_INLIER_FRAC:
+        failures.append(f'inlier fraction {inlier_frac:.2f} < {ACCEPT_MIN_INLIER_FRAC}')
+    if coverage < ACCEPT_MIN_COVERAGE:
+        failures.append(f'control-point sky coverage {coverage:.2f} < {ACCEPT_MIN_COVERAGE}')
+
+    return {
+        'prob': prob, 'matches': n_matches, 'rmse_px': rmse_px,
+        'inliers': inliers, 'matched': matched_candidates,
+        'inlier_frac': inlier_frac, 'coverage': coverage,
+        'failures': failures,
+        'summary': (f'prob={prob if prob is not None else "?"}, matches={n_matches}, '
+                    f'rmse={rmse_px if rmse_px is None else f"{rmse_px:.3f}px"}, '
+                    f'inliers={inliers}/{matched_candidates} ({inlier_frac:.2f}), '
+                    f'coverage={coverage:.2f}'),
+    }
+
 
 @njit(cache=True, fastmath=True)
 def _project_stars_numba(azimuths, altitudes, params, width, height, projection=3):
@@ -250,14 +313,15 @@ def _solve_image(t3, image, verbose=False):
                 projection=projection, distortion=None, return_matches=True,
                 pattern_checking_stars=12, match_radius=0.015, **extract)
             if res and res.get('RA') is not None:
+                # 'Prob' is the false-positive probability: smaller is better.
                 prob = float(res.get('Prob', 0.0))
-                if best is None or prob > best[0]:
+                if best is None or prob < best[0]:
                     best = (prob, res, (left, top, crop_w, crop_h), flip, projection)
         if best is not None:
             candidates.append(best)
     if not candidates:
         return None, None, False, None
-    best = max(candidates, key=lambda x: x[0])
+    best = min(candidates, key=lambda x: x[0])
     if verbose:
         p = best[0]
         if p > 0:
@@ -304,7 +368,7 @@ def _collect_control_points(t3, full_image, observer, initial_pto_data,
             x, y, az, alt, int(cat_id) if cat_id is not None else None)
 
     if not seed_points:
-        return [], initial_pto_data
+        return [], initial_pto_data, None
 
     # 2. Refine yaw/pitch/roll/FOV on the seed points, keeping lens distortion fixed.
     refined_pto_data, _, seed_rmse, ok = _optimise_pto(
@@ -327,7 +391,7 @@ def _collect_control_points(t3, full_image, observer, initial_pto_data,
     catalogue_ids = t3.star_catalog_IDs
     if star_table is None:
         print('Warning: tetra3 database star table not available.')
-        return list(seed_points.values()), refined_pto_data
+        return list(seed_points.values()), refined_pto_data, seed_rmse
 
     tree = cKDTree(star_table[:, 2:5].astype(np.float64))
     tol_rad = math.radians(tolerance)
@@ -355,7 +419,7 @@ def _collect_control_points(t3, full_image, observer, initial_pto_data,
     if verbose:
         print(f'Collected {len(control_points)} unique control points '
               f'({len(seed_points)} from central crop).')
-    return list(control_points.values()), refined_pto_data
+    return list(control_points.values()), refined_pto_data, seed_rmse
 
 
 def _project_catalog(pto_data, observer, star_table, objects=500, image_idx=0):
@@ -415,13 +479,16 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
     """
     Iteratively refine the calibration by masking the image to expected star
     positions, extracting the actual star centroids, and reoptimising all lens
-    and orientation parameters. Return the iteration with the lowest RMSE.
+    and orientation parameters. Return the iteration with the lowest RMSE,
+    plus the RMSE and matched-candidate count of that iteration for use as
+    solve-confidence statistics.
     """
     w, h = full_image.size
     current = pto_data
     best_data = pto_data
     best_control_points = []
     best_rmse = float('inf')
+    best_match_count = 0
     best_iteration = None
     solution_history = []
     matches = []
@@ -452,6 +519,7 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
             best_data = copy.deepcopy(current)
             best_control_points = list(control_points)
             best_rmse = rmse
+            best_match_count = len(matches)
             best_iteration = i + 1
         if not ok:
             break
@@ -470,7 +538,7 @@ def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3
         solution_history.append(solution)
     if verbose and best_iteration is not None:
         print(f'  Selected refine iter {best_iteration}: {best_rmse:.3f} px RMSE.')
-    return best_data, best_control_points
+    return best_data, best_control_points, best_rmse, best_match_count
 
 
 def _build_pto(image_path, width, height, fov, yaw, pitch, roll,
@@ -629,6 +697,8 @@ def main():
     mask_group.add_argument('--nomask', action='store_true',
                             help='Do not load or apply a foreground mask.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--force', action='store_true',
+                        help='Write the .pto even when the solve fails the confidence gate.')
     args = parser.parse_args()
 
     if Tetra3 is None:
@@ -716,7 +786,7 @@ def main():
     # catalogue via the initial camera model.
     if args.verbose:
         print('Collecting tetra3 control points...')
-    control_points, refined_pto_data = _collect_control_points(
+    control_points, refined_pto_data, seed_rmse = _collect_control_points(
         t3, full_image, observer, pto_data,
         central_result=result,
         central_crop_box=crop_box,
@@ -727,15 +797,37 @@ def main():
 
     # Iteratively refine by masking the image to expected star positions and
     # reoptimising all lens/orientation parameters.
+    rmse_px = seed_rmse
+    matched_candidates = len(control_points)
     if args.refine_iterations > 0:
         if args.verbose:
             print('Refining calibration with masked-star optimisation...')
-        refined_pto_data, control_points = _refine_calibration(
+        refined_pto_data, control_points, refine_rmse, refine_matched = _refine_calibration(
             refined_pto_data, full_image, observer, t3.star_table,
             iterations=args.refine_iterations,
             radius_deg=args.refine_radius,
             verbose=args.verbose,
         )
+        if refine_rmse != float('inf'):
+            rmse_px = refine_rmse
+            matched_candidates = refine_matched
+
+    # --- Solve-confidence gate ---
+    stats = evaluate_solve(result, rmse_px, control_points, matched_candidates,
+                           width, height)
+    print('Confidence: ' + stats['summary'])
+    if stats['failures'] and not args.force:
+        print('Error: solve rejected as low confidence (clouds?): '
+              + '; '.join(stats['failures']), file=sys.stderr)
+        sys.exit(1)
+
+    print(f'Confidence: prob={prob if prob is not None else "?"}, matches={n_matches}, '
+          f'rmse={rmse_px if rmse_px is None else f"{rmse_px:.3f}px"}, '
+          f'inliers={inliers}/{matched_candidates} ({inlier_frac:.2f}), coverage={coverage:.2f}')
+    if failures and not args.force:
+        print('Error: solve rejected as low confidence (clouds?): '
+              + '; '.join(failures), file=sys.stderr)
+        sys.exit(1)
 
     dummy_path = 'dummy_equirect.jpg'
 

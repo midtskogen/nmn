@@ -150,6 +150,9 @@ def main():
     T_combined = T_pitch @ T_yaw
     
     # Process only the first image
+    if not images:
+        print(f"Error: no image lines found in {args.infile}", file=sys.stderr)
+        sys.exit(1)
     img_to_process = images[0]
     
     # Apply the transformation

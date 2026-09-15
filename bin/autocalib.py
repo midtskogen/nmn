@@ -85,11 +85,21 @@ def _coverage_fraction(control_points, width, height, grid=4):
 
 
 def evaluate_solve(result, rmse_px, control_points, matched_candidates,
-                   width, height):
+                   width, height, max_prob=None, min_matches=None,
+                   max_rmse_px=None, min_inliers=None, min_inlier_frac=None,
+                   min_coverage=None):
     """Score a blind solve against the acceptance gates.
 
     Returns a dict with the individual metrics, a human-readable 'summary',
-    and a 'failures' list (empty = accept)."""
+    and a 'failures' list (empty = accept). Thresholds default to the
+    ACCEPT_* module constants."""
+    max_prob = ACCEPT_MAX_PROB if max_prob is None else max_prob
+    min_matches = ACCEPT_MIN_MATCHES if min_matches is None else min_matches
+    max_rmse_px = ACCEPT_MAX_RMSE_PX if max_rmse_px is None else max_rmse_px
+    min_inliers = ACCEPT_MIN_INLIERS if min_inliers is None else min_inliers
+    min_inlier_frac = ACCEPT_MIN_INLIER_FRAC if min_inlier_frac is None else min_inlier_frac
+    min_coverage = ACCEPT_MIN_COVERAGE if min_coverage is None else min_coverage
+
     prob = float(result['Prob']) if result.get('Prob') is not None else None
     n_matches = result.get('Matches')
     inliers = len(control_points)
@@ -97,19 +107,19 @@ def evaluate_solve(result, rmse_px, control_points, matched_candidates,
     coverage = _coverage_fraction(control_points, width, height)
 
     failures = []
-    if prob is not None and prob > ACCEPT_MAX_PROB:
-        failures.append(f'tetra3 false-positive probability {prob:.3g} > {ACCEPT_MAX_PROB:g}')
-    if n_matches is not None and n_matches < ACCEPT_MIN_MATCHES:
-        failures.append(f'only {n_matches} matched stars (< {ACCEPT_MIN_MATCHES})')
-    if rmse_px is None or rmse_px > ACCEPT_MAX_RMSE_PX:
+    if prob is not None and prob > max_prob:
+        failures.append(f'tetra3 false-positive probability {prob:.3g} > {max_prob:g}')
+    if n_matches is not None and n_matches < min_matches:
+        failures.append(f'only {n_matches} matched stars (< {min_matches})')
+    if rmse_px is None or rmse_px > max_rmse_px:
         failures.append(f'pixel RMSE {"infinite" if rmse_px is None else f"{rmse_px:.2f}px"} '
-                        f'over limit {ACCEPT_MAX_RMSE_PX}px')
-    if inliers < ACCEPT_MIN_INLIERS:
-        failures.append(f'only {inliers} inlier control points (< {ACCEPT_MIN_INLIERS})')
-    if inlier_frac < ACCEPT_MIN_INLIER_FRAC:
-        failures.append(f'inlier fraction {inlier_frac:.2f} < {ACCEPT_MIN_INLIER_FRAC}')
-    if coverage < ACCEPT_MIN_COVERAGE:
-        failures.append(f'control-point sky coverage {coverage:.2f} < {ACCEPT_MIN_COVERAGE}')
+                        f'over limit {max_rmse_px}px')
+    if inliers < min_inliers:
+        failures.append(f'only {inliers} inlier control points (< {min_inliers})')
+    if inlier_frac < min_inlier_frac:
+        failures.append(f'inlier fraction {inlier_frac:.2f} < {min_inlier_frac}')
+    if coverage < min_coverage:
+        failures.append(f'control-point sky coverage {coverage:.2f} < {min_coverage}')
 
     return {
         'prob': prob, 'matches': n_matches, 'rmse_px': rmse_px,
@@ -697,6 +707,20 @@ def main():
     mask_group.add_argument('--nomask', action='store_true',
                             help='Do not load or apply a foreground mask.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    gate = parser.add_argument_group('confidence gate',
+                                     'Reject the solve (exit 1, no .pto) unless all metrics pass.')
+    gate.add_argument('--accept-prob', type=float, default=ACCEPT_MAX_PROB,
+                      help=f'Max tetra3 false-positive probability (default: {ACCEPT_MAX_PROB:g}).')
+    gate.add_argument('--accept-matches', type=int, default=ACCEPT_MIN_MATCHES,
+                      help=f'Min stars matched in central solve (default: {ACCEPT_MIN_MATCHES}).')
+    gate.add_argument('--accept-rmse', type=float, default=ACCEPT_MAX_RMSE_PX,
+                      help=f'Max final pixel RMSE of inlier control points (default: {ACCEPT_MAX_RMSE_PX}).')
+    gate.add_argument('--accept-inliers', type=int, default=ACCEPT_MIN_INLIERS,
+                      help=f'Min inlier control points (default: {ACCEPT_MIN_INLIERS}).')
+    gate.add_argument('--accept-inlier-frac', type=float, default=ACCEPT_MIN_INLIER_FRAC,
+                      help=f'Min inlier/matched fraction (default: {ACCEPT_MIN_INLIER_FRAC}).')
+    gate.add_argument('--accept-coverage', type=float, default=ACCEPT_MIN_COVERAGE,
+                      help=f'Min sky coverage fraction on a 4x4 grid (default: {ACCEPT_MIN_COVERAGE}).')
     parser.add_argument('--force', action='store_true',
                         help='Write the .pto even when the solve fails the confidence gate.')
     args = parser.parse_args()
@@ -814,7 +838,12 @@ def main():
 
     # --- Solve-confidence gate ---
     stats = evaluate_solve(result, rmse_px, control_points, matched_candidates,
-                           width, height)
+                           width, height, max_prob=args.accept_prob,
+                           min_matches=args.accept_matches,
+                           max_rmse_px=args.accept_rmse,
+                           min_inliers=args.accept_inliers,
+                           min_inlier_frac=args.accept_inlier_frac,
+                           min_coverage=args.accept_coverage)
     print('Confidence: ' + stats['summary'])
     if stats['failures'] and not args.force:
         print('Error: solve rejected as low confidence (clouds?): '

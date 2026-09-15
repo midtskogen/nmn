@@ -1077,7 +1077,7 @@ class Zoom_Advanced(ttk.Frame):
         # Backup all lens+orientation params: the blind solve replaces the full
         # model, unlike 'o' which only refines orientation. N/O restores it.
         self.last_orientation_backup = {
-            p: self.img_data.get(p, 0) for p in ('p', 'y', 'r', 'v', 'a', 'b', 'c', 'd', 'e')}
+            p: self.img_data.get(p, 0) for p in ('p', 'y', 'r', 'v', 'a', 'b', 'c', 'd', 'e', 'f')}
         threading.Thread(target=self._blind_calibrate, daemon=True).start()
 
     def _blind_calibrate(self):
@@ -1116,7 +1116,9 @@ class Zoom_Advanced(ttk.Frame):
             new_img_data = new_images_data[0]
 
             def _update_gui_success():
-                for param in ['p', 'y', 'r', 'v', 'a', 'b', 'c', 'd', 'e']:
+                # 'f' included: the solve may pick rectilinear vs fisheye, and
+                # v/a..e are only self-consistent together with its projection.
+                for param in ['p', 'y', 'r', 'v', 'a', 'b', 'c', 'd', 'e', 'f']:
                     if param in new_img_data: self.img_data[param] = new_img_data[param]
                 self.pto_dirty = True
                 self.show_image()

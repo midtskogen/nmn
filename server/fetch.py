@@ -72,7 +72,7 @@ except ImportError:
 # Local script imports from the same project
 from fb2kml import fb2kml
 from fbspd_merge import readres, calculate_speed_profile, generate_speed_plots
-from metrack import calculate_trajectory, generate_plots as generate_metrack_plots, write_res_file
+from metrack import calculate_trajectory, generate_plots as generate_metrack_plots, write_res_file, _is_implausible_info
 from orbit import calc_azalt, orbit
 import reverse_geocode
 
@@ -1069,6 +1069,209 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
             logging.error(f"Failed to send tweet using key {key}: {e}")
 
 
+def _maybe_split_event_outliers(
+    event_dir: Path,
+    date: datetime.datetime,
+    obs_filepath: Path,
+    obs_file_paths: list,
+    metrack_info,
+    metrack_plot_data: dict,
+    station_name_to_code: dict,
+    metrack_opts: dict,
+    all_stations: bool,
+    use_orig_cen: bool,
+    infrasound_only: bool,
+    verbose: bool,
+    min_speed: float = None,
+):
+    """
+    Split the observations rejected as trajectory outliers into sibling event
+    directories (<HHMMSS>_2, <HHMMSS>_3, ...) and generate a separate report
+    for each. If the whole outlier group triangulates into a physically
+    plausible trajectory, it becomes one multi-station split event with its
+    own trajectory. Otherwise the outliers cannot belong to the same object
+    and are split per station into media-only reports. The main report keeps
+    only the inliers.
+    """
+    inlier_indices = metrack_plot_data.get('inlier_indices') if metrack_plot_data else None
+    if not inlier_indices:
+        return
+
+    inlier_set = set(inlier_indices)
+    outlier_info_list = []  # (cam_dir, station_dir_name, code)
+
+    for i, obs_file in enumerate(obs_file_paths):
+        if i in inlier_set:
+            continue
+        cam_dir = obs_file.parent
+        station_dir_name = cam_dir.parent.name
+        code = station_name_to_code.get(station_dir_name)
+        if not code:
+            try:
+                code = obs_file.read_text().strip().split()[12]
+            except Exception:
+                code = None
+        outlier_info_list.append((cam_dir, station_dir_name, code))
+
+    outlier_camera_dirs = {c for c, _, _ in outlier_info_list}
+    outlier_station_codes = {code for _, _, code in outlier_info_list if code}
+    num_cameras = len(outlier_camera_dirs)
+    num_stations = len(outlier_station_codes)
+    logging.info(f"Trajectory outliers: {num_cameras} camera(s) from {num_stations} station code(s).")
+
+    if not outlier_camera_dirs:
+        return
+
+    # For multi-station outlier groups, test whether they form a coherent
+    # trajectory. If it is plausible, the split report gets a trajectory;
+    # otherwise the split directory is flagged so process_event treats it as
+    # a media-only report with no trajectory section.
+    outlier_plausible = num_cameras >= 2 and num_stations >= 2
+    if outlier_plausible:
+        outlier_lines = []
+        for i, obs_file in enumerate(obs_file_paths):
+            if i not in inlier_set:
+                content = obs_file.read_text().strip()
+                if content:
+                    outlier_lines.append(content)
+        if len(outlier_lines) >= 2:
+            tmp_obs = event_dir / f"{obs_filepath.stem}_outliers{obs_filepath.suffix}"
+            tmp_obs.write_text('\n'.join(outlier_lines) + '\n', encoding='utf-8')
+            try:
+                outlier_info, _ = calculate_trajectory(str(tmp_obs), **metrack_opts)
+                outlier_plausible = bool(outlier_info) and not _is_implausible_info(outlier_info)
+                if outlier_plausible:
+                    logging.info(
+                        f"Outlier group forms a plausible trajectory (err={outlier_info.error:.2f} km, "
+                        f"speed={outlier_info.speed:.1f} km/s, "
+                        f"heights={outlier_info.start_height:.1f}-{outlier_info.end_height:.1f} km)."
+                    )
+                else:
+                    logging.info("Outlier group does not form a plausible trajectory; separate report will be media-only.")
+            except Exception as e:
+                outlier_plausible = False
+                logging.warning(f"Could not fit outlier group: {e}. Separate report will be media-only.")
+            finally:
+                tmp_obs.unlink(missing_ok=True)
+    else:
+        logging.info("Single-station outlier group; separate report will not contain a trajectory.")
+
+    # Build split groups. If the outlier set triangulates into a physically
+    # plausible trajectory it stays together as one event; otherwise the
+    # outliers cannot belong to the same object and are split per station,
+    # each getting a media-only report.
+    if outlier_plausible:
+        split_groups = [sorted({c for c, _, _ in outlier_info_list})]
+    else:
+        by_station = {}
+        for cam_dir, st_name, code in outlier_info_list:
+            by_station.setdefault(code or st_name, set()).add(cam_dir)
+        split_groups = [sorted(cams) for _, cams in sorted(by_station.items())]
+        if len(split_groups) > 1:
+            logging.info(f"Outlier group is not a single plausible meteor; splitting per station into {len(split_groups)} separate reports.")
+
+    base_time_str = date.strftime('%H%M%S')
+    split_suffix = 2
+
+    for group_dirs in split_groups:
+        rel_paths = sorted(str(c.relative_to(event_dir)).replace('\\', '/') for c in group_dirs)
+
+        # Reuse an existing split directory only if it contains exactly these
+        # outlier camera paths; never append into an unrelated split.
+        while True:
+            candidate = event_dir.parent / f"{base_time_str}_{split_suffix}"
+            if not candidate.exists():
+                secondary_dir = candidate
+                break
+            existing_rel = sorted(
+                str(p.parent.relative_to(candidate)).replace('\\', '/')
+                for p in candidate.glob('*/*/event.txt')
+            )
+            if existing_rel == rel_paths:
+                secondary_dir = candidate
+                break
+            split_suffix += 1
+        split_suffix += 1
+
+        group_has_trajectory = outlier_plausible and len(group_dirs) >= 2
+        logging.info(f"Splitting outlier group into separate event directory: {secondary_dir} (trajectory: {group_has_trajectory})")
+
+        copied = []
+        try:
+            for cam_dir in group_dirs:
+                rel = cam_dir.relative_to(event_dir)
+                dest = secondary_dir / rel
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(cam_dir, dest)
+                copied.append(cam_dir)
+                logging.info(f"Copied outlier camera dir {cam_dir} -> {dest}")
+        except Exception as e:
+            logging.error(f"Failed to copy outlier camera dirs to {secondary_dir}: {e}")
+            shutil.rmtree(secondary_dir, ignore_errors=True)
+            _exclude_outlier_cameras(event_dir, set(group_dirs))
+            continue
+
+        marker = secondary_dir / '.no_trajectory'
+        if not group_has_trajectory:
+            try:
+                marker.touch()
+            except Exception as e:
+                logging.warning(f"Could not write .no_trajectory marker in {secondary_dir}: {e}")
+        else:
+            marker.unlink(missing_ok=True)
+
+        try:
+            process_event(
+                secondary_dir, date, fast=False, all_stations=all_stations,
+                use_orig_cen=use_orig_cen, infrasound_only=infrasound_only,
+                verbose=verbose, min_speed=min_speed,
+            )
+        except Exception as e:
+            logging.error(f"Secondary event processing failed for {secondary_dir}: {e}. Excluding outliers from main report instead.")
+            shutil.rmtree(secondary_dir, ignore_errors=True)
+            _exclude_outlier_cameras(event_dir, set(copied))
+            continue
+
+        for cam_dir in copied:
+            try:
+                shutil.rmtree(cam_dir)
+            except Exception as e:
+                logging.warning(f"Could not remove original outlier camera dir {cam_dir}: {e}")
+
+    _rewrite_obs_to_inliers(obs_filepath, obs_file_paths, inlier_set)
+
+
+def _exclude_outlier_cameras(event_dir: Path, outlier_camera_dirs: set):
+    """Move rejected camera directories into event_dir/_excluded so they are kept but not shown in the main report."""
+    excluded_base = event_dir / '_excluded'
+    for cam_dir in sorted(outlier_camera_dirs):
+        rel = cam_dir.relative_to(event_dir)
+        dest = excluded_base / rel
+        if dest.exists():
+            dest = dest.with_name(f"{dest.name}_1")
+            while dest.exists():
+                dest = dest.with_name(dest.name.rsplit('_', 1)[0] + f"_{int(dest.name.rsplit('_', 1)[1]) + 1}")
+        try:
+            excluded_base.mkdir(exist_ok=True)
+            shutil.move(str(cam_dir), str(dest))
+            logging.info(f"Excluded outlier camera dir {cam_dir} -> {dest}")
+        except Exception as e:
+            logging.error(f"Could not exclude outlier camera dir {cam_dir}: {e}")
+
+
+def _rewrite_obs_to_inliers(obs_filepath: Path, obs_file_paths: list, inlier_set: set):
+    """Rewrite the main observation file so it only contains the inlier cameras."""
+    try:
+        with obs_filepath.open('w', encoding='utf-8') as f:
+            for i, obs_file in enumerate(obs_file_paths):
+                if i in inlier_set:
+                    f.write(obs_file.read_text().strip() + '\n')
+        logging.info(f"Rewrote main observation file without outlier cameras.")
+    except Exception as e:
+        logging.warning(f"Could not rewrite main observation file: {e}")
+
+
 def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
@@ -1400,13 +1603,16 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
     # -----------------------------------------------------------------
 
     station_codes, station_name_to_code = set(), {}
+    obs_file_paths = []
     try:
         with obs_filepath.open('w', encoding='utf-8') as outfile:
             for obs_file in sorted(event_dir.glob('*/*/*[0-9][0-9].txt')):
                 content = obs_file.read_text().strip()
-                if not content: continue
-                
+                if not content:
+                    continue
+
                 outfile.write(content + '\n')
+                obs_file_paths.append(obs_file)
                 station_dir_name = obs_file.relative_to(event_dir).parts[0]
                 try:
                     code = content.split()[12]
@@ -1437,7 +1643,25 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
     except OSError as e:
         logging.warning(f"Could not create symlink index.php: {e}")
 
-    is_multistation = len(station_codes) > 1
+    # Split-event siblings flagged with .no_trajectory contain detections that
+    # were ejected from the parent event's fit but do not form a physically
+    # plausible trajectory themselves; render them as media-only reports.
+    no_trajectory = (event_dir / '.no_trajectory').exists()
+    is_multistation = len(station_codes) > 1 and not no_trajectory
+    if no_trajectory:
+        # Remove stale trajectory artifacts left by an earlier run so the
+        # media-only report does not present a wrong trajectory.
+        stale_patterns = (
+            'obs_*.res', 'obs_*.kml', 'orbit.*', 'map.*', 'height.*', 'spd_acc.*', 'posvstime.*',
+            'tables.html', '*_map.*', '*_orbit.*', '*_height.*', '*_spd_acc.*', '*_posvstime.*',
+            '*_tables.html', '_fbspd_plot_data.pkl', '_metrack_plot_data.pkl',
+        )
+        for pattern in stale_patterns:
+            for artifact in event_dir.glob(pattern):
+                try:
+                    artifact.unlink()
+                except Exception:
+                    pass
     analysis_results = {}
 
     if is_multistation:
@@ -1468,7 +1692,14 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             if not resdat: raise ValueError("readres() failed or returned no data.")
                 
             fb2kml(str(res_filename))
-            
+
+            _maybe_split_event_outliers(
+                event_dir, date, obs_filepath, obs_file_paths,
+                metrack_info, metrack_plot_data, station_name_to_code,
+                metrack_opts, all_stations, use_orig_cen,
+                infrasound_only, verbose, min_speed,
+            )
+
             inlier_codes = set(metrack_info.inlier_stations)
             
             # Use original centroid.txt if flag is set, otherwise default to centroid2.txt
@@ -2065,7 +2296,9 @@ def main():
         
         try:
             date_str = final_event_dir.parent.name
-            time_str = final_event_dir.name
+            # Split event directories have a suffix (e.g. 231816_2); use the
+            # leading 6-digit time for parsing.
+            time_str = final_event_dir.name[:6]
             processing_date = datetime.datetime.strptime(date_str + time_str, '%Y%m%d%H%M%S')
         except (ValueError, IndexError):
             logging.error(f"Could not deduce date from path '{final_event_dir}'. Path must end in '<YYYYMMDD>/<HHMMSS>'.")

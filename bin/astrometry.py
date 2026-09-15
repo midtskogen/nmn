@@ -63,11 +63,14 @@ pos = ephem.Observer()
 config = configparser.ConfigParser()
 config.read(['/etc/meteor.cfg', os.path.expanduser('~/meteor.cfg')])
 
-pos.lat = config.get('astronomy', 'latitude')
-pos.lon = config.get('astronomy', 'longitude')
-pos.elevation = float(config.get('astronomy', 'elevation'))
-pos.temp = float(config.get('astronomy', 'temperature'))
-pos.pressure = float(config.get('astronomy', 'pressure'))
+try:
+    pos.lat = config.get('astronomy', 'latitude')
+    pos.lon = config.get('astronomy', 'longitude')
+    pos.elevation = float(config.get('astronomy', 'elevation'))
+except configparser.Error as e:
+    sys.exit(f"Missing astronomy settings in meteor.cfg: {e}")
+pos.temp = float(config.get('astronomy', 'temperature', fallback=5.0))
+pos.pressure = float(config.get('astronomy', 'pressure', fallback=1013.0))
 
 if args.longitude:
     pos.lon = str(args.longitude)
@@ -86,8 +89,10 @@ width, height = img.size
 pos.date = datetime.fromtimestamp(float(args.timestamp), UTC).strftime('%Y-%m-%d %H:%M:%S')
 temp = tempfile.NamedTemporaryFile(prefix='astrometry_', dir='.', delete=True)
 out = sys.stdout if args.verbose else open(os.devnull, 'wb')
-subprocess.Popen(['solve-field', '-L', str(args.low), '-H', str(args.high), '--odds-to-solve', str(args.odds), '-c', str(args.tolerance), '--sigma', str(args.sigma), '-o', os.path.basename(temp.name), args.picture], stdout=out, stderr=out).wait()
+rc = subprocess.Popen(['solve-field', '-L', str(args.low), '-H', str(args.high), '--odds-to-solve', str(args.odds), '-c', str(args.tolerance), '--sigma', str(args.sigma), '-o', os.path.basename(temp.name), args.picture], stdout=out, stderr=out).wait()
 corrfile = os.path.splitext(os.path.basename(temp.name))[0] + '.corr'
+if rc != 0 or not os.path.exists(corrfile):
+    sys.exit(f"solve-field failed (exit {rc}) for '{args.picture}'")
 axyfile = os.path.splitext(os.path.basename(temp.name))[0] + '.axy'
 rdlsfile = os.path.splitext(os.path.basename(temp.name))[0] + '.rdls'
 xylsfile = os.path.splitext(os.path.basename(temp.name))[0] + '-indx.xyls'

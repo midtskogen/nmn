@@ -231,9 +231,21 @@ def video_stack_worker(task: dict, resize_factor: float = 1.0, use_hw_accel: boo
     y_size, uv_size = width * height, (width // 2) * (height // 2)
     frame_size = y_size + uv_size * 2
 
+    def _read_exact(stream, n):
+        """Read exactly n bytes; a single read() may return less."""
+        chunks = []
+        remaining = n
+        while remaining > 0:
+            chunk = stream.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
     try:
         while True:
-            frame_data = proc.stdout.read(frame_size)
+            frame_data = _read_exact(proc.stdout, frame_size)
             if len(frame_data) < frame_size:
                 break
 

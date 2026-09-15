@@ -381,7 +381,7 @@ def _find_latest_json_for_camera(cams_id):
         return None, None, None
     candidates.sort(key=lambda x: x[0], reverse=True)
     dt, json_file, root = candidates[0]
-    return json_file, root, dt.timestamp()
+    return json_file, root, dt.replace(tzinfo=UTC).timestamp()
 
 
 def _lens_pto_name_from_root(root):

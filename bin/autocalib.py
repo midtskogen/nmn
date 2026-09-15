@@ -702,8 +702,9 @@ def main():
         init_a, init_b, init_c, init_d, init_e = INITIAL_A, INITIAL_B, INITIAL_C, INITIAL_D, INITIAL_E
     else:
         init_a = init_b = init_c = init_d = init_e = 0.0
-    tmp_pto_path = tempfile.mktemp(suffix='.pto')
-    with open(tmp_pto_path, 'w') as f:
+    tmp_pto = tempfile.NamedTemporaryFile(mode='w', suffix='.pto', delete=False)
+    tmp_pto_path = tmp_pto.name
+    with tmp_pto as f:
         f.write(_build_pto(args.image, width, height, full_fov,
                            hugin_yaw, hugin_pitch, hugin_roll,
                            projection=pto_projection,

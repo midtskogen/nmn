@@ -91,7 +91,7 @@ def load_model(model_path: str):
         except Exception as e:
             sys.exit(f"Error: Failed to decompress model '{model_path}': {e}")
     
-    model.load_state_dict(torch.load(buffer, map_location=device))
+    model.load_state_dict(torch.load(buffer, map_location=device, weights_only=True))
     
     return model.eval().to(device)
 

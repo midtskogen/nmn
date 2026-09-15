@@ -33,7 +33,10 @@ def get_video_start_time(video_file):
         '-of', 'default=noprint_wrappers=1:nokey=1', video_file
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return float(result.stdout.strip()) if result.returncode == 0 else 0.0
+    try:
+        return float(result.stdout.strip()) if result.returncode == 0 else 0.0
+    except ValueError:
+        return 0.0
 
 def extract_frames(video_file, start_time, output_dir, camera_id):
     """Extracts frames from a video starting from a specific time."""
@@ -76,7 +79,7 @@ def encode_stitched_frames_to_video(temp_dir, output_video_file):
     """Encodes all stitched frames back into a video."""
     frame_pattern = os.path.join(temp_dir, 'stitched_%06d.jpg')
     cmd = [
-        'ffmpeg', '-hwaccel', 'vaapi', '-framerate 25', ',-i', 'stitched_%06d.jpg',
+        'ffmpeg', '-hwaccel', 'vaapi', '-framerate', '25', '-i', frame_pattern,
         '-vf', 'swapuv,format=nv12,hwupload,scale_vaapi=w=trunc(iw/16)*16:h=trunc(ih/16)*16',
         '-c:v', 'h264_vaapi', output_video_file
     ]

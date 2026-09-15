@@ -1293,9 +1293,16 @@ def calculate_model_score(fit_results, inlier_obs_data, weights, indices_set, op
     if mse > 25.0:
          penalty += 1e12
 
-    # Primary sorting key: Total Weight (maximize -> negative for asc sort)
-    # Secondary sorting key: Normalized error (minimize)
-    score_tuple = (-total_weight, (penalty + final_error + 1) / (final_quality + 1e-9))
+    # Sort candidates first by whether the fit is physically acceptable,
+    # then by total weight (prefer more inliers), then by normalized error.
+    # This prevents a high-weight but clearly wrong fit (e.g. one that mixes
+    # two unrelated meteors) from beating a lower-weight but clean subset.
+    is_bad = penalty > 0 or total_weight == 0
+    score_tuple = (
+        is_bad,
+        0 if is_bad else -total_weight,
+        (penalty + final_error + 1) / (final_quality + 1e-9),
+    )
     return score_tuple, total_weight
 
 def robust_fit_with_ransac(obs_data, raw_data, options):
@@ -1406,8 +1413,8 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     # --- Evaluation: Compare all candidates (RANSAC & Pruning) ---
     if options.get('debug_ransac', False): print(f"\nEvaluating {len(candidate_sets)} candidate sets from RANSAC and Pruning...")
     
-    best_final_model, best_final_model_score = None, (0, float('inf'))
-    
+    best_final_model, best_final_model_score = None, None
+
     for k, indices_set in enumerate(candidate_sets):
         if len(indices_set) < 2: continue
         fit_results = _fit_subset(list(indices_set), optimize=True)
@@ -1418,10 +1425,14 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
             inlier_names = sorted([raw_data['names'][i] for i in indices_set])
             print(f"Candidate {k+1}: weight={total_weight:.1f}, inliers={len(indices_set)}, final_err={fit_results[3]:.2f}, score={current_score[1]:.2f} -> {inlier_names}")
 
-        if current_score < best_final_model_score:
+        # Only accept candidates that are physically plausible. If no plausible
+        # candidate exists, fall back to the simple all-stations fit below.
+        if current_score[0]:  # is_bad == True
+            continue
+        if best_final_model is None or current_score < best_final_model_score:
             best_final_model_score = current_score
             best_final_model = (fit_results, inlier_obs_data, sorted(list(indices_set)))
-    
+
     if best_final_model is None:
         print("Robust fit failed to find a valid model. Falling back to simple fit on all data.")
         return _fit_subset(list(range(num_stations)), optimize=True), obs_data, list(range(num_stations))
@@ -1610,6 +1621,11 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
             return False
         if info is None or info.start_height == 0:
             return False
+        # A track dipping below 5 km at either end is a degenerate fit (the
+        # same threshold used for penalizing candidates in the robust fit);
+        # it must not count as "good enough" or subset evaluation is skipped.
+        if min(info.start_height, info.end_height) < 5.0:
+            return False
         if max(info.start_height, info.end_height) < 10.0:
             return False
         if info.speed != 0:
@@ -1661,7 +1677,7 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
     min_speed = options.get('min_speed')
     if min_speed is None:
         min_speed = _min_orbital_speed_for_height_km(min(info.start_height, info.end_height))
-    is_plausible = not (max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < min_speed or info.speed > 100.0)))
+    is_plausible = not (min(info.start_height, info.end_height) < 5.0 or max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < min_speed or info.speed > 100.0)))
 
     if not is_plausible and use_ransac:
         print("\nWarning: RANSAC solution is physically implausible. Attempting fallback...")
@@ -1674,7 +1690,7 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
         min_speed = options.get('min_speed')
         if min_speed is None:
             min_speed = _min_orbital_speed_for_height_km(min(info.start_height, info.end_height))
-        is_plausible = not (max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < min_speed or info.speed > 100.0)))
+        is_plausible = not (min(info.start_height, info.end_height) < 5.0 or max(info.start_height, info.end_height) < 10.0 or (info.speed != 0 and (info.speed < min_speed or info.speed > 100.0)))
 
     if 'showerassoc' in AVAILABLE_LIBS:
         info.shower, _ = AVAILABLE_LIBS['showerassoc'].showerassoc(info.radiant_ra, info.radiant_dec, info.speed, time.strftime("%Y-%m-%d", time.localtime(info.timestamp)))
@@ -1698,7 +1714,7 @@ def _is_implausible_info(info: MetrackInfo) -> bool:
     """Quick physical-plausibility check for a fitted trajectory."""
     if info is None or info.start_height == 0:
         return True
-    if (info.error > 100 or info.start_height <= 0 or info.end_height <= 0 or
+    if (info.error > 100 or info.start_height < 5.0 or info.end_height < 5.0 or
         info.start_height > 200 or info.end_height > 200 or
         info.speed < 8 or info.speed > 100):
         return True

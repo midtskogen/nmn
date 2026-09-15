@@ -203,7 +203,8 @@ function gatherEventData($yearsToScan) {
         rsort($dateDirs);
 
         foreach ($dateDirs as $dateDir) {
-            $timeDirs = glob("{$dateDir}/[0-9][0-9][0-9][0-9][0-9][0-9]", GLOB_ONLYDIR);
+            // Match 6-digit time dirs plus split-event siblings like 231816_2
+            $timeDirs = array_values(preg_grep('~/\d{6}(_\d+)?$~', glob("{$dateDir}/*", GLOB_ONLYDIR) ?: []));
             foreach ($timeDirs as $timeDir) {
                 if (!file_exists("{$timeDir}/index.php")) {
                     continue;
@@ -322,7 +323,8 @@ function generateMonthContent($dates, $t) {
         $dateDir = basename(dirname($date));
         $timeCode = basename($date);
         $dayOfMonth = (int)substr($dateDir, 6, 2);
-        $formattedTime = substr_replace(substr_replace($timeCode, ':', 4, 0), ':', 2, 0);
+        // Split-event dirs like 231816_2: format the first 6 digits and drop the suffix
+        $formattedTime = substr_replace(substr_replace(substr($timeCode, 0, 6), ':', 4, 0), ':', 2, 0);
         if ($t['lang_short'] === 'en') {
             $formattedTimeForDisplay = formatDayWithSuffix($dayOfMonth) . ' ' . $formattedTime;
         } else {

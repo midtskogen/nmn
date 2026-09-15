@@ -72,7 +72,8 @@ foreach ($stations_json_candidates as $sjf) {
 $a = array_reverse(explode('/', getcwd()));
 $path = "/meteor/".$a[1]."/".$a[0]."/";
 $date = substr_replace($a[1],'-',4,0); $date = substr_replace($date,'-',7,0);
-$time = substr_replace($a[0],':',2,0); $time = substr_replace($time,':',5,0);
+// Split-event dirs like 231816_2: use only the leading 6-digit time
+$time = substr_replace(substr($a[0], 0, 6),':',2,0); $time = substr_replace($time,':',5,0);
 $time = preg_replace("/[a-z]/","",$time);
 $fp = ($lang_short==='nb') ? '' : $lang_short.'_';
 

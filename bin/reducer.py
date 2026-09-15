@@ -1995,6 +1995,10 @@ if __name__ == '__main__':
             parts = args.calibrate.split(':')
             if len(parts) not in [2, 3]: sys.exit(f"Error: Invalid format for --calibrate.")
             hostname = parts[0]; cam_num = parts[1]
+            if not re.fullmatch(r'[A-Za-z0-9._-]+', hostname) or hostname.startswith('-'):
+                sys.exit(f"Error: Invalid hostname in --calibrate.")
+            if not re.fullmatch(r'\d+', cam_num):
+                sys.exit(f"Error: Invalid camera number in --calibrate.")
             if len(parts) == 3:
                 date_time_str = parts[2]
                 match = re.match(r'(\d{8})/(\d{2})(\d{2})', date_time_str)

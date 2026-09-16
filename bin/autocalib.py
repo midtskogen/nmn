@@ -1201,16 +1201,121 @@ def _build_and_evaluate(args, result, seed_pairs, t3, full_image, observer,
     return refined_pto_data, control_points, stats
 
 
+def _run_all_cameras(args):
+    """--all mode: calibrate cam1..cam7 from the 23:00 still of the given
+    date (default: yesterday, UTC), then rotate the lens.pto/grid.png links."""
+    import subprocess
+    from datetime import timedelta
+
+    meteor = os.environ.get('NMN_METEOR_ROOT', '/meteor')
+    if args.image:
+        dstr = args.image.replace('-', '')
+        try:
+            datetime.strptime(dstr, '%Y%m%d')
+        except ValueError:
+            print(f'Error: invalid date: {args.image} (want YYYYMMDD or YYYY-MM-DD)',
+                  file=sys.stderr)
+            sys.exit(2)
+    else:
+        dstr = (datetime.now(timezone.utc).date() - timedelta(days=1)
+                ).strftime('%Y%m%d')
+    timestamp = int(datetime.strptime(dstr + '2300', '%Y%m%d%H%M')
+                    .replace(tzinfo=timezone.utc).timestamp())
+    drawgrid = Path(__file__).resolve().parent / 'drawgrid.py'
+    config = args.config or '/etc/meteor.cfg'
+
+    print(f'--all: calibrating cam1-7 for {dstr} (still 23/full_00.jpg), '
+          f'meteor root {meteor}', flush=True)
+    results = {}
+    for cam in range(1, 8):
+        camdir = Path(meteor) / f'cam{cam}'
+        img = camdir / dstr / '23' / 'full_00.jpg'
+        lens_dated = camdir / f'lens-{dstr}.pto'
+        grid_dated = camdir / f'grid-{dstr}.png'
+        print(f'cam{cam}: solving {img} ...', flush=True)
+        if not img.is_file():
+            results[cam] = ('skipped', 'no 23:00 still image')
+            print(f'cam{cam}: skipped - no still image', flush=True)
+            continue
+        tmp = tempfile.NamedTemporaryFile(suffix='.pto', delete=False).name
+        cmd = [sys.executable, str(Path(__file__).resolve()), str(img), tmp,
+               '-T', str(timestamp)]
+        if os.path.isfile(config):
+            cmd += ['-c', config]
+        if args.verbose:
+            cmd.append('-v')
+        if args.automask:
+            cmd.append('--automask')
+        if args.nomask:
+            cmd.append('--nomask')
+        if args.rectilinear:
+            cmd.append('--rectilinear')
+        if args.force:
+            cmd.append('--force')
+        for name in ('accept_prob', 'accept_matches', 'accept_rmse',
+                     'accept_inliers', 'accept_inlier_frac', 'accept_coverage',
+                     'match_tolerance', 'refine_iterations', 'refine_radius'):
+            cmd += ['--' + name.replace('_', '-'), str(getattr(args, name))]
+        t0 = datetime.now()
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        tail = (r.stderr.strip().splitlines() or [''])[-1]
+        conf = ''
+        for line in r.stdout.splitlines():
+            if line.startswith('Confidence:'):
+                conf = line.split(':', 1)[1].strip()
+        ok = r.returncode == 0 and os.path.isfile(tmp)
+        if not ok:
+            results[cam] = ('failed', tail)
+            print(f'cam{cam}: FAILED ({tail})', flush=True)
+            continue
+        os.replace(tmp, lens_dated)
+        link = camdir / 'lens.pto'
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(lens_dated.name)
+        # grid overlay
+        gcmd = [sys.executable, str(drawgrid), str(lens_dated), str(grid_dated),
+                '-d', str(timestamp), '-p', '0']
+        if os.path.isfile(config):
+            gcmd += ['-c', config]
+        g = subprocess.run(gcmd, capture_output=True, text=True)
+        if g.returncode == 0 and grid_dated.is_file():
+            glink = camdir / 'grid.png'
+            if glink.exists() or glink.is_symlink():
+                glink.unlink()
+            glink.symlink_to(grid_dated.name)
+            grid_msg = ''
+        else:
+            grid_msg = f' (grid failed: {g.stderr.strip()[-120:]})'
+        dt = (datetime.now() - t0).seconds
+        results[cam] = ('ok', f'{conf}{grid_msg}')
+        print(f'cam{cam}: OK in {dt}s - {conf}{grid_msg}', flush=True)
+
+    print('\n=== Summary ===')
+    n_ok = sum(1 for s, _ in results.values() if s == 'ok')
+    for cam, (state, detail) in results.items():
+        print(f'cam{cam}: {state:7} {detail}')
+    print(f'{n_ok}/7 cameras calibrated for {dstr}')
+    sys.exit(0 if n_ok == 7 else 1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Create a Hugin .pto file from a star-field image using tetra3.',
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument('image', help='Input image (e.g. JPEG)')
-    parser.add_argument('ptofile', help='Output .pto file')
+    parser.add_argument('image', nargs='?',
+                        help='Input image (e.g. JPEG). With --all: optional '
+                             'date YYYYMMDD or YYYY-MM-DD (default: yesterday).')
+    parser.add_argument('ptofile', nargs='?', help='Output .pto file')
     parser.add_argument('overlay', nargs='?', default=None,
                         help='Optional output image: draw az/alt grid + star '
                              'annotations over the input image (via drawgrid.py).')
+    parser.add_argument('--all', action='store_true',
+                        help='Calibrate all cameras: solve /meteor/camN/<date>/23/'
+                             'full_00.jpg for cam1-7, install lens-YYYYMMDD.pto + '
+                             'grid-YYYYMMDD.png and re-point the lens.pto/grid.png '
+                             'links. Takes a date argument instead of image/ptofile.')
     parser.add_argument('-c', '--config', help='Meteor config file (default: /etc/meteor.cfg)')
     parser.add_argument('-y', '--latitude', type=float, help='Observer latitude')
     parser.add_argument('-x', '--longitude', type=float, help='Observer longitude')
@@ -1254,6 +1359,15 @@ def main():
     parser.add_argument('--force', action='store_true',
                         help='Write the .pto even when the solve fails the confidence gate.')
     args = parser.parse_args()
+
+    if args.all:
+        if args.ptofile or args.overlay:
+            parser.error('--all takes an optional date argument, not image/ptofile')
+        _run_all_cameras(args)
+        return
+
+    if not args.image or not args.ptofile:
+        parser.error('image and ptofile are required (unless --all is used)')
 
     if Tetra3 is None:
         print(f'Error: could not import local tetra3 solver: {TETRA3_ERR}', file=sys.stderr)

@@ -519,9 +519,10 @@ def _solve_image(t3, image, verbose=False, mask=None):
        peaks — a spherical rotation of the known fisheye model, so the result
        is a valid centred fisheye patch regardless of where the sky is.
 
-    Returns (result, seed_pairs) where seed_pairs is a list of
-    (x, y, ra_deg, dec_deg, cat_id) in full-image coordinates, or
-    (None, None) when nothing solves."""
+    Returns (result, seed_pairs, est_fov, est_proj): seed_pairs is a list of
+    (x, y, ra_deg, dec_deg, cat_id) in full-image coordinates; est_fov is the
+    full-frame FOV implied by the winning crop and est_proj its projection
+    ('equidistant'/'rectilinear'), or (None, None, None, None) on failure."""
     w, h = image.size
     extract = {'sigma': 3, 'filtsize': 15, 'max_area': 500, 'min_area': 3, 'max_returned': 100}
     central = []
@@ -535,7 +536,7 @@ def _solve_image(t3, image, verbose=False, mask=None):
     if candidates and min(candidates, key=lambda x: x[0])[0] < 1e-12:
         best = min(candidates, key=lambda x: x[0])
         _report_solve(best, verbose)
-        return best[1], _seed_pairs(best)
+        return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
 
     # Central crops failed or produced a weak solve: place raw crops on the
     # densest star regions (terrain/obstructions may cover the centre).
@@ -544,8 +545,8 @@ def _solve_image(t3, image, verbose=False, mask=None):
     if disk and not any(math.hypot(disk[0] - c[0], disk[1] - c[1]) < w / 16
                         for c in centers):
         centers = [disk[:2]] + centers
+    off_center = []
     if centers:
-        off_center = []
         for cx, cy in centers:
             for size, fov in ((min(w, int(round(w * 30 / INITIAL_FOV))), 30.0),
                               (min(w, int(round(w * 40 / INITIAL_FOV))), 40.0)):
@@ -554,7 +555,7 @@ def _solve_image(t3, image, verbose=False, mask=None):
     if candidates and min(candidates, key=lambda x: x[0])[0] < 1e-12:
         best = min(candidates, key=lambda x: x[0])
         _report_solve(best, verbose)
-        return best[1], _seed_pairs(best)
+        return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
 
     # Raw crops still failed: reproject to centred equidistant views pointed
     # at the sky — the largest unmasked disk first, then the density peaks —
@@ -592,21 +593,46 @@ def _solve_image(t3, image, verbose=False, mask=None):
                                           fw((W - 1.0) - x, y))
                             else:
                                 to_src = from_warp
-                            best = (prob, res, to_src, (out_size, out_size), 'warp')
+                            best = (prob, res, to_src, (out_size, out_size), 'warp',
+                                    'equidistant')
                 if best is not None:
                     warp_candidates.append(best)
         candidates += warp_candidates
+
+    # Last resort for trailed or noisy fields (long-exposure DSLR stills):
+    # stricter extraction plus merging of close duplicate centroids (trail
+    # endpoints) before solving the cleaned point set.
+    if not candidates or min(candidates, key=lambda x: x[0])[0] >= 1e-12:
+        dedupe_extract = {'sigma': 5, 'filtsize': 25, 'max_area': 300,
+                          'min_area': 4, 'max_returned': 400}
+        rect_extra = [(min(w, int(round(w * f))), min(h, int(round(w * f))),
+                       'rectilinear', v, w / 2, h / 2)
+                      for f, v in ((0.5, 15.0), (0.7, 20.0), (0.9, 25.0))]
+        candidates += _try_solve_crops(
+            t3, image, central + off_center[:8] + rect_extra,
+            dedupe_extract, verbose, dedupe_sep=16)
     if not candidates:
-        return None, None
+        return None, None, None, None
     best = min(candidates, key=lambda x: x[0])
     _report_solve(best, verbose)
-    return best[1], _seed_pairs(best)
+    return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
+
+
+def _estimate_full_fov(best, image_w):
+    """Full-frame FOV and projection implied by the winning attempt. A raw
+    crop of width cw covers res['FOV'] degrees, so the frame is about
+    FOV * w / cw. Warped views already render the whole frame (fixed
+    equidistant model)."""
+    _prob, res, _to_src, size, tag = best[:5]
+    if tag == 'warp' or not res.get('FOV'):
+        return INITIAL_FOV, 'equidistant'
+    return res['FOV'] * image_w / size[0], best[5]
 
 
 def _seed_pairs(best):
     """Convert the winning solve's matched stars to (x, y, ra, dec, cat_id)
     in full-image coordinates via the candidate's back-map."""
-    _prob, res, to_src, _size, _tag = best
+    _prob, res, to_src, _size, _tag = best[:5]
     seeds = []
     cat_ids = res.get('matched_catID') or [None] * len(res['matched_centroids'])
     for (cy_c, cx_c), (sra, sdec, _mag), cat_id in zip(
@@ -617,7 +643,31 @@ def _seed_pairs(best):
     return seeds
 
 
-def _try_solve_crops(t3, image, attempts, extract, verbose=False):
+def _dedupe_centroids(centroids, min_sep):
+    """Merge centroids closer than min_sep px into their midpoint.
+
+    Long-exposure star trails get one blob per trail endpoint; the phantom
+    duplicates corrupt quad patterns. Clustering close centroids restores a
+    single point per trail. Brightness order (brightest first) is kept."""
+    from scipy.spatial import cKDTree
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    a = np.asarray(centroids, dtype=float)
+    if len(a) < 2:
+        return a
+    pairs = cKDTree(a).query_pairs(min_sep)
+    n = len(a)
+    ii = [p[0] for p in pairs] + [p[1] for p in pairs]
+    jj = [p[1] for p in pairs] + [p[0] for p in pairs]
+    graph = csr_matrix((np.ones(len(ii)), (ii, jj)), shape=(n, n))
+    _, labels = connected_components(graph, directed=False)
+    groups = [np.flatnonzero(labels == k) for k in range(labels.max() + 1)]
+    groups.sort(key=lambda ix: ix.min())
+    return np.array([a[ix].mean(axis=0) for ix in groups])
+
+
+def _try_solve_crops(t3, image, attempts, extract, verbose=False, dedupe_sep=None):
     """Solve each (crop_w, crop_h, projection, fov, cx, cy) attempt; return
     (prob, res, to_src, size, 'crop') candidates."""
     w, h = image.size
@@ -631,15 +681,25 @@ def _try_solve_crops(t3, image, attempts, extract, verbose=False):
         top = int(min(max(cy - crop_h / 2, 0), h - crop_h))
         crop = image.crop((left, top, left + crop_w, top + crop_h))
         if verbose:
-            print(f'{projection} crop: {crop_w}x{crop_h} at ({left},{top}), '
+            tag = 'dedupe ' if dedupe_sep else ''
+            print(f'{tag}{projection} crop: {crop_w}x{crop_h} at ({left},{top}), '
                   f'estimated FOV {fov_estimate:.1f} deg')
         best = None
         for flip in (False, True):
             test = crop.transpose(Image.FLIP_LEFT_RIGHT) if flip else crop
-            res = t3.solve_from_image(
-                test, fov_estimate=fov_estimate, fov_max_error=12.0,
-                projection=projection, distortion=None, return_matches=True,
-                pattern_checking_stars=12, match_radius=0.015, **extract)
+            if dedupe_sep:
+                cents = _dedupe_centroids(
+                    get_centroids_from_image(test, **extract), dedupe_sep)
+                res = t3.solve_from_centroids(
+                    cents, size=(crop_h, crop_w), fov_estimate=fov_estimate,
+                    fov_max_error=12.0, projection=projection, distortion=None,
+                    return_matches=True, pattern_checking_stars=12,
+                    match_radius=0.03, solve_timeout=45000)
+            else:
+                res = t3.solve_from_image(
+                    test, fov_estimate=fov_estimate, fov_max_error=12.0,
+                    projection=projection, distortion=None, return_matches=True,
+                    pattern_checking_stars=12, match_radius=0.015, **extract)
             if res and res.get('RA') is not None:
                 # 'Prob' is the false-positive probability: smaller is better.
                 prob = float(res.get('Prob', 0.0))
@@ -649,7 +709,7 @@ def _try_solve_crops(t3, image, attempts, extract, verbose=False):
                                   ((cw - 1.0) - x + l, y + t))
                     else:
                         to_src = (lambda x, y, l=left, t=top: (x + l, y + t))
-                    best = (prob, res, to_src, (crop_w, crop_h), 'crop')
+                    best = (prob, res, to_src, (crop_w, crop_h), 'crop', projection)
         if best is not None:
             candidates.append(best)
     return candidates
@@ -946,14 +1006,15 @@ def _optimise_pto(pto_data, control_points, parameters):
     x0 = base_params[parameter_indices]
     scales = {'v': 10, 'y': 10, 'p': 10, 'r': 10,
               'a': 0.01, 'b': 0.01, 'c': 0.01, 'd': 50, 'e': 50}
-    limits = {'v': (30, 150), 'y': (-720, 720), 'p': (-90, 90), 'r': (-180, 180),
+    limits = {'v': (5, 150), 'y': (-720, 720), 'p': (-90, 90), 'r': (-180, 180),
               'a': (-0.5, 0.5), 'b': (-0.5, 0.5), 'c': (-0.5, 0.5),
               'd': (-500, 500), 'e': (-500, 500)}
 
     def residual(values, points):
         params = base_params.copy()
         params[parameter_indices] = values
-        observed = np.asarray([(point[0], point[1]) for point in points])
+        observed = np.asarray([(point[0], point[1]) for point in points],
+                              dtype=float).reshape(-1, 2)
         azimuths = np.asarray([point[2] for point in points])
         altitudes = np.asarray([point[3] for point in points])
         predicted = _project_stars_numba(
@@ -975,6 +1036,9 @@ def _optimise_pto(pto_data, control_points, parameters):
 
     lower = np.array([limits[name][0] for name in parameters])
     upper = np.array([limits[name][1] for name in parameters])
+    x0 = np.clip(x0, lower + 1e-6, upper - 1e-6)
+    if len(control_points) <= len(parameters):
+        return result_data, [], float('inf'), False
     fit = least_squares(residual, x0, jac=jacobian, args=(control_points,), bounds=(lower, upper),
                         x_scale=[scales[name] for name in parameters], loss='soft_l1',
                         f_scale=1.0, max_nfev=1000)
@@ -996,7 +1060,7 @@ def _optimise_pto(pto_data, control_points, parameters):
 
 
 def _build_and_evaluate(args, result, seed_pairs, t3, full_image, observer,
-                        width, height, mask_img):
+                        width, height, mask_img, est_fov=None, est_proj=None):
     """Build the PTO model from a solve, collect/refine control points and
     evaluate the confidence gate. Returns (refined_pto_data, control_points,
     stats)."""
@@ -1028,26 +1092,34 @@ def _build_and_evaluate(args, result, seed_pairs, t3, full_image, observer,
     hugin_pitch = centre_alt
     hugin_roll = 0.0
 
-    # These cameras are equidistant fisheye; always seed with the fleet-median
-    # fisheye model — v and the orientation are refined against the control
-    # points below regardless of which solve attempt won.
+    # Seed the model from the winning solve: its implied full-frame FOV and
+    # projection. Fisheye seeds get the fleet-median lens params; rectilinear
+    # seeds start undistorted. A model check below switches projection if the
+    # other model fits the control points far better.
+    seed_fov = est_fov or INITIAL_FOV
+    pto_projection = 0 if (est_proj == 'rectilinear' or
+                         (est_fov or 999) < 60) else 3
+    force_rect = getattr(args, 'rectilinear', False)
+    if force_rect and seed_fov >= 60:
+        # Wide field: collect under fisheye first (converges reliably), the
+        # projection switch below re-collects under f0.
+        pto_projection = 3
+    seed_lens = ((INITIAL_A, INITIAL_B, INITIAL_C, INITIAL_D, INITIAL_E)
+                 if pto_projection == 3 else (0.0, 0.0, 0.0, 0.0, 0.0))
     if args.verbose:
         print(f'tetra3 centre: RA={ra_deg:.4f} Dec={dec_deg:.4f}')
         print(f'Image centre Az/Alt: {centre_az:.4f} / {centre_alt:.4f}')
         print(f'Hugin yaw/pitch/roll: {hugin_yaw:.4f} / {hugin_pitch:.4f} / {hugin_roll:.4f}')
-        print(f'Full image FOV: {INITIAL_FOV:.2f} deg, projection f3')
+        print(f'Full image FOV: {seed_fov:.2f} deg, projection f{pto_projection}')
 
-    # Build the initial PTO using the solved yaw/pitch/roll and a fixed set of
-    # lens parameters taken from a known-good calibration. This gives a good
-    # enough model to project the whole image and match stars across the field.
     tmp_pto = tempfile.NamedTemporaryFile(mode='w', suffix='.pto', delete=False)
     tmp_pto_path = tmp_pto.name
     with tmp_pto as f:
-        f.write(_build_pto(args.image, width, height, INITIAL_FOV,
+        f.write(_build_pto(args.image, width, height, seed_fov,
                            hugin_yaw, hugin_pitch, hugin_roll,
-                           projection=3,
-                           a=INITIAL_A, b=INITIAL_B, c=INITIAL_C,
-                           d=INITIAL_D, e=INITIAL_E))
+                           projection=pto_projection,
+                           a=seed_lens[0], b=seed_lens[1], c=seed_lens[2],
+                           d=seed_lens[3], e=seed_lens[4]))
     pto_data = pto_mapper.parse_pto_file(tmp_pto_path)
     os.unlink(tmp_pto_path)
 
@@ -1062,22 +1134,61 @@ def _build_and_evaluate(args, result, seed_pairs, t3, full_image, observer,
         verbose=args.verbose,
     )
 
+    # Model check: fit the same control points under the other projection —
+    # a genuinely rectilinear camera fits f0 far better than f3 and vice
+    # versa. The alternate model must win by a wide margin to switch.
+    if len(control_points) >= 10 and not (force_rect and pto_projection == 0):
+        alt_proj = 0 if pto_projection == 3 else 3
+        alt_lens = ((0.0, 0.0, 0.0, 0.0, 0.0) if alt_proj == 0
+                    else (INITIAL_A, INITIAL_B, INITIAL_C, INITIAL_D, INITIAL_E))
+        alt_text = _build_pto(args.image, width, height, seed_fov,
+                              hugin_yaw, hugin_pitch, hugin_roll,
+                              projection=alt_proj, a=alt_lens[0], b=alt_lens[1],
+                              c=alt_lens[2], d=alt_lens[3], e=alt_lens[4])
+        tmp0 = tempfile.NamedTemporaryFile(mode='w', suffix='.pto', delete=False)
+        with tmp0 as f:
+            f.write(alt_text)
+        pto0 = pto_mapper.parse_pto_file(tmp0.name)
+        os.unlink(tmp0.name)
+        pto0, _, rmse_alt, ok0 = _optimise_pto(
+            pto0, control_points, ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e'))
+        switch = force_rect and alt_proj == 0
+        if ok0 and (switch or rmse_alt < 0.5 * seed_rmse):
+            if args.verbose:
+                print(f'f{alt_proj} model {"forced" if switch else "fits better"} '
+                      f'({rmse_alt:.2f}px vs f{pto_projection} {seed_rmse:.2f}px); '
+                      're-collecting.')
+            pto_projection = alt_proj
+            control_points, refined_pto_data, seed_rmse = _collect_control_points(
+                t3, full_image, observer, pto0,
+                seed_pairs,
+                tolerance=args.match_tolerance,
+                verbose=args.verbose,
+            )
+
     # Iteratively refine by masking the image to expected star positions and
     # reoptimising all lens/orientation parameters.
     rmse_px = seed_rmse
     matched_candidates = len(control_points)
+    collected = control_points
     if args.refine_iterations > 0:
         if args.verbose:
             print('Refining calibration with masked-star optimisation...')
-        refined_pto_data, control_points, refine_rmse, refine_matched = _refine_calibration(
+        refined_pto_data, refine_cps, refine_rmse, refine_matched = _refine_calibration(
             refined_pto_data, full_image, observer, t3.star_table,
             iterations=args.refine_iterations,
             radius_deg=args.refine_radius,
             verbose=args.verbose,
         )
-        if refine_rmse != float('inf'):
+        if refine_rmse != float('inf') and refine_cps:
+            control_points = refine_cps
             rmse_px = refine_rmse
             matched_candidates = refine_matched
+    if not control_points and collected:
+        # Refinement found nothing; inlier-filter the collected set instead.
+        refined_pto_data, control_points, rmse_px, _ok = _optimise_pto(
+            refined_pto_data, collected,
+            ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e'))
 
     # --- Solve-confidence gate ---
     stats = evaluate_solve(result, rmse_px, control_points, matched_candidates,
@@ -1097,6 +1208,9 @@ def main():
     )
     parser.add_argument('image', help='Input image (e.g. JPEG)')
     parser.add_argument('ptofile', help='Output .pto file')
+    parser.add_argument('overlay', nargs='?', default=None,
+                        help='Optional output image: draw az/alt grid + star '
+                             'annotations over the input image (via drawgrid.py).')
     parser.add_argument('-c', '--config', help='Meteor config file (default: /etc/meteor.cfg)')
     parser.add_argument('-y', '--latitude', type=float, help='Observer latitude')
     parser.add_argument('-x', '--longitude', type=float, help='Observer longitude')
@@ -1119,6 +1233,9 @@ def main():
                                  'from the image itself.')
     mask_group.add_argument('--nomask', action='store_true',
                             help='Do not load or apply a foreground mask.')
+    parser.add_argument('--rectilinear', action='store_true',
+                        help='Force a rectilinear (f0) lens model instead of '
+                             'auto-detecting the projection.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     gate = parser.add_argument_group('confidence gate',
                                      'Reject the solve (exit 1, no .pto) unless all metrics pass.')
@@ -1181,11 +1298,13 @@ def main():
     stats = None
     result = None
     for attempt in range(2):
-        result, seed_pairs = _solve_image(t3, full_image, verbose=args.verbose, mask=mask_img)
+        result, seed_pairs, est_fov, est_proj = _solve_image(
+            t3, full_image, verbose=args.verbose, mask=mask_img)
         if result is not None:
             refined_pto_data, control_points, stats = _build_and_evaluate(
                 args, result, seed_pairs, t3, full_image,
-                observer, width, height, mask_img)
+                observer, width, height, mask_img,
+                est_fov=est_fov, est_proj=est_proj)
         if result is not None and stats is not None and not stats['failures']:
             break
         if attempt == 0 and mask_src == 'file':
@@ -1223,6 +1342,37 @@ def main():
     with open(args.ptofile, 'w') as f:
         f.write(_annotate_control_points(pto_text, control_points))
     print(f'Wrote .pto with {len(control_points)} control points: {args.ptofile}')
+
+    if args.overlay:
+        _write_grid_overlay(args, timestamp, observer)
+
+
+def _write_grid_overlay(args, timestamp, observer):
+    """Draw the az/alt grid and star annotations over the input image using
+    drawgrid.py and save the composite to args.overlay."""
+    import subprocess
+    drawgrid = Path(__file__).resolve().parent / 'drawgrid.py'
+    grid_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
+    cmd = [sys.executable, str(drawgrid), args.ptofile, grid_png,
+           '-d', str(int(timestamp)), '-p', '0',
+           '-Y', str(math.degrees(float(observer.lat))),
+           '-X', str(math.degrees(float(observer.lon))),
+           '-e', str(float(observer.elevation))]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.isfile(grid_png):
+        print(f'Warning: drawgrid.py failed ({r.stderr.strip()[-200:]}); '
+              'overlay not written.', file=sys.stderr)
+        return
+    base = Image.open(args.image).convert('RGBA')
+    grid = Image.open(grid_png)
+    if grid.size != base.size:
+        grid = grid.resize(base.size)
+    alpha = grid.getchannel('A').point(lambda a: int(a * 0.55))
+    grid.putalpha(alpha)
+    out = Image.alpha_composite(base, grid).convert('RGB')
+    out.save(args.overlay)
+    os.unlink(grid_png)
+    print(f'Wrote annotated overlay: {args.overlay}')
 
 
 if __name__ == '__main__':

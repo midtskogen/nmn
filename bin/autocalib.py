@@ -65,29 +65,39 @@ INITIAL_E = 21.55064329950385
 ACCEPT_MAX_PROB = 1e-3        # tetra3 false-positive probability (upper bound)
 ACCEPT_MIN_MATCHES = 8        # stars matched in the central tetra3 solve
 ACCEPT_MAX_RMSE_PX = 8.0      # final pixel RMSE of inlier control points
-ACCEPT_MIN_INLIERS = 30       # control points surviving outlier rejection
+ACCEPT_MIN_INLIERS = 15       # control points surviving outlier rejection
 ACCEPT_MIN_INLIER_FRAC = 0.5  # inliers / matched centroid candidates
 ACCEPT_MIN_COVERAGE = 0.4     # fraction of a 4x4 image grid containing control points
 
 
-def _coverage_fraction(control_points, width, height, grid=4):
-    """Fraction of grid cells containing at least one control point.
+def _coverage_fraction(control_points, width, height, grid=4, mask=None):
+    """Fraction of usable grid cells containing at least one control point.
 
-    A cloud bank covering part of the sky leaves matched stars clustered in
-    one region; full-sky solutions spread across most cells."""
+    'Usable' cells are those not dominated by the foreground mask (mask is
+    white where foreground). A cloud bank covering part of the sky leaves
+    matched stars clustered in one region; full-sky solutions spread across
+    most usable cells."""
     if not control_points or not width or not height:
         return 0.0
+    usable_cells = None
+    if mask is not None:
+        import numpy as _np
+        m = _np.asarray(mask.resize((grid, grid), Image.Resampling.BOX))
+        usable_cells = {(cx, cy) for cy in range(grid) for cx in range(grid)
+                        if m[cy, cx] < 128}
     cells = set()
     for x, y, *_ in control_points:
         cells.add((min(grid - 1, int(x / width * grid)),
                    min(grid - 1, int(y / height * grid))))
+    if usable_cells is not None:
+        return len(cells & usable_cells) / max(1, len(usable_cells))
     return len(cells) / (grid * grid)
 
 
 def evaluate_solve(result, rmse_px, control_points, matched_candidates,
                    width, height, max_prob=None, min_matches=None,
                    max_rmse_px=None, min_inliers=None, min_inlier_frac=None,
-                   min_coverage=None):
+                   min_coverage=None, mask=None):
     """Score a blind solve against the acceptance gates.
 
     Returns a dict with the individual metrics, a human-readable 'summary',
@@ -104,7 +114,7 @@ def evaluate_solve(result, rmse_px, control_points, matched_candidates,
     n_matches = result.get('Matches')
     inliers = len(control_points)
     inlier_frac = inliers / matched_candidates if matched_candidates else 0.0
-    coverage = _coverage_fraction(control_points, width, height)
+    coverage = _coverage_fraction(control_points, width, height, mask=mask)
 
     failures = []
     if prob is not None and prob > max_prob:
@@ -229,25 +239,97 @@ def _camera_mask_path(path):
     return f'{m.group(1)}/mask.png' if m else None
 
 
+def _resolve_mask_path(image_path, mask_path=None):
+    """Find a usable mask file: the inferred/explicit path first, then a
+    cached copy under bin/data/masks/cam<N>.png for hosts where the camera
+    mask symlink is dangling."""
+    candidates = [mask_path or _camera_mask_path(image_path)]
+    m = re.search(r'/meteor/(cam[^/]+)/', image_path)
+    if m:
+        candidates.append(str(_SCRIPT_PATH.parent / 'data' / 'masks'
+                              / f'{m.group(1)}.png'))
+    for cand in candidates:
+        if cand and os.path.isfile(cand):
+            return cand
+    return candidates[0]
+
+
+def _auto_mask(image, win=31):
+    """Derive a rough foreground mask from the image itself.
+
+    Night-sky background is smooth and dark; foreground (trees, masts, lamps,
+    cloud glow, out-of-frame bleed) is locally bright or high-contrast.
+    Returns a boolean array — True where foreground. Only used when no camera
+    mask file is available; it exists to keep terrain centroids out of the
+    solver, not to be a precise sky mask."""
+    import numpy as _np
+    from scipy.ndimage import (uniform_filter, binary_closing, binary_dilation,
+                               binary_fill_holes, label)
+    a = _np.asarray(image, dtype=_np.float64)
+    mean = uniform_filter(a, win)
+    sq = uniform_filter(a * a, win)
+    std = _np.sqrt(_np.maximum(sq - mean * mean, 0))
+    med_mean = _np.median(mean)
+    med_std = _np.median(std)
+    bright = mean > med_mean + max(12.0, 3.0 * _np.median(_np.abs(mean - med_mean)) * 1.4826)
+    textured = std > med_std + max(6.0, 3.0 * _np.median(_np.abs(std - med_std)) * 1.4826)
+    fg = bright | textured
+    fg = binary_closing(fg, iterations=4)
+    fg = binary_dilation(fg, iterations=4)
+    fg = binary_fill_holes(fg)
+    # Keep only components touching the frame border or covering >=1% of the
+    # image — interior bright blobs are often legitimate sky features.
+    lab, n = label(fg)
+    if n:
+        border = _np.zeros(fg.shape, bool)
+        border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+        sizes = _np.bincount(lab.ravel())
+        big = sizes >= 0.01 * a.size
+        big[0] = False
+        touch = _np.unique(lab[border])
+        keep_ids = set(touch[touch != 0]) | set(_np.nonzero(big)[0])
+        fg = _np.isin(lab, list(keep_ids))
+    return fg
+
+
 def _apply_camera_mask(image, image_path, mask_path=None, verbose=False):
-    """Remove foreground where the AMS camera mask is white."""
-    mask_path = mask_path or _camera_mask_path(image_path)
-    if not mask_path:
+    """Remove foreground where the camera mask is white.
+
+    Returns (masked_image, mask_image, source) where source is 'file', 'auto'
+    or 'none'. The mask comes from the camera mask file when available;
+    otherwise a rough mask is derived from the image itself so terrain still
+    stays out of the solve (chicken-and-egg: the camera mask depends on the
+    calibration we may not have)."""
+    mask_path = _resolve_mask_path(image_path, mask_path)
+    mask = None
+    source = 'none'
+    if mask_path and os.path.isfile(mask_path):
+        mask = Image.open(mask_path).convert('L')
+        if mask.size != image.size:
+            mask = mask.resize(image.size, Image.Resampling.NEAREST)
         if verbose:
-            print('No camera mask path inferred from input filename.')
-        return image
-    if not os.path.isfile(mask_path):
-        if verbose:
-            print(f'Camera mask not found: {mask_path}')
-        return image
-    mask = Image.open(mask_path).convert('L')
-    if mask.size != image.size:
-        mask = mask.resize(image.size, Image.Resampling.NEAREST)
-    if verbose:
-        print(f'Applying foreground mask (white pixels excluded): {mask_path}')
+            print(f'Applying foreground mask (white pixels excluded): {mask_path}')
+        source = 'file'
+    else:
+        if not mask_path:
+            print('Warning: no camera mask path inferred from input filename.',
+                  file=sys.stderr)
+        elif os.path.lexists(mask_path):
+            print(f'Warning: camera mask is a broken link: {mask_path} -> '
+                  f'{os.readlink(mask_path)}.', file=sys.stderr)
+        else:
+            print(f'Warning: camera mask not found: {mask_path}.', file=sys.stderr)
+        fg = _auto_mask(image)
+        if fg.any():
+            print(f'Using self-derived foreground mask ({100.0 * fg.mean():.0f}% '
+                  'of frame masked).', file=sys.stderr)
+            mask = Image.fromarray(np.where(fg, 255, 0).astype(np.uint8))
+            source = 'auto'
+        if mask is None:
+            return image, None, source
     keep_mask = ImageChops.invert(mask)
     smooth_foreground = image.filter(ImageFilter.GaussianBlur(25))
-    return Image.composite(image, smooth_foreground, keep_mask)
+    return Image.composite(image, smooth_foreground, keep_mask), mask, source
 
 
 def _parse_timestamp_from_path(path):
@@ -292,28 +374,264 @@ def _setup_observer(args, config):
     return obs, timestamp
 
 
-def _solve_image(t3, image, verbose=False):
-    """Solve the central sky; try several fisheye and rectilinear crops and pick the best."""
+def _equidistant_warp(image, f_px, axis_xy, out_size, out_fov_deg,
+                      lens_xy=None, mask=None):
+    """Reproject an off-axis region of an equidistant fisheye into a centred
+    equidistant view.
+
+    The lens model (equidistant about the lens centre, scale f px/rad) is
+    known; only the pointing is unknown. The output image is a spherical
+    rotation of the source, so it is itself a valid centred equidistant
+    fisheye image that tetra3 can solve directly. Returns the warped image
+    plus a callable mapping output (x, y) pixels back to source pixels."""
+    import numpy as _np
+    w, h = image.size
+    if lens_xy is None:
+        lens_xy = (w / 2.0 + INITIAL_D, h / 2.0 + INITIAL_E)
+    src = _np.asarray(image, dtype=_np.float64)
+    W = out_size
+    f_out = W / math.radians(out_fov_deg)
+
+    yy, xx = _np.mgrid[0:W, 0:W].astype(_np.float64) - (W - 1) / 2.0
+    r = _np.hypot(xx, yy)
+    theta = r / f_out                       # angular dist from virtual axis
+    phi = _np.arctan2(yy, xx)
+
+    # direction in the canonical frame: +z = forward, azimuth phi
+    dx = _np.sin(theta) * _np.cos(phi)
+    dy = _np.sin(theta) * _np.sin(phi)
+    dz = _np.cos(theta)
+
+    # axis direction in the source lens frame
+    ax, ay = axis_xy[0] - lens_xy[0], axis_xy[1] - lens_xy[1]
+    t0 = math.hypot(ax, ay) / f_px
+    p0 = math.atan2(ay, ax)
+
+    # Rodrigues rotation carrying +z onto the axis direction
+    a = _np.array([math.sin(t0) * math.cos(p0), math.sin(t0) * math.sin(p0), math.cos(t0)])
+    k = _np.cross([0, 0, 1], a)
+    kn = _np.linalg.norm(k)
+    if kn > 1e-12:
+        k /= kn
+        ct, st = math.cos(t0), math.sin(t0)
+        vx = k[1]*dz - k[2]*dy; vy = k[2]*dx - k[0]*dz; vz = k[0]*dy - k[1]*dx
+        kd = k[0]*dx + k[1]*dy + k[2]*dz
+        d_x = dx*ct + vx*st + k[0]*kd*(1-ct)
+        d_y = dy*ct + vy*st + k[1]*kd*(1-ct)
+        d_z = dz*ct + vz*st + k[2]*kd*(1-ct)
+    else:
+        d_x, d_y, d_z = dx, dy, dz
+
+    theta_s = _np.arccos(_np.clip(d_z, -1, 1))
+    phi_s = _np.arctan2(d_y, d_x)
+    r_s = f_px * theta_s
+    sx = lens_xy[0] + r_s * _np.cos(phi_s)
+    sy = lens_xy[1] + r_s * _np.sin(phi_s)
+
+    from scipy.ndimage import map_coordinates
+    warped = map_coordinates(src, [sy, sx], order=1, mode='constant', cval=0.0)
+    # Black out pixels sampled from outside the frame or from masked
+    # foreground, so the solver's centroid extractor only sees real sky.
+    out = (sx < 0) | (sx >= w - 1) | (sy < 0) | (sy >= h - 1)
+    if mask is not None:
+        m = _np.asarray(mask.resize((w, h), Image.Resampling.NEAREST), dtype=_np.float64) > 128
+        out |= map_coordinates(m.astype(_np.float64), [sy, sx], order=0,
+                               mode='constant', cval=1.0) > 0.5
+    warped[out] = 0.0
+
+    def from_warp(xw, yw):
+        """Map a warped-image pixel back to source-image coordinates."""
+        rx, ry = xw - (W - 1) / 2.0, yw - (W - 1) / 2.0
+        th = math.hypot(rx, ry) / f_out
+        ph = math.atan2(ry, rx)
+        ddx = math.sin(th) * math.cos(ph); ddy = math.sin(th) * math.sin(ph); ddz = math.cos(th)
+        if kn > 1e-12:
+            vx_ = k[1]*ddz - k[2]*ddy; vy_ = k[2]*ddx - k[0]*ddz; vz_ = k[0]*ddy - k[1]*ddx
+            kd_ = k[0]*ddx + k[1]*ddy + k[2]*ddz
+            ddx = ddx*ct + vx_*st + k[0]*kd_*(1-ct)
+            ddy = ddy*ct + vy_*st + k[1]*kd_*(1-ct)
+            ddz = ddz*ct + vz_*st + k[2]*kd_*(1-ct)
+        th_s = math.acos(max(-1.0, min(1.0, ddz)))
+        ph_s = math.atan2(ddy, ddx)
+        rr = f_px * th_s
+        return lens_xy[0] + rr * math.cos(ph_s), lens_xy[1] + rr * math.sin(ph_s)
+
+    return Image.fromarray(warped.astype(_np.uint8)), from_warp
+
+
+def _largest_sky_disk(mask, w, h):
+    """Centre (x, y) and pixel radius of the largest circle of unmasked sky.
+
+    Uses a distance transform over the foreground mask so the axis lands in
+    the middle of the widest contiguous clear region rather than at the
+    density peak near the sky's edge. Returns None when no mask is given."""
+    if mask is None:
+        return None
+    import numpy as _np
+    from scipy.ndimage import distance_transform_edt
+    free = _np.asarray(mask.resize((w, h), Image.Resampling.NEAREST)) < 128
+    dist = distance_transform_edt(free)
+    iy, ix = _np.unravel_index(int(dist.argmax()), dist.shape)
+    return float(ix), float(iy), float(dist[iy, ix])
+
+
+def _centroid_density_centers(image, w, h, cols=8, rows=5, top_n=4, mask=None):
+    """Return the centers of the grid cells with the most star centroids.
+
+    Used to place solve crops where the sky is actually visible for cameras
+    whose lower half is terrain (central crops hit trees/masts there). Cells
+    dominated by foreground mask are skipped — they would otherwise win on
+    spurious centroids from lights and mask edges."""
+    import numpy as _np
+    centroids = get_centroids_from_image(
+        image, sigma=2.0, image_th=None, crop=None, downsample=None,
+        filtsize=15, max_area=500, min_area=3, max_returned=2000)
+    mask_frac = {}
+    if mask is not None:
+        m = _np.asarray(mask.resize((cols, rows), Image.Resampling.BOX), dtype=_np.float64)
+        mask_frac = {(cx, cy): m[cy, cx] / 255.0 for cy in range(rows) for cx in range(cols)}
+    counts = {}
+    for pt in centroids:
+        y, x = float(pt[0]), float(pt[1])
+        cell = (min(cols - 1, int(x / w * cols)), min(rows - 1, int(y / h * rows)))
+        counts[cell] = counts.get(cell, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+    centers = []
+    for (cx, cy), n in ranked:
+        if n < 8:
+            break
+        if mask_frac.get((cx, cy), 0.0) > 0.5:
+            continue
+        centers.append(((cx + 0.5) * w / cols, (cy + 0.5) * h / rows))
+        if len(centers) >= top_n:
+            break
+    return centers
+
+
+def _solve_image(t3, image, verbose=False, mask=None):
+    """Blind-solve the sky in `image`.
+
+    Strategy:
+    1. centred crops under equidistant and rectilinear models;
+    2. if weak/failed, raw crops centred on star-density peaks (for cameras
+       with terrain covering the image centre);
+    3. if still weak, equidistant *reprojected* views centred on the density
+       peaks — a spherical rotation of the known fisheye model, so the result
+       is a valid centred fisheye patch regardless of where the sky is.
+
+    Returns (result, seed_pairs) where seed_pairs is a list of
+    (x, y, ra_deg, dec_deg, cat_id) in full-image coordinates, or
+    (None, None) when nothing solves."""
     w, h = image.size
     extract = {'sigma': 3, 'filtsize': 15, 'max_area': 500, 'min_area': 3, 'max_returned': 100}
-    attempts = []
+    central = []
     for fov in (60, 50, 40, 30, 25, 20):
         cw = min(w, int(round(w * fov / INITIAL_FOV)))
-        attempts.append((cw, cw, 'equidistant', float(fov)))
+        central.append((cw, cw, 'equidistant', float(fov), w / 2, h / 2))
     for size, fov in ((int(round(w * 0.3)), 25.0),
                       (640, 20.0), (768, 30.0), (480, 15.0)):
-        attempts.append((size, size, 'rectilinear', fov))
+        central.append((size, size, 'rectilinear', fov, w / 2, h / 2))
+    candidates = _try_solve_crops(t3, image, central, extract, verbose)
+    if candidates and min(candidates, key=lambda x: x[0])[0] < 1e-12:
+        best = min(candidates, key=lambda x: x[0])
+        _report_solve(best, verbose)
+        return best[1], _seed_pairs(best)
+
+    # Central crops failed or produced a weak solve: place raw crops on the
+    # densest star regions (terrain/obstructions may cover the centre).
+    centers = _centroid_density_centers(image, w, h, mask=mask)
+    disk = _largest_sky_disk(mask, w, h)
+    if disk and not any(math.hypot(disk[0] - c[0], disk[1] - c[1]) < w / 16
+                        for c in centers):
+        centers = [disk[:2]] + centers
+    if centers:
+        off_center = []
+        for cx, cy in centers:
+            for size, fov in ((min(w, int(round(w * 30 / INITIAL_FOV))), 30.0),
+                              (min(w, int(round(w * 40 / INITIAL_FOV))), 40.0)):
+                off_center.append((size, size, 'equidistant', fov, cx, cy))
+        candidates += _try_solve_crops(t3, image, off_center, extract, verbose)
+    if candidates and min(candidates, key=lambda x: x[0])[0] < 1e-12:
+        best = min(candidates, key=lambda x: x[0])
+        _report_solve(best, verbose)
+        return best[1], _seed_pairs(best)
+
+    # Raw crops still failed: reproject to centred equidistant views pointed
+    # at the sky — the largest unmasked disk first, then the density peaks —
+    # and solve those (exact fisheye geometry).
+    warp_axes = []
+    disk = _largest_sky_disk(mask, w, h)
+    if disk:
+        warp_axes.append(disk[:2])
+    warp_axes += [c for c in centers
+                  if not any(math.hypot(c[0] - a[0], c[1] - a[1]) < w / 16
+                             for a in warp_axes)]
+    if warp_axes:
+        f_px = w / math.radians(INITIAL_FOV)
+        warp_candidates = []
+        for cx, cy in warp_axes[:4]:
+            for out_fov, out_size in ((50.0, 768), (70.0, 960)):
+                warped, from_warp = _equidistant_warp(image, f_px, (cx, cy),
+                                                      out_size, out_fov,
+                                                      mask=mask)
+                if verbose:
+                    print(f'warped equidistant view {out_size}x{out_size} '
+                          f'axis=({cx:.0f},{cy:.0f}), FOV {out_fov:.0f} deg')
+                best = None
+                for flip in (False, True):
+                    test = warped.transpose(Image.FLIP_LEFT_RIGHT) if flip else warped
+                    res = t3.solve_from_image(
+                        test, fov_estimate=out_fov, fov_max_error=12.0,
+                        projection='equidistant', distortion=None, return_matches=True,
+                        pattern_checking_stars=12, match_radius=0.015, **extract)
+                    if res and res.get('RA') is not None:
+                        prob = float(res.get('Prob', 0.0))
+                        if best is None or prob < best[0]:
+                            if flip:
+                                to_src = (lambda x, y, fw=from_warp, W=out_size:
+                                          fw((W - 1.0) - x, y))
+                            else:
+                                to_src = from_warp
+                            best = (prob, res, to_src, (out_size, out_size), 'warp')
+                if best is not None:
+                    warp_candidates.append(best)
+        candidates += warp_candidates
+    if not candidates:
+        return None, None
+    best = min(candidates, key=lambda x: x[0])
+    _report_solve(best, verbose)
+    return best[1], _seed_pairs(best)
+
+
+def _seed_pairs(best):
+    """Convert the winning solve's matched stars to (x, y, ra, dec, cat_id)
+    in full-image coordinates via the candidate's back-map."""
+    _prob, res, to_src, _size, _tag = best
+    seeds = []
+    cat_ids = res.get('matched_catID') or [None] * len(res['matched_centroids'])
+    for (cy_c, cx_c), (sra, sdec, _mag), cat_id in zip(
+            res['matched_centroids'], res['matched_stars'], cat_ids):
+        x, y = to_src(float(cx_c), float(cy_c))
+        seeds.append((x, y, sra, sdec,
+                      int(cat_id) if cat_id is not None else None))
+    return seeds
+
+
+def _try_solve_crops(t3, image, attempts, extract, verbose=False):
+    """Solve each (crop_w, crop_h, projection, fov, cx, cy) attempt; return
+    (prob, res, to_src, size, 'crop') candidates."""
+    w, h = image.size
     candidates = []
-    for crop_w, crop_h, projection, fov_estimate in attempts:
+    for crop_w, crop_h, projection, fov_estimate, cx, cy in attempts:
         crop_w = min(crop_w, w)
         crop_h = min(crop_h, h)
         if projection == 'equidistant':
             fov_estimate = INITIAL_FOV * crop_w / w
-        left = (w - crop_w) // 2
-        top = (h - crop_h) // 2
+        left = int(min(max(cx - crop_w / 2, 0), w - crop_w))
+        top = int(min(max(cy - crop_h / 2, 0), h - crop_h))
         crop = image.crop((left, top, left + crop_w, top + crop_h))
         if verbose:
-            print(f'Central {projection} crop: {crop_w}x{crop_h} at ({left},{top}), '
+            print(f'{projection} crop: {crop_w}x{crop_h} at ({left},{top}), '
                   f'estimated FOV {fov_estimate:.1f} deg')
         best = None
         for flip in (False, True):
@@ -326,21 +644,26 @@ def _solve_image(t3, image, verbose=False):
                 # 'Prob' is the false-positive probability: smaller is better.
                 prob = float(res.get('Prob', 0.0))
                 if best is None or prob < best[0]:
-                    best = (prob, res, (left, top, crop_w, crop_h), flip, projection)
+                    if flip:
+                        to_src = (lambda x, y, l=left, t=top, cw=crop_w:
+                                  ((cw - 1.0) - x + l, y + t))
+                    else:
+                        to_src = (lambda x, y, l=left, t=top: (x + l, y + t))
+                    best = (prob, res, to_src, (crop_w, crop_h), 'crop')
         if best is not None:
             candidates.append(best)
-    if not candidates:
-        return None, None, False, None
-    best = min(candidates, key=lambda x: x[0])
+    return candidates
+
+
+def _report_solve(best, verbose):
     if verbose:
         p = best[0]
         if p > 0:
             one_in = 1.0 / p
             chance = f'1 in {one_in:.2e}' if one_in >= 1e6 else f'1 in {one_in:,.0f}'
-            print(f'Selected {best[4]} crop: {chance} false-positive chance ({p * 100:.4g}%)')
+            print(f'Selected {best[4]} attempt: {chance} false-positive chance ({p * 100:.4g}%)')
         else:
-            print(f'Selected {best[4]} crop (probability unknown)')
-    return best[1], best[2], best[3], best[4]
+            print(f'Selected {best[4]} attempt (probability unknown)')
 
 
 def _radec_to_azel(ra_deg, dec_deg, observer):
@@ -354,28 +677,20 @@ def _radec_to_azel(ra_deg, dec_deg, observer):
 
 
 def _collect_control_points(t3, full_image, observer, initial_pto_data,
-                            central_result, central_crop_box, central_flipped,
-                            tolerance=0.15, verbose=False):
-    """Refine the camera pose on the central crop, then match stars across the whole field."""
+                            seed_pairs, tolerance=0.15, verbose=False):
+    """Refine the camera pose on the tetra3 seed matches, then match stars
+    across the whole field."""
     from scipy.spatial import cKDTree
 
     w, h = full_image.size
-    cleft, ctop = central_crop_box[:2]
 
-    # 1. Seed control points from the central tetra3 solve.
+    # 1. Seed control points from the winning tetra3 solve.
     seed_points = {}
-    cat_ids = central_result.get('matched_catID') or [None] * len(central_result['matched_centroids'])
-    for (cy_c, cx_c), (sra, sdec, _), cat_id in zip(
-            central_result['matched_centroids'], central_result['matched_stars'], cat_ids):
-        x = cx_c + cleft
-        y = cy_c + ctop
-        if central_flipped:
-            x = (w - 1.0) - x
+    for x, y, sra, sdec, cat_id in seed_pairs:
         az, alt = _radec_to_azel(sra, sdec, observer)
         if alt <= 0:
             continue
-        seed_points[(round(float(x), 4), round(float(y), 4))] = (
-            x, y, az, alt, int(cat_id) if cat_id is not None else None)
+        seed_points[(round(float(x), 4), round(float(y), 4))] = (x, y, az, alt, cat_id)
 
     if not seed_points:
         return [], initial_pto_data, None
@@ -409,7 +724,7 @@ def _collect_control_points(t3, full_image, observer, initial_pto_data,
     control_points = dict(seed_points)
     for pt in centroids:
         y, x = float(pt[0]), float(pt[1])
-        mapped = pto_mapper.map_image_to_pano(refined_pto_data, 0, (w - 1.0 - x) if central_flipped else x, y)
+        mapped = pto_mapper.map_image_to_pano(refined_pto_data, 0, x, y)
         if mapped is None:
             continue
         az, alt = mapped[0] / 100.0, 90.0 - mapped[1] / 100.0
@@ -680,6 +995,101 @@ def _optimise_pto(pto_data, control_points, parameters):
     return result_data, inliers, rmse, fit.success
 
 
+def _build_and_evaluate(args, result, seed_pairs, t3, full_image, observer,
+                        width, height, mask_img):
+    """Build the PTO model from a solve, collect/refine control points and
+    evaluate the confidence gate. Returns (refined_pto_data, control_points,
+    stats)."""
+    # RA/Dec at the IMAGE centre. tetra3 reports the centre of the solved
+    # (possibly off-centre or reprojected) patch; fit a local affine map
+    # px->RA/Dec from the matched stars and evaluate at the image centre.
+    ra_deg = result['RA']
+    dec_deg = result['Dec']
+    if len(seed_pairs) >= 4:
+        fx = np.asarray([s[0] for s in seed_pairs])
+        fy = np.asarray([s[1] for s in seed_pairs])
+        ras = np.unwrap(np.radians([s[2] for s in seed_pairs]))
+        decs = np.radians([s[3] for s in seed_pairs])
+        A = np.column_stack([fx, fy, np.ones_like(fx)])
+        ra_coef, *_ = np.linalg.lstsq(A, ras, rcond=None)
+        dec_coef, *_ = np.linalg.lstsq(A, decs, rcond=None)
+        ra_deg = math.degrees(ra_coef @ [width / 2, height / 2, 1.0]) % 360.0
+        dec_deg = math.degrees(dec_coef @ [width / 2, height / 2, 1.0])
+
+    # Convert centre to azimuth/altitude and then to Hugin yaw/pitch.
+    body = ephem.FixedBody()
+    body._ra = math.radians(ra_deg)
+    body._dec = math.radians(dec_deg)
+    body._epoch = ephem.J2000
+    body.compute(observer)
+    centre_az = math.degrees(body.az)
+    centre_alt = math.degrees(body.alt)
+    hugin_yaw = (centre_az - 180.0) % 360.0
+    hugin_pitch = centre_alt
+    hugin_roll = 0.0
+
+    # These cameras are equidistant fisheye; always seed with the fleet-median
+    # fisheye model — v and the orientation are refined against the control
+    # points below regardless of which solve attempt won.
+    if args.verbose:
+        print(f'tetra3 centre: RA={ra_deg:.4f} Dec={dec_deg:.4f}')
+        print(f'Image centre Az/Alt: {centre_az:.4f} / {centre_alt:.4f}')
+        print(f'Hugin yaw/pitch/roll: {hugin_yaw:.4f} / {hugin_pitch:.4f} / {hugin_roll:.4f}')
+        print(f'Full image FOV: {INITIAL_FOV:.2f} deg, projection f3')
+
+    # Build the initial PTO using the solved yaw/pitch/roll and a fixed set of
+    # lens parameters taken from a known-good calibration. This gives a good
+    # enough model to project the whole image and match stars across the field.
+    tmp_pto = tempfile.NamedTemporaryFile(mode='w', suffix='.pto', delete=False)
+    tmp_pto_path = tmp_pto.name
+    with tmp_pto as f:
+        f.write(_build_pto(args.image, width, height, INITIAL_FOV,
+                           hugin_yaw, hugin_pitch, hugin_roll,
+                           projection=3,
+                           a=INITIAL_A, b=INITIAL_B, c=INITIAL_C,
+                           d=INITIAL_D, e=INITIAL_E))
+    pto_data = pto_mapper.parse_pto_file(tmp_pto_path)
+    os.unlink(tmp_pto_path)
+
+    # Collect control points by matching every detected star to the tetra3
+    # catalogue via the initial camera model.
+    if args.verbose:
+        print('Collecting tetra3 control points...')
+    control_points, refined_pto_data, seed_rmse = _collect_control_points(
+        t3, full_image, observer, pto_data,
+        seed_pairs,
+        tolerance=args.match_tolerance,
+        verbose=args.verbose,
+    )
+
+    # Iteratively refine by masking the image to expected star positions and
+    # reoptimising all lens/orientation parameters.
+    rmse_px = seed_rmse
+    matched_candidates = len(control_points)
+    if args.refine_iterations > 0:
+        if args.verbose:
+            print('Refining calibration with masked-star optimisation...')
+        refined_pto_data, control_points, refine_rmse, refine_matched = _refine_calibration(
+            refined_pto_data, full_image, observer, t3.star_table,
+            iterations=args.refine_iterations,
+            radius_deg=args.refine_radius,
+            verbose=args.verbose,
+        )
+        if refine_rmse != float('inf'):
+            rmse_px = refine_rmse
+            matched_candidates = refine_matched
+
+    # --- Solve-confidence gate ---
+    stats = evaluate_solve(result, rmse_px, control_points, matched_candidates,
+                           width, height, max_prob=args.accept_prob,
+                           min_matches=args.accept_matches,
+                           max_rmse_px=args.accept_rmse,
+                           min_inliers=args.accept_inliers,
+                           min_inlier_frac=args.accept_inlier_frac,
+                           min_coverage=args.accept_coverage, mask=mask_img)
+    return refined_pto_data, control_points, stats
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Create a Hugin .pto file from a star-field image using tetra3.',
@@ -704,6 +1114,9 @@ def main():
     mask_group = parser.add_mutually_exclusive_group()
     mask_group.add_argument('--mask', metavar='FILE',
                             help='Use this foreground mask instead of /meteor/camN/mask.png.')
+    mask_group.add_argument('--automask', action='store_true',
+                            help='Ignore any mask file and derive a foreground mask '
+                                 'from the image itself.')
     mask_group.add_argument('--nomask', action='store_true',
                             help='Do not load or apply a foreground mask.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
@@ -737,14 +1150,26 @@ def main():
     observer, timestamp = _setup_observer(args, config)
 
     # Open image and convert to luminance for solving.
-    full_image = Image.open(args.image).convert('L')
+    raw_image = Image.open(args.image).convert('L')
+    full_image = raw_image
+    mask_img = None
+    mask_src = 'none'
     if args.nomask:
         if args.verbose:
             print('Camera mask disabled by --nomask.')
+    elif args.automask:
+        fg = _auto_mask(raw_image)
+        mask_img = Image.fromarray(np.where(fg, 255, 0).astype(np.uint8))
+        full_image = Image.composite(
+            raw_image, raw_image.filter(ImageFilter.GaussianBlur(25)),
+            ImageChops.invert(mask_img))
+        mask_src = 'auto'
+        print(f'Using self-derived foreground mask ({100.0 * fg.mean():.0f}% '
+              'of frame masked).', file=sys.stderr)
     else:
-        full_image = _apply_camera_mask(
-            full_image, args.image, mask_path=args.mask, verbose=args.verbose)
-    width, height = full_image.size
+        full_image, mask_img, mask_src = _apply_camera_mask(
+            raw_image, args.image, mask_path=args.mask, verbose=args.verbose)
+    width, height = raw_image.size
 
     if args.verbose:
         print(f'Image: {args.image} ({width}x{height})')
@@ -753,97 +1178,33 @@ def main():
 
     # Use the local tetra3 solver; its pattern database is built from stars.py.
     t3 = Tetra3()
-    result, crop_box, flipped, projection = _solve_image(t3, full_image, verbose=args.verbose)
+    stats = None
+    result = None
+    for attempt in range(2):
+        result, seed_pairs = _solve_image(t3, full_image, verbose=args.verbose, mask=mask_img)
+        if result is not None:
+            refined_pto_data, control_points, stats = _build_and_evaluate(
+                args, result, seed_pairs, t3, full_image,
+                observer, width, height, mask_img)
+        if result is not None and stats is not None and not stats['failures']:
+            break
+        if attempt == 0 and mask_src == 'file':
+            why = 'no solution' if result is None else 'low confidence'
+            print(f'First pass: {why} with camera mask; retrying with '
+                  'self-derived foreground mask (mask may be stale)...',
+                  file=sys.stderr)
+            fg = _auto_mask(raw_image)
+            mask_img = Image.fromarray(np.where(fg, 255, 0).astype(np.uint8))
+            full_image = Image.composite(
+                raw_image, raw_image.filter(ImageFilter.GaussianBlur(25)),
+                ImageChops.invert(mask_img))
+            mask_src = 'auto'
+        else:
+            break
     if result is None:
         print('Error: tetra3 could not solve the image (or a central crop).', file=sys.stderr)
         sys.exit(1)
 
-    ra_deg = result['RA']
-    dec_deg = result['Dec']
-
-    # Convert centre to azimuth/altitude and then to Hugin yaw/pitch.
-    body = ephem.FixedBody()
-    body._ra = math.radians(ra_deg)
-    body._dec = math.radians(dec_deg)
-    body._epoch = ephem.J2000
-    body.compute(observer)
-    centre_az = math.degrees(body.az)
-    centre_alt = math.degrees(body.alt)
-    hugin_yaw = (centre_az - 180.0) % 360.0
-    hugin_pitch = centre_alt
-    hugin_roll = 0.0
-
-    crop_w = crop_box[2]
-    solved_fov = float(result['FOV'])
-    if projection == 'equidistant':
-        full_fov = solved_fov * width / crop_w
-        pto_projection = 3
-    else:
-        full_fov = math.degrees(2 * math.atan(
-            (width * math.tan(math.radians(solved_fov) / 2.0)) / crop_w))
-        pto_projection = 0
-
-    if args.verbose:
-        print(f'tetra3 centre: RA={ra_deg:.4f} Dec={dec_deg:.4f}')
-        print(f'Image centre Az/Alt: {centre_az:.4f} / {centre_alt:.4f}')
-        print(f'Hugin yaw/pitch/roll: {hugin_yaw:.4f} / {hugin_pitch:.4f} / {hugin_roll:.4f}')
-        print(f'Full image FOV: {full_fov:.2f} deg, projection f{pto_projection}')
-
-    # Build the initial PTO using the solved yaw/pitch/roll and a fixed set of
-    # lens parameters taken from a known-good calibration. This gives a good
-    # enough model to project the whole image and match stars across the field.
-    if pto_projection == 3:
-        init_a, init_b, init_c, init_d, init_e = INITIAL_A, INITIAL_B, INITIAL_C, INITIAL_D, INITIAL_E
-    else:
-        init_a = init_b = init_c = init_d = init_e = 0.0
-    tmp_pto = tempfile.NamedTemporaryFile(mode='w', suffix='.pto', delete=False)
-    tmp_pto_path = tmp_pto.name
-    with tmp_pto as f:
-        f.write(_build_pto(args.image, width, height, full_fov,
-                           hugin_yaw, hugin_pitch, hugin_roll,
-                           projection=pto_projection,
-                           a=init_a, b=init_b, c=init_c, d=init_d, e=init_e))
-    pto_data = pto_mapper.parse_pto_file(tmp_pto_path)
-    os.unlink(tmp_pto_path)
-
-    # Collect control points by matching every detected star to the tetra3
-    # catalogue via the initial camera model.
-    if args.verbose:
-        print('Collecting tetra3 control points...')
-    control_points, refined_pto_data, seed_rmse = _collect_control_points(
-        t3, full_image, observer, pto_data,
-        central_result=result,
-        central_crop_box=crop_box,
-        central_flipped=flipped,
-        tolerance=args.match_tolerance,
-        verbose=args.verbose,
-    )
-
-    # Iteratively refine by masking the image to expected star positions and
-    # reoptimising all lens/orientation parameters.
-    rmse_px = seed_rmse
-    matched_candidates = len(control_points)
-    if args.refine_iterations > 0:
-        if args.verbose:
-            print('Refining calibration with masked-star optimisation...')
-        refined_pto_data, control_points, refine_rmse, refine_matched = _refine_calibration(
-            refined_pto_data, full_image, observer, t3.star_table,
-            iterations=args.refine_iterations,
-            radius_deg=args.refine_radius,
-            verbose=args.verbose,
-        )
-        if refine_rmse != float('inf'):
-            rmse_px = refine_rmse
-            matched_candidates = refine_matched
-
-    # --- Solve-confidence gate ---
-    stats = evaluate_solve(result, rmse_px, control_points, matched_candidates,
-                           width, height, max_prob=args.accept_prob,
-                           min_matches=args.accept_matches,
-                           max_rmse_px=args.accept_rmse,
-                           min_inliers=args.accept_inliers,
-                           min_inlier_frac=args.accept_inlier_frac,
-                           min_coverage=args.accept_coverage)
     print('Confidence: ' + stats['summary'])
     if stats['failures'] and not args.force:
         print('Error: solve rejected as low confidence (clouds?): '

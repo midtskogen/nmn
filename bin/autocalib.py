@@ -1237,7 +1237,8 @@ def _run_all_cameras(args):
             results[cam] = ('skipped', 'no 23:00 still image')
             print(f'cam{cam}: skipped - no still image', flush=True)
             continue
-        tmp = tempfile.NamedTemporaryFile(suffix='.pto', delete=False).name
+        tmp = tempfile.NamedTemporaryFile(suffix='.pto', dir=camdir,
+                                          delete=False).name
         cmd = [sys.executable, str(Path(__file__).resolve()), str(img), tmp,
                '-T', str(timestamp)]
         if os.path.isfile(config):

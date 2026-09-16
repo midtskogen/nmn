@@ -1268,8 +1268,35 @@ def _run_all_cameras(args):
             results[cam] = ('failed', tail)
             print(f'cam{cam}: FAILED ({tail})', flush=True)
             continue
-        os.replace(tmp, lens_dated)
+        # Orientation shift vs the existing calibration, if any.
+        shift_msg = ''
         link = camdir / 'lens.pto'
+        if link.exists():
+            try:
+                old = pto_mapper.parse_pto_file(str(link))[1][0]
+                new = pto_mapper.parse_pto_file(tmp)[1][0]
+
+                def _canon(y, p):
+                    while p > 90: p = 180 - p; y += 180
+                    while p < -90: p = -180 - p; y += 180
+                    return y % 360, p
+                oy, op = _canon(float(old['y']), float(old['p']))
+                ny, np_ = _canon(float(new['y']), float(new['p']))
+                dy = min(abs(ny - oy), 360 - abs(ny - oy))
+                pointing = math.hypot(dy, np_ - op)
+                dr = min(abs(float(new['r']) - float(old['r'])),
+                         360 - abs(float(new['r']) - float(old['r'])))
+                dv = abs(float(new['v']) - float(old['v']))
+                shift_msg = (f' shift: {pointing:.2f}deg pointing, '
+                             f'{dr:.2f}deg roll, {dv:.2f}deg fov')
+            except Exception:
+                shift_msg = ' shift: n/a (old pto unreadable)'
+        if args.dryrun:
+            os.unlink(tmp)
+            results[cam] = ('ok', f'{conf}{shift_msg} [dry-run: not installed]')
+            print(f'cam{cam}: OK - {conf}{shift_msg} [dry-run]', flush=True)
+            continue
+        os.replace(tmp, lens_dated)
         if link.exists() or link.is_symlink():
             link.unlink()
         link.symlink_to(lens_dated.name)
@@ -1288,8 +1315,8 @@ def _run_all_cameras(args):
         else:
             grid_msg = f' (grid failed: {g.stderr.strip()[-120:]})'
         dt = (datetime.now() - t0).seconds
-        results[cam] = ('ok', f'{conf}{grid_msg}')
-        print(f'cam{cam}: OK in {dt}s - {conf}{grid_msg}', flush=True)
+        results[cam] = ('ok', f'{conf}{shift_msg}{grid_msg}')
+        print(f'cam{cam}: OK in {dt}s - {conf}{shift_msg}{grid_msg}', flush=True)
 
     print('\n=== Summary ===')
     n_ok = sum(1 for s, _ in results.values() if s == 'ok')
@@ -1316,6 +1343,9 @@ def main():
                              'full_00.jpg for cam1-7, install lens-YYYYMMDD.pto + '
                              'grid-YYYYMMDD.png and re-point the lens.pto/grid.png '
                              'links. Takes a date argument instead of image/ptofile.')
+    parser.add_argument('--dryrun', action='store_true',
+                        help='With --all: solve but do not install the dated '
+                             'lens/grid files or change the links.')
     parser.add_argument('-c', '--config', help='Meteor config file (default: /etc/meteor.cfg)')
     parser.add_argument('-y', '--latitude', type=float, help='Observer latitude')
     parser.add_argument('-x', '--longitude', type=float, help='Observer longitude')

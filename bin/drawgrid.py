@@ -110,6 +110,9 @@ def main():
     parser.add_argument("--base-image", dest='base_image', help='Load an existing PNG and draw annotations on top (skip grid generation)', type=str)
     parser.add_argument("--annotations-only", dest='annotations_only', help='Only draw star annotations on a transparent canvas (no grid)', action="store_true")
     parser.add_argument("--nopos", dest='nopos', help='Omit [az, alt] / [ra, dec] position from star labels', action="store_true")
+    parser.add_argument("--no-label-state", dest='no_label_state', action="store_true",
+                        help='Do not read or write the <outfile>.labels.json sidecar '
+                             'used for stable label placement across frames.')
     parser.add_argument("--panorama", dest='panorama', action="store_true",
                         help='Treat image as the stitched panorama output (bypass i-line transform). '
                              'Uses the p-line projection (f2=equirect, f3=fisheye) directly. '
@@ -150,6 +153,7 @@ def main():
             str(args.verbose).encode(),
             str(args.base_image).encode(),
             str(args.annotations_only).encode(),
+            str(args.no_label_state).encode(),
         ]
         h = hashlib.sha256()
         for p in parts:
@@ -813,11 +817,12 @@ def main():
             bias_radius = 15
             prev_placements = {}
             sidecar = args.outfile + '.labels.json'
-            try:
-                with open(sidecar, 'r') as _f:
-                    prev_placements = json.load(_f)
-            except (FileNotFoundError, json.JSONDecodeError, OSError):
-                pass
+            if not args.no_label_state:
+                try:
+                    with open(sidecar, 'r') as _f:
+                        prev_placements = json.load(_f)
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    pass
 
             cur_placements = {}
 
@@ -899,7 +904,7 @@ def main():
                 draw.text(int(lx), int(ly), label)
 
             # Save current placements for next frame's stability bias
-            if cur_placements:
+            if cur_placements and not args.no_label_state:
                 try:
                     with open(sidecar, 'w') as _f:
                         json.dump(cur_placements, _f)

@@ -1302,11 +1302,12 @@ def _run_all_cameras(args):
             link.unlink()
         link.symlink_to(lens_dated.name)
         # grid overlay
-        gcmd = [sys.executable, str(drawgrid), str(lens_dated), str(grid_dated),
-                '-d', str(timestamp), '-p', '0']
-        if os.path.isfile(config):
-            gcmd += ['-c', config]
-        g = subprocess.run(gcmd, capture_output=True, text=True)
+        # Grid only: no -d/-X/-Y/-e, so the star-annotation pass (which is
+        # conditioned on observer position + timestamp) is skipped.
+        g = subprocess.run(
+            [sys.executable, str(drawgrid), str(lens_dated), str(grid_dated),
+             '-p', '0'],
+            capture_output=True, text=True)
         if g.returncode == 0 and grid_dated.is_file():
             glink = camdir / 'grid.png'
             if glink.exists() or glink.is_symlink():

@@ -47,11 +47,23 @@ Scripts used directly on each camera station and for offline processing:
 
 #### Calibration & Geometry
 
+- **`autocalib.py`** — Blind stellar calibration: solves a star-field image with the local tetra3 plate solver and writes a Hugin lens `.pto`. Handles equidistant fisheye (`f3`) and rectilinear (`f0`) cameras, with automatic model selection, a confidence gate that rejects cloudy/star-poor frames, and foreground masking (`--mask` / `--automask` / `--nomask`). Key options:
+  - `IMAGE PTOFILE [OVERLAY]` — solve one image; `OVERLAY` additionally writes the input image annotated with the az/alt grid and star labels (via `drawgrid.py`).
+  - `--all [YYYYMMDD|YYYY-MM-DD]` — fleet calibration: solves `/meteor/camN/<date>/23/full_00.jpg` for cam1–7 (default date: yesterday), installs `lens-<date>.pto` + `grid-<date>.png` and re-points the `lens.pto`/`grid.png` links, preserving old dated calibrations. Reports per-camera confidence metrics and the orientation shift relative to the previous calibration. `--dryrun` solves without installing.
+  - `--rectilinear` — force the rectilinear (`f0`) lens model instead of auto-detecting.
+  - `--accept-*` flags — tune the confidence gate thresholds.
+- **`tetra3.py`** — Vendored lost-in-space plate solver used by `autocalib.py`.
 - **`calibrate.py`** — Stellar calibration to produce a lens `.pto` file.
 - **`calibrate.sh`** — Legacy shell wrapper for calibration (no longer maintained).
 - **`amscalib2lens.py`** — Creates a Hugin `.pto` from an AMS JSON calibration file.
 - **`pto2amscalib.py`** — Converts a Hugin `.pto` back into an AMS-style `*calparams.json`.
+- **`recalibrate.py`** — Improves an existing `.pto` calibration using stars in a new image.
+- **`refinetrack.py`** — Refines meteor track start/end coordinates in an image.
+- **`reproject.py`** — Changes projection and centre of a `.pto` file.
+- **`calfetch.py`** — Fetches `lens.pto` files from all stations via SSH and compiles them into `cameras.json`.
 - **`pto_mapper.py`** — Coordinate transforms between panorama and individual camera pixels.
+- **`ptotester.py`** — Sanity-checks a `.pto` file.
+- **`brightstar.py`** / **`map.py`** — Lists/maps the brightest visible stars for a `.pto` + timestamp.
 - **`findstar.py`** / **`astrometry.py`** / **`stars.py`** — Star catalog and astrometry helpers.
 
 #### Image/Video Processing
@@ -60,6 +72,9 @@ Scripts used directly on each camera station and for offline processing:
 - **`multiblend.py`** — Multi-band blending backend used by `stitcher.py`.
 - **`stitch.py`** *(in `server/data/`)* — Thin web wrapper around `stitcher.py`.
 - **`makevideos.py`** — Event video processing: stacked images, grid overlays, and gnomonic projections.
+- **`meteorcrop.py`** — Extracts a normalized image and video of a meteor track from a gnomonic projection.
+- **`mirror.py`** — Watches AMS capture directories for new video/data files, processes and moves them.
+- **`vidstitch.py`** — Stitches camera videos into a panorama using a `.pto` file.
 - **`stack.py`** — Image/video stacking, with optional ffmpeg hardware acceleration.
 - **`timelapse*.sh`** / **`stitch_latest.sh`** — Shell wrappers for nightly timelapse and live-stitch generation.
 
@@ -73,15 +88,22 @@ Scripts used directly on each camera station and for offline processing:
 #### Classification & Reporting
 
 - **`classify.py`** — PyTorch meteor image/video classification (2D and 3D CNNs). Supports train, predict, and `buildensemble` modes, optional K-Means clustering, and synthetic balancing.
+- **`predict.py`** — Runtime classifier: scores an image with the pre-trained EfficientNet model (used by `report.py`).
 - **`retrain_meteor_model_gui.py`** — Tkinter wizard that checks dependencies, splits data into training/verification sets, trains and evaluates the EfficientNet-B0 meteor classifier, and compares model-size/performance tradeoffs.
 - **`process.py`** — Processes a single meteor event detection: validation, video/classification calls, Metrack data generation, and translated brightness plots.
 - **`report.py`** — Classifies an event, produces plots/reports, and reports to the central NMN server if it passes the probability threshold.
+- **`regen_brightness.py`** — Regenerates translated brightness plots for a meteor event directory.
+- **`regen_translations.py`** — Generates missing language-specific output files for an event directory.
 
 #### Utilities
 
 - **`fb2kml.py`** / **`fbspd_merge.py`** — Fireball/FBSPD report helpers.
 - **`p100.py`** / **`imx291time.py`** / **`telnet_opener.py`** — Hardware/camera helpers.
 - **`sunpos.py`** / **`altaz.py`** / **`findcoord.py`** / **`windprofile.py`** — Astronomical and atmospheric utilities.
+- **`grazer.py`** — Earth-grazer meteor trajectory solver.
+- **`infra_fit.py`** — Fits an infrasound source location from `infra.txt` arrival times.
+- **`timestamp.py`** — Reads timestamps from image and video files.
+- **`sac2mp3.py`** — Converts a SAC seismogram to audible MP3.
 
 ### `server/` — Central Web Backend & Services
 
@@ -154,6 +176,19 @@ python3 /home/meteor/nmn/bin/stitcher.py --fisheye image*.jpg out.mp4
 ### Calibration
 
 ```bash
+# Blind-solve a single star-field image into a lens .pto
+python3 /home/meteor/nmn/bin/autocalib.py image.jpg lens.pto
+
+# Same, plus an annotated overlay image (az/alt grid + star labels)
+python3 /home/meteor/nmn/bin/autocalib.py image.jpg lens.pto annotated.jpg
+
+# Nightly fleet calibration on a station: all cameras, yesterday's 23:00 still
+python3 /home/meteor/nmn/bin/autocalib.py --all            # or --all 20260914
+python3 /home/meteor/nmn/bin/autocalib.py --all --dryrun   # solve only, install nothing
+
+# Force the rectilinear model for gnomonic/DSLR images
+python3 /home/meteor/nmn/bin/autocalib.py image.jpg lens.pto --rectilinear
+
 python3 /home/meteor/nmn/bin/calibrate.py --help
 python3 /home/meteor/nmn/bin/amscalib2lens.py --help
 python3 /home/meteor/nmn/bin/pto2amscalib.py --help

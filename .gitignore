@@ -22,3 +22,6 @@ api/queue_worker.pid
 api/queue_worker.log
 # Generated tetra3 pattern database (built from stars.py on first run)
 bin/data/tetra3_stars*.npz
+
+# tetra3 pattern databases (generated from stars.py on first use)
+bin/data/*.npz

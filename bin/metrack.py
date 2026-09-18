@@ -1189,14 +1189,18 @@ document.addEventListener("DOMContentLoaded", function () {
     // scene every frame -- a Plotly.restyle re-renders the whole scene
     // (incl. the map texture) and starves interaction.
     const overlay = document.createElement('canvas');
-    overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:5;';
-    if (getComputedStyle(plot).position === 'static') plot.style.position = 'relative';
-    plot.appendChild(overlay);
+    overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
+    // Clip to the actual gl3d viewport (#scene), not the whole plot div --
+    // otherwise streaks bleed into the title margin and clip at a different
+    // edge than the scene objects.
+    const holder = plot.querySelector('#scene') || plot;
+    if (getComputedStyle(holder).position === 'static') holder.style.position = 'relative';
+    holder.appendChild(overlay);
     const ctx = overlay.getContext('2d');
     function resize() {
         const dpr = window.devicePixelRatio || 1;
-        overlay.width = plot.clientWidth * dpr;
-        overlay.height = plot.clientHeight * dpr;
+        overlay.width = holder.clientWidth * dpr;
+        overlay.height = holder.clientHeight * dpr;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
     resize();
@@ -1261,7 +1265,7 @@ document.addEventListener("DOMContentLoaded", function () {
         ctx.clearRect(0, 0, overlay.width, overlay.height);
         const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
         const g = scn && scn.glplot, cam = g && g.camera;
-        const W = plot.clientWidth, H = plot.clientHeight;
+        const W = holder.clientWidth, H = holder.clientHeight;
         if (cam && cam.matrix && W > 0 && H > 0) {
             const ds = scn.dataScale || [1, 1, 1];
             const cp = g.cameraParams || {};

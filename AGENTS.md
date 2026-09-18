@@ -251,8 +251,15 @@
   `?dir=` parameter let anyone rsync arbitrary remote paths from stations
   into the public meteor tree. Hardened in place on bolide (station
   whitelist, event-shaped dir check, port range, per-IP rate limit,
-  dedupe, optional shared token via `/etc/default/nmn_report_token` on
-  stations). It is NOT in the repo — keep it in sync if it changes.
+  dedupe). It is NOT in the repo — keep it in sync if it changes.
+- The endpoint now REQUIRES a shared-secret token: stations send
+  `&token=` read from `/etc/default/nmn_report_token` (fallback
+  `~/.nmn_report_token`) in `bin/report.py`. Token deployed as root
+  (password auth) to all 13 reachable stations on 2026-09-18;
+  ams136 (vasteras) was unreachable (tunnel refused) and still needs
+  `/etc/default/nmn_report_token` + updated `~/nmn/bin/report.py`
+  when it comes back. Station ssh port map lives in
+  `/var/www/.ssh/config` on bolide (host 192.168.2.10, ports 10xxx).
 - `server/report.php` (public report form): uploads now map detected
   MIME to a fixed server-side extension (never the client's), base64
   images are magic-byte validated, submissions are per-IP rate limited,

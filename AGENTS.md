@@ -255,8 +255,9 @@
 - The endpoint now REQUIRES a shared-secret token: stations send
   `&token=` read from `/etc/default/nmn_report_token` (fallback
   `~/.nmn_report_token`) in `bin/report.py`. Token deployed as root
-  (password auth) to all 13 reachable stations on 2026-09-18;
-  ams136 (vasteras) was unreachable (tunnel refused) and still needs
+  (password auth) on 2026-09-18 to 13 primary stations + 10 backup
+  PCs (ams*b). Still pending (tunnels refused/offline): ams136
+  (vasteras), ams174b, ams180b, ams135b — each needs
   `/etc/default/nmn_report_token` + updated `~/nmn/bin/report.py`
   when it comes back. Station ssh port map lives in
   `/var/www/.ssh/config` on bolide (host 192.168.2.10, ports 10xxx).

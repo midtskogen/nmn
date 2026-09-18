@@ -1151,8 +1151,12 @@ document.addEventListener("DOMContentLoaded", function () {{
                     levels.append([h_m / 1000.0, -math.sin(rad), -math.cos(rad), speed_ms])
             if levels:
                 if not options.get('azonly', False) and track_start is not None:
-                    bx0, bx1 = min(seg_x) - 20.0, max(seg_x) + 20.0
-                    by0, by1 = min(seg_y) - 20.0, max(seg_y) + 20.0
+                    # Box centred on the trajectory end point, twice the
+                    # half-extent of the track (+ margin) in x and y.
+                    hw_x = (max(seg_x) - min(seg_x)) / 2.0 + 20.0
+                    hw_y = (max(seg_y) - min(seg_y)) / 2.0 + 20.0
+                    bx0, bx1 = end_x - 2.0 * hw_x, end_x + 2.0 * hw_x
+                    by0, by1 = end_y - 2.0 * hw_y, end_y + 2.0 * hw_y
                 else:
                     bx0, bx1, by0, by1 = x_min_km, x_max_km, y_min_km, y_max_km
                 bx0, bx1 = max(bx0, x_min_km), min(bx1, x_max_km)
@@ -1168,6 +1172,38 @@ document.addEventListener("DOMContentLoaded", function () {
     const N = 26;            // particles per altitude level
     const TRAIL = 0.35;      // streak length in seconds of travel
     const SPEED_SCALE = 0.9; // visual km/s per m/s of wind speed
+
+    // Draw streaks on a 2D canvas overlay instead of restyling the gl3d
+    // scene every frame -- a Plotly.restyle re-renders the whole scene
+    // (incl. the map texture) and starves interaction.
+    const overlay = document.createElement('canvas');
+    overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:5;';
+    if (getComputedStyle(plot).position === 'static') plot.style.position = 'relative';
+    plot.appendChild(overlay);
+    const ctx = overlay.getContext('2d');
+    function resize() {
+        const dpr = window.devicePixelRatio || 1;
+        overlay.width = plot.clientWidth * dpr;
+        overlay.height = plot.clientHeight * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function hsl2rgb(h, s, l) {
+        h = ((h % 360) + 360) % 360 / 360;
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        const f = t => {
+            t = ((t % 1) + 1) % 1;
+            if (t < 1/6) return p + (q - p) * 6 * t;
+            if (t < 1/2) return q;
+            if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+            return p;
+        };
+        return [Math.round(f(h + 1/3) * 255), Math.round(f(h) * 255), Math.round(f(h - 1/3) * 255)];
+    }
+
     let maxSpeed = 0;
     wind.levels.forEach(L => { if (L[3] > maxSpeed) maxSpeed = L[3]; });
     const levels = wind.levels.map(L => {
@@ -1176,43 +1212,73 @@ document.addEventListener("DOMContentLoaded", function () {
             parts.push({x: x0 + Math.random() * (x1 - x0), y: y0 + Math.random() * (y1 - y0)});
         const norm = maxSpeed > 0 ? L[3] / maxSpeed : 0;
         return {z: L[0], vx: L[1] * L[3] * SPEED_SCALE, vy: L[2] * L[3] * SPEED_SCALE,
-                color: "hsla(" + Math.round(210 - 160 * norm) + ",65%," + Math.round(78 - 18 * norm) + "%,0.6)",
-                parts: parts, idx: -1};
+                rgb: hsl2rgb(210 - 160 * norm, 0.70, 0.50 - 0.28 * norm),
+                parts: parts};
     });
-    Promise.resolve(Plotly.addTraces(plot, levels.map(L => ({
-        type: 'scatter3d', mode: 'lines', x: [], y: [], z: [],
-        line: {width: 2, color: L.color},
-        opacity: 0.55, showlegend: false, hoverinfo: 'none'
-    })))).then(function () {
-        const start = (plot.data ? plot.data.length : 0) - levels.length;
-        levels.forEach((L, i) => { L.idx = start + i; });
-        let last = performance.now();
-        function tick(now) {
-            const dt = Math.min(0.1, (now - last) / 1000);
-            last = now;
-            const X = [], Y = [], Z = [];
+    const FADE_X = (x1 - x0) * 0.15, FADE_Y = (y1 - y0) * 0.15; // feather zone near box edges
+    const BASE_A = 0.5;
+
+    // Column-major 4x4 helpers (gl-plot3d layout)
+    function matMul(a, b) {
+        const c = new Array(16);
+        for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+            c[j * 4 + i] = a[i] * b[j * 4] + a[4 + i] * b[j * 4 + 1] + a[8 + i] * b[j * 4 + 2] + a[12 + i] * b[j * 4 + 3];
+        }
+        return c;
+    }
+    function perspective(fovy, aspect, near, far) {
+        const f = 1 / Math.tan(fovy / 2), ri = 1 / (near - far);
+        return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (near + far) * ri, -1, 0, 0, near * far * ri * 2, 0];
+    }
+    function project(M, x, y, z, w, h) {
+        const cw = M[3] * x + M[7] * y + M[11] * z + M[15];
+        if (cw <= 0.001) return null;
+        const cx = (M[0] * x + M[4] * y + M[8] * z + M[12]) / cw;
+        const cy = (M[1] * x + M[5] * y + M[9] * z + M[13]) / cw;
+        return [(cx + 1) * 0.5 * w, (1 - cy) * 0.5 * h];
+    }
+
+    let last = performance.now();
+    function tick(now) {
+        const dt = Math.min(0.1, (now - last) / 1000);
+        last = now;
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
+        const g = scn && scn.glplot, cam = g && g.camera;
+        const W = plot.clientWidth, H = plot.clientHeight;
+        if (cam && cam.matrix && W > 0 && H > 0) {
+            const ds = scn.dataScale || [1, 1, 1];
+            const cp = g.cameraParams || {};
+            // True pipeline: projection * view * model * diag(dataScale) * data
+            const view = cp.view || cam.matrix;
+            const proj = cp.projection || perspective(g.fovy || Math.PI / 4, W / H, g.zNear || 0.01, g.zFar || 1000);
+            const model = cp.model || [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+            const M = matMul(proj, matMul(view, matMul(model, [ds[0],0,0,0, 0,ds[1],0,0, 0,0,ds[2],0, 0,0,0,1])));
+            ctx.lineWidth = 2;
             for (const L of levels) {
-                const xs = [], ys = [], zs = [];
-                const len = Math.hypot(L.vx, L.vy);
-                const dx = len > 0 ? L.vx / len * len * TRAIL : 0;
-                const dy = len > 0 ? L.vy / len * len * TRAIL : 0;
                 for (const p of L.parts) {
                     p.x += L.vx * dt; p.y += L.vy * dt;
                     if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) {
                         p.x = x0 + Math.random() * (x1 - x0);
                         p.y = y0 + Math.random() * (y1 - y0);
                     }
-                    xs.push(p.x - dx, p.x, null);
-                    ys.push(p.y - dy, p.y, null);
-                    zs.push(L.z, L.z, null);
+                    // Fade streaks out near the box edges so no hard boundary shows
+                    const ex = Math.min(p.x - x0, x1 - p.x) / FADE_X;
+                    const ey = Math.min(p.y - y0, y1 - p.y) / FADE_Y;
+                    const alpha = BASE_A * Math.max(0, Math.min(1, Math.min(ex, ey)));
+                    if (alpha <= 0.02) continue;
+                    const a = project(M, p.x, p.y, L.z, W, H);
+                    const b = project(M, p.x - L.vx * TRAIL, p.y - L.vy * TRAIL, L.z, W, H);
+                    if (a && b) {
+                        ctx.strokeStyle = "rgba(" + L.rgb[0] + "," + L.rgb[1] + "," + L.rgb[2] + "," + alpha.toFixed(3) + ")";
+                        ctx.beginPath(); ctx.moveTo(b[0], b[1]); ctx.lineTo(a[0], a[1]); ctx.stroke();
+                    }
                 }
-                X.push(xs); Y.push(ys); Z.push(zs);
             }
-            Plotly.restyle(plot, {x: X, y: Y, z: Z}, levels.map(L => L.idx));
-            requestAnimationFrame(tick);
         }
         requestAnimationFrame(tick);
-    });
+    }
+    requestAnimationFrame(tick);
 });
 </script>""".replace('WIND_DATA_JSON', wind_json)
                 if "</body>" in html:

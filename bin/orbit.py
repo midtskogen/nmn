@@ -588,6 +588,18 @@ document.addEventListener("DOMContentLoaded", function () {{
 </script>"""
     html_path = Path(filename)
     html = html_path.read_text(encoding="utf-8")
+    # gl-plot3d rasterizes axis text via Canvas2D getImageData without the
+    # willReadFrequently flag (console warning + GPU readbacks). Opt those
+    # canvases in before the plotly bundle loads.
+    ctx_patch = ("<script>(function(){var o=HTMLCanvasElement.prototype.getContext;"
+                 "HTMLCanvasElement.prototype.getContext=function(t,a){"
+                 "if(t==='2d')a=Object.assign({willReadFrequently:true},a||{});"
+                 "return o.call(this,t,a);};})();</script>")
+    plotly_tag = '<script charset="utf-8" src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>'
+    if plotly_tag in html:
+        html = html.replace(plotly_tag, ctx_patch + plotly_tag, 1)
+    elif "</head>" in html:
+        html = html.replace("</head>", ctx_patch + "</head>", 1)
     if "</body>" in html:
         html = html.replace("</body>", controls_and_script + "\n</body>", 1)
     else:

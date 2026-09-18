@@ -218,6 +218,8 @@ def cleanup_old_files(directory, age_in_days, task_id, files_to_skip=[]):
                 try:
                     os.remove(file_path)
                     logging.info(f"Task {task_id} - Deleted old file: {file_path}")
+                except FileNotFoundError:
+                    pass  # another concurrent task already removed it
                 except OSError as e:
                     logging.error(f"Task {task_id} - Error deleting file {file_path}: {e}")
     except FileNotFoundError:

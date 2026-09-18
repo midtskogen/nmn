@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NMN Public API Documentation</title>
+  <style>
+    :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --code:#f78166; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.55; margin: 0; padding: 2rem; }
+    .container { max-width: 980px; margin: 0 auto; }
+    h1, h2, h3 { color: var(--accent); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .hero { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; margin-bottom: 1.5rem; }
+    .hero h1 { margin-top: 0; }
+    .badges { display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 1rem; }
+    .badge { background: #1f6feb; color: #fff; padding: .35rem .7rem; border-radius: 999px; font-size: .85rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); text-transform: uppercase; font-size: .75rem; letter-spacing: .05em; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #21262d; padding: .15rem .35rem; border-radius: 4px; color: var(--code); }
+    pre { background: #21262d; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+    pre code { background: transparent; padding: 0; color: var(--text); }
+    ul li { margin: .4rem 0; }
+    .note { border-left: 3px solid var(--accent); padding-left: 1rem; color: var(--muted); font-size: .9rem; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="hero">
+    <h1>NMN Public API</h1>
+    <p>REST API for the Norsk Meteornettverk data services. It mirrors the services provided by the <code>data/</code> web interface.</p>
+    <div class="badges">
+      <span class="badge">Base URL: /api/v1</span>
+      <span class="badge">OpenAPI 3</span>
+      <a class="badge" href="index.html">Swagger UI</a>
+      <a class="badge" href="openapi.yaml">OpenAPI YAML</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Authentication</h2>
+    <ul>
+      <li><strong>Read-only</strong> endpoints are public and limited by IP.</li>
+      <li><strong>Downloads, streams and station-traffic</strong> endpoints require an API key in the <code>X-API-Key</code> header.</li>
+      <li>Contact Norsk Meteornettverk to request access to protected endpoints.</li>
+    </ul>
+    <pre><code>curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads</code></pre>
+  </div>
+
+  <div class="card">
+    <h2>Rate and traffic limits</h2>
+    <ul>
+      <li>Public read-only: 100 requests/min and 1000/hour per IP.</li>
+      <li>Authenticated stateful: 20 requests/min and 200/hour per key (configurable per key).</li>
+      <li>Downloads share the same daily quota as the web UI: 2 GB total / 1 GB per site.</li>
+      <li>Streams share the same per-IP daily stream-time quota as the web UI.</li>
+      <li>Grid / annotation / archive overlay fetches count against the download quota.</li>
+    </ul>
+    <p class="note">When a limit is exceeded the API returns HTTP 429 with a <code>Retry-After</code> header.</p>
+  </div>
+
+  <div class="card">
+    <h2>Asynchronous operations</h2>
+    <p>Predictions and image enhancement return <code>202 Accepted</code> with a task ID. Use the returned <code>poll_url</code> until the status becomes <code>complete</code> or <code>error</code>.</p>
+    <pre><code># Start a prediction
+curl -X POST 'https://norskmeteornettverk.no/api/v1/predict/passes?station=ams173&days=3'
+
+# Poll the returned task
+curl https://norskmeteornettverk.no/api/v1/predict/passes/pass_task_...</code></pre>
+  </div>
+
+  <div class="card">
+    <h2>Endpoint overview</h2>
+    <table>
+      <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>GET</td><td><code>/stations</code></td><td>none</td><td>List stations</td></tr>
+        <tr><td>GET</td><td><code>/cameras/fovs</code></td><td>none</td><td>Camera FOVs</td></tr>
+        <tr><td>GET</td><td><code>/kp</code></td><td>none</td><td>Aurora KP index</td></tr>
+        <tr><td>GET</td><td><code>/lightning?date=YYYY-MM-DD</code></td><td>none</td><td>Lightning strikes</td></tr>
+        <tr><td>GET</td><td><code>/meteors</code></td><td>none</td><td>Meteor events</td></tr>
+        <tr><td>GET</td><td><code>/stations/{id}/stats</code></td><td>none</td><td>Station usage stats</td></tr>
+        <tr><td>POST</td><td><code>/predict/passes</code></td><td>none</td><td>Queue satellite pass prediction</td></tr>
+        <tr><td>GET</td><td><code>/predict/passes/{task_id}</code></td><td>none</td><td>Prediction status</td></tr>
+        <tr><td>POST</td><td><code>/predict/aircraft</code></td><td>none</td><td>Queue aircraft crossing prediction</td></tr>
+        <tr><td>GET</td><td><code>/predict/aircraft/{task_id}</code></td><td>none</td><td>Aircraft status</td></tr>
+        <tr><td>POST</td><td><code>/downloads</code></td><td>key</td><td>Start file download</td></tr>
+        <tr><td>GET</td><td><code>/downloads/{task_id}</code></td><td>key</td><td>Download status</td></tr>
+        <tr><td>DELETE</td><td><code>/downloads/{task_id}</code></td><td>key</td><td>Cancel/cleanup</td></tr>
+        <tr><td>POST</td><td><code>/streams</code></td><td>key</td><td>Start live stream</td></tr>
+        <tr><td>GET</td><td><code>/streams/{task_id}</code></td><td>key</td><td>Stream status</td></tr>
+        <tr><td>DELETE</td><td><code>/streams/{task_id}</code></td><td>key</td><td>Stop stream</td></tr>
+        <tr><td>POST</td><td><code>/streams/{task_id}/transcode</code></td><td>key</td><td>Request H.264 transcode</td></tr>
+        <tr><td>GET</td><td><code>/grids/{station_id}/{camera_num}</code></td><td>key</td><td>Fetch grid overlay</td></tr>
+        <tr><td>GET</td><td><code>/annotations/{station_id}/{camera_num}</code></td><td>key</td><td>Fetch annotation overlay</td></tr>
+        <tr><td>GET</td><td><code>/archive/grid</code></td><td>key</td><td>Archive grid overlay</td></tr>
+        <tr><td>GET</td><td><code>/archive/annotation</code></td><td>key</td><td>Archive annotation overlay</td></tr>
+        <tr><td>GET</td><td><code>/archive/mask</code></td><td>key</td><td>Archive mask overlay</td></tr>
+        <tr><td>POST</td><td><code>/enhance</code></td><td>key</td><td>Queue image enhancement</td></tr>
+        <tr><td>GET</td><td><code>/tasks/{task_id}</code></td><td>key/status</td><td>Generic task status</td></tr>
+        <tr><td>GET</td><td><code>/docs</code></td><td>none</td><td>Swagger UI</td></tr>
+        <tr><td>GET</td><td><code>/docs/openapi.yaml</code></td><td>none</td><td>OpenAPI spec</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Example requests</h2>
+
+    <h3>Read-only data</h3>
+    <pre><code># List all stations
+curl https://norskmeteornettverk.no/api/v1/stations
+
+# Camera fields-of-view
+curl https://norskmeteornettverk.no/api/v1/cameras/fovs
+
+# Aurora KP index
+curl https://norskmeteornettverk.no/api/v1/kp
+
+# Lightning for a specific date
+curl 'https://norskmeteornettverk.no/api/v1/lightning?date=2026-08-31'
+
+# Meteor events
+curl https://norskmeteornettverk.no/api/v1/meteors
+
+# Station statistics for a date range
+curl 'https://norskmeteornettverk.no/api/v1/stations/ams173/stats?start_date=2026-08-01&end_date=2026-08-31'</code></pre>
+
+    <h3>Predictions (asynchronous)</h3>
+    <pre><code># Satellite passes, one station, last 3 days
+curl -X POST 'https://norskmeteornettverk.no/api/v1/predict/passes?station=ams173&days=3'
+
+# Satellite passes for all stations in a time window
+curl -X POST 'https://norskmeteornettverk.no/api/v1/predict/passes?start=2026-08-31T00:00:00Z&end=2026-09-03T00:00:00Z'
+
+# Aircraft crossings
+curl -X POST 'https://norskmeteornettverk.no/api/v1/predict/aircraft?station=ams173&days=2'
+
+# Response:
+# {"task_id":"pass_task_1725...","status":"queued","poll_url":"/api/v1/predict/passes/pass_task_1725..."}
+
+# Poll until status is complete or error
+curl https://norskmeteornettverk.no/api/v1/predict/passes/pass_task_1725...</code></pre>
+
+    <h3>Downloads (requires API key)</h3>
+    <pre><code>cat &gt; payload.json &lt;&lt;'JSON'
+{
+  "files": [
+    {"station_id": "ams173", "cam": 1, "time": "2026-08-31_20:00", "file_type": "image"},
+    {"station_id": "ams173", "cam": 1, "time": "2026-08-31_20:05", "file_type": "image"}
+  ]
+}
+JSON
+
+curl -X POST https://norskmeteornettverk.no/api/v1/downloads \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  -d @payload.json
+
+# Poll the returned master task
+curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads/master_task_1725...
+
+# Cancel / cleanup
+curl -X DELETE -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads/master_task_1725...</code></pre>
+
+    <h3>Live streams (requires API key)</h3>
+    <pre><code># Start a low-resolution stream on camera 1
+curl -X POST 'https://norskmeteornettverk.no/api/v1/streams' \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  -d 'station_id=ams173&camera_num=1&resolution=lowres'
+
+# Poll status
+curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/streams/stream_1725...
+
+# Request H.264 transcoding for browsers without HEVC support
+curl -X POST -H 'X-API-Key: YOUR_API_KEY' \
+  https://norskmeteornettverk.no/api/v1/streams/stream_1725.../transcode
+
+# Stop the stream
+curl -X DELETE -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/streams/stream_1725...</code></pre>
+
+    <h3>Overlays (requires API key, counts against download quota)</h3>
+    <pre><code># Live stream overlays
+curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/grids/ams173/1
+curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/annotations/ams173/1
+
+# Archive overlays for a specific timestamp
+curl -H 'X-API-Key: YOUR_API_KEY' \
+  'https://norskmeteornettverk.no/api/v1/archive/grid?station_id=ams173&camera_num=1&timestamp=2026-08-31T20:00:00Z'
+
+curl -H 'X-API-Key: YOUR_API_KEY' \
+  'https://norskmeteornettverk.no/api/v1/archive/annotation?station_id=ams173&camera_num=1&timestamp=2026-08-31T20:00:00Z'
+
+curl -H 'X-API-Key: YOUR_API_KEY' \
+  'https://norskmeteornettverk.no/api/v1/archive/mask?station_id=ams173&camera_num=1&timestamp=2026-08-31T20:00:00Z'</code></pre>
+
+    <h3>Image enhancement (asynchronous)</h3>
+    <pre><code>curl -X POST https://norskmeteornettverk.no/api/v1/enhance \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  -d '{"image": "download/ams173_20260831_200000.jpg", "filter": 30}'
+
+# Poll the generic task endpoint
+curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/tasks/api_task_1725...</code></pre>
+
+    <h3>Error responses</h3>
+    <p>Missing API key on a protected endpoint:</p>
+    <pre><code>{"error":"missing_api_key","message":"This endpoint requires an API key in the X-API-Key header."}</code></pre>
+    <p>Rate limit exceeded:</p>
+    <pre><code>{"error":"rate_limit_exceeded","message":"Too many requests. Please slow down.","retry_after":42}</code></pre>
+    <p class="note">The HTTP status is <code>429</code> and a <code>Retry-After</code> header is included.</p>
+  </div>
+
+  <p class="note">For the full interactive spec, open <a href="index.html">Swagger UI</a>.</p>
+</div>
+</body>
+</html>

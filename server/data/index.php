@@ -45,7 +45,13 @@ $STATE_ACTIONS = ['download', 'start_stream', 'cancel', 'cleanup', 'stop_stream'
 function get_user_ip() {
     // Only trust proxy headers when the immediate peer is a trusted proxy;
     // otherwise a client can spoof X-Forwarded-For to bypass per-IP quotas.
+    // Additional proxy IPs can be configured via NMN_TRUSTED_PROXIES
+    // (comma-separated, e.g. "172.22.0.1" for a docker reverse-proxy).
     $trusted_proxies = ['127.0.0.1', '::1'];
+    foreach (explode(',', (string) getenv('NMN_TRUSTED_PROXIES')) as $p) {
+        $p = trim($p);
+        if ($p !== '' && filter_var($p, FILTER_VALIDATE_IP)) $trusted_proxies[] = $p;
+    }
     $remote = $_SERVER['REMOTE_ADDR'] ?? '';
     if (in_array($remote, $trusted_proxies, true)) {
         if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
@@ -444,6 +450,9 @@ switch ($action) {
         $camera_num = $_GET['camera_num'] ?? null;
         $resolution = $_GET['resolution'] ?? 'lowres';
         $hevc_supported = $_GET['hevc_supported'] ?? 'false';
+
+        if (!in_array($resolution, ['lowres', 'hires'], true)) $resolution = 'lowres';
+        $hevc_supported = ($hevc_supported === 'true') ? 'true' : 'false';
 
         if (!$station_id || !$camera_num || !preg_match('/^ams\d+$/', $station_id) || !ctype_digit($camera_num)) {
             http_response_code(400);

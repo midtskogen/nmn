@@ -140,7 +140,8 @@ def fetch_grid_file(stream_task_id, station_id, camera_num, user_ip=None):
         # Securely copies the grid.png file from the remote station.
         tmp_filename = f"grid_{station_id}_cam{camera_num}_{uniqid()}.png"
         tmp_filepath = os.path.join(DOWNLOAD_DIR, tmp_filename)
-        command = ["scp", "-B", "-o", "ConnectTimeout=10", f"{station_id}:/meteor/cam{camera_num}/grid.png", tmp_filepath]
+        command = ["scp", "-B", "-O", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no",
+                   "--", f"{station_id}:/meteor/cam{camera_num}/grid.png", tmp_filepath]
         subprocess.run(command, check=True, timeout=40, capture_output=True)
         logging.info(f"{log_prefix} Fetched grid to {tmp_filepath}")
 
@@ -224,8 +225,8 @@ def fetch_annotation_file(stream_task_id, station_id, camera_num, user_ip=None):
         pto_bytes = 0
         if not pto_fresh:
             tmp_pto = os.path.join(DOWNLOAD_DIR, f"lens_{station_id}_cam{camera_num}_{uniqid()}.pto")
-            command = ["scp", "-B", "-o", "ConnectTimeout=10",
-                       f"{station_id}:/meteor/cam{camera_num}/lens.pto", tmp_pto]
+            command = ["scp", "-B", "-O", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no",
+                       "--", f"{station_id}:/meteor/cam{camera_num}/lens.pto", tmp_pto]
             subprocess.run(command, check=True, timeout=40, capture_output=True)
             logging.info(f"{log_prefix} Fetched lens.pto to {tmp_pto}")
             try:
@@ -328,8 +329,8 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data, us
         remote_dated = f"/meteor/cam{cam_num}/grid-{date_str}.png"
         tmp_path = os.path.join(DOWNLOAD_DIR, f"grid_{station_id}_cam{cam_num}_{uniqid()}.png")
 
-        scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
-                   f"{hostname}:{remote_dated}", tmp_path]
+        scp_cmd = ["scp", "-B", "-O", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no",
+                   "--", f"{hostname}:{shlex.quote(remote_dated)}", tmp_path]
         logging.info(f"{log_prefix} Trying dated grid: {remote_dated}")
         result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
 
@@ -337,8 +338,8 @@ def get_archive_grid_overlay(station_code, cam_num, timestamp, stations_data, us
             # Fall back to current grid.png
             logging.info(f"{log_prefix} Dated grid not found, falling back to grid.png")
             remote_current = f"/meteor/cam{cam_num}/grid.png"
-            scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
-                       f"{hostname}:{remote_current}", tmp_path]
+            scp_cmd = ["scp", "-B", "-O", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no",
+                       "--", f"{hostname}:{shlex.quote(remote_current)}", tmp_path]
             result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
 
             if result.returncode != 0 or not os.path.exists(tmp_path):
@@ -464,7 +465,8 @@ def get_stitch_cam_boundaries(station_id_arg: str, projection: str, stations_dat
                 remote_cmd = f"tar -c -h --ignore-failed-read -f - {remote_files} 2>/dev/null"
                 tar_result[0] = subprocess.run(
                     ["ssh", "-o", "ConnectTimeout=30", "-o", "BatchMode=yes",
-                     station_id, remote_cmd],
+                     "-o", "PermitLocalCommand=no",
+                     "--", station_id, remote_cmd],
                     capture_output=True, timeout=60
                 )
             except Exception as e:
@@ -474,7 +476,8 @@ def get_stitch_cam_boundaries(station_id_arg: str, projection: str, stations_dat
             try:
                 id_result[0] = subprocess.run(
                     ["ssh", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
-                     station_id,
+                     "-o", "PermitLocalCommand=no",
+                     "--", station_id,
                      f"find /meteor/{stitch_cam}/ -name '{pat}_*.jpg' | head -1 | xargs -r identify -format '%w %h\\n' 2>/dev/null"],
                     capture_output=True, timeout=30, text=True
                 )
@@ -696,8 +699,8 @@ def get_archive_annotation_overlay(station_code, cam_num, timestamp, stations_da
         if not os.path.exists(pto_path) or os.path.getsize(pto_path) == 0:
             hostname = station_id
             remote_pto = f"/meteor/cam{cam_num}/lens.pto"
-            scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
-                       f"{hostname}:{remote_pto}", pto_path]
+            scp_cmd = ["scp", "-B", "-O", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no",
+                       "--", f"{hostname}:{shlex.quote(remote_pto)}", pto_path]
             logging.info(f"{log_prefix} Fetching lens.pto")
             result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
@@ -790,8 +793,8 @@ def get_archive_mask_overlay(station_code, cam_num, stations_data, user_ip=None)
             logging.info(f"{log_prefix} Cached mask overlay is stale ({age_seconds:.0f}s), refetching")
 
         tmp_raw = os.path.join(DOWNLOAD_DIR, f"mask_raw_{station_id}_cam{cam_num}_{uniqid()}.png")
-        scp_cmd = ["scp", "-B", "-o", "ConnectTimeout=10",
-                   f"{station_id}:/meteor/cam{cam_num}/mask.png", tmp_raw]
+        scp_cmd = ["scp", "-B", "-O", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no",
+                   "--", f"{station_id}:/meteor/cam{cam_num}/mask.png", tmp_raw]
         logging.info(f"{log_prefix} Fetching mask.png")
         result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0 or not os.path.exists(tmp_raw):
@@ -966,6 +969,42 @@ def stop_stream_relay(task_id):
             logging.error(f"Refusing to remove non-stream directory: {stream_dir}")
 
 
+# A stream's parent worker bounds its lifetime via timeout_seconds (at most
+# ~15 minutes). Any stream status file older than this belongs to a worker
+# that died before cleanup, leaving orphaned ssh/ffmpeg processes running.
+STALE_STREAM_AGE_SECONDS = 30 * 60
+
+
+def sweep_stale_streams(max_age_seconds=STALE_STREAM_AGE_SECONDS):
+    """Stop stream tasks whose status file is older than *max_age_seconds*.
+
+    Reuses stop_stream_relay(), which kills the recorded ssh tunnel and
+    ffmpeg PIDs only after verifying the processes still match (guards
+    against PID reuse), and removes the stream directory and lock files.
+    Called periodically by the download coordinator's cleanup pass.
+    """
+    try:
+        names = os.listdir(LOCK_DIR)
+    except OSError:
+        return
+    now = time.time()
+    for name in names:
+        if not (name.startswith('stream_') and name.endswith('.json')):
+            continue
+        status_file = os.path.join(LOCK_DIR, name)
+        try:
+            if (now - os.path.getmtime(status_file)) <= max_age_seconds:
+                continue
+        except OSError:
+            continue
+        task_id = name[:-len('.json')]
+        try:
+            logging.info(f"Sweeping stale stream task {task_id} (status file idle > {max_age_seconds}s).")
+            stop_stream_relay(task_id)
+        except Exception as e:
+            logging.error(f"Stale stream sweep failed for {task_id}: {e}")
+
+
 def _cleanup_stale_stream_locks(log_prefix):
     """
     Finds and cleans up lock files from previous streaming sessions that may have crashed.
@@ -1018,11 +1057,13 @@ def _start_ssh_tunnel(station_id, camera_num):
     # The command forwards the local port to the camera's fixed IP and port.
     ssh_command = [
         "ssh", "-o", "RequestTTY=no",
+        "-o", "PermitLocalCommand=no",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", f"UserKnownHostsFile={host_key_file}",
         "-o", "ExitOnForwardFailure=yes", "-N", "-L",
         f"{local_port}:192.168.76.7{camera_num}:554",
-        station_id
+        "--", station_id
     ]
 
     logging.info(f"{log_prefix} Attempting to establish tunnel on port {local_port} with command: {' '.join(ssh_command)}")
@@ -1161,7 +1202,8 @@ def _onvif_request_keyframe_via_station(station_id, camera_num, log_prefix, stat
             "-H", "Content-Type: application/soap+xml; charset=utf-8",
             "--data-binary", "@-",
         ]
-        cmd = ["ssh", station_id, " ".join(shlex.quote(x) for x in remote_cmd)]
+        cmd = ["ssh", "-o", "PermitLocalCommand=no", "--", station_id,
+               " ".join(shlex.quote(x) for x in remote_cmd)]
         return subprocess.run(cmd, input=soap_xml.encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_s + 1)
 
     def _set_sync(token):

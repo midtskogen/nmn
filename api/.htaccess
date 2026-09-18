@@ -1,0 +1,23 @@
+# Allow only the public entry points and static docs.
+Options +FollowSymLinks
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Route everything that is not a real file to index.php.
+    # index.php reads PATH_INFO (/v1/...) and dispatches the request.
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^(.*)$ index.php/$1 [L,QSA]
+
+    # Block direct access to internal PHP helpers.
+    RewriteRule ^(api_common|rate_limit|query_logger|task_queue|queue_worker)\.php$ - [F,L]
+</IfModule>
+
+<FilesMatch "^(rate_limit|query_log|abuse_log|task_queue|queue_worker)\.(json|jsonl|pid|log)$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_negotiation.c>
+    Options -MultiViews
+</IfModule>

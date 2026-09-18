@@ -341,9 +341,9 @@ function generateMonthContent($dates, $t) {
             if (file_exists($tablesFile)) {
                 $tablesContent = file_get_contents($tablesFile);
                 $endAltitude = null; $entrySpeed = null; $startAltitude = null;
-                if (preg_match('/(Start height|Starthøgde|Anfangsh\u00f6he|Po\u010d\u00e1te\u010dn\u00ed v\u00fd\u0161ka|Alkukorkeus|S\u0101kuma augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $startAltitude = (float)str_replace(',', '.', $m[2]);
-                if (preg_match('/(End height|Slutth\u00f8gde|Endh\u00f6he|Kone\u010dn\u00e1 v\u00fd\u0161ka|Loppukorkeus|Beigu augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $endAltitude = (float)str_replace(',', '.', $m[2]);
-                if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupn\u00ed rychlost|Tulonopeus|Ieejas \u0101trums):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tablesContent, $m)) $entrySpeed = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(Start height|Starthøgde|Anfangshöhe|Počáteční výška|Alkukorkeus|Sākuma augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $startAltitude = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(End height|Slutthøgde|Endhöhe|Konečná výška|Loppukorkeus|Beigu augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tablesContent, $m)) $endAltitude = (float)str_replace(',', '.', $m[2]);
+                if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupní rychlost|Tulonopeus|Ieejas ātrums):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tablesContent, $m)) $entrySpeed = (float)str_replace(',', '.', $m[2]);
                 if ($startAltitude !== null && $endAltitude !== null && $entrySpeed !== null &&
                     $startAltitude > 40 && $startAltitude < 120 &&
                     $endAltitude > 10 && $endAltitude < 40 &&
@@ -428,9 +428,9 @@ function countEventsForFilters($dates, $t) {
         if (file_exists($tablesFile)) {
             $tc = file_get_contents($tablesFile);
             $sa = $ea = $sp = null;
-            if (preg_match('/(Start height|Starthøgde|Anfangshöhe|Počáteční výška|Alkukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tc, $m)) $sa = (float)str_replace(',','.', $m[2]);
-            if (preg_match('/(End height|Slutthøgde|Endhöhe|Konečná výška|Loppukorkeus):<\/td><td>\s*([0-9,]+)\s*km/i', $tc, $m)) $ea = (float)str_replace(',','.', $m[2]);
-            if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupní rychlost|Tulonopeus):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tc, $m)) $sp = (float)str_replace(',','.', $m[2]);
+            if (preg_match('/(Start height|Starthøgde|Anfangshöhe|Počáteční výška|Alkukorkeus|Sākuma augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tc, $m)) $sa = (float)str_replace(',','.', $m[2]);
+            if (preg_match('/(End height|Slutthøgde|Endhöhe|Konečná výška|Loppukorkeus|Beigu augstums):<\/td><td>\s*([0-9,]+)\s*km/i', $tc, $m)) $ea = (float)str_replace(',','.', $m[2]);
+            if (preg_match('/(Entry speed|Inngangshastighet|Eintrittsgeschwindigkeit|Vstupní rychlost|Tulonopeus|Ieejas ātrums):<\/td><td>\s*([0-9,]+)\s*km\/s/i', $tc, $m)) $sp = (float)str_replace(',','.', $m[2]);
             if ($sa !== null && $ea !== null && $sp !== null && $sa > 40 && $sa < 120 && $ea > 10 && $ea < 40 && $sp >= 10 && $sp <= 30) {
                 $eventType = 'meteorite-candidate';
                 $counts['candidates']++;

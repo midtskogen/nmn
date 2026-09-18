@@ -9,4 +9,8 @@ Options -Indexes
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule ^etc/ - [F]
+    # Never serve VCS metadata (a git checkout inside a docroot would
+    # otherwise publish .git/objects and any local config).
+    RewriteRule (^|/)\.git(/|$) - [F]
+    RewriteRule (^|/)\.devin(/|$) - [F]
 </IfModule>

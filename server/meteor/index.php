@@ -204,6 +204,7 @@ function get_language($default_lang) {
         'FI' => 'fi_FI', // *** ADDED 'fi_FI' ***
     ];
     $user_ip = get_user_ip();
+    if (!filter_var($user_ip, FILTER_VALIDATE_IP)) $user_ip = '';
     $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
     if ($geo_data_json) {
         $geo_data = json_decode($geo_data_json);

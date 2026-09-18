@@ -184,6 +184,11 @@ if (!in_array($action, $_skip_log, true)) {
     @file_put_contents($_log_file, $_log_entry, FILE_APPEND | LOCK_EX);
 }
 
+// Unguessable task ids: uniqid() is microtime-derived and enumerable.
+function new_task_id(string $prefix): string {
+    return $prefix . '_' . bin2hex(random_bytes(8));
+}
+
 // --- CSRF gate for state-changing requests ---
 if (in_array($action, $STATE_ACTIONS, true)) {
     $supplied_token = $_GET['csrf_token'] ?? $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
@@ -371,7 +376,7 @@ switch ($action) {
 
     case 'find_passes':
         header('Content-Type: application/json');
-        $task_id = uniqid('pass_task_');
+        $task_id = new_task_id('pass_task');
         // Optional filters: restrict to specific station(s) and/or a shorter
         // time window than the full search range. Both are validated strictly
         // since they're passed through to a shell command.
@@ -398,7 +403,7 @@ switch ($action) {
 
     case 'find_aircraft_crossings':
         header('Content-Type: application/json');
-        $task_id = uniqid('aircraft_task_');
+        $task_id = new_task_id('aircraft_task');
         // Optional filters: restrict to specific station(s) and/or a shorter
         // time window than the full search range. Both are validated strictly
         // since they're passed through to a shell command.
@@ -466,7 +471,7 @@ switch ($action) {
             exit;
         }
 
-        $task_id = uniqid('stream_');
+        $task_id = new_task_id('stream');
         $user_ip = get_user_ip();
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' _internal_start_stream '
             . escapeshellarg($task_id) . ' '
@@ -693,7 +698,7 @@ switch ($action) {
             header('HTTP/1.1 503 Service Unavailable');
             die(json_encode(['error' => 'Server is busy, too many concurrent downloads.']));
         }
-        $task_id = uniqid('master_task_');
+        $task_id = new_task_id('master_task');
         $payload_file = tempnam($LOCK_DIR, 'payload_');
         file_put_contents($payload_file, $raw_post, LOCK_EX);
         // Create the lock marker before releasing the semaphore.

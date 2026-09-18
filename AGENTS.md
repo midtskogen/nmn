@@ -239,3 +239,32 @@
   from every leaf directory, hardlinks/copies them into separate
   positive/negative output folders, and then uses those folders for the
   train/verify split.
+
+## Security hardening (learned 2026-09-18)
+
+- `/var/www/html/etc/` was inside the document root and publicly served
+  api_keys.json, credentials.json (OpenSky secret) and config.json (Frost
+  secret) for ~2 weeks. Blocked via webroot .htaccess (`/etc` deny);
+  the credentials still must be rotated and the dir moved outside the
+  webroot (`NMN_SECRETS_DIR` env var overrides the default lookup).
+- `/var/www/html/ssh/report.php` was an UNAUTHENTICATED endpoint whose
+  `?dir=` parameter let anyone rsync arbitrary remote paths from stations
+  into the public meteor tree. Hardened in place on bolide (station
+  whitelist, event-shaped dir check, port range, per-IP rate limit,
+  dedupe, optional shared token via `/etc/default/nmn_report_token` on
+  stations). It is NOT in the repo — keep it in sync if it changes.
+- `server/report.php` (public report form): uploads now map detected
+  MIME to a fixed server-side extension (never the client's), base64
+  images are magic-byte validated, submissions are per-IP rate limited,
+  and the script writes a protective `.htaccess` into `reports/` that
+  disables script handlers and MIME sniffing.
+- `server/fetch_foreign.sh` piped remote HTTP data into awk `system()`
+  with `curl -k` — remote/MITM command injection. Fixed: TLS verified,
+  fields regex-validated, `print > file` instead of `echo` in system().
+- `server/meteor/id_check.php` echoed raw `$_POST` (reflected XSS).
+- API keys are header/POST-body only (`?api_key=` removed); failed auth
+  is logged + throttled; task ids are `random_bytes` (not `uniqid`);
+  API tasks carry an owner sidecar for stop/cancel authorization.
+- `.htaccess` files are now tracked (nmn/, server/data/, api/, lang/) —
+  do not remove; they protect secrets, locks, cache and log files when
+  the repo tree is deployed inside a document root.

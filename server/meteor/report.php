@@ -36,7 +36,8 @@ function s4_get_language($default_lang) {
              'CA'=>'en_GB','AU'=>'en_GB','DE'=>'de_DE','AT'=>'de_DE','CH'=>'de_DE',
              'CZ'=>'cs_CZ','SK'=>'cs_CZ','FI'=>'fi_FI','LV'=>'lv_LV'];
     $ip = s4_get_user_ip();
-    $gj = @file_get_contents("http://ip-api.com/json/{$ip}?fields=countryCode,status");
+    if (!filter_var($ip, FILTER_VALIDATE_IP)) $ip = '';
+    $gj = $ip !== '' ? @file_get_contents("http://ip-api.com/json/{$ip}?fields=countryCode,status") : false;
     if ($gj) { $g=json_decode($gj); if ($g&&$g->status==='success'&&isset($cmap[$g->countryCode])) return $cmap[$g->countryCode]; }
     return $default_lang;
 }

@@ -68,7 +68,7 @@ foreach ($dates as $year) {
       $d2 = substr_replace($d2, ":", 2, 0);
       $d2 = substr_replace($d2, ":", 5, 0);
       if (file_exists($date . "/map.jpg")) {
-        $res = shell_exec("cat " . $date . "/obs_" . $y . "-" . $m . "-" . $d . "_" . $d2 . ".res");
+        $res = shell_exec("cat " . escapeshellarg($date . "/obs_" . $y . "-" . $m . "-" . $d . "_" . $d2 . ".res"));
         $res = preg_split("/[\s]+/", $res);
         $start = $res[5];
         $end = $res[11];
@@ -83,7 +83,7 @@ foreach ($dates as $year) {
 	$dirs = array_map('basename', array_filter(glob($date . '/*'), 'is_dir'));
         $loc = "";
         if (file_exists($date . "/location.txt")) {
-          $loc = "<br><small>" . trim(shell_exec("cat " . $date . "/location.txt")) . "</small>";
+          $loc = "<br><small>" . trim(shell_exec("cat " . escapeshellarg($date . "/location.txt"))) . "</small>";
         } else {
 	  $loc = "<br><small>(" . implode(", ", $dirs) . ")</small>";
 	}

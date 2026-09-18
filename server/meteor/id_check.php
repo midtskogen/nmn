@@ -43,7 +43,7 @@ a:visited {color:#601010}
 
 <?php
 if ($_POST) {
-  foreach ($_POST as $c) {print($c . " "); }
+  foreach ($_POST as $c) {print(htmlspecialchars($c) . " "); }
 }
 ?>
 

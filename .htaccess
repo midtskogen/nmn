@@ -1,0 +1,12 @@
+Options -Indexes
+
+# Deny access to private configuration, credentials, and generated state files.
+<FilesMatch "^(credentials\.json|config\.json|api_keys\.json|api_config\.json|.*\.(log|lock|pid|part|tmp|bak|backup|fixed|~))$">
+    Require all denied
+</FilesMatch>
+
+# If this directory is ever served directly, block the private etc/ tree.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^etc/ - [F]
+</IfModule>

@@ -1,0 +1,14 @@
+Options +SymLinksIfOwnerMatch
+
+# Block direct web access to sensitive/generated files
+<FilesMatch "\.(py|json|log|lock|pid|part|tmp|bak|backup|fixed|~)$">
+    Require all denied
+</FilesMatch>
+
+# Also block common backup/credential filenames
+<FilesMatch "^(credentials\.json|config\.json|.*\.bak|.*\.backup|.*\.fixed)$">
+    Require all denied
+</FilesMatch>
+
+RewriteEngine On
+RewriteRule ^cache/ - [F]

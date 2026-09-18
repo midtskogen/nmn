@@ -10,13 +10,58 @@ function sanitize_input($data) {
 }
 
 function generate_random_name($length = 5) {
-    return substr(str_shuffle(str_repeat('0123456789abcdefghijklmnopqrstuvwxyz', ceil($length/36))),1,$length);
+    // CSPRNG: str_shuffle() is not cryptographically secure.
+    return substr(bin2hex(random_bytes((int) ceil($length / 2) + 1)), 0, $length);
+}
+
+function detected_image_ext($bytes) {
+    // Identify real image content by magic bytes (never trust the client).
+    if (strncmp($bytes, "\x89PNG\r\n\x1a\n", 8) === 0) return 'png';
+    if (strncmp($bytes, "\xFF\xD8\xFF", 3) === 0) return 'jpg';
+    if (strncmp($bytes, "GIF87a", 6) === 0 || strncmp($bytes, "GIF89a", 6) === 0) return 'gif';
+    return false;
 }
 
 function save_base64_image($base64_string, $output_file) {
     $data = explode(',', $base64_string);
     if (count($data) < 2) return false;
-    return file_put_contents($output_file, base64_decode($data[1])) !== false;
+    if (strlen($base64_string) > 40 * 1024 * 1024) return false;
+    $raw = base64_decode($data[1], true);
+    if ($raw === false || detected_image_ext($raw) === false) return false;
+    return file_put_contents($output_file, $raw, LOCK_EX) !== false;
+}
+
+// Rate-limit report submissions per client IP (file is outside the web root).
+function report_rate_limited() {
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $file = sys_get_temp_dir() . '/nmn_report_ratelimit.json';
+    $fp = fopen($file, 'c+');
+    if (!$fp) return false;
+    flock($fp, LOCK_EX);
+    $buckets = json_decode(stream_get_contents($fp), true) ?: [];
+    $now = time();
+    $buckets[$ip] = array_values(array_filter($buckets[$ip] ?? [], fn($t) => $t > $now - 3600));
+    $limited = count($buckets[$ip]) >= 10;
+    if (!$limited) $buckets[$ip][] = $now;
+    ftruncate($fp, 0); rewind($fp);
+    fwrite($fp, json_encode($buckets));
+    flock($fp, LOCK_UN); fclose($fp);
+    return $limited;
+}
+
+// Ensure the reports tree can never execute uploaded scripts and never
+// lets browsers MIME-sniff served files into HTML/JS.
+function ensure_reports_htaccess($reports_root) {
+    $ht = $reports_root . '/.htaccess';
+    if (!file_exists($ht)) {
+        @file_put_contents($ht, "Options -Indexes\n"
+            . "Header set X-Content-Type-Options \"nosniff\"\n"
+            . "<FilesMatch \"\\.(php|phtml|phar|php3|php4|php5|php7|php8|cgi|pl|py|sh|htaccess)$\">\n"
+            . "    Require all denied\n"
+            . "</FilesMatch>\n"
+            . "RemoveHandler .php .phtml .phar .cgi .pl .py .sh\n"
+            . "RemoveType .php .phtml .phar\n");
+    }
 }
 
 function normalize_coordinate_input($value) {
@@ -36,7 +81,14 @@ function parse_and_validate_coordinate($value, $min, $max) {
 // --- Main Script Logic ---
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    
+
+    if (report_rate_limited()) {
+        http_response_code(429);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo "Too many reports submitted. Please try again later.";
+        exit();
+    }
+
     // --- Translation Data ---
     $lang = sanitize_input($_POST['lang'] ?? 'nb_NO');
     $translations = [
@@ -302,6 +354,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $date_obj = DateTime::createFromFormat('Y-m-d H:i:s', "{$sighting_date_str} {$sighting_time_str}") ?: new DateTime();
     $report_dir = 'reports/' . $date_obj->format('Ymd/His') . '/';
     if (!is_dir($report_dir)) mkdir($report_dir, 0777, true);
+    ensure_reports_htaccess('reports');
 
     // 3. Generate unique filename and paths
     $file_name = generate_random_name(5);
@@ -311,25 +364,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $sky_view_image_name = '';
     if (isset($_POST['sky_view_image'])) {
         $sky_view_image_name = "sky-view-{$file_name}.png";
-        save_base64_image($_POST['sky_view_image'], $report_dir . $sky_view_image_name);
+        if (!save_base64_image($_POST['sky_view_image'], $report_dir . $sky_view_image_name)) {
+            $sky_view_image_name = '';
+        }
     }
     
     $generated_map_image_name = '';
     if (isset($_POST['generated_map_image'])) {
         $generated_map_image_name = "map-view-{$file_name}.png";
-        save_base64_image($_POST['generated_map_image'], $report_dir . $generated_map_image_name);
+        if (!save_base64_image($_POST['generated_map_image'], $report_dir . $generated_map_image_name)) {
+            $generated_map_image_name = '';
+        }
     }
     
     // 5. Handle File Uploads
     $uploaded_files_html = $uploaded_files_text = '';
     if (isset($_FILES['file_uploads'])) {
-        $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm'];
+        // Detected MIME -> fixed server-side extension.  The client-supplied
+        // filename extension is NEVER used: a PHP file beginning with image
+        // magic bytes would otherwise be stored as a .php webshell, and
+        // .html/.svg uploads become stored XSS.
+        $mime_to_ext = [
+            'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif',
+            'video/mp4' => 'mp4', 'video/quicktime' => 'mov',
+            'video/x-msvideo' => 'avi', 'video/webm' => 'webm',
+        ];
+        $max_uploads = 10;
+        $max_bytes = 64 * 1024 * 1024;
         foreach ($_FILES['file_uploads']['tmp_name'] as $i => $tmp_name) {
-            if ($_FILES['file_uploads']['error'][$i] === UPLOAD_ERR_OK) {
+            if ($i >= $max_uploads) break;
+            if ($_FILES['file_uploads']['error'][$i] === UPLOAD_ERR_OK
+                && $_FILES['file_uploads']['size'][$i] <= $max_bytes) {
                 $file_type = mime_content_type($tmp_name);
-                if (in_array($file_type, $allowed_types)) {
-                    $original_name = $_FILES['file_uploads']['name'][$i];
-                    $new_filename = "upload-{$i}-{$file_name}." . pathinfo($original_name, PATHINFO_EXTENSION);
+                if (isset($mime_to_ext[$file_type])) {
+                    $new_filename = "upload-{$i}-{$file_name}." . $mime_to_ext[$file_type];
                     if (move_uploaded_file($tmp_name, $report_dir . $new_filename)) {
                         $uploaded_files_text .= "- {$new_filename}\n";
                         if (strpos($file_type, 'image/') === 0) {
@@ -345,7 +413,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     // 6. Prepare URLs and translated values for the template
     $protocol = 'https://'; // Force HTTPS to resolve mixed content issues
-    $base_url = $protocol . $_SERVER['HTTP_HOST'];
+    // Never trust the Host header: strip anything but a plain host[:port].
+    $safe_host = preg_replace('/[^a-zA-Z0-9.\-:]/', '', $_SERVER['HTTP_HOST'] ?? '');
+    $base_url = $protocol . ($safe_host !== '' ? $safe_host : 'norskmeteornettverk.no');
     $absolute_report_url = "{$base_url}/{$report_file_path}";
     
     $time_accuracy_text = translate_value('time_accuracy', $time_accuracy_val, $lang, $translations);

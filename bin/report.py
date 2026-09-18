@@ -54,7 +54,7 @@ except ImportError as e:
 # --- Constants ---
 METEOR_PROBABILITY_THRESHOLD = 0.5
 SSH_TUNNEL_CONFIG_PATH = '/etc/default/ssh_tunnel'
-REMOTE_REPORT_URL = "http://norskmeteornettverk.no/ssh/report.php"
+REMOTE_REPORT_URL = "https://norskmeteornettverk.no/ssh/report.php"
 # Assume processing scripts are in the user's bin directory
 METEORCROP_PATH = Path.home() / "bin" / "meteorcrop.py"
 PREDICT_PATH = Path.home() / "bin" / "predict.py"
@@ -333,8 +333,17 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
         print(f"SSH tunnel is active on port {port}. Not using lftp.")
 
     print("Pinging report URL...")
+    # Optional shared secret: the server accepts unauthenticated pings but
+    # validates inputs strictly; a token lets it distinguish real stations.
+    token = ''
+    try:
+        token = Path('/etc/default/nmn_report_token').read_text().strip() or \
+                (Path.home() / '.nmn_report_token').read_text().strip()
+    except OSError:
+        pass
     query = urllib.parse.urlencode({
-        'station': station_name, 'port': port, 'dir': str(event_dir)})
+        'station': station_name, 'port': port, 'dir': str(event_dir),
+        'token': token})
     report_command = [
         'curl', '-s', '-o', '/dev/null',
         f'{REMOTE_REPORT_URL}?{query}'

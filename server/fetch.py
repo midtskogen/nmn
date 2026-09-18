@@ -14,6 +14,7 @@ Usage:
     python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen]
 """
 
+import shlex
 import argparse
 import atexit
 import configparser
@@ -1053,7 +1054,7 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
     key_main = '/var/www/.oysttyerkey'
     
     for key in [key_solobs, key_main]:
-        cmd = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key} -silent {full_tweet}'
+        cmd = f'ulimit -t 100; /usr/bin/oysttyer -ssl -keyf={key} -silent {shlex.quote(full_tweet)}'
         try:
             subprocess.run(
                 cmd,

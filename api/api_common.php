@@ -38,7 +38,14 @@ if (!defined('DATA_DIR')) {
     define('DATA_DIR', api_resolve_data_dir());
 }
 if (!defined('SECRETS_DIR')) {
-    define('SECRETS_DIR', realpath(__DIR__ . '/../../etc') ?: __DIR__ . '/../../etc');
+    // Prefer an explicit env-configured directory OUTSIDE the web root.
+    // The legacy default resolves to <webroot>/etc on a docroot deployment,
+    // which lets Apache serve api_keys.json/credentials.json to anyone.
+    $secrets = getenv('NMN_SECRETS_DIR') ?: '';
+    if ($secrets === '' || !is_dir($secrets)) {
+        $secrets = realpath(__DIR__ . '/../../etc') ?: __DIR__ . '/../../etc';
+    }
+    define('SECRETS_DIR', rtrim($secrets, '/'));
 }
 if (!defined('LOCK_DIR')) {
     define('LOCK_DIR', DATA_DIR . '/locks');
@@ -162,9 +169,36 @@ function api_error($code, $message, $status = 400, $extra = []) {
 
 // --- API key validation ---
 function get_api_key() {
+    // Keys are accepted via the X-API-Key header or the POST body only.
+    // A ?api_key= query parameter would end up in Apache access logs,
+    // reverse-proxy logs, browser history and Referer headers.
     $header = $_SERVER['HTTP_X_API_KEY'] ?? '';
     if ($header !== '') return $header;
-    return $_GET['api_key'] ?? ($_POST['api_key'] ?? '');
+    return $_POST['api_key'] ?? '';
+}
+
+/**
+ * Report a failed authentication: log it to the abuse log and throttle the
+ * caller so API keys cannot be brute-forced at full request rate.
+ */
+function _api_auth_failed(string $code, string $message, int $status) {
+    if (function_exists('check_rate_limit') && function_exists('log_abuse_event')) {
+        $ip = get_user_ip();
+        log_abuse_event([
+            'ip'       => $ip,
+            'key_id'   => null,
+            'type'     => 'auth_fail',
+            'endpoint' => $GLOBALS['log_entry']['endpoint'] ?? '',
+            'reason'   => $code,
+        ]);
+        $result = check_rate_limit($ip, 'auth_fail');
+        if (!$result['allowed']) {
+            header('Retry-After: ' . $result['retry_after']);
+            api_error('rate_limit_exceeded', 'Too many failed authentication attempts.', 429,
+                      ['retry_after' => $result['retry_after']]);
+        }
+    }
+    api_error($code, $message, $status);
 }
 
 function validate_api_key($endpoint_group) {
@@ -172,20 +206,25 @@ function validate_api_key($endpoint_group) {
     if ($key === '') {
         api_error('missing_api_key', 'This endpoint requires an API key in the X-API-Key header.', 401);
     }
+    // Placeholder keys from the example config must never authenticate,
+    // even if an enabled entry was left in api_keys.json.
+    if (str_starts_with($key, 'REPLACE_ME')) {
+        _api_auth_failed('invalid_api_key', 'The supplied API key is not recognised.', 401);
+    }
     $keys = load_api_keys();
     if (!isset($keys[$key])) {
-        api_error('invalid_api_key', 'The supplied API key is not recognised.', 401);
+        _api_auth_failed('invalid_api_key', 'The supplied API key is not recognised.', 401);
     }
     $key_data = $keys[$key];
     if (empty($key_data['enabled'])) {
-        api_error('disabled_api_key', 'The supplied API key is disabled.', 403);
+        _api_auth_failed('disabled_api_key', 'The supplied API key is disabled.', 403);
     }
     if (!empty($key_data['expires']) && strtotime($key_data['expires']) < time()) {
-        api_error('expired_api_key', 'The supplied API key has expired.', 403);
+        _api_auth_failed('expired_api_key', 'The supplied API key has expired.', 403);
     }
     $allowed = $key_data['allowed_endpoints'] ?? [];
     if (!empty($allowed) && !in_array($endpoint_group, $allowed, true)) {
-        api_error('endpoint_not_allowed', 'This API key is not allowed to use this endpoint group.', 403);
+        _api_auth_failed('endpoint_not_allowed', 'This API key is not allowed to use this endpoint group.', 403);
     }
     return $key_data;
 }

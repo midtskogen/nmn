@@ -69,6 +69,7 @@ def _resolve_credentials_file():
         return path
     real_dir = os.path.dirname(os.path.realpath(__file__))
     candidates = [
+        *( [os.path.join(os.environ['NMN_SECRETS_DIR'], 'credentials.json')] if os.environ.get('NMN_SECRETS_DIR') else [] ),
         os.path.normpath(os.path.join(real_dir, '..', '..', '..', 'etc', 'credentials.json')),
         os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])) if sys.argv and os.path.isfile(sys.argv[0]) else real_dir, 'credentials.json'),
         os.path.join(real_dir, 'credentials.json'),

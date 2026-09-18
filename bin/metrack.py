@@ -1228,7 +1228,11 @@ document.addEventListener("DOMContentLoaded", function () {
                 parts: parts};
     });
     const FADE_X = (x1 - x0) * 0.15, FADE_Y = (y1 - y0) * 0.15; // feather zone near box edges
+    const FADE_IN = 1.5;     // seconds for a respawned streak to reach full alpha
     const BASE_A = 0.5;
+    // Stagger initial ages so the field starts populated instead of
+    // fading in uniformly.
+    levels.forEach(L => L.parts.forEach(p => { p.age = Math.random() * FADE_IN; }));
 
     // Column-major 4x4 helpers (gl-plot3d layout)
     function matMul(a, b) {
@@ -1269,15 +1273,17 @@ document.addEventListener("DOMContentLoaded", function () {
             ctx.lineWidth = 2;
             for (const L of levels) {
                 for (const p of L.parts) {
-                    p.x += L.vx * dt; p.y += L.vy * dt;
+                    p.x += L.vx * dt; p.y += L.vy * dt; p.age += dt;
                     if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) {
                         p.x = x0 + Math.random() * (x1 - x0);
                         p.y = y0 + Math.random() * (y1 - y0);
+                        p.age = 0;
                     }
                     // Fade streaks out near the box edges so no hard boundary shows
                     const ex = Math.min(p.x - x0, x1 - p.x) / FADE_X;
                     const ey = Math.min(p.y - y0, y1 - p.y) / FADE_Y;
-                    const alpha = BASE_A * Math.max(0, Math.min(1, Math.min(ex, ey)));
+                    const alpha = BASE_A * Math.max(0, Math.min(1, Math.min(ex, ey)))
+                                * Math.min(1, p.age / FADE_IN);
                     if (alpha <= 0.02) continue;
                     const a = project(M, p.x, p.y, L.z, W, H);
                     const b = project(M, p.x - L.vx * TRAIL, p.y - L.vy * TRAIL, L.z, W, H);

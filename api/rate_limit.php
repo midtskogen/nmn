@@ -14,6 +14,10 @@ function default_rate_limits(): array {
     return [
         'read_only' => ['requests_per_minute' => 100, 'requests_per_hour' => 1000],
         'stateful'  => ['requests_per_minute' => 20,  'requests_per_hour' => 200],
+        // Queued CPU-heavy jobs get a much tighter anonymous budget.
+        'predict'   => ['requests_per_minute' => 5,   'requests_per_hour' => 40],
+        // Failed API-key authentication attempts per IP.
+        'auth_fail' => ['requests_per_minute' => 10,  'requests_per_hour' => 60],
     ];
 }
 
@@ -22,11 +26,11 @@ function _rate_limit_config(): array {
         require_once __DIR__ . '/api_common.php';
     }
     $cfg = load_api_config();
-    $defaults = default_rate_limits();
-    return [
-        'read_only' => array_merge($defaults['read_only'], $cfg['default_rate_limit']['read_only'] ?? []),
-        'stateful'  => array_merge($defaults['stateful'],  $cfg['default_rate_limit']['stateful']  ?? []),
-    ];
+    $limits = [];
+    foreach (default_rate_limits() as $type => $defaults) {
+        $limits[$type] = array_merge($defaults, $cfg['default_rate_limit'][$type] ?? []);
+    }
+    return $limits;
 }
 
 /**

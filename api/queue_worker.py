@@ -21,7 +21,7 @@ from pathlib import Path
 
 API_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = API_DIR.parent.parent
-SECRETS_DIR = PROJECT_DIR / 'etc'
+SECRETS_DIR = Path(os.environ['NMN_SECRETS_DIR']) if os.environ.get('NMN_SECRETS_DIR') else PROJECT_DIR / 'etc'
 DATA_DIR = Path(os.environ.get('NMN_DATA_DIR', PROJECT_DIR / 'data')).resolve()
 LOCK_DIR = Path(os.environ.get('NMN_LOCK_DIR', DATA_DIR / 'locks')).resolve()
 QUEUE_FILE = API_DIR / 'task_queue.jsonl'
@@ -352,7 +352,9 @@ def run_job(job):
 
         if proc.returncode != 0:
             err = (stderr or 'unknown error').strip()[:500]
-            update_status(task_id, 'error', message='error_internal', debug=err)
+            # stderr may contain paths/traceback fragments: keep it in the
+            # worker log but do not expose it through the public status API.
+            update_status(task_id, 'error', message='error_internal')
             set_job_done(task_id, proc.returncode, err)
             logger.error('Job %s failed with code %s: %s', task_id, proc.returncode, err)
         else:
@@ -372,7 +374,7 @@ def run_job(job):
         logger.error('Job %s timed out', task_id)
     except Exception as e:
         logger.exception('Job %s crashed', task_id)
-        update_status(task_id, 'error', message='error_internal', debug=str(e))
+        update_status(task_id, 'error', message='error_internal')
         set_job_done(task_id, -1, str(e))
 
 

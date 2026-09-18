@@ -106,6 +106,79 @@ function api_require_key(string $endpoint_group): array {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: bounded parameters for queued prediction jobs.
+// Anonymous callers may only request modest amounts of work.
+// ---------------------------------------------------------------------------
+function predict_job_args(): array {
+    $args = [];
+    if (!empty($_GET['station'])) {
+        $stations = array_values(array_filter(array_map('trim', explode(',', $_GET['station']))));
+        if (count($stations) > 20) {
+            api_error('too_many_stations', 'At most 20 stations may be requested at once.', 400);
+        }
+        foreach ($stations as $s) validate_station_id($s);
+        if ($stations) $args['station'] = implode(',', $stations);
+    }
+    if (!empty($_GET['days'])) {
+        if (!ctype_digit($_GET['days'])) api_error('invalid_days', 'days must be an integer.', 400);
+        $days = (int)$_GET['days'];
+        if ($days < 1 || $days > 31) api_error('invalid_days', 'days must be between 1 and 31.', 400);
+        $args['days'] = $days;
+    }
+    if (!empty($_GET['start'])) $args['start'] = validate_iso_timestamp($_GET['start']);
+    if (!empty($_GET['end']))   $args['end']   = validate_iso_timestamp($_GET['end']);
+    if (isset($args['start'], $args['end'])) {
+        $span = strtotime($args['end']) - strtotime($args['start']);
+        if ($span <= 0 || $span > 45 * 86400) {
+            api_error('invalid_range', 'end must be after start and span at most 45 days.', 400);
+        }
+    }
+    return $args;
+}
+
+// Pending-queue depth cap: anonymous floods must not grow the queue (or the
+// on-disk status files) without bound.
+const MAX_PENDING_JOBS = 200;
+function predict_enqueue(string $task_id, string $action, array $args, string $bucket) {
+    api_check_rate('predict', $bucket);
+    if (count(list_pending_jobs()) >= MAX_PENDING_JOBS) {
+        log_abuse_event([
+            'ip' => $GLOBALS['log_entry']['ip'] ?? 'unknown_ip',
+            'type' => 'queue_full', 'endpoint' => $GLOBALS['log_entry']['endpoint'] ?? '',
+            'reason' => 'pending queue at ' . MAX_PENDING_JOBS,
+        ]);
+        api_error('server_busy', 'The job queue is full. Please try again later.', 503);
+    }
+    write_status_file($task_id, ['status' => 'queued', 'message' => 'status_starting']);
+    enqueue_job($task_id, $action, $args);
+    ensure_queue_worker_running();
+}
+
+// ---------------------------------------------------------------------------
+// Task ownership: API-created tasks get an owner sidecar so only the owning
+// key (or an admin key) may cancel/stop/control them later.
+// ---------------------------------------------------------------------------
+function _task_owner_file(string $task_id): string {
+    return LOCK_DIR . '/owner_' . $task_id . '.json';
+}
+function api_record_task_owner(string $task_id, ?string $key_id) {
+    file_put_contents(_task_owner_file($task_id), json_encode(['key_id' => $key_id]), LOCK_EX);
+}
+function api_require_task_ownership(string $task_id) {
+    global $key_id;
+    $f = _task_owner_file($task_id);
+    if (!file_exists($f)) return; // not created through the API
+    $owner = (json_decode((string) file_get_contents($f), true) ?: [])['key_id'] ?? null;
+    if ($owner === $key_id) return;
+    validate_api_key('admin');
+}
+
+// Unguessable task ids (uniqid() is microtime-derived and enumerable).
+function new_task_id(string $prefix): string {
+    return $prefix . '_' . bin2hex(random_bytes(8));
+}
+
+// ---------------------------------------------------------------------------
 // Helper: run a Python script synchronously and return JSON.
 // ---------------------------------------------------------------------------
 function run_python(array $args) {
@@ -199,23 +272,12 @@ switch ($resource) {
         $sub = $segments[1] ?? '';
         if ($sub === 'passes') {
             if ($method === 'POST' && count($segments) === 2) {
-                api_check_rate('read_only', $client_ip); // predictions are public but CPU heavy
-                $task_id = uniqid('pass_task_');
-                $args = [];
-                if (!empty($_GET['station'])) {
-                    $stations = array_filter(array_map('trim', explode(',', $_GET['station'])));
-                    foreach ($stations as $s) validate_station_id($s);
-                    $args['station'] = implode(',', $stations);
-                }
-                if (!empty($_GET['days']) && ctype_digit($_GET['days'])) $args['days'] = (int)$_GET['days'];
-                if (!empty($_GET['start'])) $args['start'] = validate_iso_timestamp($_GET['start']);
-                if (!empty($_GET['end']))   $args['end']   = validate_iso_timestamp($_GET['end']);
-                write_status_file($task_id, ['status' => 'queued', 'message' => 'status_starting']);
-                enqueue_job($task_id, 'find_passes', $args);
-                ensure_queue_worker_running();
+                $task_id = new_task_id('pass_task');
+                predict_enqueue($task_id, 'find_passes', predict_job_args(), $client_ip);
                 api_json_response(['task_id' => $task_id, 'status' => 'queued', 'poll_url' => '/api/v1/predict/passes/' . $task_id], 202);
             }
             if ($method === 'GET' && count($segments) === 3) {
+                api_check_rate('read_only', $client_ip);
                 $task_id = validate_task_id($segments[2], ['pass_task']);
                 $data = read_status_file($task_id);
                 if ($data === null) api_error('task_not_found', 'Task not found or not started yet.', 404);
@@ -224,23 +286,12 @@ switch ($resource) {
         }
         if ($sub === 'aircraft') {
             if ($method === 'POST' && count($segments) === 2) {
-                api_check_rate('read_only', $client_ip);
-                $task_id = uniqid('aircraft_task_');
-                $args = [];
-                if (!empty($_GET['station'])) {
-                    $stations = array_filter(array_map('trim', explode(',', $_GET['station'])));
-                    foreach ($stations as $s) validate_station_id($s);
-                    $args['station'] = implode(',', $stations);
-                }
-                if (!empty($_GET['days']) && ctype_digit($_GET['days'])) $args['days'] = (int)$_GET['days'];
-                if (!empty($_GET['start'])) $args['start'] = validate_iso_timestamp($_GET['start']);
-                if (!empty($_GET['end']))   $args['end']   = validate_iso_timestamp($_GET['end']);
-                write_status_file($task_id, ['status' => 'queued', 'message' => 'status_starting']);
-                enqueue_job($task_id, 'find_aircraft_crossings', $args);
-                ensure_queue_worker_running();
+                $task_id = new_task_id('aircraft_task');
+                predict_enqueue($task_id, 'find_aircraft_crossings', predict_job_args(), $client_ip);
                 api_json_response(['task_id' => $task_id, 'status' => 'queued', 'poll_url' => '/api/v1/predict/aircraft/' . $task_id], 202);
             }
             if ($method === 'GET' && count($segments) === 3) {
+                api_check_rate('read_only', $client_ip);
                 $task_id = validate_task_id($segments[2], ['aircraft_task']);
                 $data = read_status_file($task_id);
                 if ($data === null) api_error('task_not_found', 'Task not found or not started yet.', 404);
@@ -275,7 +326,8 @@ switch ($resource) {
                 flock($sem, LOCK_UN); fclose($sem);
                 api_error('server_busy', 'Too many concurrent downloads.', 503);
             }
-            $task_id = uniqid('master_task_');
+            $task_id = new_task_id('master_task');
+            api_record_task_owner($task_id, $key_id);
             $payload_file = tempnam(LOCK_DIR, 'payload_');
             file_put_contents($payload_file, $raw, LOCK_EX);
             touch(LOCK_DIR . '/' . $task_id . '.lock');
@@ -288,6 +340,7 @@ switch ($resource) {
             api_json_response(['task_id' => $task_id, 'status' => 'pending', 'poll_url' => '/api/v1/downloads/' . $task_id], 202);
         }
         if ($method === 'GET' && count($segments) === 2) {
+            api_check_rate('read_only', $client_ip);
             $task_id = validate_task_id($segments[1], ['master_task']);
             $data = read_status_file($task_id);
             if ($data === null) api_json_response(['status' => 'pending']);
@@ -296,6 +349,7 @@ switch ($resource) {
         if ($method === 'DELETE' && count($segments) === 2) {
             api_require_key('download');
             $task_id = validate_task_id($segments[1], ['master_task']);
+            api_require_task_ownership($task_id);
             $cmd = python_exec() . ' ' . escapeshellarg(DATA_DIR . '/controller.py') . ' cancel ' . escapeshellarg($task_id);
             shell_exec($cmd);
             api_json_response(['success' => true, 'task_id' => $task_id, 'status' => 'cancelled']);
@@ -312,7 +366,18 @@ switch ($resource) {
             if (!in_array($resolution, ['lowres', 'hires'], true)) $resolution = 'lowres';
             $hevc = isset($_POST['hevc_supported']) ? $_POST['hevc_supported'] : ($_GET['hevc_supported'] ?? 'false');
 
-            $task_id = uniqid('stream_');
+            // Bound concurrent streams: each spawns an ssh tunnel plus an
+            // ffmpeg relay on this server and a camera on the station.
+            $active_streams = 0;
+            foreach (glob(LOCK_DIR . '/stream_*.json') ?: [] as $sf) {
+                if (time() - filemtime($sf) < 15 * 60) $active_streams++;
+            }
+            if ($active_streams >= 8) {
+                api_error('server_busy', 'Too many concurrent streams. Please try again later.', 503);
+            }
+
+            $task_id = new_task_id('stream');
+            api_record_task_owner($task_id, $key_id);
             $cmd = python_exec() . ' ' . escapeshellarg(DATA_DIR . '/controller.py') . ' _internal_start_stream '
                  . escapeshellarg($task_id) . ' '
                  . escapeshellarg($station_id) . ' '
@@ -324,6 +389,7 @@ switch ($resource) {
             api_json_response(['task_id' => $task_id, 'status' => 'pending', 'poll_url' => '/api/v1/streams/' . $task_id], 202);
         }
         if ($method === 'GET' && count($segments) === 2) {
+            api_check_rate('read_only', $client_ip);
             $task_id = validate_task_id($segments[1], ['stream']);
             $data = read_status_file($task_id);
             if ($data === null) api_json_response(['status' => 'pending']);
@@ -332,6 +398,7 @@ switch ($resource) {
         if ($method === 'DELETE' && count($segments) === 2) {
             api_require_key('streams');
             $task_id = validate_task_id($segments[1], ['stream']);
+            api_require_task_ownership($task_id);
             $cmd = python_exec() . ' ' . escapeshellarg(DATA_DIR . '/controller.py') . ' stop_stream ' . escapeshellarg($task_id);
             shell_exec($cmd);
             api_json_response(['success' => true, 'task_id' => $task_id, 'status' => 'stop_requested']);
@@ -339,6 +406,7 @@ switch ($resource) {
         if ($method === 'POST' && count($segments) === 3 && $segments[2] === 'transcode') {
             api_require_key('streams');
             $task_id = validate_task_id($segments[1], ['stream']);
+            api_require_task_ownership($task_id);
             $data = run_python([DATA_DIR . '/controller.py', 'request_transcode', $task_id]);
             api_json_response($data);
         }
@@ -394,7 +462,8 @@ switch ($resource) {
         if (!is_array($payload) || empty($payload['image']) || !isset($payload['filter'])) {
             api_error('invalid_json', 'JSON body must contain image and filter.', 400);
         }
-        $task_id = uniqid('api_task_');
+        $task_id = new_task_id('api_task');
+        api_record_task_owner($task_id, $key_id);
         $args = [
             'image'  => basename($payload['image']),
             'filter' => (int)$payload['filter'],
@@ -407,6 +476,7 @@ switch ($resource) {
     // --- Generic task status --------------------------------------------------
     case 'tasks':
         if ($method !== 'GET' || count($segments) !== 2) api_error('not_found', 'Unknown endpoint.', 404);
+        api_check_rate('read_only', $client_ip);
         $task_id = validate_task_id($segments[1], ['api_task']);
         $data = read_status_file($task_id);
         if ($data === null) api_json_response(['status' => 'pending']);

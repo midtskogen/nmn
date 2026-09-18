@@ -26,11 +26,10 @@ Pass the key in the header:
 curl -H 'X-API-Key: ak_live_...' https://norskmeteornettverk.no/api/v1/downloads
 ```
 
-Or, less securely, as a query parameter:
-
-```bash
-curl 'https://norskmeteornettverk.no/api/v1/downloads?api_key=ak_live_...'
-```
+A key may also be sent in the POST body as `api_key` for clients that
+cannot set headers.  Keys are **not** accepted in the URL query string,
+because that would leak them into web-server and proxy logs, browser
+history and Referer headers.
 
 API keys are stored in `etc/api_keys.json` (outside the web root).  Each key can be restricted to specific endpoint groups and to a per-key rate limit.
 
@@ -38,6 +37,16 @@ API keys are stored in `etc/api_keys.json` (outside the web root).  Each key can
 
 - Anonymous (read-only) requests: 100 per minute / 1000 per hour per IP.
 - Authenticated (stateful) requests: 20 per minute / 200 per hour per key.
+- Queued prediction jobs (`predict/passes`, `predict/aircraft`): 5 per
+  minute / 40 per hour per IP, with `days` <= 31, <= 20 stations per
+  request, a 45-day start/end range cap and a global pending-queue cap.
+- Failed API-key authentications: 10 per minute / 60 per hour per IP,
+  logged to the abuse log.
+- Tasks created through the API record the owning key; only that key (or
+  an `admin` key) may cancel/stop/transcode them afterwards.
+- `etc/` must live OUTSIDE the document root.  Set `NMN_SECRETS_DIR` in
+  the web server environment to point the API at it; `etc/.htaccess`
+  denies direct access as a fallback.
 
 When a limit is exceeded the API returns HTTP 429 with a `Retry-After` header.
 

@@ -34,7 +34,8 @@ CAMERA_FOV_CACHE_FILE = os.path.join(CACHE_DIR, 'camera_fov_cache.json')
 # Defines the path to the meteor data directory, which is located outside the web application's root.
 METEOR_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'meteor'))
 # Private configuration/credential directory outside the web root.
-SECRETS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..', 'etc'))
+SECRETS_DIR = os.environ.get('NMN_SECRETS_DIR') or os.path.normpath(
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..', 'etc'))
 
 # A cache for API credentials and the nearest weather station lookup to avoid repeated API calls
 FROST_API_CREDS = None

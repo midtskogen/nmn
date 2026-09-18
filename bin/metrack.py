@@ -1023,41 +1023,78 @@ document.addEventListener("DOMContentLoaded", function () {{
     let animationPaused = false;
     let reqId = null;
 
-    function setCamera(a) {{
-        Plotly.relayout(plot, {{
-            'scene.camera': {{
-                up: {{x: 0, y: 0, z: 1}},
-                center: center,
-                eye: {{
-                    x: center.x + distance * Math.cos(a),
-                    y: center.y + distance * Math.sin(a),
-                    z: center.z + elevOffsetZ
-                }}
-            }}
-        }});
-    }}
+    // Smooth zoom: intercept the wheel before the camera's own handler (which
+    // applies one fixed factor per tick = jumpy) and accumulate a target
+    // factor that the animation loop eases the eye distance toward.
+    let zoomTarget = 1.0;
+    plot.addEventListener('wheel', function (e) {{
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const dy = e.deltaY * (e.deltaMode === 1 ? 33 : 1);
+        zoomTarget *= Math.exp(-dy * 0.0012);
+        zoomTarget = Math.max(0.02, Math.min(50, zoomTarget));
+    }}, {{passive: false, capture: true}});
 
     function step(now) {{
-        if (animationPaused) return;
         const dt = now - lastTime;
         lastTime = now;
-        angle += dt * speed;
-        setCamera(angle);
+        // Rotate the live gl3d camera directly: scroll zoom is applied as a
+        // dolly on the eye distance (eased), so it composes with rotation.
+        // eye/center/up are [x,y,z] arrays on the internal scene camera.
+        const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
+        if (scn && scn.camera && scn.camera.eye && scn.camera.center) {{
+            // cam.eye is the camera's computedEye: lookAt() calls
+            // recalcMatrix() first, which recomputes it from the controller
+            // state and wipes in-place mutations. Always build a fresh
+            // newEye array instead.
+            const e = scn.camera.eye;
+            const c = scn.camera.center;
+            let scale = 1;
+            if (Math.abs(Math.log(zoomTarget)) > 1e-3) {{
+                const f = Math.min(1, dt * 0.012);   // ~80ms ease
+                scale = Math.exp(Math.log(zoomTarget) * f);
+                zoomTarget = Math.exp(Math.log(zoomTarget) * (1 - f));
+            }}
+            if (!animationPaused || scale !== 1) {{
+                const ox = e[0] - c[0], oy = e[1] - c[1], oz = e[2] - c[2];
+                const a = Math.atan2(oy, ox) + (animationPaused ? 0 : dt * speed);
+                const r = (Math.hypot(ox, oy) || distance) * scale;
+                const newEye = [c[0] + r * Math.cos(a),
+                                c[1] + r * Math.sin(a),
+                                c[2] + oz * scale];
+                if (scn.camera.lookAt) {{
+                    scn.camera.lookAt(newEye, c, scn.camera.up);
+                }}
+                scn.render();
+            }}
+        }} else {{
+            angle += dt * speed;
+            Plotly.relayout(plot, {{
+                'scene.camera': {{
+                    up: {{x: 0, y: 0, z: 1}},
+                    center: center,
+                    eye: {{
+                        x: center.x + distance * Math.cos(angle),
+                        y: center.y + distance * Math.sin(angle),
+                        z: center.z + elevOffsetZ
+                    }}
+                }}
+            }});
+        }}
         reqId = requestAnimationFrame(step);
     }}
 
     function startAnimation() {{
         animationPaused = false;
         lastTime = performance.now();
-        reqId = requestAnimationFrame(step);
+        if (!reqId) {{
+            reqId = requestAnimationFrame(step);
+        }}
     }}
 
     function pauseAnimation() {{
+        // Keep the frame loop alive so wheel zoom still eases while paused.
         animationPaused = true;
-        if (reqId) {{
-            cancelAnimationFrame(reqId);
-            reqId = null;
-        }}
     }}
 
     function toggleAnimation(e) {{

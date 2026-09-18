@@ -258,6 +258,10 @@ def _plot_orbit(et, meteor_elements, doplot,
 
     if doplot == 'save' or doplot == 'both':
         filename = output_filename or 'orbit.svg'
+        # Keep text as SVG <text> elements (not glyph paths) so the
+        # NMN_I18N_* placeholder tokens can be string-substituted per
+        # language by fetch.py before rasterising to jpg.
+        plt.rcParams['svg.fonttype'] = 'none'
         plt.savefig(filename, bbox_inches='tight', pad_inches=0.2)
         print(f"Plot saved to {filename}")
     if doplot == 'show' or doplot == 'both':
@@ -429,21 +433,15 @@ def _plot_orbit_interactive(et, meteor_elements,
         traces.append(go.Scatter3d(x=[x[i], x[i]], y=[y[i], y[i]], z=[z[i], 0], mode='lines',
                                    line=dict(color='dimgray', width=1.5, dash='dot'), showlegend=False, hoverinfo='none'))
                             
-    # --- 6. Animation Frame Generation ---
-    frames = []
-    num_frames = 360
+    # --- 6. Figure Layout and Generation ---
+    # Smooth rotation is done in the browser via requestAnimationFrame +
+    # Plotly.relayout (camera eye only), instead of embedding Plotly frames —
+    # the frame-based animation redrew the whole scene and ran at ~2 fps.
     initial_eye = dict(x=2.5, y=0.01, z=1.2)
-    radius = np.sqrt(initial_eye['x']**2 + initial_eye['y']**2)
-    
-    for k in range(num_frames):
-        theta = (k / num_frames) * 2 * np.pi
-        eye_x = radius * np.cos(theta)
-        eye_y = radius * np.sin(theta)
-        frames.append(go.Frame(
-            layout=dict(scene=dict(camera=dict(eye=dict(x=eye_x, y=eye_y, z=initial_eye['z']))))
-        ))
+    camera_center = dict(x=0, y=0, z=0)
+    camera_radius = float(np.hypot(initial_eye['x'], initial_eye['y']))
+    elev_offset_z = float(initial_eye['z'] - camera_center['z'])
 
-    # --- 7. Figure Layout and Generation ---
     layout = go.Layout(
         title_text=translations.get("plot_orbit_title", "Meteoroid's Heliocentric Orbit"), title_x=0.5, title_y=1,
         margin=dict(l=0, r=0, b=0, t=40),
@@ -455,102 +453,147 @@ def _plot_orbit_interactive(et, meteor_elements,
         scene=dict(
             xaxis_title='X (AU)', yaxis_title='Y (AU)', zaxis_title='Z (AU)',
             aspectmode='data', dragmode='turntable',
-            camera=dict(up=dict(x=0, y=0, z=1), center=dict(x=0, y=0, z=0), eye=initial_eye),
+            camera=dict(up=dict(x=0, y=0, z=1), center=camera_center, eye=initial_eye),
             xaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1),
             yaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1),
             zaxis=dict(showspikes=True, spikecolor="rgba(128,128,128,0.9)", spikethickness=1)
         ),
-        updatemenus=[dict(
-            type='buttons',
-            active=0,
-            showactive=True,
-            y=0.95, x=0.05,
-            xanchor='left', yanchor='top',
-            pad=dict(t=0, r=10),
-            font=dict(size=10), 
-            bgcolor='rgba(255, 255, 255, 0.5)',
-            buttons=[
-                dict(label=translations.get("plot_interactive_play", "▶ Play"),
-                     method='animate',
-                     args=[None, dict(frame=dict(duration=20, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
-                dict(label=translations.get("plot_interactive_pause", "⏸ Pause"),
-                     method='animate',
-                     args=[[None], dict(frame=dict(duration=0, redraw=False),
-                                        mode='immediate',
-                                        transition=dict(duration=0))])
-            ]
-        )]
     )
-    
-    fig = go.Figure(data=traces, layout=layout, frames=frames)
+
+    fig = go.Figure(data=traces, layout=layout)
     filename = output_filename or "orbit.html"
     fig.write_html(filename, include_plotlyjs='cdn')
 
-    # This javascript block is appended to the HTML file to add custom interaction.
-    # It finds the play button using its translated text content.
-    play_button_text = json.dumps(translations.get("plot_interactive_play", "▶ Play"))
-    with open(filename, "a", encoding="utf-8") as f:
-        f.write(f"""
+    center_json = json.dumps(camera_center)
+    radius_json = json.dumps(camera_radius)
+    elev_json = json.dumps(elev_offset_z)
+    play_text = translations.get("plot_interactive_play", "▶ Play")
+    pause_text = translations.get("plot_interactive_pause", "⏸ Pause")
+    controls_and_script = f"""
+<style>
+  html, body {{ margin: 0; padding: 0; overflow: hidden; height: 100%; }}
+</style>
+<div id="orbit-rotation-controls" style="position:fixed; top:10px; left:10px; z-index:1000; font-family:sans-serif;">
+  <button id="orbit-play-btn" style="margin-right:5px; padding:4px 10px; cursor:pointer;">{play_text}</button>
+  <button id="orbit-pause-btn" style="padding:4px 10px; cursor:pointer;">{pause_text}</button>
+</div>
 <script>
 document.addEventListener("DOMContentLoaded", function () {{
-    const plot = document.querySelector("div.js-plotly-plot");
-    let animationPaused = false;
+    const plot = document.querySelector(".js-plotly-plot");
+    if (!plot) return;
 
-    function pauseAnimation() {{
-        animationPaused = true;
-        console.log("Pausing animation");
-        Plotly.animate(plot, null, {{
-            mode: 'immediate',
-            frame: {{ duration: 0, redraw: false }},
-            transition: {{ duration: 0 }}
-        }}).catch((err) => {{
-            console.warn("Pause failed:", err);
-        }});
+    const center = {center_json};
+    const radius = {radius_json};
+    const elevOffsetZ = {elev_json};
+    const rotationPeriodMs = 18000; // one full revolution in 18 seconds
+    const speed = 2 * Math.PI / rotationPeriodMs;
+    let angle = 0;
+    let lastTime = performance.now();
+    let animationPaused = false;
+    let reqId = null;
+
+    // Smooth zoom: intercept the wheel before the camera's own handler (which
+    // applies one fixed factor per tick = jumpy) and accumulate a target
+    // factor that the animation loop eases the eye distance toward.
+    let zoomTarget = 1.0;
+    plot.addEventListener('wheel', function (e) {{
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const dy = e.deltaY * (e.deltaMode === 1 ? 33 : 1);
+        zoomTarget *= Math.exp(-dy * 0.0012);
+        zoomTarget = Math.max(0.02, Math.min(50, zoomTarget));
+    }}, {{passive: false, capture: true}});
+
+    function step(now) {{
+        const dt = now - lastTime;
+        lastTime = now;
+        // Rotate the live gl3d camera directly: scroll zoom is applied as a
+        // dolly on the eye distance (eased), so it composes with rotation.
+        // eye/center/up are [x,y,z] arrays on the internal scene camera.
+        const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
+        if (scn && scn.camera && scn.camera.eye && scn.camera.center) {{
+            // cam.eye is the camera's computedEye: lookAt() calls
+            // recalcMatrix() first, which recomputes it from the controller
+            // state and wipes in-place mutations. Always build a fresh
+            // newEye array instead.
+            const e = scn.camera.eye;
+            const c = scn.camera.center;
+            let scale = 1;
+            if (Math.abs(Math.log(zoomTarget)) > 1e-3) {{
+                const f = Math.min(1, dt * 0.012);   // ~80ms ease
+                scale = Math.exp(Math.log(zoomTarget) * f);
+                zoomTarget = Math.exp(Math.log(zoomTarget) * (1 - f));
+            }}
+            if (!animationPaused || scale !== 1) {{
+                const ox = e[0] - c[0], oy = e[1] - c[1], oz = e[2] - c[2];
+                const a = Math.atan2(oy, ox) + (animationPaused ? 0 : dt * speed);
+                const r = (Math.hypot(ox, oy) || radius) * scale;
+                const newEye = [c[0] + r * Math.cos(a),
+                                c[1] + r * Math.sin(a),
+                                c[2] + oz * scale];
+                if (scn.camera.lookAt) {{
+                    scn.camera.lookAt(newEye, c, scn.camera.up);
+                }}
+                scn.render();
+            }}
+        }} else {{
+            angle += dt * speed;
+            Plotly.relayout(plot, {{
+                'scene.camera': {{
+                    up: {{x: 0, y: 0, z: 1}},
+                    center: center,
+                    eye: {{
+                        x: center.x + radius * Math.cos(angle),
+                        y: center.y + radius * Math.sin(angle),
+                        z: center.z + elevOffsetZ
+                    }}
+                }}
+            }});
+        }}
+        reqId = requestAnimationFrame(step);
     }}
 
-    function resumeAnimation() {{
+    function startAnimation() {{
         animationPaused = false;
-        console.log("Resuming animation");
-        Plotly.animate(plot, null, {{
-            frame: {{ duration: 50, redraw: true }},
-            transition: {{ duration: 0 }},
-            mode: "next",
-            fromcurrent: true
-        }}).catch((err) => {{
-            console.warn("Resume failed:", err);
-        }});
+        lastTime = performance.now();
+        if (!reqId) {{
+            reqId = requestAnimationFrame(step);
+        }}
+    }}
+
+    function pauseAnimation() {{
+        // Keep the frame loop alive so wheel zoom still eases while paused.
+        animationPaused = true;
     }}
 
     function toggleAnimation(e) {{
-        e.preventDefault(); // prevent context menu
+        e.preventDefault();
         if (animationPaused) {{
-            resumeAnimation();
+            startAnimation();
         }} else {{
             pauseAnimation();
         }}
     }}
 
-    plot.addEventListener('plotly_animated', () => {{
-        console.log("Animation started — resetting paused flag");
-        animationPaused = false;
-    }});
-    if (plot) {{
-        // Right-click = toggle animation
-        plot.addEventListener("contextmenu", toggleAnimation);
-        // Hook the play button to resume and reset state
-        const playButton = [...document.querySelectorAll("button")].find(btn =>
-            btn.textContent === {play_button_text}
-        );
-        if (playButton) {{
-            playButton.addEventListener("click", () => {{
-                animationPaused = false;
-            }});
-        }}
-    }}
+    const playBtn = document.getElementById("orbit-play-btn");
+    const pauseBtn = document.getElementById("orbit-pause-btn");
+    if (playBtn) playBtn.addEventListener("click", startAnimation);
+    if (pauseBtn) pauseBtn.addEventListener("click", pauseAnimation);
+
+    plot.addEventListener("contextmenu", toggleAnimation);
+    plot.addEventListener("mousedown", pauseAnimation);
+    plot.addEventListener("touchstart", pauseAnimation);
+    startAnimation();
 }});
-</script>
-""")
-        print(f"\nInteractive plot with autorotation saved to {filename}")
+</script>"""
+    html_path = Path(filename)
+    html = html_path.read_text(encoding="utf-8")
+    if "</body>" in html:
+        html = html.replace("</body>", controls_and_script + "\n</body>", 1)
+    else:
+        html += controls_and_script
+    html_path.write_text(html, encoding="utf-8")
+    print(f"\nInteractive plot with autorotation saved to {filename}")
 
 
 def calc_azalt(lat1, lon1, alt1, lat2, lon2, alt2):

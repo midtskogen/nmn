@@ -1125,6 +1125,103 @@ document.addEventListener("DOMContentLoaded", function () {{
         html = html.replace("</body>", controls_and_script + "\n</body>", 1)
     else:
         html += controls_and_script
+
+    # --- Animated wind-profile overlay ---
+    # If fetch.py pulled a sounding (wind_profile.csv: Height_m,Temp_K,Pressure_Pa,
+    # WindSpeed_ms,WindDir_deg), embed subtle per-altitude particle streaks that
+    # advect along the flow direction at a speed proportional to wind speed.
+    wind_csv = html_path.parent / 'wind_profile.csv'
+    if not wind_csv.is_file():
+        wind_csv = Path('wind_profile.csv')
+    if wind_csv.is_file():
+        try:
+            levels = []
+            with open(wind_csv, encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split(',')
+                    if len(parts) < 5:
+                        continue
+                    h_m, speed_ms, dir_deg = float(parts[0]), float(parts[3]), float(parts[4])
+                    rad = math.radians(dir_deg)
+                    # Meteorological direction is where the wind comes FROM;
+                    # the flow vector points the opposite way (east, north).
+                    levels.append([h_m / 1000.0, -math.sin(rad), -math.cos(rad), speed_ms])
+            if levels:
+                if not options.get('azonly', False) and track_start is not None:
+                    bx0, bx1 = min(seg_x) - 20.0, max(seg_x) + 20.0
+                    by0, by1 = min(seg_y) - 20.0, max(seg_y) + 20.0
+                else:
+                    bx0, bx1, by0, by1 = x_min_km, x_max_km, y_min_km, y_max_km
+                bx0, bx1 = max(bx0, x_min_km), min(bx1, x_max_km)
+                by0, by1 = max(by0, y_min_km), min(by1, y_max_km)
+                wind_json = json.dumps({'box': [bx0, bx1, by0, by1], 'levels': levels})
+                wind_script = """
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const plot = document.querySelector(".js-plotly-plot");
+    if (!plot) return;
+    const wind = WIND_DATA_JSON;
+    const x0 = wind.box[0], x1 = wind.box[1], y0 = wind.box[2], y1 = wind.box[3];
+    const N = 26;            // particles per altitude level
+    const TRAIL = 0.35;      // streak length in seconds of travel
+    const SPEED_SCALE = 0.9; // visual km/s per m/s of wind speed
+    let maxSpeed = 0;
+    wind.levels.forEach(L => { if (L[3] > maxSpeed) maxSpeed = L[3]; });
+    const levels = wind.levels.map(L => {
+        const parts = [];
+        for (let i = 0; i < N; i++)
+            parts.push({x: x0 + Math.random() * (x1 - x0), y: y0 + Math.random() * (y1 - y0)});
+        const norm = maxSpeed > 0 ? L[3] / maxSpeed : 0;
+        return {z: L[0], vx: L[1] * L[3] * SPEED_SCALE, vy: L[2] * L[3] * SPEED_SCALE,
+                color: "hsla(" + Math.round(210 - 160 * norm) + ",65%," + Math.round(78 - 18 * norm) + "%,0.6)",
+                parts: parts, idx: -1};
+    });
+    Plotly.addTraces(plot, levels.map(L => ({
+        type: 'scatter3d', mode: 'lines', x: [], y: [], z: [],
+        line: {width: 2, color: L.color},
+        opacity: 0.55, showlegend: false, hoverinfo: 'none'
+    }))).then(function () {
+        const start = plot.data.length - levels.length;
+        levels.forEach((L, i) => { L.idx = start + i; });
+        let last = performance.now();
+        function tick(now) {
+            const dt = Math.min(0.1, (now - last) / 1000);
+            last = now;
+            const X = [], Y = [], Z = [];
+            for (const L of levels) {
+                const xs = [], ys = [], zs = [];
+                const len = Math.hypot(L.vx, L.vy);
+                const dx = len > 0 ? L.vx / len * len * TRAIL : 0;
+                const dy = len > 0 ? L.vy / len * len * TRAIL : 0;
+                for (const p of L.parts) {
+                    p.x += L.vx * dt; p.y += L.vy * dt;
+                    if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) {
+                        p.x = x0 + Math.random() * (x1 - x0);
+                        p.y = y0 + Math.random() * (y1 - y0);
+                    }
+                    xs.push(p.x - dx, p.x, null);
+                    ys.push(p.y - dy, p.y, null);
+                    zs.push(L.z, L.z, null);
+                }
+                X.push(xs); Y.push(ys); Z.push(zs);
+            }
+            Plotly.restyle(plot, {x: X, y: Y, z: Z}, levels.map(L => L.idx));
+            requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+    });
+});
+</script>""".replace('WIND_DATA_JSON', wind_json)
+                if "</body>" in html:
+                    html = html.replace("</body>", wind_script + "\n</body>", 1)
+                else:
+                    html += wind_script
+        except Exception as e:
+            print(f"Warning: could not embed wind animation: {e}")
+
     html_path.write_text(html, encoding="utf-8")
     print(f"Interactive 3D plot saved to {filename}")
 

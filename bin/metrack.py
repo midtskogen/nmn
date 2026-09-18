@@ -1179,12 +1179,12 @@ document.addEventListener("DOMContentLoaded", function () {
                 color: "hsla(" + Math.round(210 - 160 * norm) + ",65%," + Math.round(78 - 18 * norm) + "%,0.6)",
                 parts: parts, idx: -1};
     });
-    Plotly.addTraces(plot, levels.map(L => ({
+    Promise.resolve(Plotly.addTraces(plot, levels.map(L => ({
         type: 'scatter3d', mode: 'lines', x: [], y: [], z: [],
         line: {width: 2, color: L.color},
         opacity: 0.55, showlegend: false, hoverinfo: 'none'
-    }))).then(function () {
-        const start = plot.data.length - levels.length;
+    })))).then(function () {
+        const start = (plot.data ? plot.data.length : 0) - levels.length;
         levels.forEach((L, i) => { L.idx = start + i; });
         let last = performance.now();
         function tick(now) {

@@ -18,6 +18,7 @@ api/query_log.json*
 api/abuse_log.json*
 api/rate_limit.json*
 api/task_queue.jsonl*
+api/*.pid
 api/queue_worker.pid
 api/queue_worker.log
 # Generated tetra3 pattern database (built from stars.py on first run)

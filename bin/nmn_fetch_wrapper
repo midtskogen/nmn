@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""
+nmn_fetch_wrapper — forced-command whitelist for the NMN web-fetch SSH key.
+
+Install on each station, then restrict the web server's key in
+~meteor/.ssh/authorized_keys:
+
+    restrict,command="/home/meteor/nmn/bin/nmn_fetch_wrapper" ssh-ed25519 AAAA... nmn-fetch@bolide
+    restrict,permitopen="192.168.76.*:554",no-pty ssh-ed25519 AAAA... nmn-stream@bolide
+
+(`restrict` already implies no-pty, no-agent/X11 forwarding and no port
+forwarding; the stream key gets no shell at all, only -L to the camera
+subnet. Keep the two keys separate so a fetch request can never tunnel.)
+
+Everything not matching the whitelist below is rejected and logged to
+syslog. The patterns mirror EXACTLY the remote commands emitted by
+nmn/server/data/controller.py and live_streamer.py:
+
+  * scp -f <paths under /meteor>          (file pull; scp -O = legacy proto)
+  * stat -c%s <path under /meteor>        (size probe before scp)
+  * cd <dir> && tar -czf - <names>        (batched minute-file prefetch)
+  * tar -c -h --ignore-failed-read -f -   (lens.pto bundle)
+  * find /meteor/cam[89]/ ... | identify  (stitch dimension probe)
+  * curl ... http://192.168.76.N:8899/onvif/Media  (ONVIF keyframe request)
+  * sftp subsystem                        (delegated to sftp-server -R,
+                                           read-only, rooted at /meteor)
+
+If the web server ever legitimately needs a new remote command, add a
+pattern here AND keep it strict (unquoted, /meteor-only tokens).
+"""
+
+import os
+import re
+import sys
+import syslog
+
+SFTP_SERVER = "/usr/lib/openssh/sftp-server"
+SFTP_ROOT = "/meteor"
+
+# A bare path token confined to /meteor (no spaces, no quotes, no meta).
+_P = r"/meteor/[A-Za-z0-9_./-]+"
+# A bare filename token (no slash, no meta).
+_F = r"[A-Za-z0-9_.-]+"
+
+ALLOWED = [
+    # scp file pull: `scp -f /meteor/...` (one or more files, -f only:
+    # -t/-T upload mode is NEVER permitted)
+    re.compile(rf"^scp -f(?: +{_P})+$"),
+    # remote size probe before scp
+    re.compile(rf"^stat -c%s {_P}$"),
+    # batched image prefetch: cd /meteor/camN/YYYYMMDD/HH && tar -czf - names
+    re.compile(rf"^cd {_P} && tar -czf -(?: +{_F})+ 2>/dev/null$"),
+    # lens.pto bundle for camera-boundary overlays
+    re.compile(rf"^tar -c -h --ignore-failed-read -f -(?: +{_P})+ 2>/dev/null$"),
+    # stitch dimensions probe (cam8=equirect, cam9=fisheye)
+    re.compile(r"^find /meteor/cam[89]/ -name '(?:mini|full)_\*\.jpg' \| "
+               r"head -1 \| xargs -r identify -format '%w %h\\n' 2>/dev/null$"),
+    # ONVIF SetSynchronizationPoint (keyframe request) via the camera LAN.
+    # SOAP body arrives on stdin (@-); only the fixed Media service URL.
+    re.compile(r"^curl -sS --max-time [0-9]+ "
+               r"-w '\\nHTTP_CODE:%\{http_code\}\\n' -X POST "
+               r"http://192\.168\.76\.[0-9]+:8899/onvif/Media "
+               r"-H 'Content-Type: application/soap\+xml; charset=utf-8' "
+               r"--data-binary @-$"),
+]
+
+
+def _deny(reason):
+    syslog.syslog(syslog.LOG_WARNING, f"nmn_fetch_wrapper DENIED: {reason}")
+    print(f"nmn_fetch_wrapper: command not permitted", file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    syslog.openlog("nmn_fetch_wrapper", syslog.LOG_PID, syslog.LOG_AUTH)
+
+    cmd = os.environ.get("SSH_ORIGINAL_COMMAND")
+    if not cmd:
+        _deny("interactive session (no SSH_ORIGINAL_COMMAND)")
+
+    # SFTP subsystem request (modern scp without -O, or sftp client):
+    # delegate to the real sftp-server, but read-only and rooted at /meteor.
+    if cmd in ("sftp", "internal-sftp", "/usr/lib/openssh/sftp-server"):
+        if not os.path.exists(SFTP_SERVER):
+            _deny("sftp-server not installed")
+        syslog.syslog(syslog.LOG_INFO, "nmn_fetch_wrapper sftp (read-only)")
+        os.execv(SFTP_SERVER, [SFTP_SERVER, "-R", "-d", SFTP_ROOT])
+
+    for pattern in ALLOWED:
+        if pattern.fullmatch(cmd):
+            syslog.syslog(syslog.LOG_INFO, f"nmn_fetch_wrapper allowed: {cmd[:200]}")
+            os.execv("/bin/sh", ["/bin/sh", "-c", cmd])
+
+    _deny(f"no whitelist match: {cmd[:300]}")
+
+
+if __name__ == "__main__":
+    main()

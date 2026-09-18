@@ -1,0 +1,393 @@
+openapi: 3.0.3
+info:
+  title: NMN Public API
+  description: |
+    Public REST API for the Norsk Meteornettverk data services.
+    Read-only endpoints are open; stateful or station-traffic endpoints require an API key.
+  version: "1.0.0"
+servers:
+  - url: https://norskmeteornettverk.no/api/v1
+paths:
+  /stations:
+    get:
+      summary: List stations
+      operationId: listStations
+      responses:
+        '200': { description: Station list JSON }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /cameras/fovs:
+    get:
+      summary: Camera field-of-view metadata
+      operationId: getCameraFovs
+      responses:
+        '200': { description: Camera FOV JSON }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /kp:
+    get:
+      summary: Aurora KP index
+      operationId: getKp
+      responses:
+        '200': { description: KP data JSON }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /lightning:
+    get:
+      summary: Lightning strikes
+      operationId: getLightning
+      parameters:
+        - name: date
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200': { description: Lightning data JSON }
+        '400': { description: Invalid date }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /meteors:
+    get:
+      summary: Meteor events
+      operationId: getMeteors
+      responses:
+        '200': { description: Meteor data JSON }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /stations/{station_id}/stats:
+    get:
+      summary: Station usage statistics
+      operationId: getStationStats
+      parameters:
+        - name: station_id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^ams\d+$' }
+        - name: start_date
+          in: query
+          schema: { type: string, format: date }
+        - name: end_date
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200': { description: Stats JSON }
+        '400': { description: Invalid parameters }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /predict/passes:
+    post:
+      summary: Queue satellite pass prediction
+      operationId: predictPasses
+      parameters:
+        - name: station
+          in: query
+          schema: { type: string }
+        - name: days
+          in: query
+          schema: { type: integer }
+        - name: start
+          in: query
+          schema: { type: string, format: date-time }
+        - name: end
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '202': { description: Task queued JSON with task_id }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /predict/passes/{task_id}:
+    get:
+      summary: Poll satellite pass prediction status
+      operationId: getPassStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Task status JSON }
+        '404': { description: Task not found }
+  /predict/aircraft:
+    post:
+      summary: Queue aircraft crossing prediction
+      operationId: predictAircraft
+      parameters:
+        - name: station
+          in: query
+          schema: { type: string }
+        - name: days
+          in: query
+          schema: { type: integer }
+        - name: start
+          in: query
+          schema: { type: string, format: date-time }
+        - name: end
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '202': { description: Task queued JSON with task_id }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /predict/aircraft/{task_id}:
+    get:
+      summary: Poll aircraft crossing prediction status
+      operationId: getAircraftStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Task status JSON }
+        '404': { description: Task not found }
+  /downloads:
+    post:
+      summary: Start file download
+      operationId: startDownload
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '202': { description: Task queued JSON with task_id }
+        '401': { description: Missing/invalid API key }
+        '413': { description: Payload too large }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /downloads/{task_id}:
+    get:
+      summary: Poll download status
+      operationId: getDownloadStatus
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Task status JSON }
+    delete:
+      summary: Cancel and cleanup a download
+      operationId: cancelDownload
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Cancellation result }
+  /streams:
+    post:
+      summary: Start a live stream
+      operationId: startStream
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                station_id: { type: string }
+                camera_num: { type: integer }
+                resolution: { type: string, enum: [lowres, hires] }
+                hevc_supported: { type: string }
+      responses:
+        '202': { description: Stream task queued JSON }
+        '401': { description: Missing/invalid API key }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /streams/{task_id}:
+    get:
+      summary: Poll stream status
+      operationId: getStreamStatus
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Stream status JSON }
+    delete:
+      summary: Stop a stream
+      operationId: stopStream
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Stop result }
+  /streams/{task_id}/transcode:
+    post:
+      summary: Request H.264 transcode
+      operationId: requestTranscode
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Transcode request result }
+  /grids/{station_id}/{camera_num}:
+    get:
+      summary: Fetch grid overlay from a station
+      operationId: fetchGrid
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: station_id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^ams\d+$' }
+        - name: camera_num
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: Grid overlay URL JSON }
+        '401': { description: Missing/invalid API key }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /annotations/{station_id}/{camera_num}:
+    get:
+      summary: Fetch annotation overlay from a station
+      operationId: fetchAnnotation
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: station_id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^ams\d+$' }
+        - name: camera_num
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: Annotation overlay URL JSON }
+        '401': { description: Missing/invalid API key }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /archive/grid:
+    get:
+      summary: Fetch archive grid overlay
+      operationId: fetchArchiveGrid
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: station_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: camera_num
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: timestamp
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        '200': { description: Archive grid URL JSON }
+  /archive/annotation:
+    get:
+      summary: Fetch archive annotation overlay
+      operationId: fetchArchiveAnnotation
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: station_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: camera_num
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: timestamp
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        '200': { description: Archive annotation URL JSON }
+  /archive/mask:
+    get:
+      summary: Fetch archive mask overlay
+      operationId: fetchArchiveMask
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: station_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: camera_num
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: timestamp
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        '200': { description: Archive mask URL JSON }
+  /enhance:
+    post:
+      summary: Queue image enhancement
+      operationId: enhanceImage
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image: { type: string }
+                filter: { type: integer }
+      responses:
+        '202': { description: Task queued JSON with task_id }
+  /tasks/{task_id}:
+    get:
+      summary: Generic task status
+      operationId: getTaskStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Task status JSON }
+  /admin/stats:
+    get:
+      summary: API traffic statistics
+      operationId: getStats
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: html
+          in: query
+          schema: { type: integer, enum: [0, 1] }
+      responses:
+        '200': { description: JSON or HTML stats }
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  responses:
+    RateLimit:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              message: { type: string }
+              retry_after: { type: integer }

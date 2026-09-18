@@ -10,6 +10,7 @@ import logging
 import time
 import shutil
 import re
+import shlex
 import signal
 import threading
 from datetime import datetime, timedelta, timezone
@@ -268,7 +269,8 @@ try:
         start_stream_relay, stop_stream_relay, request_stream_transcode,
         fetch_grid_file, fetch_annotation_file,
         get_archive_grid_overlay, get_archive_annotation_overlay,
-        get_stitch_cam_boundaries, get_archive_mask_overlay
+        get_stitch_cam_boundaries, get_archive_mask_overlay,
+        sweep_stale_streams
     )
     from data_fetchers import (
         get_kp_data, get_lightning_data, get_meteor_data, get_camera_fovs, get_station_stats
@@ -489,18 +491,18 @@ class FileProcessor:
 
     def _scp_file(self, remote_path, local_path):
         temp_path = local_path + ".part"
-        command = ["scp", "-B", "-o", "ConnectTimeout=300"]
+        command = ["scp", "-B", "-O", "-o", "ConnectTimeout=300", "-o", "PermitLocalCommand=no"]
         if self.ssh_control_socket and os.path.exists(self.ssh_control_socket):
             command += ["-o", f"ControlPath={self.ssh_control_socket}"]
-        command += [f"{self.station_id}:{remote_path}", temp_path]
+        command += ["--", f"{self.station_id}:{shlex.quote(remote_path)}", temp_path]
         # Best-effort: get remote file size for progress reporting
         remote_size = 0
         if self.status_file:
             try:
-                sz_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+                sz_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no"]
                 if self.ssh_control_socket and os.path.exists(self.ssh_control_socket):
                     sz_cmd += ["-o", f"ControlPath={self.ssh_control_socket}"]
-                sz_cmd += [self.station_id, f"stat -c%s {remote_path}"]
+                sz_cmd += ["--", self.station_id, f"stat -c%s {shlex.quote(remote_path)}"]
                 sz_out = subprocess.run(sz_cmd, capture_output=True, text=True, timeout=15)
                 remote_size = int(sz_out.stdout.strip())
             except Exception:
@@ -939,6 +941,9 @@ class FileProcessor:
         return result
 
 def download_for_single_station(task_id, station_id, json_payload_str, master_task_id):
+    _safe_id(task_id, 'task_id')
+    _safe_id(station_id, 'station_id')
+    _safe_id(master_task_id, 'master_task_id')
     station_status_file = os.path.join(LOCK_DIR, f"{task_id}.json")
     try:
         data = json.loads(json_payload_str)
@@ -968,9 +973,11 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             try:
                 ssh_master_proc = subprocess.Popen(
                     ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=60",
+                     "-o", "PermitLocalCommand=no",
+                     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
                      "-o", f"ControlPath={ssh_control_socket}",
                      "-o", "ControlMaster=yes", "-o", "ControlPersist=60",
-                     "-N", station_id],
+                     "-N", "--", station_id],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(1)
             except OSError:
@@ -985,17 +992,17 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                     remote_path = f"/meteor/cam{cam_num}/{date_compact}/timelapse{'_hires' if is_hires_tl else ''}.mp4"
                     if not os.path.exists(local_path):
                         temp_path = local_path + ".part"
-                        cmd = ["scp", "-B", "-o", "ConnectTimeout=300"]
+                        cmd = ["scp", "-B", "-O", "-o", "ConnectTimeout=300", "-o", "PermitLocalCommand=no"]
                         if ssh_control_socket and os.path.exists(ssh_control_socket):
                             cmd += ["-o", f"ControlPath={ssh_control_socket}"]
-                        cmd += [f"{station_id}:{remote_path}", temp_path]
+                        cmd += ["--", f"{station_id}:{shlex.quote(remote_path)}", temp_path]
                         # Get remote file size for progress reporting (best-effort)
                         remote_size = 0
                         try:
-                            sz_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+                            sz_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "PermitLocalCommand=no"]
                             if ssh_control_socket and os.path.exists(ssh_control_socket):
                                 sz_cmd += ["-o", f"ControlPath={ssh_control_socket}"]
-                            sz_cmd += [station_id, f"stat -c%s {remote_path}"]
+                            sz_cmd += ["--", station_id, f"stat -c%s {shlex.quote(remote_path)}"]
                             sz_out = subprocess.run(sz_cmd, capture_output=True, text=True, timeout=15)
                             remote_size = int(sz_out.stdout.strip())
                         except Exception:
@@ -1042,7 +1049,7 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                     update_status(station_status_file, "progress", {"step": step, "total": total_items, "message": f"status_fetching_timelapse|station={station_code}", "files": results, "errors": errors})
             if ssh_master_proc and ssh_master_proc.poll() is None:
                 try:
-                    subprocess.run(["ssh", "-o", f"ControlPath={ssh_control_socket}", "-O", "exit", station_id], capture_output=True, timeout=10)
+                    subprocess.run(["ssh", "-o", "PermitLocalCommand=no", "-o", f"ControlPath={ssh_control_socket}", "-O", "exit", "--", station_id], capture_output=True, timeout=10)
                 except Exception: ssh_master_proc.terminate()
             if os.path.exists(ssh_control_socket): os.remove(ssh_control_socket)
             update_status(station_status_file, "complete", {"files": results, "errors": errors, "total_bytes_downloaded": total_bytes})
@@ -1077,10 +1084,16 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
 
         if 'camera_views' in data and data['camera_views']:
             for view in data['camera_views']:
+                # Camera numbers are interpolated into remote shell commands
+                # (cd/stat/scp paths); they MUST be plain ints, never raw
+                # payload strings.
+                cam_int = int(view['camera'])
+                if not (1 <= cam_int <= 99):
+                    raise ValueError(f"error_invalid_camera|cam={view['camera']}")
                 start = datetime.fromisoformat(view['start_utc']).replace(second=0, microsecond=0)
                 end = datetime.fromisoformat(view['end_utc'])
                 while start <= end:
-                    files_to_process.append({'time': start, 'cam': view['camera']})
+                    files_to_process.append({'time': start, 'cam': cam_int})
                     start += timedelta(minutes=1)
         elif is_video_multi:
             start_time = datetime.strptime(f"{data['date']} {data['hour']}:{data['minute']}", '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
@@ -1118,9 +1131,11 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
             try:
                 ssh_master_proc = subprocess.Popen(
                     ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=60",
+                     "-o", "PermitLocalCommand=no",
+                     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
                      "-o", f"ControlPath={ssh_control_socket}",
                      "-o", "ControlMaster=yes", "-o", "ControlPersist=120",
-                     "-N", station_id],
+                     "-N", "--", station_id],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
                 import time as _time; _time.sleep(1)  # give master time to establish
@@ -1151,10 +1166,12 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                     logging.warning(f"Worker {task_id} - skipping unsafe remote filenames")
                     continue
                 local_map = {rf: lp for rf, lp in file_list}
-                ssh_cmd = ["ssh"]
+                ssh_cmd = ["ssh", "-o", "PermitLocalCommand=no"]
                 if ssh_control_socket and os.path.exists(ssh_control_socket):
                     ssh_cmd += ["-o", f"ControlPath={ssh_control_socket}"]
-                ssh_cmd += [station_id, f"cd {remote_dir} && tar -czf - {' '.join(filenames)} 2>/dev/null"]
+                ssh_cmd += ["--", station_id,
+                            f"cd {shlex.quote(remote_dir)} && tar -czf - "
+                            f"{' '.join(shlex.quote(rf) for rf in filenames)} 2>/dev/null"]
                 try:
                     result = subprocess.run(ssh_cmd, capture_output=True, timeout=120)
                     if result.returncode == 0 and result.stdout:
@@ -1276,10 +1293,10 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
                                         remote_file = f"{'mini' if not is_hires else 'full'}_{t_obj.strftime('%M')}.jpg"
                                         remote_path = f"{remote_dir}/{remote_file}"
                                         temp_path = fpath + ".part"
-                                        cmd_scp = ["scp", "-B", "-o", "ConnectTimeout=15"]
+                                        cmd_scp = ["scp", "-B", "-O", "-o", "ConnectTimeout=15", "-o", "PermitLocalCommand=no"]
                                         if ssh_control_socket and os.path.exists(ssh_control_socket):
                                             cmd_scp += ["-o", f"ControlPath={ssh_control_socket}"]
-                                        cmd_scp += [f"{station_id}:{remote_path}", temp_path]
+                                        cmd_scp += ["--", f"{station_id}:{shlex.quote(remote_path)}", temp_path]
                                         try:
                                             subprocess.run(cmd_scp, check=True, timeout=60, capture_output=True)
                                             os.rename(temp_path, fpath)
@@ -1457,8 +1474,9 @@ def download_for_single_station(task_id, station_id, json_payload_str, master_ta
 
         if ssh_master_proc and ssh_master_proc.poll() is None:
             try:
-                subprocess.run(["ssh", "-o", f"ControlPath={ssh_control_socket}",
-                                "-O", "exit", station_id],
+                subprocess.run(["ssh", "-o", "PermitLocalCommand=no",
+                                "-o", f"ControlPath={ssh_control_socket}",
+                                "-O", "exit", "--", station_id],
                                capture_output=True, timeout=10)
             except Exception:
                 ssh_master_proc.terminate()
@@ -1486,6 +1504,19 @@ def cleanup_lock_dir(lock_dir, age_in_days, task_id):
     try:
         for filename in os.listdir(lock_dir):
             file_path = os.path.join(lock_dir, filename)
+            # Stale ssh ControlMaster sockets are socket files, not regular
+            # files, so the isfile check below would never reach them. The
+            # masters self-expire within ControlPersist seconds (~2 min), so
+            # a socket older than an hour is guaranteed orphaned.
+            import stat as _stat
+            try:
+                if _stat.S_ISSOCK(os.stat(file_path).st_mode):
+                    if (now - os.path.getmtime(file_path)) > 3600:
+                        os.remove(file_path)
+                        logging.info(f"Task {task_id} - Deleted stale ssh control socket: {file_path}")
+                    continue
+            except FileNotFoundError:
+                continue
             if not os.path.isfile(file_path):
                 continue
             age = now - os.path.getmtime(file_path)
@@ -1511,6 +1542,8 @@ def cleanup_lock_dir(lock_dir, age_in_days, task_id):
                 try:
                     os.remove(file_path)
                     logging.info(f"Task {task_id} - Deleted old file: {file_path}")
+                except FileNotFoundError:
+                    pass  # another concurrent task already removed it
                 except OSError as e:
                     logging.error(f"Task {task_id} - Error deleting file {file_path}: {e}")
     except FileNotFoundError:
@@ -1535,6 +1568,12 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
         trim_log_file(LOG_FILE, MAX_LOG_LINES, master_task_id)
         for d in [DOWNLOAD_DIR, LOG_DIR, CACHE_DIR]: cleanup_old_files(d, CLEANUP_AGE_DAYS, master_task_id, [os.path.basename(LOG_FILE)] if d == LOG_DIR else [])
         cleanup_lock_dir(LOCK_DIR, CLEANUP_AGE_DAYS, master_task_id)
+        # Kill orphaned ssh tunnels/ffmpeg relays left behind by crashed
+        # stream workers so they cannot accumulate indefinitely.
+        try:
+            sweep_stale_streams()
+        except Exception as e:
+            logging.warning(f"Coordinator {master_task_id} - stale stream sweep failed: {e}")
         
         data = json.loads(json_payload)
         if 'crossing_data' in data: data['flight_pass_data'] = data.pop('crossing_data')

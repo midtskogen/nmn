@@ -20,7 +20,10 @@
     th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); }
     th { color: var(--muted); text-transform: uppercase; font-size: .75rem; letter-spacing: .05em; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #21262d; padding: .15rem .35rem; border-radius: 4px; color: var(--code); }
-    pre { background: #21262d; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+    pre { background: #21262d; padding: 1rem; padding-top: 2.2rem; border-radius: 8px; overflow-x: auto; position: relative; }
+    .copy-btn { position: absolute; top: .4rem; right: .4rem; background: #30363d; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: .25rem .6rem; font-size: .75rem; cursor: pointer; font-family: inherit; }
+    .copy-btn:hover { background: #3c444d; color: var(--text); }
+    .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
     pre code { background: transparent; padding: 0; color: var(--text); }
     ul li { margin: .4rem 0; }
     .note { border-left: 3px solid var(--accent); padding-left: 1rem; color: var(--muted); font-size: .9rem; }
@@ -229,5 +232,34 @@ curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/tasks/ap
 
   <p class="note">For the full interactive spec, open <a href="index.html">Swagger UI</a>.</p>
 </div>
+<script>
+// Add a copy-to-clipboard button to every code block.
+document.querySelectorAll('pre').forEach(function (pre) {
+  var btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.type = 'button';
+  btn.textContent = 'Copy';
+  btn.setAttribute('aria-label', 'Copy code block to clipboard');
+  btn.addEventListener('click', function () {
+    var code = pre.querySelector('code');
+    var text = code ? code.innerText : pre.innerText.replace(/^Copy\n/, '');
+    var done = function () {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { btn.textContent = 'Failed'; });
+    } else {
+      // Fallback for non-secure contexts
+      var ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = 'Failed'; }
+      document.body.removeChild(ta);
+    }
+  });
+  pre.insertBefore(btn, pre.firstChild);
+});
+</script>
 </body>
 </html>

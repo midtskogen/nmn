@@ -14,16 +14,14 @@
 
 $token_file = '/var/www/.ssh/report_token';
 $REPORT_TOKEN = trim((string)@file_get_contents($token_file));
-if ($REPORT_TOKEN === '') {
-    http_response_code(500);
-    exit("token not configured\n");
-}
+$allowed_signers = '/var/www/.ssh/allowed_signers';   // station ssh pubkey(s)
 
 header('Content-Type: text/plain; charset=UTF-8');
 
 $dir     = (string)($_GET['dir'] ?? '');
 $station = preg_replace('/[^\w]/', '', (string)($_GET['station'] ?? ''));
 $token   = (string)($_SERVER['HTTP_X_NMN_TOKEN'] ?? $_GET['token'] ?? '');
+$sig_b64 = (string)($_SERVER['HTTP_X_NMN_SIG'] ?? '');
 $ip      = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
 $log_file = '/tmp/upload_php.log';
 
@@ -37,9 +35,11 @@ function deny(int $code, string $msg): void {
     exit;
 }
 
-if ($token === '' || !hash_equals($REPORT_TOKEN, $token)) {
-    deny(403, 'forbidden');
-}
+// Authentication: an ssh-keygen signature over "<dir>\n<body>" made with the
+// station's private key (the same key the reverse tunnel uses - it never
+// leaves the station), verified against allowed_signers.  The shared token
+// is accepted as a fallback during the transition.
+$auth = '';
 
 // Whitelist station names against stations.json.
 $stations_ok = false;
@@ -108,6 +108,30 @@ if ($out) fclose($out);
 if ($written === 0) { @unlink($archive); deny(400, 'empty body'); }
 if ($written > $MAX) { @unlink($archive); deny(413, 'too large'); }
 
+// Authenticate: signature over "<dir>\n<body>" beats the shared token.
+if ($sig_b64 !== '') {
+    $sigfile = $archive . '.sig';
+    $payload = $archive . '.payload';
+    file_put_contents($sigfile, base64_decode($sig_b64));
+    $pf = fopen($payload, 'wb');
+    fwrite($pf, $clean_dir . "\n");
+    $af = fopen($archive, 'rb');
+    stream_copy_to_stream($af, $pf);
+    fclose($af); fclose($pf);
+    $v = 'ssh-keygen -Y verify -f ' . escapeshellarg($allowed_signers)
+       . ' -I nmn-station -n nmn-upload -s ' . escapeshellarg($sigfile)
+       . ' < ' . escapeshellarg($payload) . ' 2>/dev/null';
+    exec($v, $vo, $vrc);
+    @unlink($sigfile); @unlink($payload);
+    if ($vrc === 0) $auth = 'sig';
+}
+if ($auth === ''
+    && $REPORT_TOKEN !== '' && $token !== ''
+    && hash_equals($REPORT_TOKEN, $token)) {
+    $auth = 'token';
+}
+if ($auth === '') { @unlink($archive); deny(403, 'forbidden'); }
+
 // Upload stored — now mark the dir as seen for dedupe.
 if ($fp = fopen($rl_file, 'c+')) {
     if (flock($fp, LOCK_EX)) {
@@ -139,6 +163,6 @@ $cmd = sprintf(
 exec($cmd);
 
 @file_put_contents($log_file,
-    "[" . date("Y-m-d H:i:s") . "] RECEIVED station=$station dir=$clean_dir bytes=$written ip=$ip archive=$archive\n",
+    "[" . date("Y-m-d H:i:s") . "] RECEIVED auth=$auth station=$station dir=$clean_dir bytes=$written ip=$ip archive=$archive\n",
     FILE_APPEND | LOCK_EX);
 echo "received\n";

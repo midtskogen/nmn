@@ -190,6 +190,42 @@ function new_task_id(string $prefix): string {
 }
 
 // ---------------------------------------------------------------------------
+// Shared download-job launcher: payload JSON -> temp file -> coordinator.
+// ---------------------------------------------------------------------------
+function api_start_download(string $raw, string $client_ip, ?string $key_id) {
+    global $log_entry;
+    $max_payload = 5 * 1024 * 1024;
+    if (strlen($raw) > $max_payload) {
+        $log_entry['status'] = 413;
+        api_error('payload_too_large', 'Download payload too large.', 413);
+    }
+    // Reuse the web UI concurrent-download semaphore.
+    $max_concurrent = 8;
+    $sem_file = LOCK_DIR . '/download_semaphore.lock';
+    $sem = fopen($sem_file, 'c');
+    if (!$sem || !flock($sem, LOCK_EX)) {
+        api_error('server_busy', 'Could not acquire download lock.', 503);
+    }
+    $lock_files = glob(LOCK_DIR . '/master_task_*.lock');
+    if (count($lock_files) >= $max_concurrent) {
+        flock($sem, LOCK_UN); fclose($sem);
+        api_error('server_busy', 'Too many concurrent downloads.', 503);
+    }
+    $task_id = new_task_id('master_task');
+    api_record_task_owner($task_id, $key_id);
+    $payload_file = tempnam(LOCK_DIR, 'payload_');
+    file_put_contents($payload_file, $raw, LOCK_EX);
+    touch(LOCK_DIR . '/' . $task_id . '.lock');
+    flock($sem, LOCK_UN); fclose($sem);
+
+    $cmd = python_exec() . ' ' . escapeshellarg(DATA_DIR . '/controller.py') . ' download '
+         . escapeshellarg($task_id) . ' ' . escapeshellarg($payload_file) . ' ' . escapeshellarg($client_ip)
+         . ' > /dev/null 2>&1 &';
+    shell_exec($cmd);
+    api_json_response(['task_id' => $task_id, 'status' => 'pending', 'poll_url' => '/api/v1/downloads/' . $task_id], 202);
+}
+
+// ---------------------------------------------------------------------------
 // Helper: run a Python script synchronously and return JSON.
 // ---------------------------------------------------------------------------
 function run_python(array $args) {
@@ -316,40 +352,12 @@ switch ($resource) {
     case 'downloads':
         if ($method === 'POST' && count($segments) === 1) {
             api_require_key('download');
-            $max_payload = 5 * 1024 * 1024;
             $raw = file_get_contents('php://input');
-            if (strlen($raw) > $max_payload) {
-                $log_entry['status'] = 413;
-                api_error('payload_too_large', 'Download payload too large.', 413);
-            }
             $json = json_decode($raw, true);
             if (!is_array($json)) {
                 api_error('invalid_json', 'Request body must be JSON.', 400);
             }
-            // Reuse the web UI concurrent-download semaphore.
-            $max_concurrent = 8;
-            $sem_file = LOCK_DIR . '/download_semaphore.lock';
-            $sem = fopen($sem_file, 'c');
-            if (!$sem || !flock($sem, LOCK_EX)) {
-                api_error('server_busy', 'Could not acquire download lock.', 503);
-            }
-            $lock_files = glob(LOCK_DIR . '/master_task_*.lock');
-            if (count($lock_files) >= $max_concurrent) {
-                flock($sem, LOCK_UN); fclose($sem);
-                api_error('server_busy', 'Too many concurrent downloads.', 503);
-            }
-            $task_id = new_task_id('master_task');
-            api_record_task_owner($task_id, $key_id);
-            $payload_file = tempnam(LOCK_DIR, 'payload_');
-            file_put_contents($payload_file, $raw, LOCK_EX);
-            touch(LOCK_DIR . '/' . $task_id . '.lock');
-            flock($sem, LOCK_UN); fclose($sem);
-
-            $cmd = python_exec() . ' ' . escapeshellarg(DATA_DIR . '/controller.py') . ' download '
-                 . escapeshellarg($task_id) . ' ' . escapeshellarg($payload_file) . ' ' . escapeshellarg($client_ip)
-                 . ' > /dev/null 2>&1 &';
-            shell_exec($cmd);
-            api_json_response(['task_id' => $task_id, 'status' => 'pending', 'poll_url' => '/api/v1/downloads/' . $task_id], 202);
+            api_start_download($raw, $client_ip, $key_id);
         }
         if ($method === 'GET' && count($segments) === 2) {
             api_check_rate('read_only', $client_ip);
@@ -367,6 +375,78 @@ switch ($resource) {
             api_json_response(['success' => true, 'task_id' => $task_id, 'status' => 'cancelled']);
         }
         api_error('not_found', 'Unknown endpoint.', 404);
+
+    // --- Simple download: one URL, no JSON body ------------------------------
+    // GET /api/v1/download?station=ams172&camera=2&date=YYYY-MM-DD&hour=H&minute=M
+    //     [&file_type=lowres] [&length=N] [&interval=N] [&duration=N]
+    //     [&stitch_equirect=1] [&stitch_fisheye=1] [&lang=en]
+    // File types: lowres|hires (video), image|image_lowres (still),
+    //             image_long|image_lowres_long (stacked still),
+    //             timelapse|timelapse_hires (full-day stitched videos;
+    //             hour/minute unused, length=days, interval=day step).
+    case 'download':
+        if ($method !== 'GET' || count($segments) !== 1) api_error('not_found', 'Unknown endpoint.', 404);
+        api_require_key('download');
+
+        $stations = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['station'] ?? '')))));
+        if (!$stations) api_error('missing_parameter', 'station is required (comma-separated amsNNN ids).', 400);
+        if (count($stations) > 10) api_error('too_many_stations', 'At most 10 stations per request.', 400);
+        foreach ($stations as $s) validate_station_id($s);
+
+        $file_types = ['lowres', 'hires', 'image', 'image_lowres', 'image_long',
+                       'image_lowres_long', 'timelapse', 'timelapse_hires'];
+        $file_type = (string)($_GET['file_type'] ?? 'lowres');
+        if (!in_array($file_type, $file_types, true)) {
+            api_error('invalid_file_type', 'file_type must be one of: ' . implode(', ', $file_types), 400);
+        }
+        $is_timelapse = str_starts_with($file_type, 'timelapse');
+
+        // Timelapse downloads pick cameras via stitch_equirect/fisheye, so
+        // camera is only required for the other file types.
+        $cameras = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['camera'] ?? ''))), 'strlen'));
+        if (!$cameras && !$is_timelapse) api_error('missing_parameter', 'camera is required (comma-separated numbers).', 400);
+        $cameras = array_map(fn($c) => validate_camera_num($c), $cameras);
+
+        $date = isset($_GET['date']) ? validate_date($_GET['date'])
+            : api_error('missing_parameter', 'date is required (YYYY-MM-DD).', 400);
+
+        $hour = $minute = 0;
+        if (!$is_timelapse) {
+            if (!isset($_GET['hour'], $_GET['minute']) || !ctype_digit((string)$_GET['hour']) || !ctype_digit((string)$_GET['minute'])
+                || (int)$_GET['hour'] > 23 || (int)$_GET['minute'] > 59) {
+                api_error('invalid_parameter', 'hour (0-23) and minute (0-59) are required.', 400);
+            }
+            $hour = (int)$_GET['hour']; $minute = (int)$_GET['minute'];
+        }
+
+        // The coordinator enforces its own bounds; mirror the same limits here
+        // so bad URLs fail fast with a clear 400.
+        $bounds = ['length' => 100, 'interval' => 365, 'duration' => 60];
+        foreach ($bounds as $name => $max) {
+            $v = $_GET[$name] ?? '1';
+            if (!ctype_digit((string)$v) || (int)$v < 1 || (int)$v > $max) {
+                api_error('invalid_parameter', "$name must be an integer 1-$max.", 400);
+            }
+        }
+
+        $payload = [
+            'stations'   => $stations,
+            'cameras'    => $cameras,
+            'file_type'  => $file_type,
+            'date'       => $date,
+            'hour'       => str_pad((string)$hour, 2, '0', STR_PAD_LEFT),
+            'minute'     => str_pad((string)$minute, 2, '0', STR_PAD_LEFT),
+            'length'     => (int)($_GET['length'] ?? 1),
+            'interval'   => (int)($_GET['interval'] ?? 1),
+            'duration'   => (int)($_GET['duration'] ?? 1),
+        ];
+        foreach (['stitch_equirect', 'stitch_fisheye'] as $flag) {
+            if (!empty($_GET[$flag])) $payload[$flag] = in_array($_GET[$flag], ['1', 'true', 'yes'], true);
+        }
+        if (isset($_GET['lang']) && preg_match('/^[a-z]{2}(_[A-Z]{2})?$/', $_GET['lang'])) {
+            $payload['lang'] = $_GET['lang'];
+        }
+        api_start_download(json_encode($payload, JSON_THROW_ON_ERROR), $client_ip, $key_id);
 
     // --- Streams --------------------------------------------------------------
     case 'streams':

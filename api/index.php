@@ -190,6 +190,21 @@ function new_task_id(string $prefix): string {
 }
 
 // ---------------------------------------------------------------------------
+// Rewrite the coordinator's relative "download/..." paths into absolute URLs
+// so API callers can fetch the files directly.
+// ---------------------------------------------------------------------------
+function _absolutize_download_urls(&$node, string $base) {
+    if (!is_array($node)) return;
+    foreach ($node as $k => &$v) {
+        if (is_array($v)) {
+            _absolutize_download_urls($v, $base);
+        } elseif (is_string($v) && in_array($k, ['url', 'thumb_url'], true) && strpos($v, 'download/') === 0) {
+            $v = $base . '/' . $v;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared download-job launcher: payload JSON -> temp file -> coordinator.
 // ---------------------------------------------------------------------------
 function api_start_download(string $raw, string $client_ip, ?string $key_id, bool $wait = false) {
@@ -235,6 +250,9 @@ function api_start_download(string $raw, string $client_ip, ?string $key_id, boo
             $data = read_status_file($task_id);
             if (is_array($data) && in_array($data['status'] ?? '', ['complete', 'error'], true)) {
                 $data['task_id'] = $task_id;
+                // TLS terminates upstream; the public site is https-only.
+                $host = $_SERVER['HTTP_HOST'] ?? 'norskmeteornettverk.no';
+                if (isset($data['files'])) _absolutize_download_urls($data['files'], "https://$host/data");
                 api_json_response($data, ($data['status'] === 'error') ? 500 : 200);
             }
         }

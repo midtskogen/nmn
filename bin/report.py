@@ -56,6 +56,13 @@ except ImportError as e:
 METEOR_PROBABILITY_THRESHOLD = 0.5
 SSH_TUNNEL_CONFIG_PATH = '/etc/default/ssh_tunnel'
 REMOTE_REPORT_URL = "https://norskmeteornettverk.no/ssh/report.php"
+REMOTE_UPLOAD_URL = "https://norskmeteornettverk.no/ssh/upload.php"
+# Same exclude set as the server's rsync pull in server/fetch.py — push must
+# deliver exactly the files a pull would have fetched.
+PUSH_EXCLUDES = [
+    'frame-*', '*.pkl', '*.php', '*.pht*', '*.phar', '*.cgi', '*.pl',
+    '*.shtml', '*.py', '*.pyc', '*.pyo', '*.sh', '.htaccess', '.htpasswd',
+]
 # Persistent report queue: a ping that fails goes here and is retried by a
 # detached drainer every REPORT_RETRY_INTERVAL seconds until the server
 # acknowledges it — server downtime must not lose detections.
@@ -178,6 +185,50 @@ def _ping(url: str) -> Tuple[str, str]:
         return '000', str(e)
 
 
+def _push_event(station_name: str, event_dir) -> Tuple[str, str]:
+    """Push the event dir to the server as a streamed tar.gz.
+
+    The station's only outbound channel to the server is HTTPS, so this
+    pipes `tar czf -` straight into a curl POST — no temp file, no memory
+    buffering.  Returns (http_code, body); '000' on transport failure.
+    """
+    url = REMOTE_UPLOAD_URL + '?' + urllib.parse.urlencode({
+        'station': station_name, 'dir': str(event_dir)})
+    tar_cmd = ['tar', 'czf', '-', '-C', str(event_dir)]
+    for pat in PUSH_EXCLUDES:
+        tar_cmd += ['--exclude', pat]
+    tar_cmd.append('.')
+    try:
+        tar = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+        r = subprocess.run(
+            ['curl', '-s', '-w', '\n%{http_code}', '--max-time', '600',
+             '-X', 'POST', '--data-binary', '@-',
+             '-H', 'Content-Type: application/octet-stream',
+             '-H', f'X-NMN-Token: {_report_token()}', url],
+            stdin=tar.stdout, capture_output=True, text=True, timeout=660)
+        tar.stdout.close()
+        tar.wait(timeout=10)
+        body, _, code = r.stdout.rpartition('\n')
+        return code, body.strip()
+    except Exception as e:
+        return '000', str(e)
+
+
+def _deliver_report(station_name: str, port: str, event_dir) -> str:
+    """Deliver a report: push the data over HTTPS, fall back to a pull ping.
+
+    Returns the final http code.  Either transport delivers the event:
+    push hands the files to upload.php directly; the ping tells the server
+    to pull the dir over the ssh tunnel.
+    """
+    code, _ = _push_event(station_name, event_dir)
+    if code.startswith('2'):
+        return code
+    ping_code, _ = _ping(_report_url(station_name, port, event_dir))
+    return code if code != '000' else ping_code
+
+
 def _enqueue_report(station_name: str, port: str, event_dir) -> None:
     """Persist a failed report so it is retried until the server acks it."""
     entry = f'{station_name}\t{port}\t{event_dir}\n'
@@ -204,7 +255,7 @@ def _drain_queue() -> None:
                 if len(parts) != 3:
                     continue
                 st, pt, dr = parts
-                code, _ = _ping(_report_url(st, pt, dr))
+                code = _deliver_report(st, pt, dr)
                 if code.startswith('2'):
                     print(f"Queued report delivered: {dr}")
                 elif not code.startswith('4'):
@@ -453,22 +504,27 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
     else:
         print(f"SSH tunnel is active on port {port}. Not using lftp.")
 
-    print("Pinging report URL...")
-    # A lost ping means the event is never fetched, so verify the HTTP
-    # status.  2xx (including "already queued") is success; 4xx is a
-    # terminal denial; anything else is retried a few times and then
-    # queued for indefinite background retries by the queue drainer.
-    url = _report_url(station_name, port, event_dir)
-    for attempt in range(3):
-        code, body = _ping(url)
-        print(f"Report ping attempt {attempt + 1}/3: HTTP {code} {body}")
-        if code.startswith('2') or code.startswith('4'):
-            break
-        time.sleep(30)
+    # Preferred path: push the event dir straight to the server over HTTPS
+    # (the only outbound channel stations have).  On failure fall back to
+    # the pull ping, which asks the server to rsync the dir over the ssh
+    # tunnel.  If neither reaches the server the report is queued and the
+    # detached drainer keeps retrying until the server acknowledges it.
+    code, body = _push_event(station_name, event_dir)
+    print(f"Event push: HTTP {code} {body}")
+    if not code.startswith('2'):
+        if code != '404':  # 404 = upload.php not deployed yet; go straight to ping
+            print(f"Push failed (HTTP {code}), falling back to pull ping")
+        url = _report_url(station_name, port, event_dir)
+        for attempt in range(3):
+            code, body = _ping(url)
+            print(f"Report ping attempt {attempt + 1}/3: HTTP {code} {body}")
+            if code.startswith('2') or code.startswith('4'):
+                break
+            time.sleep(30)
     if code.startswith('2'):
         _drain_queue()  # server is reachable: flush any queued reports
     elif code.startswith('4'):
-        print(f"WARNING: report ping denied (HTTP {code}): {body}",
+        print(f"WARNING: report denied (HTTP {code}): {body}",
               file=sys.stderr)
     else:
         print(f"WARNING: server unreachable (HTTP {code}); queued for retry",

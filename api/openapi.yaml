@@ -149,7 +149,7 @@ paths:
         '429': { $ref: '#/components/responses/RateLimit' }
   /download:
     get:
-      summary: Start a download with query parameters (no JSON body)
+      summary: Download via a single URL — waits for completion and returns file URLs
       operationId: startDownloadSimple
       security:
         - ApiKeyAuth: []
@@ -217,7 +217,8 @@ paths:
           description: Language code for thumbnail annotations (e.g. en)
           schema: { type: string }
       responses:
-        '202': { description: Task queued JSON with task_id and poll_url }
+        '200': { description: Download finished; files map contains direct URLs under /data/ }
+        '202': { description: Still running after 5 min; poll the returned poll_url }
         '400': { description: Missing/invalid parameter }
         '401': { description: Missing/invalid API key }
         '429': { $ref: '#/components/responses/RateLimit' }

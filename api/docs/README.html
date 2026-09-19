@@ -168,11 +168,11 @@ curl -H 'X-API-Key: YOUR_API_KEY' \
 curl -H 'X-API-Key: YOUR_API_KEY' \
   'https://norskmeteornettverk.no/api/v1/download?station=ams173&date=2026-08-31&file_type=timelapse&length=2&stitch_equirect=1&stitch_fisheye=1'
 
-# Response:
-# {"task_id":"master_task_...","status":"pending","poll_url":"/api/v1/downloads/master_task_..."}
+# The request waits until the download finishes, then returns the final
+# status directly — "files" holds direct URLs under /data/:
+# {"status":"complete","files":{"SOR":{"00:04":[{"url":"download/SOR_cam2_..._image_lowres.jpg",...}]}},"errors":{}}
 #
-# Poll until "status":"complete" — "files" then holds direct URLs like
-# download/SOR_cam2_20260918_0004_image_lowres.jpg under /data/
+# Jobs still running after ~5 minutes return 202 + poll_url instead:
 curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads/master_task_1725...</code></pre>
     <p class="note">Parameters: <code>station</code> (comma-separated amsNNN, max 10), <code>camera</code>, <code>date</code> (YYYY-MM-DD), <code>hour</code>, <code>minute</code> (UTC), <code>file_type</code> (<code>lowres</code>|<code>hires</code>|<code>image</code>|<code>image_lowres</code>|<code>image_long</code>|<code>image_lowres_long</code>|<code>timelapse</code>|<code>timelapse_hires</code>), <code>length</code>, <code>interval</code>, <code>duration</code>, <code>stitch_equirect</code>, <code>stitch_fisheye</code>, <code>lang</code>.</p>
     <p class="note">Stations only keep a few days of raw data locally — a completed job with <code>error_no_files_found</code> per station means the requested time is no longer on the station.</p>

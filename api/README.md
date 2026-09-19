@@ -182,6 +182,10 @@ numbers), `date` (YYYY-MM-DD), `hour`, `minute` (UTC), `file_type`
 `stitch_equirect`, `stitch_fisheye`, `lang`.  For timelapse file types
 `camera`/`hour`/`minute` are not needed; `length` is the number of days.
 
+The request is synchronous: it waits for the download to finish and
+returns the final status (`files` holds direct URLs under `/data/`).
+Jobs still running after ~5 minutes return `202` + `poll_url` instead.
+
 Stations only keep a few days of raw data locally.  A completed job with
 `error_no_files_found` under `errors` means the requested time is no
 longer on the station.

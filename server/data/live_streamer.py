@@ -12,7 +12,7 @@ import socket
 import re
 import shlex
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from PIL import Image
 
 # Import from our new shared utility library
@@ -849,8 +849,14 @@ def _get_timeout_for_station(station_id, resolution, stations_data):
 def _check_stream_time_quota(user_ip, station_id, resolution, stations_data):
     """Checks if a user has exceeded their daily streaming time quota for a station."""
     try:
-        # Read-only check: no need to take the write lock or rewrite the tracker.
-        tracker = read_json_file(STREAM_TIME_TRACKER_FILE, default={}) or {}
+        # Read-only check: no need to take the write lock or rewrite the
+        # tracker.  A MISSING file is normal (first stream of the day) but a
+        # CORRUPT one must fail closed — read it directly rather than via
+        # read_json_file(), which would silently return the default.
+        tracker = {}
+        if os.path.exists(STREAM_TIME_TRACKER_FILE):
+            with open(STREAM_TIME_TRACKER_FILE, 'r') as f:
+                tracker = json.load(f)
         today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         station_usage = tracker.get(today_str, {}).get(user_ip, {}).get(station_id, {})
 
@@ -858,7 +864,10 @@ def _check_stream_time_quota(user_ip, station_id, resolution, stations_data):
         hires_used = station_usage.get('total_hires_seconds', 0)
     except Exception as e:
         logging.error(f"Failed to check stream time quota for IP {user_ip}: {e}")
-        return True, "" # Fail open (allow stream if quota check fails)
+        # Fail closed: a corrupt/missing tracker must not grant unlimited
+        # streams, since streaming is the most expensive unauthenticated
+        # action (SSH tunnel + ffmpeg relay per session).
+        return False, "error_stream_quota_unavailable"
 
     station_type = 'quota' if stations_data.get(station_id, {}).get("station", {}).get("quota", False) else 'normal'
     limit_lowres = STREAM_TIME_LIMITS_SECONDS[station_type]['lowres']
@@ -876,6 +885,11 @@ def _update_stream_time_tracker(user_ip, station_id, resolution, duration_second
     if duration_seconds <= 0: return
     with atomic_json_rw(STREAM_TIME_TRACKER_FILE) as tracker:
         today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        # Prune day buckets older than a week so the tracker cannot grow
+        # without bound.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d')
+        for day_key in [k for k in tracker if k < cutoff]:
+            del tracker[day_key]
         user_day = tracker.setdefault(today_str, {}).setdefault(user_ip, {})
         station_day = user_day.setdefault(station_id, {'total_lowres_seconds': 0, 'total_hires_seconds': 0})
         
@@ -953,13 +967,30 @@ def stop_stream_relay(task_id):
             except OSError as e:
                 logging.error(f"Error removing grid file {grid_path}: {e}")
 
-    # Deletes the stream directory and all control/lock files.
-    if stream_dir := data.get("stream_dir"):
+    # Deletes the stream directory and all control/lock files.  The status
+    # files must be removed unconditionally: streams that fail before the
+    # "ready" status have no stream_dir recorded, and without cleanup each
+    # failed attempt would leak its task-scoped directory.
+    stream_dir = data.get("stream_dir")
+    if not stream_dir:
+        # The stream dir is uniquely identified by its _<task_id> suffix.
+        try:
+            for entry in os.listdir(STREAM_DIR):
+                if entry.endswith(f"_{task_id}"):
+                    stream_dir = os.path.join(STREAM_DIR, entry)
+                    break
+        except OSError:
+            pass
+    for f in [status_file, f"{status_file}.lock"]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except OSError as e: logging.error(f"Error removing control file {f}: {e}")
+    if stream_dir:
         stream_identity = os.path.basename(stream_dir)
-        for f in [status_file, f"{status_file}.lock", os.path.join(STREAM_DIR, f"{stream_identity}.lock")]:
-            if os.path.exists(f):
-                try: os.remove(f)
-                except OSError as e: logging.error(f"Error removing control file {f}: {e}")
+        lock_file = os.path.join(STREAM_DIR, f"{stream_identity}.lock")
+        if os.path.exists(lock_file):
+            try: os.remove(lock_file)
+            except OSError as e: logging.error(f"Error removing control file {lock_file}: {e}")
         real_stream_dir = os.path.realpath(stream_dir)
         real_stream_dir_parent = os.path.realpath(STREAM_DIR)
         if real_stream_dir.startswith(real_stream_dir_parent + os.sep) and os.path.exists(stream_dir):
@@ -1259,6 +1290,11 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
     stations_data = _load_stations_data()
     _validate_station(station_id, stations_data)
     camera_num = _validate_camera(camera_num)
+    # Live RTSP/ONVIF relays only exist on cam1-7 (192.168.76.71-77).
+    # Higher numbers map to other hosts on the station LAN (e.g. the cam8/9
+    # stitch machines) — do not relay to them.
+    if not 1 <= camera_num <= 7:
+        raise ValueError(f"camera number out of range for streaming: {camera_num}")
     if resolution not in ('lowres', 'hires'):
         raise ValueError(f"invalid resolution: {resolution!r}")
 
@@ -1284,14 +1320,18 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
         update_status(status_file, "error", {"message": message})
         return
 
-    stream_identity = f"{station_id}_{camera_num}_{resolution}"
+    # Scope the stream dir to this task: previously every client shared
+    # {station}_{cam}_{res}, so a second request rmtree'd the first user's
+    # live stream and the URL was trivially guessable.
+    stream_identity = f"{station_id}_{camera_num}_{resolution}_{task_id}"
     stream_dir = os.path.join(STREAM_DIR, stream_identity)
     if os.path.exists(stream_dir): shutil.rmtree(stream_dir)
     os.makedirs(stream_dir, exist_ok=True)
     
     ssh_process, ffmpeg_process = None, None
     try:
-        update_status(status_file, "establishing_tunnel", {"message": "status_contacting_station"})
+        update_status(status_file, "establishing_tunnel",
+                      {"message": "status_contacting_station", "stream_dir": stream_dir})
    
         t_ssh0 = time.time()
         ssh_process, local_port = _start_ssh_tunnel(station_id, camera_num)
@@ -1358,7 +1398,8 @@ def start_stream_relay(task_id, station_id, camera_num, resolution, user_ip, hev
         timeout_seconds = _get_timeout_for_station(station_id, resolution, stations_data)
         update_data = {
             "message": "status_stream_ready", "pids": {"ssh_pid": ssh_process.pid, "ffmpeg_pid": ffmpeg_process.pid},
-            "stream_dir": stream_dir, "station_id": station_id, "timeout_seconds": timeout_seconds, "resolution": resolution
+            "stream_dir": stream_dir, "stream_identity": stream_identity,
+            "station_id": station_id, "timeout_seconds": timeout_seconds, "resolution": resolution
         }
         timings["setup_seconds"] = round(time.time() - stream_start_time, 3)
         update_data["input_codec"] = input_codec

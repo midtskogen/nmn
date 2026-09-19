@@ -1,14 +1,20 @@
 Options +SymLinksIfOwnerMatch
 
 # Block direct web access to sensitive/generated files
-<FilesMatch "\.(py|json|log|lock|pid|part|tmp|bak|backup|fixed|~)$">
+<FilesMatch "\.(py|pyc|pyo|json|jsonl|ndjson|db|sqlite|log|lock|pid|part|tmp|temp|bak|backup|old|orig|swp|fixed|~)$">
     Require all denied
 </FilesMatch>
 
-# Also block common backup/credential filenames
-<FilesMatch "^(credentials\.json|config\.json|.*\.bak|.*\.backup|.*\.fixed)$">
+# Also block common backup/credential filenames and extensionless runtime
+# artifacts (ssh_known_hosts, payload_* temp files, core dumps).
+<FilesMatch "^(credentials\.json|config\.json|.*\.bak|.*\.backup|.*\.fixed|ssh_known_hosts|known_hosts|payload_.*|core(\..*)?)$">
     Require all denied
 </FilesMatch>
 
 RewriteEngine On
+# Runtime state directories must never be served.
 RewriteRule ^cache/ - [F]
+RewriteRule ^locks/ - [F]
+RewriteRule ^logs/ - [F]
+RewriteRule (^|/)__pycache__(/|$) - [F]
+AddDefaultCharset UTF-8

@@ -10,16 +10,18 @@ from datetime import datetime, timezone
 
 def uniqid(prefix=''):
     """
-    Generates a reasonably unique ID string by using the current high-resolution timestamp.
-    This is useful for creating unique task IDs and filenames.
-    
+    Generates a unique, unguessable ID string using a cryptographic random
+    source. Timestamp-derived IDs were previously used but are predictable
+    and allow cross-user task status/cancel guessing.
+
     Args:
         prefix (str): A string to prepend to the generated ID.
-    
+
     Returns:
         str: The unique ID string.
     """
-    return prefix + f"{time.time():.8f}".replace('.', '')
+    import secrets
+    return prefix + secrets.token_hex(8)
 
 
 def atomic_json_write(file_path, data, indent=None):

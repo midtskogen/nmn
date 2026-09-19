@@ -830,24 +830,27 @@ def _report_feature_importance(stacker_model: LogisticRegression):
     print("="*60)
 
 def resolve_model_path(arg_path: str, default_name: str) -> Optional[str]:
-    """Finds a model file, respecting user overrides and searching for .pth and .pth.zst."""
-    search_names = []
-    if arg_path:
-        search_names.extend([arg_path, arg_path + '.zst'])
-    
-    search_names.extend([default_name, default_name + '.zst'])
+    """Finds a model file, respecting user overrides and searching for .pth and .pth.zst.
 
-    search_names = list(OrderedDict.fromkeys(search_names))
-    
-    for name in search_names:
-        if os.path.exists(os.path.abspath(name)):
-            logging.info(f"Found model file in current directory: ./{name}")
-            return name
-        user_model_dir = pathlib.Path.home() / 'nmn' / 'model'
-        user_model_path = user_model_dir / name
-        if os.path.exists(user_model_path):
-            logging.info(f"Found model file in user directory: {user_model_path}")
-            return str(user_model_path)
+    Explicit --model paths are used verbatim (operator intent).  Default
+    model names are resolved ONLY in trusted locations — never the current
+    directory, which may be a station-populated event dir where a planted
+    .joblib file would mean pickle-deserialization code execution.
+    """
+    if arg_path and arg_path != default_name:
+        for name in [arg_path, arg_path + '.zst']:
+            if os.path.exists(name):
+                return name
+        return None
+
+    script_model_dir = pathlib.Path(__file__).resolve().parent.parent / 'model'
+    user_model_dir = pathlib.Path.home() / 'nmn' / 'model'
+    for name in [default_name, default_name + '.zst']:
+        for base in (script_model_dir, user_model_dir):
+            candidate = base / name
+            if candidate.exists():
+                logging.info(f"Found model file: {candidate}")
+                return str(candidate)
     return None
 
 def find_and_load_model(model_name: str, args: argparse.Namespace) -> Optional[nn.Module]:

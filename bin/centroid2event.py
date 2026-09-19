@@ -193,9 +193,13 @@ def main():
         with open(args.centroid, 'r') as file:
             for line in file:
                 parts = line.split()
-                if len(parts) < 8: continue
+                if len(parts) < 9: continue
 
                 az, alt = float(parts[3]), float(parts[2])
+                # Reject non-finite or out-of-range angles instead of letting
+                # NaN/inf or absurd az/alt propagate into the event output.
+                if not (math.isfinite(az) and math.isfinite(alt)) or not (0 <= az < 360) or not (-90 <= alt <= 90):
+                    continue
 
                 # STEP 1: Convert (az, alt) to linear panorama coords
                 pano_x, pano_y = az_alt_to_pano_coord(az, alt, global_options)

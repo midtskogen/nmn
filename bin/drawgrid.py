@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import stat
 from datetime import datetime, UTC
 import time as _time
 from brightstar import brightstar
@@ -186,16 +187,49 @@ def main():
             h.update(b'\x00')
         return h.hexdigest()
 
-    _cache_dir = Path(os.environ.get('NMN_GRID_CACHE_DIR', '/tmp/nmn_grid_cache'))
+    # Default to a per-user cache dir — a shared /tmp dir lets another local
+    # user pre-create the directory or plant poisoned/symlinked entries that
+    # would then be copied to the output or read back as a "valid" cache.
+    _env_cache = os.environ.get('NMN_GRID_CACHE_DIR')
+    if _env_cache:
+        _cache_dir = Path(_env_cache)
+    else:
+        _cache_dir = Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache'))) / 'nmn_grid_cache'
+
+    def _cache_usable(d):
+        """True only if d is a real, private directory owned by us."""
+        try:
+            st = os.lstat(d)
+            return stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and not (st.st_mode & 0o077)
+        except OSError:
+            return False
+
+    try:
+        _cache_dir.mkdir(parents=True, exist_ok=True)
+        if os.lstat(_cache_dir).st_uid == os.geteuid():
+            os.chmod(_cache_dir, 0o700)
+    except OSError:
+        pass
+    if not _cache_usable(_cache_dir):
+        _cache_dir = None
+
+    def _cache_file_ok(p):
+        """True only for a regular file owned by us (no symlink tricks)."""
+        try:
+            st = os.lstat(p)
+            return stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid()
+        except OSError:
+            return False
+
     _cache_key = _grid_cache_key(args)
-    _cache_png = _cache_dir / f"{_cache_key[:32]}.png"
-    _cache_meta = _cache_dir / f"{_cache_key[:32]}.json"
+    _cache_png = _cache_dir / f"{_cache_key[:32]}.png" if _cache_dir else None
+    _cache_meta = _cache_dir / f"{_cache_key[:32]}.json" if _cache_dir else None
 
     _base_grid_key = _base_grid_cache_key(args)
-    _base_grid_cache_png = _cache_dir / f"base_{_base_grid_key[:32]}.png"
-    _base_grid_cache_meta = _cache_dir / f"base_{_base_grid_key[:32]}.json"
+    _base_grid_cache_png = _cache_dir / f"base_{_base_grid_key[:32]}.png" if _cache_dir else None
+    _base_grid_cache_meta = _cache_dir / f"base_{_base_grid_key[:32]}.json" if _cache_dir else None
 
-    if _cache_png.exists() and _cache_meta.exists():
+    if _cache_png and _cache_meta and _cache_file_ok(_cache_png) and _cache_file_ok(_cache_meta):
         try:
             shutil.copyfile(_cache_png, args.outfile)
             return
@@ -650,7 +684,8 @@ def main():
     # because base-grid geometry does not depend on the timestamp in Az/Alt mode.
     _base_grid_loaded = False
     if not args.base_image and not args.annotations_only:
-        if _base_grid_cache_png.exists() and _base_grid_cache_meta.exists():
+        if (_base_grid_cache_png and _base_grid_cache_meta
+                and _cache_file_ok(_base_grid_cache_png) and _cache_file_ok(_base_grid_cache_meta)):
             try:
                 image = wand.image.Image(filename=str(_base_grid_cache_png))
                 _base_grid_loaded = True
@@ -695,7 +730,8 @@ def main():
 
         # Cache the rendered base grid for future timestamps at this station.
         try:
-            _cache_dir.mkdir(parents=True, exist_ok=True)
+            if _cache_dir is None:
+                raise OSError("no safe cache dir")
             _tmp_base_png = _base_grid_cache_png.with_suffix('.tmp.png')
             image.save(filename=str(_tmp_base_png))
             os.replace(_tmp_base_png, _base_grid_cache_png)
@@ -919,7 +955,8 @@ def main():
     # Save a copy of the rendered grid to the cache for future reuse. Atomic
     # write-into-place to avoid partially-written cache files under concurrency.
     try:
-        _cache_dir.mkdir(parents=True, exist_ok=True)
+        if _cache_dir is None:
+            raise OSError("no safe cache dir")
         _tmp_png = _cache_png.with_suffix('.tmp.png')
         shutil.copyfile(args.outfile, _tmp_png)
         os.replace(_tmp_png, _cache_png)

@@ -65,11 +65,20 @@ except ImportError as e:
     )
 
 def resolve_model_path(filenames: List[str]) -> Optional[str]:
-    """Finds the first available model file from a list of candidates."""
+    """Finds the first available model file from a list of candidates.
+
+    NOTE: the current working directory is deliberately NOT searched —
+    predict.py is invoked by report.py with CWD inside the event directory
+    (populated from station uploads), so a planted model file would take
+    over the classifier output.  Only trusted locations are considered.
+    """
+    script_model_dir = pathlib.Path(__file__).resolve().parent.parent / 'model'
+    user_model_dir = pathlib.Path.home() / 'nmn' / 'model'
     for filename in filenames:
-        if os.path.exists(filename): return filename
-        user_path = pathlib.Path.home() / 'nmn' / 'model' / filename
-        if user_path.exists(): return str(user_path)
+        for base in (script_model_dir, user_model_dir):
+            candidate = base / filename
+            if candidate.exists():
+                return str(candidate)
     return None
 
 def load_model(model_path: str):
@@ -108,7 +117,7 @@ def main():
     model_path = resolve_model_path(MODEL_FILES)
     if not model_path:
         sys.exit(
-            "Error: Could not find a model file.\nPlease place one of the following in the current directory or '~/nmn/model/':\n"
+            "Error: Could not find a model file.\nPlease place one of the following in the model directory ('~/nmn/model/'):\n"
             + "\n".join([f"  - {name}" for name in MODEL_FILES])
         )
     

@@ -554,9 +554,13 @@ def detect_meteor_activity(video_path: Path, trim_config: Settings.VideoTrim) ->
             return None
 
         # Use ffprobe's signalstats filter to get the average brightness (YAVG) for each frame.
+        # The path goes into a lavfi filtergraph spec: backslash-escape the
+        # filter-level metacharacters so a crafted filename cannot break out
+        # of the movie= argument and inject extra filters.
+        lavfi_path = re.sub(r"([\\':])", r"\\\1", video_path.as_posix())
         ffprobe_cmd = [
             "ffprobe", "-v", "error", "-f", "lavfi",
-            f"movie={video_path.as_posix()},signalstats",
+            f"movie={lavfi_path},signalstats",
             "-show_entries", "frame_tags=lavfi.signalstats.YAVG",
             "-of", "csv=p=0",
         ]

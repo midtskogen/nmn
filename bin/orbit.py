@@ -7,6 +7,7 @@ Calculates and plots the orbit of a meteor based on observational data.
 # 1. Standard Library Imports
 import os
 import argparse
+import html as html_mod
 import json
 from typing import Optional
 
@@ -66,7 +67,10 @@ def _load_spice_kernels():
     Finds and loads the required SPICE kernels.
     """
     possible_paths = [
-        './data/',
+        # Script-relative only: orbit.py runs with CWD inside the event
+        # directory (populated from station uploads), so './data/' would let
+        # a station plant a malicious SPICE kernel that furnsh() loads.
+        str(Path(__file__).resolve().parent / 'data'),
         '/var/www/html/bin/data',
         os.path.expanduser('~/spice/data/')
     ]
@@ -467,8 +471,8 @@ def _plot_orbit_interactive(et, meteor_elements,
     center_json = json.dumps(camera_center)
     radius_json = json.dumps(camera_radius)
     elev_json = json.dumps(elev_offset_z)
-    play_text = translations.get("plot_interactive_play", "▶ Play")
-    pause_text = translations.get("plot_interactive_pause", "⏸ Pause")
+    play_text = html_mod.escape(translations.get("plot_interactive_play", "▶ Play"))
+    pause_text = html_mod.escape(translations.get("plot_interactive_pause", "⏸ Pause"))
     controls_and_script = f"""
 <style>
   html, body {{ margin: 0; padding: 0; overflow: hidden; height: 100%; }}

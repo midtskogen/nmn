@@ -22,8 +22,9 @@ nmn/server/data/controller.py and live_streamer.py:
   * tar -c -h --ignore-failed-read -f -   (lens.pto bundle)
   * find /meteor/cam[89]/ ... | identify  (stitch dimension probe)
   * curl ... http://192.168.76.N:8899/onvif/Media  (ONVIF keyframe request)
-  * sftp subsystem                        (delegated to sftp-server -R,
-                                           read-only, rooted at /meteor)
+  * sftp subsystem                        (delegated to sftp-server -R -d;
+                                           read-only BUT NOT CONFINED —
+                                           see note below)
 
 If the web server ever legitimately needs a new remote command, add a
 pattern here AND keep it strict (unquoted, /meteor-only tokens).
@@ -65,6 +66,55 @@ ALLOWED = [
 ]
 
 
+_METEOR_ROOT = os.path.realpath("/meteor")
+
+
+def _abs_path_ok(token):
+    """True if the absolute /meteor path resolves inside the meteor tree.
+
+    The _P regex allows '.', '/' and '-' — so '/meteor/../etc/passwd' matches
+    the whitelist pattern but escapes the tree.  realpath collapses '..' and
+    resolves symlinks, catching both traversal and symlink escapes.
+    """
+    rp = os.path.realpath(token)
+    return rp == _METEOR_ROOT or rp.startswith(_METEOR_ROOT + "/")
+
+
+def _rel_name_ok(token):
+    """True for a safe bare tar member name.
+
+    The _F charset accepts '..' (tar-slip when the server unpacks, and
+    traversal relative to the cd dir) and option-looking tokens such as
+    '--checkpoint-action=exec=x' (tar executes it) — reject both classes.
+    """
+    return (token not in (".", "..")
+            and not token.startswith("-")
+            and ".." not in token.split("/"))
+
+
+def _members_ok(cmd):
+    """Validate the path/name tokens of a whitelisted command beyond what
+    the regex can express."""
+    if cmd.startswith("cd "):
+        m = re.match(r"^cd (\S+) && tar -czf - (.*) 2>/dev/null$", cmd)
+        if not m:
+            return False
+        return _abs_path_ok(m.group(1)) and all(
+            _rel_name_ok(n) for n in m.group(2).split())
+    if cmd.startswith("tar -c "):
+        m = re.match(
+            r"^tar -c -h --ignore-failed-read -f - (.*) 2>/dev/null$", cmd)
+        if not m:
+            return False
+        return all(_abs_path_ok(t) for t in m.group(1).split())
+    if cmd.startswith("scp -f "):
+        return all(_abs_path_ok(t) for t in cmd[len("scp -f "):].split())
+    if cmd.startswith("stat "):
+        return _abs_path_ok(cmd.split()[-1])
+    # Remaining patterns contain only fixed tokens.
+    return True
+
+
 def _deny(reason):
     syslog.syslog(syslog.LOG_WARNING, f"nmn_fetch_wrapper DENIED: {reason}")
     print(f"nmn_fetch_wrapper: command not permitted", file=sys.stderr)
@@ -79,7 +129,12 @@ def main():
         _deny("interactive session (no SSH_ORIGINAL_COMMAND)")
 
     # SFTP subsystem request (modern scp without -O, or sftp client):
-    # delegate to the real sftp-server, but read-only and rooted at /meteor.
+    # delegate to the real sftp-server read-only.  NOTE: `-d /meteor` only
+    # sets the STARTING directory — it is not a chroot; the key holder can
+    # still read any file readable by user `meteor`.  True confinement
+    # requires a ChrootDirectory Match block in sshd_config.  Removing this
+    # branch entirely would break modern scp, which speaks the sftp
+    # protocol by default.
     if cmd in ("sftp", "internal-sftp", "/usr/lib/openssh/sftp-server"):
         if not os.path.exists(SFTP_SERVER):
             _deny("sftp-server not installed")
@@ -88,6 +143,8 @@ def main():
 
     for pattern in ALLOWED:
         if pattern.fullmatch(cmd):
+            if not _members_ok(cmd):
+                _deny(f"path/member escapes /meteor: {cmd[:300]}")
             syslog.syslog(syslog.LOG_INFO, f"nmn_fetch_wrapper allowed: {cmd[:200]}")
             os.execv("/bin/sh", ["/bin/sh", "-c", cmd])
 

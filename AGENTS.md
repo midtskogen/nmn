@@ -193,7 +193,9 @@
   It loads the first file found from this list:
   - `meteor_efficientnet_b0_model_clustered.pth.zst` (compressed, clustered)
   - `meteor_efficientnet_b0_model.pth`
-  searched in the current directory or `~/nmn/model/`.
+  searched in `nmn/model/` (script-relative) or `~/nmn/model/` only —
+  the current directory is deliberately NOT searched because report.py
+  invokes it inside station-populated event directories.
 - To regenerate that model, use the `efficientnet` subcommand of
   `nmn/bin/classify.py`:
   ```

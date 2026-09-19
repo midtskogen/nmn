@@ -14,6 +14,13 @@ define('BASE_PATH', '/home/httpd/norskmeteornettverk.no/meteor');
 chdir(BASE_PATH);
 
 $isCliMode = php_sapi_name() == 'cli';
+// This is a cron/CLI generator: a web hit must never trigger a full
+// directory rescan + file writes (also, with register_argc_argv on, a
+// ?YYYY query string would populate $argv over HTTP).
+if (!$isCliMode) {
+    http_response_code(403);
+    exit('Forbidden');
+}
 $isYearArgProvided = isset($argv[1]);
 
 // --- Translations ---
@@ -250,6 +257,16 @@ function formatDayWithSuffix($day) {
 }
 
 /**
+ * Writes a file atomically (temp file + rename) so concurrent web readers
+ * never see a partially-written fragment.
+ */
+function atomic_write($path, $contents) {
+    $tmp = $path . '.tmp.' . getmypid();
+    if (file_put_contents($tmp, $contents) === false) return false;
+    return rename($tmp, $path);
+}
+
+/**
  * Generates the HTML for a media item (image and potential video).
  * @param string $imgPath Path to the image file.
  * @param string $videoExt The video file extension to look for.
@@ -262,7 +279,12 @@ function generateMediaItem($imgPath, $videoExt, $altText) {
     $videoFullPath = $basePath . $videoExt;
     $webVideoPath = '/meteor/' . $videoFullPath;
     $webImagePath = '/meteor/' . $imgPath;
-    $videoDataAttr = file_exists($videoFullPath) ? "data-videosrc='{$webVideoPath}'" : '';
+    // Paths derive from (station-influenced) directory/file names — escape
+    // them for the single-quoted HTML attribute context they land in.
+    $webVideoPathEsc = htmlspecialchars($webVideoPath, ENT_QUOTES);
+    $webImagePathEsc = htmlspecialchars($webImagePath, ENT_QUOTES);
+    $altTextEsc = htmlspecialchars($altText, ENT_QUOTES);
+    $videoDataAttr = file_exists($videoFullPath) ? "data-videosrc='{$webVideoPathEsc}'" : '';
     $placeholderSrc = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
     // Determine display dimensions: scale to width=256, preserve aspect ratio.
     $displayWidth = 256;
@@ -278,7 +300,7 @@ function generateMediaItem($imgPath, $videoExt, $altText) {
         }
     }
     $sizeAttr = $displayHeight ? "width='{$displayWidth}' height='{$displayHeight}'" : "width='{$displayWidth}'";
-    $imageHTML = "<img src='{$placeholderSrc}' data-src='{$webImagePath}' {$sizeAttr} loading='lazy' alt='{$altText}' {$videoDataAttr}>";
+    $imageHTML = "<img src='{$placeholderSrc}' data-src='{$webImagePathEsc}' {$sizeAttr} loading='lazy' alt='{$altTextEsc}' {$videoDataAttr}>";
     return "<div class='media-swap-container'>{$imageHTML}</div>";
 }
 
@@ -394,7 +416,7 @@ function generateMonthContent($dates, $t) {
             $mediaHTML .= "</div>";
         }
         $content .= "<div class='event-container' data-event-type='{$eventType}' data-shower='{$showerType}'>";
-        $content .= "<a href='/meteor/{$date}/' class='observation-link {$linkClass}'>";
+        $content .= "<a href='/meteor/" . htmlspecialchars($date, ENT_QUOTES) . "/' class='observation-link {$linkClass}'>";
         $content .= "<span>{$formattedTimeForDisplay}</span>";
         if ($locationInfo) $content .= "<small class='location-details'>{$locationInfo}</small>";
         $content .= "</a>";
@@ -470,7 +492,7 @@ function generateEventTable($tableData, $t, $isArchivePage = false) {
         $lang_short = $t['lang_short'];
         $fragmentFile = BASE_PATH . "/month-{$year}-{$monthNum}-{$lang_short}.html";
         $monthContent = generateMonthContent($dates, $t);
-        file_put_contents($fragmentFile, $monthContent);
+        atomic_write($fragmentFile, $monthContent);
         $fragmentUrl = "/meteor/month-{$year}-{$monthNum}-{$lang_short}.html";
 
         // Pre-compute per-filter counts for the minimized-count fallback
@@ -855,7 +877,7 @@ if ($isYearArgProvided) {
             echo generatePageFooter($t);
             echo "\n<script src=\"theme.js\"></script>\n</body>\n</html>";
             $outputFile = BASE_PATH . "/{$targetYear}_{$lang_short}_a.html";
-            file_put_contents($outputFile, ob_get_clean());
+            atomic_write($outputFile, ob_get_clean());
         }
 
         // Part B: July - December
@@ -877,7 +899,7 @@ if ($isYearArgProvided) {
             echo generatePageFooter($t);
             echo "\n<script src=\"theme.js\"></script>\n</body>\n</html>";
             $outputFile = BASE_PATH . "/{$targetYear}_{$lang_short}_b.html";
-            file_put_contents($outputFile, ob_get_clean());
+            atomic_write($outputFile, ob_get_clean());
         }
     }
 } else {
@@ -907,6 +929,6 @@ if ($isYearArgProvided) {
         }
         $lang_short = $t['lang_short'];
         $outputFile = BASE_PATH . "/index-static_{$lang_short}.html";
-        file_put_contents($outputFile, ob_get_clean());
+        atomic_write($outputFile, ob_get_clean());
     }
 }

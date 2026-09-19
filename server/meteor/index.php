@@ -145,23 +145,37 @@ $translations = [
     ],
 ];
 
-// --- Setup ---
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
 /**
  * Gets the user's real IP address, safely handling proxies.
  * @return string The user's IP address.
  */
 function get_user_ip() {
-    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-        return trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+    // Only trust proxy headers when the immediate peer is a trusted proxy;
+    // otherwise clients can spoof X-Forwarded-For.  Extra proxies can be
+    // configured via NMN_TRUSTED_PROXIES (comma-separated IPs).
+    $trusted = ['127.0.0.1', '::1'];
+    foreach (explode(',', (string) getenv('NMN_TRUSTED_PROXIES')) as $p) {
+        $p = trim($p);
+        if ($p !== '' && filter_var($p, FILTER_VALIDATE_IP)) $trusted[] = $p;
     }
-    if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
-        return trim($_SERVER['HTTP_X_REAL_IP']);
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+    if (in_array($remote, $trusted, true)) {
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $c = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+            if (filter_var($c, FILTER_VALIDATE_IP)) return $c;
+        }
+        if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+            $c = trim($_SERVER['HTTP_X_REAL_IP']);
+            if (filter_var($c, FILTER_VALIDATE_IP)) return $c;
+        }
     }
-    return $_SERVER['REMOTE_ADDR'] ?? 'unknown_ip';
+    return $remote !== '' ? $remote : 'unknown_ip';
+}
+
+function geo_lookup($ip) {
+    // Bounded request so a slow/failed GeoIP service cannot hang workers.
+    $ctx = stream_context_create(['http' => ['timeout' => 3]]);
+    return @file_get_contents("http://ip-api.com/json/{$ip}?fields=countryCode,status", false, $ctx);
 }
 
 /**
@@ -205,7 +219,7 @@ function get_language($default_lang) {
     ];
     $user_ip = get_user_ip();
     if (!filter_var($user_ip, FILTER_VALIDATE_IP)) $user_ip = '';
-    $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
+    $geo_data_json = $user_ip !== '' ? geo_lookup($user_ip) : false;
     if ($geo_data_json) {
         $geo_data = json_decode($geo_data_json);
         if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
@@ -379,9 +393,11 @@ $lang_short = substr($lang_code, 0, 2);
                 $default_static_file_path = 'index-static_nb.html'; // Fallback to Norwegian
 
                 if (file_exists($static_file_path)) {
-                    include($static_file_path);
+                    // readfile() echoes the fragment without evaluating any
+                    // embedded <?php — include() would execute it.
+                    readfile($static_file_path);
                 } elseif (file_exists($default_static_file_path)) {
-                    include($default_static_file_path);
+                    readfile($default_static_file_path);
                 }
             ?>
         </div>

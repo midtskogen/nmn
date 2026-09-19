@@ -1,5 +1,12 @@
 <?php
 
+// Cron/CLI generator only: a web hit must not trigger a full directory
+// rescan and a file write on every request.
+if (php_sapi_name() !== 'cli') {
+    http_response_code(403);
+    exit('Forbidden');
+}
+
 ob_start();
 chdir("/home/httpd/norskmeteornettverk.no/meteor");
 $myDirectory = opendir(".");
@@ -12,14 +19,14 @@ $dates = array();
 
 $filtered = array();
 for ($index=0; $index < $indexCount; $index++) {
-	if (substr("$dirArray[$index]", 0, 1) != "." && substr("$dirArray[$index]", 0, 4) == "2025" && filetype($dirArray[$index]) == 'dir') {
+	if (substr("$dirArray[$index]", 0, 1) != "." && substr("$dirArray[$index]", 0, 4) == date('Y') && filetype($dirArray[$index]) == 'dir') {
 		$myDirectory2 = opendir($dirArray[$index]);
 		while($entryName2 = readdir($myDirectory2)) { $dirArray2[] = $entryName2; }
 		closedir($myDirectory2);
 		$indexCount2 = count($dirArray2);
 		rsort($dirArray2);
 		for ($index2=0; $index2 < $indexCount2; $index2++) {
-	        	if (preg_match("/\d{6}/", $dirArray2[$index2]) && substr("$dirArray2[$index2]", 0, 1) != "." && file_exists($dirArray[$index] . "/" . $dirArray2[$index2] . "/index.php")) {
+	        	if (preg_match("/^\d{6}(_\d+)?$/", $dirArray2[$index2]) && file_exists($dirArray[$index] . "/" . $dirArray2[$index2] . "/index.php")) {
 			        $year = substr($dirArray[$index], 0, 4);
 				$month = substr($dirArray[$index], 4, 2);
 				$dates[$year][$month][] = $dirArray[$index] . "/" . $dirArray2[$index2];
@@ -66,10 +73,10 @@ foreach ($dates as $year) {
       $d2 = substr_replace($d2, ":", 2, 0);
       $d2 = substr_replace($d2, ":", 5, 0);
       if (file_exists($date . "/map.jpg")) {
-        $res = shell_exec("cat " . escapeshellarg($date . "/obs_" . $y . "-" . $m . "-" . $d . "_" . $d2 . ".res"));
-        $res = preg_split("/[\s]+/", $res);
-        $start = $res[5];
-        $end = $res[11];
+        $res_raw = @file_get_contents($date . "/obs_" . $y . "-" . $m . "-" . $d . "_" . $d2 . ".res");
+        $res = $res_raw !== false ? preg_split("/[\s]+/", $res_raw) : [];
+        $start = $res[5] ?? 0;
+        $end = $res[11] ?? 0;
         if ($start > 150 || $end < 10 || $end > 150 || $start < 10) {
           $b1 = "<font color=lightgray>";
 	} else if ($start > 60 && $end < 40) {
@@ -81,25 +88,25 @@ foreach ($dates as $year) {
 	$dirs = array_map('basename', array_filter(glob($date . '/*'), 'is_dir'));
         $loc = "";
         if (file_exists($date . "/location.txt")) {
-          $loc = "<br><small>" . trim(shell_exec("cat " . escapeshellarg($date . "/location.txt"))) . "</small>";
+          $loc = "<br><small>" . htmlspecialchars(trim((string)@file_get_contents($date . "/location.txt"))) . "</small>";
         } else {
-	  $loc = "<br><small>(" . implode(", ", $dirs) . ")</small>";
+	  $loc = "<br><small>(" . htmlspecialchars(implode(", ", $dirs)) . ")</small>";
 	}
         $b2 = "$loc</font>";
       } else {
         $dirs = array_map('basename', array_filter(glob($date . '/*'), 'is_dir'));
-        $loc = "<br><small>(" . implode(", ", $dirs) . ")</small>";
+        $loc = "<br><small>(" . htmlspecialchars(implode(", ", $dirs)) . ")</small>";
         $b1 = "<font color=grey>";
         $b2 = "$loc</font>";
       }
       $dirs2 = [];
-      print($date . '<br>');
+      print(htmlspecialchars($date) . '<br>');
       foreach($dirs as $d) {
 	$cams = array_map('basename', array_filter(glob($date . '/' . $d . '/cam*'), 'is_dir'));
-	foreach($cams as $c) { $dirs2[] = $date . '/' . $d . '/' . $c;  print($d . '/' . $c . "<br>"); }
+	foreach($cams as $c) { $dirs2[] = $date . '/' . $d . '/' . $c;  print(htmlspecialchars($d . '/' . $c) . "<br>"); }
       }
-      foreach($dirs2 as $d) { $f = $d . '/fireball.jpg'; if (file_exists($f)) { print("<img src=$f width=256><br>"); } }
-      print("<a href=\"$date" . "/\">$b1$time$b2</a><br><hr>");
+      foreach($dirs2 as $d) { $f = $d . '/fireball.jpg'; if (file_exists($f)) { print("<img src=" . htmlspecialchars($f, ENT_QUOTES) . " width=256><br>"); } }
+      print("<a href=\"" . htmlspecialchars($date, ENT_QUOTES) . "/\">$b1$time$b2</a><br><hr>");
     }
     print("</td>\n");
   }
@@ -107,6 +114,9 @@ foreach ($dates as $year) {
   print("</th></tr></table>\n");
 }
 
-file_put_contents('/home/httpd/norskmeteornettverk.no/meteor/orbit-static.html', ob_get_clean());
+// Atomic write so web readers never see a partial file.
+$_orb_tmp = '/home/httpd/norskmeteornettverk.no/meteor/orbit-static.html.tmp.' . getmypid();
+file_put_contents($_orb_tmp, ob_get_clean());
+rename($_orb_tmp, '/home/httpd/norskmeteornettverk.no/meteor/orbit-static.html');
 					 
 ?>

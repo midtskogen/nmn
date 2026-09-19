@@ -3186,10 +3186,15 @@
                 totalSize += file.size;
                 const fileItem = document.createElement('div');
                 fileItem.className = 'list-group-item d-flex justify-content-between align-items-center';
-                fileItem.innerHTML = `
-                    <span>${file.name} (${formatBytes(file.size)})</span>
-                    <button type="button" class="btn-close" aria-label="${t('remove_file_label')}" data-index="${index}"></button>
-                `;
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = `${file.name} (${formatBytes(file.size)})`;
+                const closeBtn = document.createElement('button');
+                closeBtn.type = 'button';
+                closeBtn.className = 'btn-close';
+                closeBtn.setAttribute('aria-label', t('remove_file_label'));
+                closeBtn.setAttribute('data-index', index);
+                fileItem.appendChild(nameSpan);
+                fileItem.appendChild(closeBtn);
                 fileListContainer.appendChild(fileItem);
             });
 

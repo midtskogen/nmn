@@ -1,0 +1,24 @@
+Options -Indexes
+
+# --- Protect the station-populated event tree -----------------------------
+# Event directories (YYYYMMDD/HHMMSS/) are filled by an rsync pull from the
+# stations, i.e. with content a station controls.  The only PHP that is
+# ever legitimate inside a date directory is the index.php SYMLINK to
+# ../../report.php.  A station could otherwise drop a regular .php file
+# (webshell) and have Apache execute it.  rsync excludes .php/.htaccess
+# already; this is a second layer in case files arrive by other means.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # The ONLY permitted PHP in a date dir is index.php, and only when it
+    # is a symlink (the server creates it pointing at ../../report.php).
+    # Every other scriptable filename is denied outright — regular file or
+    # symlink, so a planted "x.php -> payload.txt" link cannot execute the
+    # target through the .php handler either.
+    RewriteCond %{REQUEST_FILENAME} -l
+    RewriteRule ^[0-9]{8}/[^/]+/index\.php$ - [L]
+    RewriteRule ^[0-9]{8}/[^/]+/.*\.(php|pht|phtml|phar|cgi|pl|shtml)$ - [F,L]
+
+    # Never serve dotfiles or Apache config that a station might plant.
+    RewriteRule ^[0-9]{8}/.*/\. - [F,L]
+</IfModule>

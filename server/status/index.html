@@ -471,108 +471,10 @@
             } catch (error) {
                 console.error('Error loading status:', error);
                 document.getElementById('loading').innerHTML = 
-                    `<p class="text-danger"><i class="bi bi-exclamation-triangle"></i> Feil ved lasting av status: ${error.message}</p>`;
+                    `<p class="text-danger"><i class="bi bi-exclamation-triangle"></i> Feil ved lasting av status: ${escapeHtml(error.message)}</p>`;
             }
         }
         
-        // Parse log for display in modal (client-side parsing)
-        function extractStatusFromLog(logText) {
-            
-            // Parse summary section
-            let successes = 0;
-            let info = 0;
-            let warnings = 0;
-            let failures = 0;
-            let total = 0;
-            const issues = [];
-            
-            let inSummary = false;
-            let inIssues = false;
-            
-            for (let i = 0; i < cleanLines.length; i++) {
-                const line = cleanLines[i];
-                
-                // Check for summary section start
-                if (line.includes('Health Check Summary')) {
-                    inSummary = true;
-                    inIssues = false;
-                    continue;
-                }
-                
-                // Check for detailed issues section (after summary)
-                if (line.includes('=== Detailed Issues and Recommendations ===')) {
-                    inSummary = false;
-                    inIssues = true;
-                    continue;
-                }
-                
-                if (inSummary) {
-                    // Parse summary counts - format: "Successful: 122"
-                    const totalMatch = line.match(/Total checks:\s*(\d+)/i);
-                    if (totalMatch) total = parseInt(totalMatch[1]);
-                    
-                    const successMatch = line.match(/Successful:\s*(\d+)/i);
-                    if (successMatch) successes = parseInt(successMatch[1]);
-                    
-                    const infoMatch = line.match(/Info:\s*(\d+)/i);
-                    if (infoMatch) info = parseInt(infoMatch[1]);
-                    
-                    const warnMatch = line.match(/Warnings:\s*(\d+)/i);
-                    if (warnMatch) warnings = parseInt(warnMatch[1]);
-                    
-                    const failMatch = line.match(/Failures:\s*(\d+)/i);
-                    if (failMatch) failures = parseInt(failMatch[1]);
-                }
-                
-                if (inIssues && line.trim().startsWith('Issue:')) {
-                    // Extract issue description
-                    let issueText = line.replace(/^\s*\d+\.\s*Issue:\s*/, '').trim();
-                    
-                    // Determine issue type from the original colored output
-                    const originalLine = lines[i] || '';
-                    let type = 'info';
-                    if (originalLine.includes('[91m') || originalLine.includes('FAIL')) {
-                        type = 'fail';
-                    } else if (originalLine.includes('[93m') || originalLine.includes('WARN')) {
-                        type = 'warn';
-                    }
-                    
-                    if (issueText && issueText.length > 5) {
-                        issues.push({
-                            type: type,
-                            text: issueText.substring(0, 120)
-                        });
-                    }
-                }
-            }
-            
-            // If no summary found, try alternate parsing from [ OK ] / [ FAIL ] markers
-            if (total === 0) {
-                for (const line of cleanLines) {
-                    if (line.includes('[ OK ]') || line.includes('SUCCESS')) successes++;
-                    if (line.includes('[ INFO ]')) info++;
-                    if (line.includes('[ WARN ]')) warnings++;
-                    if (line.includes('[ FAIL ]') || line.includes('FAIL')) failures++;
-                }
-            }
-            
-            // Determine overall status
-            let status = 'ok';
-            if (failures > 0) status = 'fail';
-            else if (warnings > 0) status = 'warning';
-            else if (info > 0) status = 'ok';  // Info alone doesn't trigger warning
-            
-            return { 
-                status, 
-                successes, 
-                info,
-                warnings, 
-                failures, 
-                total,
-                issues: issues.slice(0, 5),  // Limit to top 5 issues
-                lastCheck: timestamp 
-            };
-        }
         
         function displayStations(stations) {
             const grid = document.getElementById('station-grid');
@@ -617,10 +519,10 @@
             div.innerHTML = `
                 <div class="station-header">
                     <div class="station-title">
-                        <span class="status-badge ${station.status}"></span>
+                        <span class="status-badge ${escapeHtml(station.status)}"></span>
                         <div>
-                            <div class="station-id">${station.id} ${stationCode ? `(${stationCode})` : ''}</div>
-                            <div class="station-location">${stationName} ${location ? `• ${location}` : ''}</div>
+                            <div class="station-id">${escapeHtml(station.id)} ${stationCode ? `(${escapeHtml(stationCode)})` : ''}</div>
+                            <div class="station-location">${escapeHtml(stationName)} ${location ? `• ${escapeHtml(location)}` : ''}</div>
                         </div>
                     </div>
                 </div>
@@ -667,8 +569,8 @@
                             ${station.backupPcOk === false ? `<br><small class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Backup-PC ikke på nett</small>` : ''}
                             ${(station.geophoneId || station.infrasoundId) ? `
                                 <div class="mt-1" style="font-size: 0.7rem;">
-                                    ${station.geophoneId ? `<a href="https://dataview.raspberryshake.org/#/AM/${station.geophoneId}/00/EHZ" target="_blank" class="${station.geophoneOk ? 'text-success' : 'text-danger'} text-decoration-none"><i class="bi bi-broadcast"></i> Seismo</a>` : ''}
-                                    ${station.infrasoundId ? `<a href="https://dataview.raspberryshake.org/#/AM/${station.infrasoundId}/00/HDF" target="_blank" class="${station.infrasoundOk ? 'text-success' : 'text-danger'} text-decoration-none ms-2"><i class="bi bi-mic"></i> Infralyd</a>` : ''}
+                                    ${station.geophoneId ? `<a href="https://dataview.raspberryshake.org/#/AM/${encodeURIComponent(station.geophoneId)}/00/EHZ" target="_blank" class="${station.geophoneOk ? 'text-success' : 'text-danger'} text-decoration-none"><i class="bi bi-broadcast"></i> Seismo</a>` : ''}
+                                    ${station.infrasoundId ? `<a href="https://dataview.raspberryshake.org/#/AM/${encodeURIComponent(station.infrasoundId)}/00/HDF" target="_blank" class="${station.infrasoundOk ? 'text-success' : 'text-danger'} text-decoration-none ms-2"><i class="bi bi-mic"></i> Infralyd</a>` : ''}
                                 </div>
                             ` : ''}
                         </div>
@@ -676,12 +578,16 @@
                 </div>
                 <div class="station-footer">
                     <span>Sist sjekka: ${station.lastCheck ? formatTimestamp(station.lastCheck) : '-'}</span>
-                    <a href="#" class="view-log-btn" onclick="showLog('${station.id}')">
+                    <a href="#" class="view-log-btn" data-sid="${escapeHtml(station.id)}">
                         <i class="bi bi-file-text me-1"></i>Vis logg
                     </a>
                 </div>
             `;
-            
+
+            div.querySelector('.view-log-btn').addEventListener('click', (e) => {
+                e.preventDefault();
+                showLog(e.currentTarget.dataset.sid);
+            });
             return div;
         }
         
@@ -746,9 +652,12 @@
         }
         
         function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            // Escapes &, <, >, " and ' — safe for element content AND for
+            // single/double-quoted attribute values.
+            return String(text).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;',
+                '"': '&quot;', "'": '&#39;'
+            }[c]));
         }
         
         // Convert ANSI color codes to HTML
@@ -809,8 +718,8 @@
             try {
                 // Load both log and history in parallel
                 const [logResponse, historyResponse] = await Promise.all([
-                    fetch(`log_api.php?station=${stationId}`),
-                    fetch(`log_api.php?station=${stationId}&action=history`)
+                    fetch(`log_api.php?station=${encodeURIComponent(stationId)}`),
+                    fetch(`log_api.php?station=${encodeURIComponent(stationId)}&action=history`)
                 ]);
                 
                 const logData = await logResponse.json();
@@ -855,8 +764,8 @@
                 const warnClass = entry.warnings > 0 ? 'text-warning' : '';
                 const failClass = entry.failures > 0 ? 'text-danger' : '';
                 
-                html += `<tr class="history-row" onclick="loadHistoryLog('${stationId}', '${entry.timestamp}')" style="cursor: pointer;">
-                    <td>${date}</td>
+                html += `<tr class="history-row" data-sid="${escapeHtml(stationId)}" data-ts="${escapeHtml(entry.timestamp)}" style="cursor: pointer;">
+                    <td>${escapeHtml(date)}</td>
                     <td>${statusIcon}</td>
                     <td>${entry.fetch_success === 0 || entry.fetch_success === false ? '?' : (entry.successes || 0)}</td>
                     <td class="${warnClass}">${entry.fetch_success === 0 || entry.fetch_success === false ? '?' : (entry.warnings || 0)}</td>
@@ -866,11 +775,14 @@
             
             html += '</tbody></table></div>';
             container.innerHTML = html;
+            container.querySelectorAll('.history-row').forEach(row => {
+                row.addEventListener('click', () => loadHistoryLog(row.dataset.sid, row.dataset.ts));
+            });
         }
         
         async function loadHistoryLog(stationId, timestamp) {
             try {
-                const response = await fetch(`log_api.php?station=${stationId}&timestamp=${timestamp}`);
+                const response = await fetch(`log_api.php?station=${encodeURIComponent(stationId)}&timestamp=${encodeURIComponent(timestamp)}`);
                 const data = await response.json();
                 
                 if (data.error) throw new Error(data.error);
@@ -916,12 +828,12 @@
                     const name = cameras[id]?.station?.name;
                     if (!name) continue;
                     const displayName = cameras[id]?.station?.display_name || name.charAt(0).toUpperCase() + name.slice(1);
-                    const baseUrl = `/cam/${name}`;
+                    const baseUrl = `/cam/${encodeURIComponent(name)}`;
                     const sdUrl = `${baseUrl}/equirect.jpg`;
                     const hdUrl = `${baseUrl}/equirect_hd.jpg`;
                     const item = document.createElement('div');
                     item.className = 'equirect-item';
-                    item.innerHTML = `<div class="equirect-label">${id} — ${displayName}</div>`;
+                    item.innerHTML = `<div class="equirect-label">${escapeHtml(id)} — ${escapeHtml(displayName)}</div>`;
                     
                     const describeError = (url, status) => {
                         const file = url.split('/').slice(-2).join('/');

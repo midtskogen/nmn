@@ -278,3 +278,8 @@
 - `.htaccess` files are now tracked (nmn/, server/data/, api/, lang/) —
   do not remove; they protect secrets, locks, cache and log files when
   the repo tree is deployed inside a document root.
+- rsync gotcha (2026-09-19 outage): `--contimeout` only works for
+  rsync-daemon (rsync://) connections — over `-e ssh` it is a fatal
+  usage error and every station fetch failed instantly. Connect
+  timeouts must go in the -e ssh string as `-o ConnectTimeout=N`;
+  `--timeout` (I/O stall) is valid in both modes.

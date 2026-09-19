@@ -25,6 +25,7 @@ Note: for 'nb' (Norwegian Bokmål) the prefix is empty (no language prefix).
 import argparse
 import configparser
 import datetime
+import html
 import json
 import logging
 import os
@@ -193,6 +194,12 @@ def generate_lv_stations(event_dir: Path, translations: dict, prefix: str, force
         for event_file in station_files:
             station = event_file.parent.parent.name
             cam = event_file.parent.name
+            # These names are interpolated into generated hrefs and used to
+            # build filesystem paths — keep them in a strict charset.
+            if not (re.fullmatch(r'[A-Za-z0-9_-]+', station)
+                    and re.fullmatch(r'[A-Za-z0-9_-]+', cam)):
+                logging.warning(f"  Skipping event file with unsafe dir names: {event_file}")
+                continue
             location = _STATION_DISPLAY_NAMES.get(station, station.title())
 
             cfg = configparser.ConfigParser()
@@ -223,128 +230,109 @@ def generate_lv_stations(event_dir: Path, translations: dict, prefix: str, force
             url_base = f'/meteor/{event_dir.parent.name}/{event_dir.name}/{station}'
             station_ts = f"{station}-{ts_str}"
 
-            html_template = """
-<div class="container">
+            # This file is included via readfile(), not include() — it must
+            # contain NO php.  All existence checks are resolved here at
+            # generation time against the event directory.
+            def _esc(v):
+                return html.escape(str(v), quote=True)
+
+            def _exists(rel: str) -> bool:
+                return (event_dir / rel).is_file()
+
+            L = {
+                'videos': _esc(translations.get('videos', 'Videos:')),
+                'images': _esc(translations.get('images', 'Images:')),
+                'text_files': _esc(translations.get('text_files', 'Text Files:')),
+                'gnomonic': _esc(translations.get('gnomonic', 'Gnomonic')),
+                'gnomonic_with_coords': _esc(translations.get('gnomonic_with_coords', 'Gnomonic with coordinates')),
+                'original': _esc(translations.get('original', 'Original')),
+                'original_with_coords': _esc(translations.get('original_with_coords', 'Original with coordinates')),
+                'gnomonic_uncorrected_with_coords': _esc(translations.get('gnomonic_uncorrected_with_coords', 'Uncorrected gnomonic with coordinates')),
+                'gnomonic_with_labels': _esc(translations.get('gnomonic_with_labels', 'Gnomonic with labels')),
+                'gnomonic_uncorrected_with_labels': _esc(translations.get('gnomonic_uncorrected_with_labels', 'Uncorrected gnomonic with labels')),
+                'original_with_mask': _esc(translations.get('original_with_mask', 'Original with mask')),
+                'detection': _esc(translations.get('detection', 'Detection')),
+                'observation': _esc(translations.get('observation', 'Observation')),
+                'coordinates': _esc(translations.get('coordinates', 'Coordinates')),
+                'error_messages': _esc(translations.get('error_messages', 'Error Messages')),
+                'log_file': _esc(translations.get('log_file', 'Log')),
+                'brightness': _esc(translations.get('brightness', 'Brightness')),
+            }
+
+            p = f"{station}/{cam}"
+            t = station_ts
+
+            def _link(name: str, label: str) -> str:
+                if _exists(f"{p}/{name}"):
+                    return f'&bull; <a href="{url_base}/{cam}/{name}">{label}</a><br>\n'
+                return ''
+
+            # Brightness: language-specific file first, then the default.
+            brightness_name = None
+            for cand in (f"{prefix}brightness.jpg", "brightness.jpg"):
+                if _exists(f"{p}/{cand}"):
+                    brightness_name = cand
+                    break
+
+            # Preview: gnomonic-grid -> grid -> plain; link the matching
+            # video when present.
+            preview_img_url = preview_href_url = None
+            if _exists(f"{p}/{t}-gnomonic-grid.jpg"):
+                preview_img_url = f"{url_base}/{cam}/{t}-gnomonic-grid.jpg"
+                preview_href_url = (f"{url_base}/{cam}/{t}-gnomonic.mp4"
+                                    if _exists(f"{p}/{t}-gnomonic.mp4") else preview_img_url)
+            elif _exists(f"{p}/{t}-grid.jpg"):
+                preview_img_url = f"{url_base}/{cam}/{t}-grid.jpg"
+                preview_href_url = (f"{url_base}/{cam}/{t}-grid.mp4"
+                                    if _exists(f"{p}/{t}-grid.mp4") else preview_img_url)
+            elif _exists(f"{p}/{t}.jpg"):
+                preview_img_url = f"{url_base}/{cam}/{t}.jpg"
+                if _exists(f"{p}/{t}-orig.mp4"):
+                    preview_href_url = f"{url_base}/{cam}/{t}-orig.mp4"
+                elif _exists(f"{p}/{t}.mp4"):
+                    preview_href_url = f"{url_base}/{cam}/{t}.mp4"
+                else:
+                    preview_href_url = preview_img_url
+
+            media_html = ''
+            if _exists(f"{p}/fireball_neg.webm"):
+                media_html = (f'<a href="{url_base}/{cam}/fireball_orig.webm">'
+                              '<video autoplay loop muted playsinline '
+                              'style="max-width: 800px; width: 100%; height: auto; border: 1px solid black;">'
+                              f'<source src="{url_base}/{cam}/fireball_neg.webm" type="video/webm"></video></a><br>\n')
+            elif _exists(f"{p}/fireball.jpg"):
+                media_html = (f'<a href="{url_base}/{cam}/fireball.jpg">'
+                              f'<img src="{url_base}/{cam}/fireball.jpg" '
+                              'style="max-width: 800px; width: 100%; height: auto;" alt="fireball"><br></a>\n')
+
+            preview_html = (f'<a href="{preview_href_url}"><img src="{preview_img_url}" '
+                            'width=768 alt="preview"></a>') if preview_img_url else ''
+            orig_video = _link(f"{t}-orig.mp4", L['original']) or _link(f"{t}.mp4", L['original'])
+            brightness_html = (f'<a href="{url_base}/{cam}/{brightness_name}">'
+                               f'<img src="{url_base}/{cam}/{brightness_name}" '
+                               f'width=400 alt="{L["brightness"]}"><br></a>') if brightness_name else ''
+
+            f.write(f"""<div class="container">
   <div class="column">
-<h1>{location} ({code}) {cam}</h1>
-<?php
-$webm_path = "{station}/{cam}/fireball_neg.webm";
-$jpg_path = "{station}/{cam}/fireball.jpg";
-$webm_url = "{url_base}/{cam}/fireball_neg.webm";
-$webm_url2 = "{url_base}/{cam}/fireball_orig.webm";
-$jpg_url = "{url_base}/{cam}/fireball.jpg";
-
-$b_prefix = ($lang === '{default_lang_code}') ? '' : substr($lang, 0, 2) . '_';
-$specific_brightness_path = "{station}/{cam}/" . $b_prefix . "brightness.jpg";
-$specific_brightness_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
-$default_brightness_path = "{station}/{cam}/brightness.jpg";
-$default_brightness_url = "{url_base}/{cam}/brightness.jpg";
-
-$display_brightness_path = null;
-$display_brightness_url = null;
-
-if (file_exists($specific_brightness_path)) {{
-    $display_brightness_path = $specific_brightness_path;
-    $display_brightness_url = $specific_brightness_url;
-}} elseif (file_exists($default_brightness_path)) {{
-    $display_brightness_path = $default_brightness_path;
-    $display_brightness_url = $default_brightness_url;
-}}
-
-$preview_img_path = null;
-$preview_img_url = null;
-$preview_href_url = null;
-
-if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{
-    $preview_img_path = "{station}/{cam}/{station_ts}-gnomonic-grid.jpg";
-    $preview_img_url = "{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg";
-    if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}-gnomonic.mp4";
-    }} else {{
-        $preview_href_url = $preview_img_url;
-    }}
-}} elseif (file_exists("{station}/{cam}/{station_ts}-grid.jpg")) {{
-    $preview_img_path = "{station}/{cam}/{station_ts}-grid.jpg";
-    $preview_img_url = "{url_base}/{cam}/{station_ts}-grid.jpg";
-    if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}-grid.mp4";
-    }} else {{
-        $preview_href_url = $preview_img_url;
-    }}
-}} elseif (file_exists("{station}/{cam}/{station_ts}.jpg")) {{
-    $preview_img_path = "{station}/{cam}/{station_ts}.jpg";
-    $preview_img_url = "{url_base}/{cam}/{station_ts}.jpg";
-    if (file_exists("{station}/{cam}/{station_ts}-orig.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}-orig.mp4";
-    }} elseif (file_exists("{station}/{cam}/{station_ts}.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}.mp4";
-    }} else {{
-        $preview_href_url = $preview_img_url;
-    }}
-}}
-?>
+<h1>{_esc(location)} ({_esc(code)}) {_esc(cam)}</h1>
     <div style="text-align: center;">
-        <?php if (file_exists($webm_path)) {{ ?>
-        <a href="<?php echo $webm_url2; ?>"><video autoplay loop muted playsinline style="max-width: 800px; width: 100%; height: auto; border: 1px solid black;"><source src="<?php echo $webm_url; ?>" type="video/webm"></video></a><br>
-        <?php }} elseif (file_exists($jpg_path)) {{ ?>
-        <a href="<?php echo $jpg_url; ?>"><img src="<?php echo $jpg_url; ?>" style="max-width: 800px; width: 100%; height: auto;" alt="fireball"><br></a>
-        <?php }} ?>
-    </div>
+        {media_html}    </div>
 <table><tr><td valign=top>
-<?php if ($preview_img_path !== null) {{ ?><a href="<?php echo $preview_href_url; ?>"><img src="<?php echo $preview_img_url; ?>" width=768 alt="preview"></a><?php }} ?>
+{preview_html}
 </td>
 <td valign=top>
 <table border=1>
-<tr><td><b>{videos_header}</b><br>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4">{gnomonic_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.mp4">{gnomonic_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-orig.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-orig.mp4">{original_label}</a><br> <?php }} elseif (file_exists("{station}/{cam}/{station_ts}.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.mp4">{original_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.mp4">{original_with_coords_label}</a><br> <?php }} ?>
-</td></tr>
-<tr><td><b>{images_header}</b><br>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.jpg">{gnomonic_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg">{gnomonic_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg">{gnomonic_uncorrected_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels.jpg">{gnomonic_with_labels_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg">{gnomonic_uncorrected_with_labels_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.jpg">{original_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.jpg">{original_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-mask.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-mask.jpg">{original_with_mask_label}</a><br> <?php }} ?>
-</td></tr>
-<tr><td><b>{text_files_header}</b><br>
-<?php if (file_exists("{station}/{cam}/event.txt")) {{ ?>• <a href="{url_base}/{cam}/event.txt">{detection_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.txt")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.txt">{observation_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/centroid2.txt")) {{ ?>• <a href="{url_base}/{cam}/centroid2.txt">{coordinates_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/stderr.txt")) {{ ?>• <a href="{url_base}/{cam}/stderr.txt">{error_messages_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/report.log")) {{ ?>• <a href="{url_base}/{cam}/report.log">{log_file_label}</a><br> <?php }} ?>
-</td></tr></table>
-<?php if ($display_brightness_path !== null) {{ ?><a href="<?php echo $display_brightness_url; ?>"><img src="<?php echo $display_brightness_url; ?>" width=400 alt="{brightness_label}"><br></a> <?php }} ?>
+<tr><td><b>{L['videos']}</b><br>
+{_link(f"{t}-gnomonic.mp4", L['gnomonic'])}{_link(f"{t}-gnomonic-grid.mp4", L['gnomonic_with_coords'])}{orig_video}{_link(f"{t}-grid.mp4", L['original_with_coords'])}</td></tr>
+<tr><td><b>{L['images']}</b><br>
+{_link(f"{t}-gnomonic.jpg", L['gnomonic'])}{_link(f"{t}-gnomonic-grid.jpg", L['gnomonic_with_coords'])}{_link(f"{t}-gnomonic-grid-uncorr.jpg", L['gnomonic_uncorrected_with_coords'])}{_link(f"{t}-gnomonic-labels.jpg", L['gnomonic_with_labels'])}{_link(f"{t}-gnomonic-labels-uncorr.jpg", L['gnomonic_uncorrected_with_labels'])}{_link(f"{t}.jpg", L['original'])}{_link(f"{t}-grid.jpg", L['original_with_coords'])}{_link(f"{t}-mask.jpg", L['original_with_mask'])}</td></tr>
+<tr><td><b>{L['text_files']}</b><br>
+{_link("event.txt", L['detection'])}{_link(f"{t}.txt", L['observation'])}{_link("centroid2.txt", L['coordinates'])}{_link("stderr.txt", L['error_messages'])}{_link("report.log", L['log_file'])}</td></tr></table>
+{brightness_html}
 </td></tr></table>
 </p>
 </div></div>
-            """
-
-            f.write(html_template.format(
-                url_base=url_base, station=station, cam=cam, station_ts=station_ts,
-                code=code, location=location, default_lang_code=DEFAULT_LANG,
-                videos_header=translations.get('videos', 'Videos:'),
-                images_header=translations.get('images', 'Images:'),
-                text_files_header=translations.get('text_files', 'Text Files:'),
-                gnomonic_label=translations.get('gnomonic', 'Gnomonic'),
-                gnomonic_with_coords_label=translations.get('gnomonic_with_coords', 'Gnomonic with coordinates'),
-                original_label=translations.get('original', 'Original'),
-                original_with_coords_label=translations.get('original_with_coords', 'Original with coordinates'),
-                gnomonic_uncorrected_with_coords_label=translations.get('gnomonic_uncorrected_with_coords', 'Uncorrected gnomonic with coordinates'),
-                gnomonic_with_labels_label=translations.get('gnomonic_with_labels', 'Gnomonic with labels'),
-                gnomonic_uncorrected_with_labels_label=translations.get('gnomonic_uncorrected_with_labels', 'Uncorrected gnomonic with labels'),
-                original_with_mask_label=translations.get('original_with_mask', 'Original with mask'),
-                detection_label=translations.get('detection', 'Detection'),
-                observation_label=translations.get('observation', 'Observation'),
-                coordinates_label=translations.get('coordinates', 'Coordinates'),
-                error_messages_label=translations.get('error_messages', 'Error Messages'),
-                log_file_label=translations.get('log_file', 'Log'),
-                brightness_label=translations.get('brightness', 'Brightness'),
-            ))
+""")
 
     logging.info(f"  Generated {prefix}stations.html")
 

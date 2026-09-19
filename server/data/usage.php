@@ -1,6 +1,23 @@
 <?php
 $BASE_DIR = dirname($_SERVER['SCRIPT_FILENAME']);
 
+// --- Access control ---
+// This page exposes operational data (per-IP stream/download usage, quota
+// consumption, station load).  It must not be world-readable: require a
+// shared token (NMN_USAGE_TOKEN env var, passed as ?token= or the
+// X-NMN-Token header) or a loopback client.  When no token is configured
+// the page denies everyone except loopback.
+$usage_token = (string) getenv('NMN_USAGE_TOKEN');
+$remote = $_SERVER['REMOTE_ADDR'] ?? '';
+$is_loopback = in_array($remote, ['127.0.0.1', '::1'], true);
+$provided = $_SERVER['HTTP_X_NMN_TOKEN'] ?? ($_GET['token'] ?? '');
+if (!$is_loopback
+    && !($usage_token !== '' && is_string($provided)
+         && hash_equals($usage_token, (string) $provided))) {
+    http_response_code(403);
+    exit('Forbidden');
+}
+
 // --- Language ---
 $supported_langs = ['nb_NO', 'en_GB'];
 $lang_code = 'nb_NO';

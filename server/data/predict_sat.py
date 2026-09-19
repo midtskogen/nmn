@@ -3,6 +3,7 @@
 import sys
 import json
 import os
+import re
 import logging
 import urllib.request
 import argparse
@@ -485,6 +486,8 @@ def _group_and_finalize_passes(all_passes_found):
     return final_passes
 
 def _station_cache_path(station_id):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', str(station_id)):
+        raise ValueError(f"invalid station_id for cache path: {station_id!r}")
     return os.path.join(PASS_CACHE_DIR, f"{station_id}.json")
 
 def _load_station_cache(station_id, current_tle_names):

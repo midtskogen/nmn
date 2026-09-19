@@ -1624,9 +1624,13 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
           
             quota_tracker = {}
             if os.path.exists(QUOTA_TRACKER_FILE):
-                with open(QUOTA_TRACKER_FILE, 'r') as f:
-                    try: quota_tracker = json.load(f)
-                    except json.JSONDecodeError: logging.warning(f"Task {master_task_id} - Could not parse quota_tracker.json.")
+                try:
+                    with open(QUOTA_TRACKER_FILE, 'r') as f:
+                        quota_tracker = json.load(f)
+                except (OSError, json.JSONDecodeError) as e:
+                    # Fail closed: a corrupt tracker must not grant unlimited downloads.
+                    logging.error(f"Task {master_task_id} - Could not parse quota_tracker.json: {e}")
+                    raise ValueError("error_quota_unavailable")
             
             today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             todays_usage = quota_tracker.get(today_str, {})
@@ -1777,8 +1781,9 @@ def main():
         if resolution not in ('lowres', 'hires'):
             raise ValueError(f"invalid resolution: {resolution!r}")
 
-        # Explicitly create the stream subdirectory (e.g., streams/ams173_1_hires)
-        stream_subdir = os.path.join(STREAM_DIR, f"{station_id}_{cam_num}_{resolution}")
+        # Explicitly create the task-scoped stream subdirectory
+        # (e.g., streams/ams173_1_hires_stream_ab12cd34)
+        stream_subdir = os.path.join(STREAM_DIR, f"{station_id}_{int(cam_num)}_{resolution}_{task_id}")
         os.makedirs(stream_subdir, exist_ok=True)
 
         start_stream_relay(task_id, station_id, cam_num, resolution, user_ip, hevc_supported)

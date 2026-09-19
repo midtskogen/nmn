@@ -16,6 +16,7 @@ let activeStreamTaskId = null;
 let stopStreamTimeout = null;
 // Timeout ID to automatically close the modal.
 let streamStatusPoller = null; // Interval ID for polling the stream's status.
+let streamStatusData = null; // Last status payload (holds stream_identity for the playlist URL).
 let onFullscreenChange = null; // Holds the fullscreen change event handler.
 let lastModalDimensions = null; // Stores dimensions for smooth prev/next navigation.
 let currentMediaList = []; // Global list of all media items for navigation - updated dynamically.
@@ -3340,7 +3341,10 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
 
             // 3. Wait a moment for backend FFmpeg to restart (1.5s is usually enough)
             setTimeout(() => {
-                const playlistUrl = `streams/${stationId}_${cameraNum}_${resolution}/playlist.m3u8`;
+                const streamIdent = streamStatusData && streamStatusData.stream_identity
+                    ? streamStatusData.stream_identity
+                    : `${stationId}_${cameraNum}_${resolution}`;
+                const playlistUrl = `streams/${streamIdent}/playlist.m3u8`;
 
                 if (hls) {
                     hls.stopLoad();
@@ -3361,11 +3365,14 @@ export function showVideoModal(stationId, cameraNum, resolution, streamTaskId, o
 
     streamStatusPoller = api.pollStreamStatus(streamTaskId, {
         onStatusUpdate: (data) => {
+            streamStatusData = data;
             if (statusEl) statusEl.textContent = translateMessage(data.message) || t('modal_status_updating');
         },
         onReady: (data) => {
+            streamStatusData = data;
             setBaseStatusText(t('modal_waiting_for_video'));
-            const playlistUrl = `streams/${data.station_id}_${cameraNum}_${data.resolution}/playlist.m3u8`;
+            const streamIdent = data.stream_identity || `${data.station_id}_${cameraNum}_${data.resolution}`;
+            const playlistUrl = `streams/${streamIdent}/playlist.m3u8`;
 
             const formatCodec = (c) => {
                 const s = String(c || '').toLowerCase();

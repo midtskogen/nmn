@@ -91,6 +91,7 @@
     "error_invalid_station_id": "Ungültige Stations-ID: {sid}",
     "error_invalid_file_type": "Ungültiger Dateityp: {file_type}",
     "error_too_many_files": "{num_files} Dateien angefordert, das sind zu viele (max. {limit}).",
+    "error_no_files_found": "Keine Dateien für die gewählte Station und Zeit gefunden. Die Station hält Daten möglicherweise nicht so weit zurück vor.",
     "error_invalid_length": "Ungültige 'Anzahl' (1-{max}).",
     "error_invalid_interval": "Ungültiges 'Intervall' (1-{max}).",
     "error_user_quota_exceeded": "Ihr persönliches Datenkontingent ({limit}MB) für {station_code} ist für heute aufgebraucht.",

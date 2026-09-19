@@ -1708,6 +1708,14 @@ def main_download_coordinator(master_task_id, json_payload, user_ip):
                 if s_data.get("message") and s_data.get("status") == "error": aggregated_errors.setdefault(station_code, []).append(f"error_worker_crash|msg={s_data.get('message')}")
                 if s_data.get("total_bytes_downloaded", 0) > 0: quota_updates[task_info['station_id']] = quota_updates.get(task_info['station_id'], 0) + s_data["total_bytes_downloaded"]
 
+        # Surface an explicit error when every station returned nothing
+        # (e.g. the requested minute is older than the station's local
+        # retention window) instead of silently reporting an empty result.
+        if not aggregated_files and not aggregated_errors:
+            for _ti in sub_tasks.values():
+                _sc = all_stations_data.get(_ti['station_id'], {}).get('station', {}).get('code', 'UNKNOWN')
+                aggregated_errors.setdefault(_sc, []).append('error_no_files_found')
+
         if quota_updates: update_quota_tracker(quota_updates, master_task_id, user_ip, QUOTA_TRACKER_FILE)
         update_status(status_file, "complete", {"files": aggregated_files, "errors": aggregated_errors})
         logging.info(f"Coordinator {master_task_id} finished successfully.")

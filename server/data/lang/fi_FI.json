@@ -91,6 +91,7 @@
     "error_invalid_station_id": "Virheellinen aseman ID: {sid}",
     "error_invalid_file_type": "Virheellinen tiedostotyyppi: {file_type}",
     "error_too_many_files": "Pyydettiin {num_files} tiedostoa, mikä on liikaa (enintään {limit}).",
+    "error_no_files_found": "Valitulle asemalle ja ajankohdalle ei löytynyt tiedostoja. Asemalla ei välttämättä ole dataa näin pitkältä ajalta.",
     "error_invalid_length": "Virheellinen 'Lukumäärä' (1-{max}).",
     "error_invalid_interval": "Virheellinen 'Intervalli' (1-{max}).",
     "error_user_quota_exceeded": "Henkilökohtainen datakiintiösi ({limit} Mt) asemalle {station_code} on ylittynyt tältä päivältä.",

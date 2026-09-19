@@ -182,6 +182,10 @@ numbers), `date` (YYYY-MM-DD), `hour`, `minute` (UTC), `file_type`
 `stitch_equirect`, `stitch_fisheye`, `lang`.  For timelapse file types
 `camera`/`hour`/`minute` are not needed; `length` is the number of days.
 
+Stations only keep a few days of raw data locally.  A completed job with
+`error_no_files_found` under `errors` means the requested time is no
+longer on the station.
+
 The advanced form accepts the same JSON payload used by the web interface:
 
 ```bash

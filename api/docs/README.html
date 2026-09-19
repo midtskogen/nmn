@@ -86,7 +86,8 @@ curl https://norskmeteornettverk.no/api/v1/predict/passes/pass_task_...</code></
         <tr><td>GET</td><td><code>/predict/passes/{task_id}</code></td><td>none</td><td>Prediction status</td></tr>
         <tr><td>POST</td><td><code>/predict/aircraft</code></td><td>none</td><td>Queue aircraft crossing prediction</td></tr>
         <tr><td>GET</td><td><code>/predict/aircraft/{task_id}</code></td><td>none</td><td>Aircraft status</td></tr>
-        <tr><td>POST</td><td><code>/downloads</code></td><td>key</td><td>Start file download</td></tr>
+        <tr><td>GET</td><td><code>/download</code></td><td>key</td><td>Start download from a single URL</td></tr>
+        <tr><td>POST</td><td><code>/downloads</code></td><td>key</td><td>Start file download (JSON)</td></tr>
         <tr><td>GET</td><td><code>/downloads/{task_id}</code></td><td>key</td><td>Download status</td></tr>
         <tr><td>DELETE</td><td><code>/downloads/{task_id}</code></td><td>key</td><td>Cancel/cleanup</td></tr>
         <tr><td>POST</td><td><code>/streams</code></td><td>key</td><td>Start live stream</td></tr>
@@ -145,22 +146,35 @@ curl -X POST 'https://norskmeteornettverk.no/api/v1/predict/aircraft?station=ams
 curl https://norskmeteornettverk.no/api/v1/predict/passes/pass_task_1725...</code></pre>
 
     <h3>Downloads (requires API key)</h3>
-    <pre><code>cat &gt; payload.json &lt;&lt;'JSON'
-{
-  "files": [
-    {"station_id": "ams173", "cam": 1, "time": "2026-08-31_20:00", "file_type": "image"},
-    {"station_id": "ams173", "cam": 1, "time": "2026-08-31_20:05", "file_type": "image"}
-  ]
-}
-JSON
+    <p>The simplest form needs no JSON — everything is a query parameter on a single URL:</p>
+    <pre><code># One image from camera 1 at 20:00 UTC
+curl -H 'X-API-Key: YOUR_API_KEY' \
+  'https://norskmeteornettverk.no/api/v1/download?station=ams173&camera=1&date=2026-08-31&hour=20&minute=0&file_type=image'
 
-curl -X POST https://norskmeteornettverk.no/api/v1/downloads \
+# A sequence of 5 images, 5 minutes apart
+curl -H 'X-API-Key: YOUR_API_KEY' \
+  'https://norskmeteornettverk.no/api/v1/download?station=ams173&camera=1&date=2026-08-31&hour=20&minute=0&file_type=image&length=5&interval=5'
+
+# A 3-minute low-res video
+curl -H 'X-API-Key: YOUR_API_KEY' \
+  'https://norskmeteornettverk.no/api/v1/download?station=ams173&camera=1&date=2026-08-31&hour=20&minute=0&file_type=lowres&duration=3'
+
+# Both timelapse projections for two days (camera/hour/minute not needed)
+curl -H 'X-API-Key: YOUR_API_KEY' \
+  'https://norskmeteornettverk.no/api/v1/download?station=ams173&date=2026-08-31&file_type=timelapse&length=2&stitch_equirect=1&stitch_fisheye=1'
+
+# Response:
+# {"task_id":"master_task_...","status":"pending","poll_url":"/api/v1/downloads/master_task_..."}
+#
+# Poll until "status":"complete" — "files" then holds direct URLs like
+# download/SOR_cam2_20260918_0004_image_lowres.jpg under /data/
+curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads/master_task_1725...</code></pre>
+    <p class="note">Parameters: <code>station</code> (comma-separated amsNNN, max 10), <code>camera</code>, <code>date</code> (YYYY-MM-DD), <code>hour</code>, <code>minute</code> (UTC), <code>file_type</code> (<code>lowres</code>|<code>hires</code>|<code>image</code>|<code>image_lowres</code>|<code>image_long</code>|<code>image_lowres_long</code>|<code>timelapse</code>|<code>timelapse_hires</code>), <code>length</code>, <code>interval</code>, <code>duration</code>, <code>stitch_equirect</code>, <code>stitch_fisheye</code>, <code>lang</code>.</p>
+    <p>The advanced form accepts the same fields as a JSON body (plus <code>pass_data</code>/<code>flight_pass_data</code>/<code>crossing_data</code> for pass downloads):</p>
+    <pre><code>curl -X POST https://norskmeteornettverk.no/api/v1/downloads \
   -H 'Content-Type: application/json' \
   -H 'X-API-Key: YOUR_API_KEY' \
-  -d @payload.json
-
-# Poll the returned master task
-curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads/master_task_1725...
+  -d '{"stations":["ams173"],"cameras":[1],"file_type":"image","date":"2026-08-31","hour":"20","minute":"0","length":5,"interval":5}'
 
 # Cancel / cleanup
 curl -X DELETE -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads/master_task_1725...</code></pre>

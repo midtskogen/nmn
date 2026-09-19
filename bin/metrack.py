@@ -15,6 +15,7 @@ output generation. The main `metrack` function remains backward-compatible.
 import argparse
 import configparser
 import datetime
+import html as html_mod
 import math
 import io
 import os
@@ -828,7 +829,9 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
                 if not lats or not lons:
                     continue
                 pcolor = str(p.get('color', '#ff00ff'))
-                plabel = str(p.get('label', ''))
+                # Labels can carry station-supplied names — escape before
+                # they reach the generated HTML page.
+                plabel = html_mod.escape(str(p.get('label', '')))
                 pz = 0.0
                 if p.get('elev_km') is not None:
                     pz = float(p.get('elev_km'))
@@ -907,7 +910,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             try:
                 mlat = float(m.get('lat'))
                 mlon = float(m.get('lon'))
-                mlabel = str(m.get('label', ''))
+                mlabel = html_mod.escape(str(m.get('label', '')))
                 mcolor = str(m.get('color', '#ff00ff'))
                 mlabel_color = str(m.get('label_color', mcolor))
                 mz = 0.0
@@ -998,8 +1001,8 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     center_json = json.dumps(camera_center)
     distance_json = json.dumps(camera_distance)
     elev_json = json.dumps(elev_offset_z)
-    play_text = translations.get("plot_interactive_play", "▶ Play")
-    pause_text = translations.get("plot_interactive_pause", "⏸ Pause")
+    play_text = html_mod.escape(translations.get("plot_interactive_play", "▶ Play"))
+    pause_text = html_mod.escape(translations.get("plot_interactive_pause", "⏸ Pause"))
     controls_and_script = f"""
 <style>
   html, body {{ margin: 0; padding: 0; overflow: hidden; height: 100%; }}

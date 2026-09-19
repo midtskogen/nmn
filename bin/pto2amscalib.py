@@ -566,6 +566,19 @@ def convert_pto_file(args):
     pitch = float(img.get('p', 0.0))
     roll = float(img.get('r', 0.0))
 
+    # Reject non-finite or implausible geometry from a malformed .pto rather
+    # than letting NaN/inf propagate into the calibration JSON.
+    for name, val in (('w', w), ('h', h), ('v', fov), ('y', yaw), ('p', pitch), ('r', roll)):
+        if not math.isfinite(val):
+            print(f"Error: non-finite {name} value in PTO file: {img.get(name[0] if name != 'fov' else 'v')}", file=sys.stderr)
+            sys.exit(1)
+    if w <= 0 or h <= 0 or w > 65536 or h > 65536:
+        print(f"Error: implausible image dimensions {w}x{h}", file=sys.stderr)
+        sys.exit(1)
+    if fov <= 0 or fov > 360:
+        print(f"Error: implausible field of view {fov}", file=sys.stderr)
+        sys.exit(1)
+
     # Basic geometry: pixel scale from the horizontal FOV and width.
     pixscale = fov * 3600.0 / w  # arcsec/pixel, horizontal
 

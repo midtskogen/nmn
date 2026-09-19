@@ -158,7 +158,12 @@ def process_station(station_id: str, quiet: bool, ssh_user: str = 'root', ssh_ti
         host_config = ssh_config.lookup(station_id)
 
         with paramiko.SSHClient() as ssh:
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # Verify against known_hosts instead of auto-accepting any key:
+            # AutoAddPolicy makes the connection trivially MITM-able.  New
+            # stations must be added to ~/.ssh/known_hosts (e.g. ssh-keyscan
+            # over a trusted path) before calfetch will connect.
+            ssh.load_system_host_keys()
+            ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
             ssh.connect(
                 hostname=host_config.get('hostname', station_id),
                 username=host_config.get('user', ssh_user),

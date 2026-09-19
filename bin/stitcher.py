@@ -2593,7 +2593,7 @@ def _fetch_remote_files_over_ssh(station, remote_paths, local_dir, progress_pref
     def _fetch_batch(batch):
         file_list = '\n'.join(batch) + '\n'
         ssh_cmd = ssh_base + [station, 'tar', '-cvhf', '-', '-T', '/dev/stdin']
-        tar_cmd = ['tar', '-xf', '-', '-C', local_dir]
+        tar_cmd = ['tar', '-xf', '-', '-C', local_dir, '--no-same-owner', '--no-same-permissions', '--delay-directory-restore']
 
         expected_basenames = set(os.path.basename(p) for p in batch)
         stderr_lines = []
@@ -5126,7 +5126,7 @@ def launch_gui():
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 tar_proc = subprocess.Popen(
-                    ["tar", "-xf", "-", "-C", tmp],
+                    ["tar", "-xf", "-", "-C", tmp, "--no-same-owner", "--no-same-permissions", "--delay-directory-restore"],
                     stdin=ssh_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 ssh_proc.stdout.close()
@@ -5672,7 +5672,7 @@ def launch_gui():
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 tar_proc = subprocess.Popen(
-                    ["tar", "-xf", "-", "-C", tmp],
+                    ["tar", "-xf", "-", "-C", tmp, "--no-same-owner", "--no-same-permissions", "--delay-directory-restore"],
                     stdin=ssh_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 ssh_proc.stdout.close()

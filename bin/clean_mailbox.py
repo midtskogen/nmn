@@ -48,6 +48,11 @@ def compact_mailbox_in_place(path, cutoff, dry_run=False):
     st = os.stat(path)
 
     with open(path, 'r+b') as f:
+        # TOCTOU: the mailbox may have been replaced between stat() and
+        # open() — verify we hold the same inode before rewriting in place.
+        st2 = os.fstat(f.fileno())
+        if (st2.st_dev, st2.st_ino) != (st.st_dev, st.st_ino):
+            raise RuntimeError(f"{path}: file was replaced during open — refusing to rewrite")
         try:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         except OSError:
@@ -164,6 +169,10 @@ def main():
         help="Count how many messages would be removed without changing the file"
     )
     args = parser.parse_args()
+
+    if args.days < 0:
+        print(f"Error: --days must be >= 0 (got {args.days})", file=sys.stderr)
+        sys.exit(2)
 
     path = args.mailbox
     if not os.path.exists(path):

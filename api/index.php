@@ -192,7 +192,7 @@ function new_task_id(string $prefix): string {
 // ---------------------------------------------------------------------------
 // Shared download-job launcher: payload JSON -> temp file -> coordinator.
 // ---------------------------------------------------------------------------
-function api_start_download(string $raw, string $client_ip, ?string $key_id) {
+function api_start_download(string $raw, string $client_ip, ?string $key_id, bool $wait = false) {
     global $log_entry;
     $max_payload = 5 * 1024 * 1024;
     if (strlen($raw) > $max_payload) {
@@ -222,6 +222,24 @@ function api_start_download(string $raw, string $client_ip, ?string $key_id) {
          . escapeshellarg($task_id) . ' ' . escapeshellarg($payload_file) . ' ' . escapeshellarg($client_ip)
          . ' > /dev/null 2>&1 &';
     shell_exec($cmd);
+
+    // Synchronous mode (GET /download): hold the request until the
+    // coordinator finishes so callers get the final file list directly.
+    // If the wait exceeds the budget, fall back to the async handle.
+    if ($wait) {
+        // Apache TimeOut / FcgidIOTimeout is 300s — leave margin to respond.
+        set_time_limit(295);
+        $deadline = microtime(true) + 280;
+        while (microtime(true) < $deadline) {
+            usleep(500000);
+            $data = read_status_file($task_id);
+            if (is_array($data) && in_array($data['status'] ?? '', ['complete', 'error'], true)) {
+                $data['task_id'] = $task_id;
+                api_json_response($data, ($data['status'] === 'error') ? 500 : 200);
+            }
+        }
+        api_json_response(['task_id' => $task_id, 'status' => 'pending', 'poll_url' => '/api/v1/downloads/' . $task_id], 202);
+    }
     api_json_response(['task_id' => $task_id, 'status' => 'pending', 'poll_url' => '/api/v1/downloads/' . $task_id], 202);
 }
 
@@ -376,10 +394,12 @@ switch ($resource) {
         }
         api_error('not_found', 'Unknown endpoint.', 404);
 
-    // --- Simple download: one URL, no JSON body ------------------------------
+    // --- Simple download: one URL, no JSON body, synchronous -----------------
     // GET /api/v1/download?station=ams172&camera=2&date=YYYY-MM-DD&hour=H&minute=M
     //     [&file_type=lowres] [&length=N] [&interval=N] [&duration=N]
     //     [&stitch_equirect=1] [&stitch_fisheye=1] [&lang=en]
+    // Waits for the download to finish and returns the final status (files +
+    // errors).  Jobs still running after 5 min return the async 202 handle.
     // File types: lowres|hires (video), image|image_lowres (still),
     //             image_long|image_lowres_long (stacked still),
     //             timelapse|timelapse_hires (full-day stitched videos;
@@ -446,7 +466,7 @@ switch ($resource) {
         if (isset($_GET['lang']) && preg_match('/^[a-z]{2}(_[A-Z]{2})?$/', $_GET['lang'])) {
             $payload['lang'] = $_GET['lang'];
         }
-        api_start_download(json_encode($payload, JSON_THROW_ON_ERROR), $client_ip, $key_id);
+        api_start_download(json_encode($payload, JSON_THROW_ON_ERROR), $client_ip, $key_id, true);
 
     // --- Streams --------------------------------------------------------------
     case 'streams':

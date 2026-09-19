@@ -6,6 +6,13 @@
  * JSON aggregates or a simple HTML table view (add ?html=1).
  */
 
+// This file must only ever be reached via index.php's /admin/stats route,
+// which enforces API-key auth.  Refuse direct requests to stats.php.
+if (basename($_SERVER['SCRIPT_FILENAME'] ?? '') === basename(__FILE__)) {
+    http_response_code(403);
+    exit('Forbidden');
+}
+
 require_once __DIR__ . '/api_common.php';
 require_once __DIR__ . '/task_queue.php';
 

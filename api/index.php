@@ -162,14 +162,25 @@ function _task_owner_file(string $task_id): string {
     return LOCK_DIR . '/owner_' . $task_id . '.json';
 }
 function api_record_task_owner(string $task_id, ?string $key_id) {
-    file_put_contents(_task_owner_file($task_id), json_encode(['key_id' => $key_id]), LOCK_EX);
+    global $api_key;
+    // Store a hash of the API key itself, not the (optional, non-unique)
+    // 'id' field — two keys missing 'id' would otherwise share ownership.
+    $owner_hash = hash('sha256', (string)$api_key);
+    $ok = file_put_contents(_task_owner_file($task_id),
+        json_encode(['owner' => $owner_hash, 'key_id' => $key_id]), LOCK_EX);
+    if ($ok === false) {
+        // If the sidecar cannot be written the task would be controllable
+        // by ANY key in its endpoint group — fail rather than continue.
+        api_error('owner_record_failed', 'Could not record task ownership.', 500);
+    }
 }
 function api_require_task_ownership(string $task_id) {
-    global $key_id;
+    global $api_key;
     $f = _task_owner_file($task_id);
     if (!file_exists($f)) return; // not created through the API
-    $owner = (json_decode((string) file_get_contents($f), true) ?: [])['key_id'] ?? null;
-    if ($owner === $key_id) return;
+    $rec = json_decode((string) file_get_contents($f), true) ?: [];
+    $owner = $rec['owner'] ?? null;
+    if ($owner !== null && hash_equals($owner, hash('sha256', (string)$api_key))) return;
     validate_api_key('admin');
 }
 
@@ -458,9 +469,28 @@ switch ($resource) {
     case 'enhance':
         if ($method !== 'POST') api_error('method_not_allowed', 'POST required.', 405);
         api_require_key('enhance');
-        $payload = json_decode(file_get_contents('php://input'), true);
-        if (!is_array($payload) || empty($payload['image']) || !isset($payload['filter'])) {
+        $max_payload = 256 * 1024;
+        $raw = file_get_contents('php://input');
+        if (strlen($raw) > $max_payload) {
+            $log_entry['status'] = 413;
+            api_error('payload_too_large', 'Enhance payload too large.', 413);
+        }
+        $payload = json_decode($raw, true);
+        if (!is_array($payload) || empty($payload['image']) || !isset($payload['filter'])
+            || !is_string($payload['image'])) {
             api_error('invalid_json', 'JSON body must contain image and filter.', 400);
+        }
+        if (!preg_match('/^[A-Za-z0-9_.\/-]+$/', $payload['image'])
+            || strpos($payload['image'], '..') !== false) {
+            api_error('invalid_image', 'Invalid image name.', 400);
+        }
+        // Bound the number of queued enhance jobs to avoid queue flooding.
+        $pending = 0;
+        foreach (glob(LOCK_DIR . '/queue_*.json') ?: [] as $qf) {
+            if (time() - filemtime($qf) < 3600) $pending++;
+        }
+        if ($pending >= 100) {
+            api_error('server_busy', 'Too many pending tasks. Please try again later.', 503);
         }
         $task_id = new_task_id('api_task');
         api_record_task_owner($task_id, $key_id);

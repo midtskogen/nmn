@@ -34,6 +34,31 @@ function _rate_limit_config(): array {
 }
 
 /**
+ * Normalize a bucket key so that IPv6 addresses share a /64 bucket.
+ * Without this, an attacker rotating through a single /64 (18 quintillion
+ * addresses) trivially bypasses every per-IP limit and grows the state file
+ * without bound.  Non-IP keys (e.g. API key ids) pass through unchanged.
+ */
+function _rate_bucket_key(string $bucket_key): string {
+    if (filter_var($bucket_key, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        $packed = inet_pton($bucket_key);
+        if ($packed !== false && strlen($packed) === 16) {
+            // First 8 bytes = /64 network prefix.
+            return 'v6:' . bin2hex(substr($packed, 0, 8)) . '/64';
+        }
+    }
+    if (filter_var($bucket_key, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        return 'v4:' . $bucket_key;
+    }
+    return $bucket_key;
+}
+
+// Upper bound on distinct buckets retained in the state file.  Beyond this,
+// the least-recently-active buckets are evicted — this bounds the file size
+// (and therefore the flock-serialized read/rewrite cost per request).
+define('RATE_LIMIT_MAX_BUCKETS', 5000);
+
+/**
  * Check a sliding-window rate limit.
  *
  * @param string $bucket_key    Identifier for the bucket (IP address or API key).
@@ -42,6 +67,7 @@ function _rate_limit_config(): array {
  * @return array ['allowed' => bool, 'retry_after' => int]
  */
 function check_rate_limit(string $bucket_key, string $type, ?array $override = null): array {
+    $bucket_key = _rate_bucket_key($bucket_key);
     $limits = _rate_limit_config()[$type] ?? _rate_limit_config()['read_only'];
     if ($override !== null) {
         $limits = array_merge($limits, $override);
@@ -56,7 +82,15 @@ function check_rate_limit(string $bucket_key, string $type, ?array $override = n
 
     $fp = fopen($file, 'c');
     if (!$fp || !flock($fp, LOCK_EX)) {
-        // If we cannot lock, fail open (allow the request) but log is impossible here.
+        if ($fp) fclose($fp);
+        // Failing open here silently disables all rate limiting (including
+        // the auth-failure brute-force throttle).  Deny the security-
+        // sensitive bucket types; for the rest, allow but make the failure
+        // visible in the error log.
+        error_log("NMN rate_limit: cannot lock $file — bucket type '$type'");
+        if (in_array($type, ['auth_fail', 'predict', 'stateful'], true)) {
+            return ['allowed' => false, 'retry_after' => 60];
+        }
         return ['allowed' => true, 'retry_after' => 0];
     }
 
@@ -67,13 +101,36 @@ function check_rate_limit(string $bucket_key, string $type, ?array $override = n
         if (is_array($decoded)) $data = $decoded;
     }
 
+    // Evict buckets with no activity inside either window, then cap the
+    // total bucket count so the file cannot grow without bound (an attacker
+    // rotating IPs must not be able to bloat a file every request rewrites
+    // under an exclusive lock).
+    foreach ($data as $k => $b) {
+        $minute = array_filter($b['minute'] ?? [], fn($t) => $t > $now - 60);
+        $hour   = array_filter($b['hour']   ?? [], fn($t) => $t > $now - 3600);
+        if (empty($minute) && empty($hour) && $k !== $bucket_key) {
+            unset($data[$k]);
+        }
+    }
+    if (count($data) >= RATE_LIMIT_MAX_BUCKETS && !isset($data[$bucket_key])) {
+        $last_seen = [];
+        foreach ($data as $k => $b) {
+            $last_seen[$k] = max(array_merge($b['minute'] ?? [], $b['hour'] ?? [], [0]));
+        }
+        asort($last_seen);
+        foreach (array_slice(array_keys($last_seen), 0, count($data) - RATE_LIMIT_MAX_BUCKETS + 1) as $k) {
+            unset($data[$k]);
+        }
+    }
+
     if (!isset($data[$bucket_key])) {
         $data[$bucket_key] = ['minute' => [], 'hour' => []];
     }
 
-    // Prune old entries.
-    $data[$bucket_key]['minute'] = array_values(array_filter($data[$bucket_key]['minute'], fn($t) => $t > $now - 60));
-    $data[$bucket_key]['hour']   = array_values(array_filter($data[$bucket_key]['hour'],   fn($t) => $t > $now - 3600));
+    // Prune old entries.  Buckets may come from an older/hand-edited file
+    // that lacks one of the keys — default to [] rather than TypeError.
+    $data[$bucket_key]['minute'] = array_values(array_filter($data[$bucket_key]['minute'] ?? [], fn($t) => $t > $now - 60));
+    $data[$bucket_key]['hour']   = array_values(array_filter($data[$bucket_key]['hour']   ?? [], fn($t) => $t > $now - 3600));
 
     $minute_count = count($data[$bucket_key]['minute']);
     $hour_count   = count($data[$bucket_key]['hour']);

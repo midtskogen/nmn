@@ -53,6 +53,22 @@ extern "C" {
 
 static FILE *inputfile = 0;
 static int mfc_open = 0;
+
+// Bounded append into the fixed-size event-report buffer.  The naive
+//   p += snprintf(rp + p, rps - p, ...)
+// idiom overflows rp once p exceeds rps: snprintf() returns the length it
+// WOULD have written, so rps - p goes negative, becomes a huge size_t, and
+// subsequent calls write out of bounds.  APPEND clamps the write cursor so
+// p can never exceed rps - 1 and never calls snprintf with no room left.
+#define APPEND(...)                                                                     \
+  do {                                                                                  \
+    if (p < (unsigned int)rps) {                                                        \
+      int _w = snprintf(rp + p, (size_t)((unsigned int)rps - p), __VA_ARGS__);          \
+      if (_w > 0) p += ((unsigned int)_w < (unsigned int)rps - 1 - p)                   \
+                           ? (unsigned int)_w                                           \
+                           : (unsigned int)rps - 1 - p;                                 \
+    }                                                                                   \
+  } while (0)
 static int ffmpeg_open = 0;
 
 typedef enum { ALL, IP8172, IP816A, IP9171, IP8151, IMX291, IMX291SD, IMX291HD, IMX307, IMX307SD, IMX307HD } camid;
@@ -2206,101 +2222,101 @@ static void detect_trail2(record *history, unsigned int length, config *config, 
   strftime(tsbuf2, sizeof(tsbuf2), "%Y-%m-%d %H:%M:%S", t);
 
   unsigned int p = 0;
-  p += snprintf(rp + p, rps - p, "[trail]\n");
-  p += snprintf(rp + p, rps - p, "frames = %d\n", best_num);
-  p += snprintf(rp + p, rps - p, "duration = %.2f\n", track[best_num - 1].timestamp - track[0].timestamp + 0.005);
-  p += snprintf(rp + p, rps - p, "slope = %.2f\n", a);
-  p += snprintf(rp + p, rps - p, "offset = %.2f\n", b);
+  APPEND("[trail]\n");
+  APPEND("frames = %d\n", best_num);
+  APPEND("duration = %.2f\n", track[best_num - 1].timestamp - track[0].timestamp + 0.005);
+  APPEND("slope = %.2f\n", a);
+  APPEND("offset = %.2f\n", b);
 
   if (config->ptofile && track[0].az >= 0)
-    p += snprintf(rp + p, rps - p, "speed = %f\n", arc / (track[best_num - 1].timestamp - track[0].timestamp));
-  p += snprintf(rp + p, rps - p, "correlation1 = %f\n", r);
-  p += snprintf(rp + p, rps - p, "positions =");
+    APPEND("speed = %f\n", arc / (track[best_num - 1].timestamp - track[0].timestamp));
+  APPEND("correlation1 = %f\n", r);
+  APPEND("positions =");
   for (unsigned int i = 0; i < best_num; i++)
-    p += snprintf(rp + p, rps - p, " %.1f,%.1f", track[i].x * config->ptowidth / config->width,
+    APPEND(" %.1f,%.1f", track[i].x * config->ptowidth / config->width,
                   track[i].y * config->ptoheight / config->height);
-  p += snprintf(rp + p, rps - p, "\n");
-  p += snprintf(rp + p, rps - p, "timestamps =");
-  for (unsigned int i = 0; i < best_num; i++) p += snprintf(rp + p, rps - p, " %.2f", track[i].timestamp);
-  p += snprintf(rp + p, rps - p, "\n");
+  APPEND("\n");
+  APPEND("timestamps =");
+  for (unsigned int i = 0; i < best_num; i++) APPEND(" %.2f", track[i].timestamp);
+  APPEND("\n");
   if (config->ptofile && track[0].az >= 0) {
-    p += snprintf(rp + p, rps - p, "coordinates =");
-    for (unsigned int i = 0; i < best_num; i++) p += snprintf(rp + p, rps - p, " %.2f,%.2f", track[i].az, track[i].alt);
-    p += snprintf(rp + p, rps - p, "\n");
-    p += snprintf(rp + p, rps - p, "gnomonic =");
-    for (unsigned int i = 0; i < best_num; i++) p += snprintf(rp + p, rps - p, " %f,%f", track[i].gnomx, track[i].gnomy);
-    p += snprintf(rp + p, rps - p, "\n");
-    p += snprintf(rp + p, rps - p, "midpoint = %.2f,%.2f\n", midaz, midalt);
-    p += snprintf(rp + p, rps - p, "arc = %.2f\n", arc);
+    APPEND("coordinates =");
+    for (unsigned int i = 0; i < best_num; i++) APPEND(" %.2f,%.2f", track[i].az, track[i].alt);
+    APPEND("\n");
+    APPEND("gnomonic =");
+    for (unsigned int i = 0; i < best_num; i++) APPEND(" %f,%f", track[i].gnomx, track[i].gnomy);
+    APPEND("\n");
+    APPEND("midpoint = %.2f,%.2f\n", midaz, midalt);
+    APPEND("arc = %.2f\n", arc);
   }
-  p += snprintf(rp + p, rps - p, "brightness =");
-  for (unsigned int i = 0; i < best_num; i++) p += snprintf(rp + p, rps - p, " %d", track[i].brightness);
-  p += snprintf(rp + p, rps - p, "\n");
-  p += snprintf(rp + p, rps - p, "size =");
-  for (unsigned int i = 0; i < best_num; i++) p += snprintf(rp + p, rps - p, " %d", track[i].size);
-  p += snprintf(rp + p, rps - p, "\n");
-  p += snprintf(rp + p, rps - p, "frame_brightness =");
-  for (unsigned int i = 0; i < best_num; i++) p += snprintf(rp + p, rps - p, " %.1f", track[i].framebrightness / 2.560);
-  p += snprintf(rp + p, rps - p, "\n");
+  APPEND("brightness =");
+  for (unsigned int i = 0; i < best_num; i++) APPEND(" %d", track[i].brightness);
+  APPEND("\n");
+  APPEND("size =");
+  for (unsigned int i = 0; i < best_num; i++) APPEND(" %d", track[i].size);
+  APPEND("\n");
+  APPEND("frame_brightness =");
+  for (unsigned int i = 0; i < best_num; i++) APPEND(" %.1f", track[i].framebrightness / 2.560);
+  APPEND("\n");
 
-  p += snprintf(rp + p, rps - p, "\n[video]\n");
-  p += snprintf(rp + p, rps - p, "start = %s.%02d UTC (%.2f)\n", tsbuf, (int)((track[0].timestamp - (int)track[0].timestamp) * 100),
+  APPEND("\n[video]\n");
+  APPEND("start = %s.%02d UTC (%.2f)\n", tsbuf, (int)((track[0].timestamp - (int)track[0].timestamp) * 100),
                 track[0].timestamp);
-  p += snprintf(rp + p, rps - p, "end = %s.%02d UTC (%.2f)\n", tsbuf2,
+  APPEND("end = %s.%02d UTC (%.2f)\n", tsbuf2,
                 (int)((track[best_num - 1].timestamp - (int)track[best_num - 1].timestamp) * 100), track[best_num - 1].timestamp);
 
   ts = time(nullptr);
   t = gmtime(&ts);
   strftime(tsbuf, sizeof(tsbuf), "%Y-%m-%d %H:%M:%S", t);
-  p += snprintf(rp + p, rps - p, "wallclock = %s UTC\n", tsbuf);
-  p += snprintf(rp + p, rps - p, "width = %d\n", config->width);
-  p += snprintf(rp + p, rps - p, "height = %d\n", config->height);
-  p += snprintf(rp + p, rps - p, "raw = %d\n", config->raw);
-  p += snprintf(rp + p, rps - p, "flash = %d\n", config->flash);
+  APPEND("wallclock = %s UTC\n", tsbuf);
+  APPEND("width = %d\n", config->width);
+  APPEND("height = %d\n", config->height);
+  APPEND("raw = %d\n", config->raw);
+  APPEND("flash = %d\n", config->flash);
 
-  p += snprintf(rp + p, rps - p, "\n[config]\n");
-  p += snprintf(rp + p, rps - p, "swidth = %d\n", config->swidth);
-  p += snprintf(rp + p, rps - p, "sheight = %d\n", config->sheight);
-  p += snprintf(rp + p, rps - p, "swdec = %d\n", config->swdec);
-  p += snprintf(rp + p, rps - p, "downscale_thr = %d\n", config->downscale_thr);
-  p += snprintf(rp + p, rps - p, "mintrail_sec = %.2f\n", config->mintrail_sec);
-  p += snprintf(rp + p, rps - p, "maxtrail_sec = %.2f\n", config->maxtrail_sec);
-  p += snprintf(rp + p, rps - p, "mintrail = %d\n", config->mintrail);
-  p += snprintf(rp + p, rps - p, "maxtrail = %d\n", config->maxtrail);
-  p += snprintf(rp + p, rps - p, "minspeed = %f\n", config->minspeed * config->width / 100);
-  p += snprintf(rp + p, rps - p, "maxspeed = %f\n", config->maxspeed * config->width / 100);
-  p += snprintf(rp + p, rps - p, "minspeedkms = %f\n", config->minspeedkms);
-  p += snprintf(rp + p, rps - p, "maxspeedkms = %f\n", config->maxspeedkms);
-  p += snprintf(rp + p, rps - p, "leveltest = %d\n", config->leveltest);
-  p += snprintf(rp + p, rps - p, "numspots = %d\n", config->numspots);
-  p += snprintf(rp + p, rps - p, "brightness = %d\n", config->brightness);
-  p += snprintf(rp + p, rps - p, "flash_thr = %.2f\n", config->flash_thr);
-  p += snprintf(rp + p, rps - p, "lookahead = %d\n", config->lookahead);
-  p += snprintf(rp + p, rps - p, "exit = %d\n", config->exit);
-  p += snprintf(rp + p, rps - p, "peak = %f\n", config->peak);
-  p += snprintf(rp + p, rps - p, "filter = %d\n", config->filter);
-  p += snprintf(rp + p, rps - p, "dct_threshold = %f\n", config->dct_threshold);
-  p += snprintf(rp + p, rps - p, "correlation = %f\n", config->corr);
-  p += snprintf(rp + p, rps - p, "spacing correlation = %f\n", config->spacing_corr);
-  p += snprintf(rp + p, rps - p, "gnomonic correlation = %f\n", config->gnomonic_corr);
-  p += snprintf(rp + p, rps - p, "nothreads = %d\n", config->nothreads);
-  p += snprintf(rp + p, rps - p, "lastreport_ts = %u\n", (unsigned int)config->lastreport_ts);
-  p += snprintf(rp + p, rps - p, "ts_future = %d\n", config->ts_future);
-  p += snprintf(rp + p, rps - p, "snapshot_interval = %d\n", config->snapshot_interval);
-  p += snprintf(rp + p, rps - p, "snapshot_integration = %d\n", config->snapshot_integration);
-  if (config->logfile) p += snprintf(rp + p, rps - p, "logfile = %s\n", config->logfile);
-  if (config->maskfile) p += snprintf(rp + p, rps - p, "maskfile = %s\n", config->maskfile);
-  if (config->maxfile) p += snprintf(rp + p, rps - p, "maxfile = %s\n", config->maxfile);
-  if (config->savefile) p += snprintf(rp + p, rps - p, "savefile = %s\n", config->savefile);
+  APPEND("\n[config]\n");
+  APPEND("swidth = %d\n", config->swidth);
+  APPEND("sheight = %d\n", config->sheight);
+  APPEND("swdec = %d\n", config->swdec);
+  APPEND("downscale_thr = %d\n", config->downscale_thr);
+  APPEND("mintrail_sec = %.2f\n", config->mintrail_sec);
+  APPEND("maxtrail_sec = %.2f\n", config->maxtrail_sec);
+  APPEND("mintrail = %d\n", config->mintrail);
+  APPEND("maxtrail = %d\n", config->maxtrail);
+  APPEND("minspeed = %f\n", config->minspeed * config->width / 100);
+  APPEND("maxspeed = %f\n", config->maxspeed * config->width / 100);
+  APPEND("minspeedkms = %f\n", config->minspeedkms);
+  APPEND("maxspeedkms = %f\n", config->maxspeedkms);
+  APPEND("leveltest = %d\n", config->leveltest);
+  APPEND("numspots = %d\n", config->numspots);
+  APPEND("brightness = %d\n", config->brightness);
+  APPEND("flash_thr = %.2f\n", config->flash_thr);
+  APPEND("lookahead = %d\n", config->lookahead);
+  APPEND("exit = %d\n", config->exit);
+  APPEND("peak = %f\n", config->peak);
+  APPEND("filter = %d\n", config->filter);
+  APPEND("dct_threshold = %f\n", config->dct_threshold);
+  APPEND("correlation = %f\n", config->corr);
+  APPEND("spacing correlation = %f\n", config->spacing_corr);
+  APPEND("gnomonic correlation = %f\n", config->gnomonic_corr);
+  APPEND("nothreads = %d\n", config->nothreads);
+  APPEND("lastreport_ts = %u\n", (unsigned int)config->lastreport_ts);
+  APPEND("ts_future = %d\n", config->ts_future);
+  APPEND("snapshot_interval = %d\n", config->snapshot_interval);
+  APPEND("snapshot_integration = %d\n", config->snapshot_integration);
+  if (config->logfile) APPEND("logfile = %s\n", config->logfile);
+  if (config->maskfile) APPEND("maskfile = %s\n", config->maskfile);
+  if (config->maxfile) APPEND("maxfile = %s\n", config->maxfile);
+  if (config->savefile) APPEND("savefile = %s\n", config->savefile);
   if (config->ptofile) {
-    p += snprintf(rp + p, rps - p, "ptofile = %s\n", config->ptofile);
-    if (config->ptoscale) p += snprintf(rp + p, rps - p, "ptoscale = %f\n", config->ptoscale);
-    if (config->ptowidth) p += snprintf(rp + p, rps - p, "ptowidth = %f\n", config->ptowidth);
-    if (config->ptoheight) p += snprintf(rp + p, rps - p, "ptoheight = %f\n", config->ptoheight);
+    APPEND("ptofile = %s\n", config->ptofile);
+    if (config->ptoscale) APPEND("ptoscale = %f\n", config->ptoscale);
+    if (config->ptowidth) APPEND("ptowidth = %f\n", config->ptowidth);
+    if (config->ptoheight) APPEND("ptoheight = %f\n", config->ptoheight);
   }
-  if (config->execute && config->saveevent) p += snprintf(rp + p, rps - p, "execute = %s\n", config->execute);
-  if (config->eventdir) p += snprintf(rp + p, rps - p, "eventdir = %s\n", config->eventdir);
-  if (config->snapshot_dir) p += snprintf(rp + p, rps - p, "snapshot_dir = %s\n", config->snapshot_dir);
+  if (config->execute && config->saveevent) APPEND("execute = %s\n", config->execute);
+  if (config->eventdir) APPEND("eventdir = %s\n", config->eventdir);
+  if (config->snapshot_dir) APPEND("snapshot_dir = %s\n", config->snapshot_dir);
 
   // Write the best detection of the current series of detections to file
   saveevent(config, rp, (time_t)track[best_num - 1].timestamp);
@@ -2767,108 +2783,107 @@ static void detect_trail(record *history, unsigned int length, config *config, u
           strftime(tsbuf2, sizeof(tsbuf2), "%Y-%m-%d %H:%M:%S", t);
 
           unsigned int p = 0;
-          p += snprintf(rp + p, rps - p, "[trail]\n");
-          p += snprintf(rp + p, rps - p, "frames = %d\n", b - a);
-          p += snprintf(rp + p, rps - p, "duration = %.2f\n", history[b - 1].timestamp - history[a].timestamp + 0.005);
-          p += snprintf(rp + p, rps - p, "slope = %.2f\n", slope);
-          p += snprintf(rp + p, rps - p, "offset = %.2f\n", offset);
+          APPEND("[trail]\n");
+          APPEND("frames = %d\n", b - a);
+          APPEND("duration = %.2f\n", history[b - 1].timestamp - history[a].timestamp + 0.005);
+          APPEND("slope = %.2f\n", slope);
+          APPEND("offset = %.2f\n", offset);
 
-          p += snprintf(rp + p, rps - p, "pixelspeed = %f\n", l);
+          APPEND("pixelspeed = %f\n", l);
           if (config->ptofile && az[a] >= 0)
-            p += snprintf(rp + p, rps - p, "speed = %f\n", arc / (history[b - 1].timestamp - history[a].timestamp));
-          p += snprintf(rp + p, rps - p, "correlation1 = %f\n", r);
-          p += snprintf(rp + p, rps - p, "correlation2 = %f\n", dr);
-          if (gnomonic_corr < 1.1) p += snprintf(rp + p, rps - p, "correlation3 = %f\n", gnomonic_corr);
-          p += snprintf(rp + p, rps - p, "positions =");
+            APPEND("speed = %f\n", arc / (history[b - 1].timestamp - history[a].timestamp));
+          APPEND("correlation1 = %f\n", r);
+          APPEND("correlation2 = %f\n", dr);
+          if (gnomonic_corr < 1.1) APPEND("correlation3 = %f\n", gnomonic_corr);
+          APPEND("positions =");
           for (unsigned int i = a; i < b; i++)
-            p +=
-                snprintf(rp + p, rps - p, " %.1f,%.1f", x[i] * config->ptowidth / config->width, y[i] * config->ptoheight / config->height);
-          p += snprintf(rp + p, rps - p, "\n");
-          p += snprintf(rp + p, rps - p, "timestamps =");
-          for (unsigned int i = 0; i < b - a; i++) p += snprintf(rp + p, rps - p, " %.2f", history[a + i].timestamp);
-          p += snprintf(rp + p, rps - p, "\n");
+            APPEND(" %.1f,%.1f", x[i] * config->ptowidth / config->width, y[i] * config->ptoheight / config->height);
+          APPEND("\n");
+          APPEND("timestamps =");
+          for (unsigned int i = 0; i < b - a; i++) APPEND(" %.2f", history[a + i].timestamp);
+          APPEND("\n");
           if (config->ptofile && az[a] >= 0) {
-            p += snprintf(rp + p, rps - p, "coordinates =");
-            for (unsigned int i = a; i < b; i++) p += snprintf(rp + p, rps - p, " %.2f,%.2f", az[i], alt[i]);
-            p += snprintf(rp + p, rps - p, "\n");
-            p += snprintf(rp + p, rps - p, "gnomonic =");
-            for (unsigned int i = 0; i < b - a; i++) p += snprintf(rp + p, rps - p, " %f,%f", gnomonic_x[i], gnomonic_y[i]);
-            p += snprintf(rp + p, rps - p, "\n");
-            p += snprintf(rp + p, rps - p, "midpoint = %.2f,%.2f\n", midaz, midalt);
-            p += snprintf(rp + p, rps - p, "arc = %.2f\n", arc);
+            APPEND("coordinates =");
+            for (unsigned int i = a; i < b; i++) APPEND(" %.2f,%.2f", az[i], alt[i]);
+            APPEND("\n");
+            APPEND("gnomonic =");
+            for (unsigned int i = 0; i < b - a; i++) APPEND(" %f,%f", gnomonic_x[i], gnomonic_y[i]);
+            APPEND("\n");
+            APPEND("midpoint = %.2f,%.2f\n", midaz, midalt);
+            APPEND("arc = %.2f\n", arc);
           }
-          p += snprintf(rp + p, rps - p, "brightness =");
-          for (unsigned int i = a; i < b; i++) p += snprintf(rp + p, rps - p, " %d", z[i]);
-          p += snprintf(rp + p, rps - p, "\n");
-          p += snprintf(rp + p, rps - p, "dct midpoint = %d\n", dcttest(z + a, b - a, dct));
-          p += snprintf(rp + p, rps - p, "dct =");
-          for (unsigned int i = 0; i < b - a; i++) p += snprintf(rp + p, rps - p, " %d", dct[i]);
-          p += snprintf(rp + p, rps - p, "\n");
-          p += snprintf(rp + p, rps - p, "size =");
-          for (unsigned int i = a; i < b; i++) p += snprintf(rp + p, rps - p, " %d", zz[i]);
-          p += snprintf(rp + p, rps - p, "\n");
-          p += snprintf(rp + p, rps - p, "frame_brightness =");
-          for (unsigned int i = a; i < b; i++) p += snprintf(rp + p, rps - p, " %.1f", history[i].framebrightness / 2.560);
-          p += snprintf(rp + p, rps - p, "\n");
+          APPEND("brightness =");
+          for (unsigned int i = a; i < b; i++) APPEND(" %d", z[i]);
+          APPEND("\n");
+          APPEND("dct midpoint = %d\n", dcttest(z + a, b - a, dct));
+          APPEND("dct =");
+          for (unsigned int i = 0; i < b - a; i++) APPEND(" %d", dct[i]);
+          APPEND("\n");
+          APPEND("size =");
+          for (unsigned int i = a; i < b; i++) APPEND(" %d", zz[i]);
+          APPEND("\n");
+          APPEND("frame_brightness =");
+          for (unsigned int i = a; i < b; i++) APPEND(" %.1f", history[i].framebrightness / 2.560);
+          APPEND("\n");
 
-          p += snprintf(rp + p, rps - p, "\n[video]\n");
-          p += snprintf(rp + p, rps - p, "start = %s.%02d UTC (%.2f)\n", tsbuf,
+          APPEND("\n[video]\n");
+          APPEND("start = %s.%02d UTC (%.2f)\n", tsbuf,
                         (int)((history[a].timestamp - (int)history[a].timestamp) * 100), history[a].timestamp);
-          p += snprintf(rp + p, rps - p, "end = %s.%02d UTC (%.2f)\n", tsbuf2,
+          APPEND("end = %s.%02d UTC (%.2f)\n", tsbuf2,
                         (int)((history[b - 1].timestamp - (int)history[b - 1].timestamp) * 100), history[b - 1].timestamp);
 
           ts = time(nullptr);
           t = gmtime(&ts);
           strftime(tsbuf, sizeof(tsbuf), "%Y-%m-%d %H:%M:%S", t);
-          p += snprintf(rp + p, rps - p, "wallclock = %s UTC\n", tsbuf);
-          p += snprintf(rp + p, rps - p, "width = %d\n", config->width);
-          p += snprintf(rp + p, rps - p, "height = %d\n", config->height);
-          p += snprintf(rp + p, rps - p, "raw = %d\n", config->raw);
-          p += snprintf(rp + p, rps - p, "flash = %d\n", config->flash);
+          APPEND("wallclock = %s UTC\n", tsbuf);
+          APPEND("width = %d\n", config->width);
+          APPEND("height = %d\n", config->height);
+          APPEND("raw = %d\n", config->raw);
+          APPEND("flash = %d\n", config->flash);
 
-          p += snprintf(rp + p, rps - p, "\n[config]\n");
-          p += snprintf(rp + p, rps - p, "swidth = %d\n", config->swidth);
-          p += snprintf(rp + p, rps - p, "sheight = %d\n", config->sheight);
-          p += snprintf(rp + p, rps - p, "swdec = %d\n", config->swdec);
-          p += snprintf(rp + p, rps - p, "downscale_thr = %d\n", config->downscale_thr);
-          p += snprintf(rp + p, rps - p, "mintrail_sec = %.2f\n", config->mintrail_sec);
-          p += snprintf(rp + p, rps - p, "maxtrail_sec = %.2f\n", config->maxtrail_sec);
-          p += snprintf(rp + p, rps - p, "mintrail = %d\n", config->mintrail);
-          p += snprintf(rp + p, rps - p, "maxtrail = %d\n", config->maxtrail);
-          p += snprintf(rp + p, rps - p, "minspeed = %f\n", config->minspeed * config->width / 100);
-          p += snprintf(rp + p, rps - p, "maxspeed = %f\n", config->maxspeed * config->width / 100);
-          p += snprintf(rp + p, rps - p, "minspeedkms = %f\n", config->minspeedkms);
-          p += snprintf(rp + p, rps - p, "maxspeedkms = %f\n", config->maxspeedkms);
-          p += snprintf(rp + p, rps - p, "leveltest = %d\n", config->leveltest);
-          p += snprintf(rp + p, rps - p, "numspots = %d\n", config->numspots);
-          p += snprintf(rp + p, rps - p, "brightness = %d\n", config->brightness);
-          p += snprintf(rp + p, rps - p, "flash_thr = %.2f\n", config->flash_thr);
-          p += snprintf(rp + p, rps - p, "lookahead = %d\n", config->lookahead);
-          p += snprintf(rp + p, rps - p, "exit = %d\n", config->exit);
-          p += snprintf(rp + p, rps - p, "peak = %f\n", config->peak);
-          p += snprintf(rp + p, rps - p, "filter = %d\n", config->filter);
-          p += snprintf(rp + p, rps - p, "dct_threshold = %f\n", config->dct_threshold);
-          p += snprintf(rp + p, rps - p, "correlation = %f\n", config->corr);
-          p += snprintf(rp + p, rps - p, "spacing correlation = %f\n", config->spacing_corr);
-          p += snprintf(rp + p, rps - p, "gnomonic correlation = %f\n", config->gnomonic_corr);
-          p += snprintf(rp + p, rps - p, "nothreads = %d\n", config->nothreads);
-          p += snprintf(rp + p, rps - p, "lastreport_ts = %u\n", (unsigned int)config->lastreport_ts);
-          p += snprintf(rp + p, rps - p, "ts_future = %d\n", config->ts_future);
-          p += snprintf(rp + p, rps - p, "snapshot_interval = %d\n", config->snapshot_interval);
-          p += snprintf(rp + p, rps - p, "snapshot_integration = %d\n", config->snapshot_integration);
-          if (config->logfile) p += snprintf(rp + p, rps - p, "logfile = %s\n", config->logfile);
-          if (config->maskfile) p += snprintf(rp + p, rps - p, "maskfile = %s\n", config->maskfile);
-          if (config->maxfile) p += snprintf(rp + p, rps - p, "maxfile = %s\n", config->maxfile);
-          if (config->savefile) p += snprintf(rp + p, rps - p, "savefile = %s\n", config->savefile);
+          APPEND("\n[config]\n");
+          APPEND("swidth = %d\n", config->swidth);
+          APPEND("sheight = %d\n", config->sheight);
+          APPEND("swdec = %d\n", config->swdec);
+          APPEND("downscale_thr = %d\n", config->downscale_thr);
+          APPEND("mintrail_sec = %.2f\n", config->mintrail_sec);
+          APPEND("maxtrail_sec = %.2f\n", config->maxtrail_sec);
+          APPEND("mintrail = %d\n", config->mintrail);
+          APPEND("maxtrail = %d\n", config->maxtrail);
+          APPEND("minspeed = %f\n", config->minspeed * config->width / 100);
+          APPEND("maxspeed = %f\n", config->maxspeed * config->width / 100);
+          APPEND("minspeedkms = %f\n", config->minspeedkms);
+          APPEND("maxspeedkms = %f\n", config->maxspeedkms);
+          APPEND("leveltest = %d\n", config->leveltest);
+          APPEND("numspots = %d\n", config->numspots);
+          APPEND("brightness = %d\n", config->brightness);
+          APPEND("flash_thr = %.2f\n", config->flash_thr);
+          APPEND("lookahead = %d\n", config->lookahead);
+          APPEND("exit = %d\n", config->exit);
+          APPEND("peak = %f\n", config->peak);
+          APPEND("filter = %d\n", config->filter);
+          APPEND("dct_threshold = %f\n", config->dct_threshold);
+          APPEND("correlation = %f\n", config->corr);
+          APPEND("spacing correlation = %f\n", config->spacing_corr);
+          APPEND("gnomonic correlation = %f\n", config->gnomonic_corr);
+          APPEND("nothreads = %d\n", config->nothreads);
+          APPEND("lastreport_ts = %u\n", (unsigned int)config->lastreport_ts);
+          APPEND("ts_future = %d\n", config->ts_future);
+          APPEND("snapshot_interval = %d\n", config->snapshot_interval);
+          APPEND("snapshot_integration = %d\n", config->snapshot_integration);
+          if (config->logfile) APPEND("logfile = %s\n", config->logfile);
+          if (config->maskfile) APPEND("maskfile = %s\n", config->maskfile);
+          if (config->maxfile) APPEND("maxfile = %s\n", config->maxfile);
+          if (config->savefile) APPEND("savefile = %s\n", config->savefile);
           if (config->ptofile) {
-            p += snprintf(rp + p, rps - p, "ptofile = %s\n", config->ptofile);
-            if (config->ptoscale) p += snprintf(rp + p, rps - p, "ptoscale = %f\n", config->ptoscale);
-            if (config->ptowidth) p += snprintf(rp + p, rps - p, "ptowidth = %f\n", config->ptowidth);
-            if (config->ptoheight) p += snprintf(rp + p, rps - p, "ptoheight = %f\n", config->ptoheight);
+            APPEND("ptofile = %s\n", config->ptofile);
+            if (config->ptoscale) APPEND("ptoscale = %f\n", config->ptoscale);
+            if (config->ptowidth) APPEND("ptowidth = %f\n", config->ptowidth);
+            if (config->ptoheight) APPEND("ptoheight = %f\n", config->ptoheight);
           }
-          if (config->execute && config->saveevent) p += snprintf(rp + p, rps - p, "execute = %s\n", config->execute);
-          if (config->eventdir) p += snprintf(rp + p, rps - p, "eventdir = %s\n", config->eventdir);
-          if (config->snapshot_dir) p += snprintf(rp + p, rps - p, "snapshot_dir = %s\n", config->snapshot_dir);
+          if (config->execute && config->saveevent) APPEND("execute = %s\n", config->execute);
+          if (config->eventdir) APPEND("eventdir = %s\n", config->eventdir);
+          if (config->snapshot_dir) APPEND("snapshot_dir = %s\n", config->snapshot_dir);
         }
       }
 
@@ -3145,13 +3160,24 @@ int parseopts(config *config, int argc, char **argv, char *fargs) {
           FILE *f = fopen(optarg, "r");
           if (f) {
             fseek(f, 0, SEEK_END);
-            size = ftell(f);
+            long fsize = ftell(f);
             fseek(f, 0, SEEK_SET);
-            fargs = (char *)malloc(size + 3);
-            if (!fargs || fread(fargs + 2, 1, size, f) != size) {
+            // Bound the config file: ftell() can return -1 (negative size
+            // would wrap the fread length and shrink the malloc), and a
+            // huge file would give a huge VLA for fargv below.
+            if (fsize < 4 || fsize > 1024 * 1024) {
               fprintf(stderr, "Error when reading config file\n");
+              fclose(f);
               return 1;
             }
+            size = (int)fsize;
+            fargs = (char *)malloc(size + 3);
+            if (!fargs || fread(fargs + 2, 1, size, f) != (size_t)size) {
+              fprintf(stderr, "Error when reading config file\n");
+              fclose(f);
+              return 1;
+            }
+            fclose(f);
             fargs[0] = 'c';  // dummy fargs[0]
             fargs[1] = ' ';
             fargs[size + 2] = 0;
@@ -3251,6 +3277,19 @@ int parseopts(config *config, int argc, char **argv, char *fargs) {
       default: return 1;
     }
   }
+
+  // Clamp unchecked atoi() values: these fields are unsigned, so a
+  // negative option wraps to ~4G — caught by the upper bounds below.
+  // Absurd values would produce negative-size/huge VLAs, huge allocations,
+  // or wrapped offsets.  0 width/height means "auto-detect" (non-raw).
+  if (config->width > 16384) config->width = 0;
+  if (config->height > 16384) config->height = 0;
+  if (config->lookahead == 0 || config->lookahead > 8192) config->lookahead = 900;
+  // numspots is unsigned: a negative -n value wraps to ~4G and would make
+  // the best[] VLA enormous; 0 would make it zero-size but still written.
+  if (config->numspots == 0 || config->numspots > 16) config->numspots = 3;
+  if (config->snapshot_interval < 0) config->snapshot_interval = 0;
+  if (config->snapshot_integration < 0) config->snapshot_integration = 0;
   return 0;
 }
 
@@ -3271,6 +3310,10 @@ void metdetect(void) {
   int argc = _argc;
   char **argv = _argv;
   FILE *i = strcmp(argv[argc - 1], "-") ? fopen(argv[argc - 1], "rb") : stdin;
+  if (!i) {
+    fprintf(stderr, "%s: Cannot open %s\n", argv[0], argv[argc - 1]);
+    exit(1);
+  }
   uint8_t *__restrict__ origs[2];
   uint8_t *__restrict__ orig;
   uint8_t *__restrict__ orig2;
@@ -3498,11 +3541,6 @@ void metdetect(void) {
   memset(history, 0, config.lookahead * sizeof(*history));
   memset(maxbuf + xa * y, 128, xa * ya / 2);
 
-  if (!i) {
-    printf("%s: File error\n", argv[0]);
-    close_dec();
-    exit(-1);
-  }
   int count = 0;
   static uint64_t framecount = 0;
   uint64_t prevdetect = 0;
@@ -3520,9 +3558,14 @@ void metdetect(void) {
     unsigned int x = 0, y = 0;
     unsigned char *prev_max = loadjpeg(config.savefile, &x, &y);
     debug(config.log, "Max file is %s (%d x %d)\n", config.savefile, x, y);
-    if (config.width < x || config.height < y || !prev_max) {
-      debug(config.log, "Corrupt max %s %d x %d vs %d x %d\n", config.savefile, x, y, config.width, config.height);
-      memset(maxbuf, 0, x * y);
+    // The max file is saved at the scaled dims (swidth/sheight); anything
+    // else cannot be restored into maxbuf.  Check against the SCALED dims —
+    // comparing to config.width/height would accept JPEGs larger than the
+    // xa*ya allocation and overflow it on memcpy.
+    if (!prev_max || x != config.swidth || y != config.sheight) {
+      debug(config.log, "Incompatible max %s %d x %d vs %d x %d\n", config.savefile, x, y, config.swidth, config.sheight);
+      memset(maxbuf, 0, xa * ya);
+      memset(maxbuf + xa * config.sheight, 128, xa * ya / 2);
     } else {
       debug(config.log, "Old max file %s restored\n", config.savefile);
       memcpy(maxbuf, prev_max, x * y);
@@ -4212,8 +4255,10 @@ unsigned char *readh264frame(unsigned int *l) {
   static int first = 2;
   static const unsigned int bufsize = 1024 * 1024;
   static const unsigned int chunksize = 4096;
-  static unsigned char buf1_unaligned[bufsize + 15];
-  static unsigned char buf2_unaligned[bufsize + 15];
+  // +31 so the aligned buffer always keeps >=16 bytes of slack at the end:
+  // the start-code search reads a few bytes past `readbytes`.
+  static unsigned char buf1_unaligned[bufsize + 31];
+  static unsigned char buf2_unaligned[bufsize + 31];
   unsigned char *buf1 = (unsigned char *)((uintptr_t)(buf1_unaligned + 15) & ~15);
   unsigned char *buf2 = (unsigned char *)((uintptr_t)(buf2_unaligned + 15) & ~15);
   static int swap = 0;
@@ -4224,19 +4269,38 @@ unsigned char *readh264frame(unsigned int *l) {
   unsigned int readbytes = surplus;
   unsigned int pos = 0;
 
-  // Copy extra data from last run
-  if (surplus) memcpy(curr, other + surpluspos, surplus);
+  // Copy extra data from last run (bounded: surpluspos+surplus <= bufsize by
+  // construction, but clamp defensively before the copy).
+  if (surplus) {
+    if (surpluspos > bufsize) surpluspos = bufsize;
+    if (surplus > bufsize - surpluspos) surplus = bufsize - surpluspos;
+    memcpy(curr, other + surpluspos, surplus);
+    readbytes = surplus;
+  }
 
   do {
     int end, i;
     do {
       unsigned int r = 0;
-      unsigned int len = chunksize * (1 + (surplus > chunksize)) - surplus;
+      // Fill toward chunksize (2*chunksize when a large surplus is pending)
+      // but never write past the aligned buffer end: the old expression
+      // chunksize*(1+(surplus>chunksize))-surplus underflows to ~4GB once
+      // surplus exceeds 2*chunksize, and the alignment pad could push the
+      // write past bufsize.
+      unsigned int target = chunksize * (1 + (surplus > chunksize));
+      if (pos + surplus >= bufsize) break;
+      unsigned int space = bufsize - pos - surplus;
+      unsigned int len = target > surplus ? target - surplus : 0;
       len += 16 - ((pos + surplus + len) & 15);  // Align end
-      r = (unsigned int)fread(curr + pos + surplus, 1, len, inputfile);
+      if (len > space) len = space;
+      if (len) r = (unsigned int)fread(curr + pos + surplus, 1, len, inputfile);
 
-      // Avoid start code at the end of the chunk
-      while (!feof(inputfile) && v128_haszero_u8(v128_load_aligned(curr + pos + surplus + r - 16)))
+      // Avoid start code at the end of the chunk.  Guard r >= 16 (the old
+      // code read 16 bytes before the write cursor on short reads) and keep
+      // the top-up reads inside the buffer.
+      while (!feof(inputfile) && r >= 16 &&
+             pos + surplus + r + 16 <= bufsize &&
+             v128_haszero_u8(v128_load_unaligned(curr + pos + surplus + r - 16)))
         r += (unsigned int)fread(curr + pos + surplus + r, 1, 16, inputfile);
 
       if (!r && !surplus) break;
@@ -4246,19 +4310,19 @@ unsigned char *readh264frame(unsigned int *l) {
       do {
         // Fast forward if there's no start code in sight
         if (!(pos & 15))
-          while (pos <= readbytes - 16 && !v128_haszero_u8(v128_load_aligned(curr + pos))) pos += 16;
+          while (pos + 16 <= readbytes && !v128_haszero_u8(v128_load_aligned(curr + pos))) pos += 16;
 
         end = ((pos + 16) & ~15);
         if (end > readbytes) end = readbytes;
 
         // Exact start code search
-        pos--;
+        if (pos) pos--;
         while (pos < end &&
                (curr[pos + 0] || curr[pos + 1] || curr[pos + 2] != 1 || (curr[pos + 3] & 0x1f) != 5 && (curr[pos + 3] & 0x1f) != 1))
           pos++;
       } while (pos == end && pos < readbytes);
     } while (pos == end && pos < bufsize - chunksize);
-    surplus = readbytes - pos;
+    surplus = readbytes > pos ? readbytes - pos : 0;
   } while (first-- > 1);
   first = 0;
   if (pos >= bufsize - chunksize) return 0;
@@ -4410,6 +4474,9 @@ typedef struct {
 typedef struct {
   int iIndex;
   int iBytesUsed[4];
+  // Allocated capacity of each plane (from the driver's plane length) so
+  // writes into cPlane[] can be bounded instead of trusting iBytesUsed.
+  unsigned int iPlaneSize[4];
   void *cPlane[4];
 } V4l2SinkBuffer;
 
@@ -4496,6 +4563,7 @@ bool CDVDVideoCodecMFC::OpenDevices() {
         snprintf(name, sizeof(sysname), "/sys/class/video4linux/%s/name", ent->d_name);
 
         FILE *fp = fopen(name, "r");
+        if (!fp) continue;
         if (fgets(drivername, 32, fp) != nullptr) {
           p = strchr(drivername, '\n');
           if (p != nullptr) *p = '\0';
@@ -4505,8 +4573,10 @@ bool CDVDVideoCodecMFC::OpenDevices() {
         }
         fclose(fp);
 
+        // readlink() does not NUL-terminate: ret == sizeof(target) would
+        // write one byte past the buffer.
         ret = readlink(sysname, target, sizeof(target));
-        if (ret < 0) continue;
+        if (ret < 0 || ret >= (int)sizeof(target)) continue;
         target[ret] = '\0';
         p = strrchr(target, '/');
         if (p == nullptr) continue;
@@ -4613,7 +4683,12 @@ bool CDVDVideoCodecMFC::decopen(unsigned char *h264, unsigned int size) {
   // Get empty buffer to fill
   if (!m_MFCOutput->GetBuffer(&sinkBuffer)) return false;
 
-  // Fill it with the header
+  // Fill it with the header — clamp to the driver's allocated plane size
+  // (a crafted/large header must not overflow the mmap'd buffer).
+  if (size > sinkBuffer.iPlaneSize[0]) {
+    fprintf(stderr, "MFC init header (%u bytes) exceeds buffer capacity (%u bytes)\n", size, sinkBuffer.iPlaneSize[0]);
+    return false;
+  }
   sinkBuffer.iBytesUsed[0] = size;
   memcpy(sinkBuffer.cPlane[0], h264, size);
 
@@ -4657,6 +4732,17 @@ const picture *CDVDVideoCodecMFC::Decode(unsigned char *pData, int iSize) {
     uint8_t *demuxer_content = pData;
     m_MFCOutput->Poll(1000 / 3);  // Wait up to 0.3 of a second for buffer availability
     if (m_MFCOutput->GetBuffer(m_Buffer)) {
+      // Drop oversized frames rather than overflowing the mapped buffer.
+      if ((unsigned int)demuxer_bytes > m_Buffer->iPlaneSize[0]) {
+        fprintf(stderr, "MFC frame (%d bytes) exceeds buffer capacity (%u bytes), dropped\n",
+                demuxer_bytes, m_Buffer->iPlaneSize[0]);
+        // GetBuffer() popped the buffer — requeue it so repeated oversized
+        // frames cannot drain the pool and stall the decoder.  Zero the
+        // used length so the driver doesn't decode the stale contents.
+        m_Buffer->iBytesUsed[0] = 0;
+        m_MFCOutput->PushBuffer(m_Buffer);
+        return 0;
+      }
       m_Buffer->iBytesUsed[0] = demuxer_bytes;
       memcpy((uint8_t *)m_Buffer->cPlane[0], demuxer_content, m_Buffer->iBytesUsed[0]);
 
@@ -4778,6 +4864,12 @@ bool CLinuxV4l2Sink::GetFormat(v4l2_format *format) {
     return false;
   }
   numplanes = format->fmt.pix_mp.num_planes;
+  // cPlane[]/iBytesUsed[]/iPlaneSize[] are fixed [4] arrays — a driver
+  // reporting more planes would overflow them.
+  if (numplanes < 1 || numplanes > 4) {
+    fprintf(stderr, "V4L2 driver reported %d planes (max supported: 4)\n", numplanes);
+    return false;
+  }
   return true;
 }
 
@@ -4833,7 +4925,10 @@ bool CLinuxV4l2Sink::DequeueBuffer(V4l2SinkBuffer *buffer) {
   }
 
   buffer->iIndex = buf.index;
-  for (int i = 0; i < numplanes; i++) buffer->cPlane[i] = (void *)addresses[buffer->iIndex * numplanes + i];
+  for (int i = 0; i < numplanes; i++) {
+    buffer->cPlane[i] = (void *)addresses[buffer->iIndex * numplanes + i];
+    buffer->iPlaneSize[i] = buffers[buffer->iIndex].m.planes[i].length;
+  }
   return true;
 }
 
@@ -4843,7 +4938,10 @@ bool CLinuxV4l2Sink::GetBuffer(V4l2SinkBuffer *buffer) {
   } else {
     buffer->iIndex = freebuffers.front();
     freebuffers.pop();
-    for (int i = 0; i < numplanes; i++) buffer->cPlane[i] = (void *)addresses[buffer->iIndex * numplanes + i];
+    for (int i = 0; i < numplanes; i++) {
+      buffer->cPlane[i] = (void *)addresses[buffer->iIndex * numplanes + i];
+      buffer->iPlaneSize[i] = buffers[buffer->iIndex].m.planes[i].length;
+    }
   }
   return true;
 }

@@ -31,8 +31,19 @@ const char *readfilerev(const char *name, int *size) {
   FILE *f = fopen(name, "rb");
   if (!f) return 0;
 
+  if (st.st_size <= 0) {
+    fclose(f);
+    return 0;
+  }
+
   char *buffer1 = malloc(st.st_size);
   char *buffer2 = malloc(st.st_size);
+  if (!buffer1 || !buffer2) {
+    free(buffer1);
+    free(buffer2);
+    fclose(f);
+    return 0;
+  }
 
   if (fread(buffer1, st.st_size, 1, f) != 1) {
     free(buffer1);
@@ -62,7 +73,7 @@ const pos *find_path(const pos *p, const pos *list, double thr, double min, int 
   int smallest = 9999999;
   const pos *best = 0;
   int count = 0;
-  for (int k = 0; list[k].x.f >= 0 && list[k].y.f >= 0 && k < MAXSTARS; k++) {
+  for (int k = 0; k < MAXSTARS && list[k].x.f >= 0 && list[k].y.f >= 0; k++) {
     double d = dist(&list[k], p);
     count += d < thr;
     if (d >= min && d < smallest) {
@@ -89,6 +100,8 @@ pos **get_stars(int num_frames, double thr, const char **files, int *num_stars) 
       fprintf(stderr, "Malloc error\n");
       exit(0);
     }
+    // Sentinel: a file that yields no stars must still terminate scans.
+    frames[i][0].x.f = frames[i][0].y.f = -1;
   }
   int cnt = num_frames;
   int total = cnt;
@@ -149,7 +162,7 @@ pos **get_stars(int num_frames, double thr, const char **files, int *num_stars) 
     exit(0);
   }
 
-  for (int j = 0; frames[0][j].x.f >= 0 && frames[0][j].y.f >= 0 && j < MAXSTARS; j++) {
+  for (int j = 0; j < MAXSTARS && star < MAXSTARS && frames[0][j].x.f >= 0 && frames[0][j].y.f >= 0; j++) {
     const pos *curr = &frames[0][j];
     int x = 0;
     path[x++] = curr;
@@ -304,7 +317,7 @@ int find_circle(pos *data, double n, double *out_x, double *out_y, double *out_r
     xnew = x - y / Dy;
     if ((xnew == x) || (!isfinite(xnew))) break;
     ynew = A0 + xnew * (A1 + xnew * (A2 + 4 * xnew * xnew));
-    if (abs(ynew) >= abs(y)) break;
+    if (fabs(ynew) >= fabs(y)) break;
     x = xnew;
     y = ynew;
   }
@@ -322,6 +335,10 @@ int find_circle(pos *data, double n, double *out_x, double *out_y, double *out_r
 }
 
 int main(int argc, const char **argv) {
+  if (argc < 4) {
+    fprintf(stderr, "Usage: %s <threshold> <file1> <file2> [file3 ...]\n", argv[0]);
+    return 1;
+  }
   double thr = atof(argv[1]);
   int num_frames = argc - 2;
   const int min_size = num_frames - 2 < 10 ? num_frames - 2 : ((num_frames / 10) < 10 ? 10 : num_frames / 10);
@@ -361,6 +378,10 @@ int main(int argc, const char **argv) {
   } trail;
 
   trail *unique = malloc(sizeof(trail) * MAXSTARS);
+  if (!unique) {
+    fprintf(stderr, "Malloc error\n");
+    exit(0);
+  }
   int unique_trails = 0;
 
   /* Find the longest unique star trails */
@@ -382,9 +403,9 @@ int main(int argc, const char **argv) {
         unique[unique_trails++].list = passes[i].list[j];
       }
       if (unique_trails == MAXSTARS) {
-        // Bail out
+        // Bail out: break the inner loop, then make the outer loop end too.
         i = num_passes;
-        j = passes[i].stars;
+        break;
       }
     }
   }
@@ -396,6 +417,10 @@ int main(int argc, const char **argv) {
   } circle;
 
   circle *circles = malloc(sizeof(circle) * unique_trails);
+  if (!circles) {
+    fprintf(stderr, "Malloc error\n");
+    exit(0);
+  }
 
   /* Find trails moving unexpectedly */
   for (int j = 0; j < unique_trails; j++)

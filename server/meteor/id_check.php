@@ -43,7 +43,11 @@ a:visited {color:#601010}
 
 <?php
 if ($_POST) {
-  foreach ($_POST as $c) {print(htmlspecialchars($c) . " "); }
+  foreach ($_POST as $c) {
+    if (is_array($c)) { $c = implode(' ', $c); }
+    if (!is_scalar($c)) { continue; }
+    print(htmlspecialchars((string)$c) . " ");
+  }
 }
 ?>
 

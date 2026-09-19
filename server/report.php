@@ -353,7 +353,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // 2. Create directory structure
     $date_obj = DateTime::createFromFormat('Y-m-d H:i:s', "{$sighting_date_str} {$sighting_time_str}") ?: new DateTime();
     $report_dir = 'reports/' . $date_obj->format('Ymd/His') . '/';
-    if (!is_dir($report_dir)) mkdir($report_dir, 0777, true);
+    if (!is_dir($report_dir)) mkdir($report_dir, 0755, true);
     ensure_reports_htaccess('reports');
 
     // 3. Generate unique filename and paths

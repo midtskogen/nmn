@@ -3,22 +3,38 @@
 $DEFAULT_LANG = 'nb_NO';
 $LANG_DIR = '/home/httpd/norskmeteornettverk.no/bin/loc'; // Corrected to a full, unambiguous path as a best practice.
 // --- Setup ---
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
 
 /**
  * Gets the user's real IP address, safely handling proxies.
  * @return string The user's IP address.
  */
 function get_user_ip() {
-    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-        return trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+    // Only trust proxy headers when the immediate peer is a trusted proxy;
+    // otherwise clients can spoof X-Forwarded-For.  Extra proxies can be
+    // configured via NMN_TRUSTED_PROXIES (comma-separated IPs).
+    $trusted = ['127.0.0.1', '::1'];
+    foreach (explode(',', (string) getenv('NMN_TRUSTED_PROXIES')) as $p) {
+        $p = trim($p);
+        if ($p !== '' && filter_var($p, FILTER_VALIDATE_IP)) $trusted[] = $p;
     }
-    if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
-        return trim($_SERVER['HTTP_X_REAL_IP']);
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+    if (in_array($remote, $trusted, true)) {
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $c = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+            if (filter_var($c, FILTER_VALIDATE_IP)) return $c;
+        }
+        if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+            $c = trim($_SERVER['HTTP_X_REAL_IP']);
+            if (filter_var($c, FILTER_VALIDATE_IP)) return $c;
+        }
     }
-    return $_SERVER['REMOTE_ADDR'] ?? 'unknown_ip';
+    return $remote !== '' ? $remote : 'unknown_ip';
+}
+
+function geo_lookup($ip) {
+    // Bounded request so a slow/failed GeoIP service cannot hang workers.
+    $ctx = stream_context_create(['http' => ['timeout' => 3]]);
+    return @file_get_contents("http://ip-api.com/json/{$ip}?fields=countryCode,status", false, $ctx);
 }
 
 /**
@@ -60,7 +76,7 @@ function get_language($default_lang) {
     ];
     $user_ip = get_user_ip();
     if (!filter_var($user_ip, FILTER_VALIDATE_IP)) $user_ip = '';
-    $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status");
+    $geo_data_json = geo_lookup($user_ip);
     if ($geo_data_json) {
         $geo_data = json_decode($geo_data_json);
         if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
@@ -288,7 +304,7 @@ table img {
 
     <?php if ($orbit_jpg_display || $orbit_html_display || $tables_html_display): ?>
     <div class="container">
-      <?php if ($tables_html_display) { echo '<div class="column">'; include $tables_html_display; echo '</div>'; } ?>
+      <?php if ($tables_html_display) { echo '<div class="column">'; readfile($tables_html_display); echo '</div>'; } ?>
       <?php if ($orbit_jpg_display || $orbit_html_display): ?>
       <div class="column">
         <div id="orbit-placeholder">
@@ -316,7 +332,7 @@ table img {
 
     <hr style="border: none; border-top: 1px solid var(--border-color); margin: 2em 0;">
 
-    <?php if ($stations_html_display) include $stations_html_display; ?>
+    <?php if ($stations_html_display) readfile($stations_html_display); ?>
 
     <footer>
         <p class="text-center"><?php echo htmlspecialchars($t['footer_text'] ?? 'This is an automatically generated report from the Norwegian Meteor Network.'); ?></p>

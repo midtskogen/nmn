@@ -6,12 +6,33 @@
 
 $DEFAULT_LANG = 'nb_NO';
 $LANG_DIR = '/home/httpd/norskmeteornettverk.no/bin/loc';
-if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 function s4_get_user_ip() {
-    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) return trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
-    if (!empty($_SERVER['HTTP_X_REAL_IP'])) return trim($_SERVER['HTTP_X_REAL_IP']);
-    return $_SERVER['REMOTE_ADDR'] ?? 'unknown_ip';
+    // Only trust proxy headers when the immediate peer is a trusted proxy;
+    // otherwise clients can spoof X-Forwarded-For.  Extra proxies can be
+    // configured via NMN_TRUSTED_PROXIES (comma-separated IPs).
+    $trusted = ['127.0.0.1', '::1'];
+    foreach (explode(',', (string) getenv('NMN_TRUSTED_PROXIES')) as $p) {
+        $p = trim($p);
+        if ($p !== '' && filter_var($p, FILTER_VALIDATE_IP)) $trusted[] = $p;
+    }
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+    if (in_array($remote, $trusted, true)) {
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $c = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+            if (filter_var($c, FILTER_VALIDATE_IP)) return $c;
+        }
+        if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+            $c = trim($_SERVER['HTTP_X_REAL_IP']);
+            if (filter_var($c, FILTER_VALIDATE_IP)) return $c;
+        }
+    }
+    return $remote !== '' ? $remote : 'unknown_ip';
+}
+function s4_geo_lookup($ip) {
+    // Bounded request so a slow/failed GeoIP service cannot hang workers.
+    $ctx = stream_context_create(['http' => ['timeout' => 3]]);
+    return @file_get_contents("http://ip-api.com/json/{$ip}?fields=countryCode,status", false, $ctx);
 }
 function s4_get_language($default_lang) {
     $supported = ['nb_NO','en_GB','de_DE','cs_CZ','fi_FI','lv_LV'];
@@ -37,7 +58,7 @@ function s4_get_language($default_lang) {
              'CZ'=>'cs_CZ','SK'=>'cs_CZ','FI'=>'fi_FI','LV'=>'lv_LV'];
     $ip = s4_get_user_ip();
     if (!filter_var($ip, FILTER_VALIDATE_IP)) $ip = '';
-    $gj = $ip !== '' ? @file_get_contents("http://ip-api.com/json/{$ip}?fields=countryCode,status") : false;
+    $gj = $ip !== '' ? s4_geo_lookup($ip) : false;
     if ($gj) { $g=json_decode($gj); if ($g&&$g->status==='success'&&isset($cmap[$g->countryCode])) return $cmap[$g->countryCode]; }
     return $default_lang;
 }
@@ -459,7 +480,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
 
     <?php if ($orbit_jpg || $orbit_html || $tables_html): ?>
     <div class="row">
-      <?php if ($tables_html): ?><div class="col"><?php include $tables_html; ?></div><?php endif; ?>
+      <?php if ($tables_html): ?><div class="col"><?php readfile($tables_html); ?></div><?php endif; ?>
       <?php if ($orbit_jpg || $orbit_html): ?>
       <div class="col">
         <div id="s4op"><?php if ($orbit_jpg) echo "<img class='plot' src='{$orbit_jpg}' alt='orbit'>"; ?></div>
@@ -592,7 +613,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
                 $allVidVariants[] = ['url' => "{$base_url}/{$vf}", 'label' => $vl, 'desc' => $vl];
             }
             foreach ($vids as $fname => $lbl): ?>
-              <li><a href="#" onclick="openMediaPlayer('<?php echo "{$base_url}/{$fname}"; ?>', 'video', <?php echo htmlspecialchars(json_encode($allVidVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, '<?php echo htmlspecialchars($sc['label'] ?? ''); ?>'); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
+              <li><a href="#" onclick="openMediaPlayer(<?php echo htmlspecialchars(json_encode("{$base_url}/{$fname}"), ENT_QUOTES); ?>, 'video', <?php echo htmlspecialchars(json_encode($allVidVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, <?php echo htmlspecialchars(json_encode($sc['label'] ?? ''), ENT_QUOTES); ?>); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
             <?php endforeach; ?>
           </ul>
         </div>
@@ -607,7 +628,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
                 $allImgVariants[] = ['url' => "{$base_url}/{$if}", 'label' => $il, 'desc' => $il];
             }
             foreach ($imgs as $fname => $lbl): ?>
-              <li><a href="#" onclick="openMediaPlayer('<?php echo "{$base_url}/{$fname}"; ?>', 'image', <?php echo htmlspecialchars(json_encode($allImgVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, '<?php echo htmlspecialchars($sc['label'] ?? ''); ?>'); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
+              <li><a href="#" onclick="openMediaPlayer(<?php echo htmlspecialchars(json_encode("{$base_url}/{$fname}"), ENT_QUOTES); ?>, 'image', <?php echo htmlspecialchars(json_encode($allImgVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, <?php echo htmlspecialchars(json_encode($sc['label'] ?? ''), ENT_QUOTES); ?>); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
             <?php endforeach; ?>
           </ul>
         </div>
@@ -618,7 +639,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
           <h3><?php echo htmlspecialchars($t['text_files']??'Tekstfiler'); ?></h3>
           <ul>
             <?php foreach ($txts as $fname => $lbl): ?>
-              <li><a href="#" onclick="openTextViewer('<?php echo "{$base_url}/{$fname}"; ?>', '<?php echo htmlspecialchars($lbl); ?>'); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
+              <li><a href="#" onclick="openTextViewer(<?php echo htmlspecialchars(json_encode("{$base_url}/{$fname}"), ENT_QUOTES); ?>, <?php echo htmlspecialchars(json_encode($lbl), ENT_QUOTES); ?>); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
             <?php endforeach; ?>
           </ul>
         </div>
@@ -688,7 +709,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
 
     <?php if ($orbit_jpg || $orbit_html || $tables_html): ?>
     <div class="row">
-      <?php if ($tables_html): ?><div class="col"><?php include $tables_html; ?></div><?php endif; ?>
+      <?php if ($tables_html): ?><div class="col"><?php readfile($tables_html); ?></div><?php endif; ?>
       <?php if ($orbit_jpg || $orbit_html): ?>
       <div class="col">
         <div id="s4sop"><?php if ($orbit_jpg) echo "<img class='plot' src='{$orbit_jpg}' alt='orbit'>"; ?></div>
@@ -792,7 +813,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
                 $allVidVariants[] = ['url' => "{$base_url}/{$vf}", 'label' => $vl, 'desc' => $vl];
             }
             foreach ($vids as $fname => $lbl): ?>
-            <li><a href="#" onclick="openMediaPlayer('<?php echo "{$base_url}/{$fname}"; ?>', 'video', <?php echo htmlspecialchars(json_encode($allVidVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, '<?php echo htmlspecialchars($sc['label'] ?? ''); ?>'); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
+            <li><a href="#" onclick="openMediaPlayer(<?php echo htmlspecialchars(json_encode("{$base_url}/{$fname}"), ENT_QUOTES); ?>, 'video', <?php echo htmlspecialchars(json_encode($allVidVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, <?php echo htmlspecialchars(json_encode($sc['label'] ?? ''), ENT_QUOTES); ?>); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
           <?php endforeach; ?></ul>
         </div>
         <?php endif; ?>
@@ -807,7 +828,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
                 $allImgVariants[] = ['url' => "{$base_url}/{$if}", 'label' => $il, 'desc' => $il];
             }
             foreach ($imgs as $fname => $lbl): ?>
-            <li><a href="#" onclick="openMediaPlayer('<?php echo "{$base_url}/{$fname}"; ?>', 'image', <?php echo htmlspecialchars(json_encode($allImgVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, '<?php echo htmlspecialchars($sc['label'] ?? ''); ?>'); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
+            <li><a href="#" onclick="openMediaPlayer(<?php echo htmlspecialchars(json_encode("{$base_url}/{$fname}"), ENT_QUOTES); ?>, 'image', <?php echo htmlspecialchars(json_encode($allImgVariants, JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP)); ?>, <?php echo htmlspecialchars(json_encode($sc['label'] ?? ''), ENT_QUOTES); ?>); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
           <?php endforeach; ?></ul>
         </div>
         <?php endif; ?>
@@ -816,7 +837,7 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
         <div class="links-card">
           <h3><?php echo htmlspecialchars($t['text_files']??'Tekstfiler'); ?></h3>
           <ul><?php foreach ($txts as $fname => $lbl): ?>
-            <li><a href="#" onclick="openTextViewer('<?php echo "{$base_url}/{$fname}"; ?>', '<?php echo htmlspecialchars($lbl); ?>'); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
+            <li><a href="#" onclick="openTextViewer(<?php echo htmlspecialchars(json_encode("{$base_url}/{$fname}"), ENT_QUOTES); ?>, <?php echo htmlspecialchars(json_encode($lbl), ENT_QUOTES); ?>); return false;"><?php echo htmlspecialchars($lbl); ?></a></li>
           <?php endforeach; ?></ul>
         </div>
         <?php endif; ?>

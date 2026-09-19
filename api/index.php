@@ -226,7 +226,8 @@ function read_status_file(string $task_id): ?array {
 // Read-only rate limit applies before any anonymous endpoint.
 // ---------------------------------------------------------------------------
 if (empty($segments)) {
-    api_json_response(['message' => 'NMN API v1', 'docs' => '/api/v1/docs']);
+    header('Location: /api/v1/docs', true, 302);
+    exit;
 }
 
 $resource = $segments[0] ?? '';

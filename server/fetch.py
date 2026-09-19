@@ -2398,12 +2398,21 @@ def main():
     proc_date_str = final_event_dir.parent.name
     proc_time_str = final_event_dir.name
     processing_date = datetime.datetime.strptime(proc_date_str + proc_time_str, '%Y%m%d%H%M%S')
-    
+
+    process_event_with_lock(final_event_dir, processing_date,
+                            all_stations=args.all, use_orig_cen=args.origcen,
+                            infrasound_only=args.infrasound, verbose=args.verbose)
+    logging.info("--- Script finished. ---")
+
+
+def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
+                            all_stations: bool = False, use_orig_cen: bool = False,
+                            infrasound_only: bool = False, verbose: bool = False):
     # Acquire an exclusive lock on the event directory so that concurrent
     # fetch.py instances (for different stations of the same event) do not
     # run process_event() simultaneously.  The second instance will block
     # here until the first finishes, then re-process with all station data.
-    lock_path = final_event_dir / '.process_event.lock'
+    lock_path = event_dir / '.process_event.lock'
     lock_fd = None
     try:
         lock_fd = lock_path.open('w')
@@ -2439,7 +2448,7 @@ def main():
         else:
             logging.info("Lock acquired. Starting process_event().")
 
-        process_event(final_event_dir, processing_date, fast=False, all_stations=args.all, use_orig_cen=args.origcen, infrasound_only=args.infrasound, verbose=args.verbose)
+        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:
@@ -2449,7 +2458,6 @@ def main():
                 lock_fd.close()
             except Exception:
                 pass
-        logging.info("--- Script finished. ---")
 
 
 if __name__ == '__main__':

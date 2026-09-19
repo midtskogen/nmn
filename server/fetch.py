@@ -472,9 +472,12 @@ def fetch_data(station: str, port: str, remote_dir: str, local_dir: Path) -> boo
         # accept-new pins the host key on first contact instead of accepting
         # a changed/spoofed key on every connect (StrictHostKeyChecking=no).
         # --timeout aborts on a stalled transfer so a hung station cannot
-        # keep the fetch worker alive forever.
-        '--timeout=600', '--contimeout=30',
-        '--progress', '-e', f'ssh -o StrictHostKeyChecking=accept-new -p {ssh_port}',
+        # keep the fetch worker alive forever.  The CONNECT timeout must
+        # go through ssh's -o ConnectTimeout: rsync's --contimeout only
+        # applies to rsync-daemon (rsync://) connections and is a fatal
+        # usage error over -e ssh.
+        '--timeout=600',
+        '--progress', '-e', f'ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -p {ssh_port}',
         f'meteor@{host}:{shlex.quote(remote_dir)}/', str(local_dir)
     ]
 

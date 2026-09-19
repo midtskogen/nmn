@@ -51,6 +51,13 @@ for event in events:
         second = file[5]
         id = os.path.splitext(file[7])[0]
         camid = id[-1]
+        # Fields are interpolated into a symlink path below; reject anything
+        # that could escape the target directory (e.g. '..' components) or
+        # produce a garbage camera IP.
+        if not (year.isdigit() and month.isdigit() and day.isdigit()
+                and hour.isdigit() and minute.isdigit() and second.isdigit()
+                and len(camid) == 1 and camid.isdigit()):
+            raise ValueError(f"unsafe event filename fields in {eventfile}")
         quality = eventdir[-2] + eventdir[-1]
         eventfile = eventdir + '/' + eventfile
         nmnfile = args.symdir + "/cam" + camid + "/" + year + month + day + "/" + hour + ("/full_" if quality == "HD" else "/mini_") + minute + ".mp4"

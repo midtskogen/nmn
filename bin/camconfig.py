@@ -1132,7 +1132,9 @@ def main():
                 return jsonify(controller.set_camera_time(ip))
 
             print(f"Web server running. Open http://127.0.0.1:{port} in your browser.")
-            app.run(host='0.0.0.0', port=port)
+            # Bind to localhost: this UI authenticates with PAM credentials and
+            # can reconfigure/reboot cameras — it must not be reachable off-box.
+            app.run(host='127.0.0.1', port=port)
         
         controller = CameraController(ips)
         run_flask_app(controller, port=args.port)

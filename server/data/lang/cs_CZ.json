@@ -91,6 +91,7 @@
     "error_invalid_station_id": "Neplatné ID stanice: {sid}",
     "error_invalid_file_type": "Neplatný typ souboru: {file_type}",
     "error_too_many_files": "Požadováno {num_files} souborů, což je příliš mnoho (max {limit}).",
+    "error_no_files_found": "Pro zvolenou stanici a čas nebyly nalezeny žádné soubory. Stanice už nemusí mít data z tak starého období.",
     "error_invalid_length": "Neplatný 'Počet' (1-{max}).",
     "error_invalid_interval": "Neplatný 'Interval' (1-{max}).",
     "error_user_quota_exceeded": "Vaše osobní datový limit ({limit}MB) pro stanici {station_code} byl pro dnešek vyčerpána.",

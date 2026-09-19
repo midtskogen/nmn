@@ -91,6 +91,7 @@
     "error_invalid_station_id": "Nederīgs stacijas ID: {sid}",
     "error_invalid_file_type": "Nederīgs faila tips: {file_type}",
     "error_too_many_files": "Pieprasīti {num_files} faili, kas ir pārāk daudz (maksimums {limit}).",
+    "error_no_files_found": "Pieprasītajai stacijai un laikam nav atrasts neviens fails. Stacijā, iespējams, vairs nav tik veci dati.",
     "error_invalid_length": "Nederīgs 'Skaits' (1-{max}).",
     "error_invalid_interval": "Nederīgs 'Intervāls' (1-{max}).",
     "error_user_quota_exceeded": "Jūsu personīgā datu kvota ({limit} MB) stacijai {station_code} šodien ir pārsniegta.",

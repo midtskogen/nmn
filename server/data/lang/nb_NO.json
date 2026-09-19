@@ -91,6 +91,7 @@
     "error_invalid_station_id": "Ugyldig stasjons-ID: {sid}",
     "error_invalid_file_type": "Ugyldig filtype: {file_type}",
     "error_too_many_files": "{num_files} filer er valgt, som er for mange (maks {limit}).",
+    "error_no_files_found": "Fant ingen filer for valgt stasjon og tidspunkt. Stasjonen har kanskje ikke data så langt tilbake.",
     "error_invalid_length": "Ugyldig 'Antall' (1-{max}).",
     "error_invalid_interval": "Ugyldig 'Intervall' (1-{max}).",
     "error_user_quota_exceeded": "Din personlige datakvote ({limit}MB) for {station_code} er brukt opp for i dag.",

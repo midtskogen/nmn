@@ -20,15 +20,12 @@
     th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); }
     th { color: var(--muted); text-transform: uppercase; font-size: .75rem; letter-spacing: .05em; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #21262d; padding: .15rem .35rem; border-radius: 4px; color: var(--code); }
-    pre { background: #21262d; padding: 1rem; padding-top: 2.2rem; border-radius: 8px; overflow-x: auto; position: relative; }
-    .copy-btn { position: absolute; top: .4rem; right: .4rem; background: #30363d; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: .25rem .6rem; font-size: .75rem; cursor: pointer; font-family: inherit; }
-    .copy-btn:hover { background: #3c444d; color: var(--text); }
-    .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
-    .cmdline { display: block; position: relative; }
-    .copy-line { position: absolute; right: 0; top: 0; background: none; border: none; color: var(--muted); cursor: pointer; font-size: .9em; line-height: 1.55; padding: 0 .3em; opacity: 0; transition: opacity .15s; font-family: inherit; }
-    .cmdline:hover .copy-line, .copy-line:focus-visible { opacity: 1; }
-    .copy-line:hover { color: var(--text); }
-    .copy-line.copied { color: #3fb950; opacity: 1; }
+    pre { background: #21262d; padding: 1rem; border-radius: 8px; overflow-x: auto; position: relative; }
+    .cmdline { display: block; position: relative; min-height: 1.55em; }
+    .cmdline.cmd { padding-right: 4.5em; }
+    .copy-line { position: absolute; right: 0; top: 0; background: #30363d; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 0 .6em; font-size: .75rem; line-height: 1.9; cursor: pointer; font-family: inherit; }
+    .copy-line:hover { background: #3c444d; color: var(--text); }
+    .copy-line.copied { color: #3fb950; border-color: #3fb950; }
     pre code { background: transparent; padding: 0; color: var(--text); }
     ul li { margin: .4rem 0; }
     .note { border-left: 3px solid var(--accent); padding-left: 1rem; color: var(--muted); font-size: .9rem; }
@@ -275,14 +272,15 @@ document.querySelectorAll('pre').forEach(function (pre) {
     span.className = 'cmdline';
     span.textContent = g.join('\n');
     if (g[0].trim() !== '' && !g[0].trim().startsWith('#')) {
+      span.classList.add('cmd');
       var btn = document.createElement('button');
       btn.className = 'copy-line';
       btn.type = 'button';
-      btn.textContent = '⧉';
+      btn.textContent = 'Copy';
       btn.title = 'Copy command';
       btn.setAttribute('aria-label', 'Copy command to clipboard');
       btn.addEventListener('click', function () {
-        _copyText(g.join('\n'), function () { _flash(btn, '✓'); }, function () { _flash(btn, '✗'); });
+        _copyText(g.join('\n'), function () { _flash(btn, 'Copied!'); }, function () { _flash(btn, 'Failed'); });
       });
       span.appendChild(btn);
     }
@@ -292,16 +290,6 @@ document.querySelectorAll('pre').forEach(function (pre) {
 
   (code || pre).textContent = '';
   (code || pre).appendChild(frag);
-
-  var all = document.createElement('button');
-  all.className = 'copy-btn';
-  all.type = 'button';
-  all.textContent = 'Copy all';
-  all.setAttribute('aria-label', 'Copy entire code block to clipboard');
-  all.addEventListener('click', function () {
-    _copyText(text, function () { _flash(all, 'Copied!'); }, function () { _flash(all, 'Failed'); });
-  });
-  pre.insertBefore(all, pre.firstChild);
 });
 </script>
 </body>

@@ -169,8 +169,8 @@ curl -H 'X-API-Key: YOUR_API_KEY' \
   'https://norskmeteornettverk.no/api/v1/download?station=ams173&date=2026-08-31&file_type=timelapse&length=2&stitch_equirect=1&stitch_fisheye=1'
 
 # The request waits until the download finishes, then returns the final
-# status directly — "files" holds direct URLs under /data/:
-# {"status":"complete","files":{"SOR":{"00:04":[{"url":"download/SOR_cam2_..._image_lowres.jpg",...}]}},"errors":{}}
+# status directly — "files" holds absolute URLs you can fetch directly:
+# {"status":"complete","files":{"SOR":{"00:04":[{"url":"https://norskmeteornettverk.no/data/download/SOR_cam2_..._image_lowres.jpg",...}]}},"errors":{}}
 #
 # Jobs still running after ~5 minutes return 202 + poll_url instead:
 curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/downloads/master_task_1725...</code></pre>

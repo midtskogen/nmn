@@ -165,10 +165,15 @@ for token in $files; do numfiles=$((numfiles+1)); done
 
 for i in $files; do
     if [ ${i: -4} == ".jpg" ]; then
-	dest="$dest $(basename ${i%.*})"
+	bn=$(basename ${i%.*})
+	# Filenames land inside eval'd `convert ... | bash` pipelines below;
+	# refuse anything but a plain safe name.
+	[[ "$bn" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Skipping unsafe filename: $i"; continue; }
+	dest="$dest $bn"
     fi
     if [ ${i: -4} == ".mp4" ]; then
 	file=$(echo $i | sed 's/[\/_]/ /g;s/\.mp4//' | awk -F'[ ]' '{for(i=NF;i;i--)printf("%s"(i>1?" ":"\n"),$i)}'| awk '{print $2"_"$4$3$1}')
+	[[ "$file" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Skipping unsafe filename: $i"; continue; }
 	dest="$dest $file"
     fi
 done
@@ -331,6 +336,7 @@ line=0;
 for i in $dest; do
     let line=$line+1
     echo -en "\e[0K\rProcessing file $line/$numfiles"
+    [[ "$i" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Skipping unsafe filename: $i"; continue; }
     echo convert $i.png $(echo $i|sed "s/full/star/").jpg -fx "u*v" -fill white $(sed $line'q;d' < stars2.txt | sed 's/\t-------,-------//g;s/\t/ -draw point\\ /g') $(echo $i|sed "s/full/clean/").jpg | bash
     #echo convert $i $(echo $i|sed "s/full/star/;s/png/jpg/") -fx "u*v" $(echo $i|sed "s/full/clean/;s/png/jpg/") | bash
 done
@@ -345,6 +351,7 @@ echo "7/11 Assign identity numbers" | tee -a calibration.log
 for i in clean*.jpg; do
     let count=count+1
     echo -en "\e[0K\rProcessing file $count/$numfiles"
+    [[ "$i" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Skipping unsafe filename: $i"; continue; }
     echo $(cat stars2.txt | sed $count'q;d' | sed 's/\t\([0-9\.]*\),\([0-9\.]*\)/ -annotate +\1+\2\n/g;s/-------,-------/ -annotate -100-100\n/g' | head -n -1 | awk '{print $0" "++i}') | awk '{printf("convert '$i' -pointsize 16 -fill green "$0" '$(echo $i | sed s/clean/key/)'\n");}' | bash
 done
 echo
@@ -540,6 +547,9 @@ function label {
     else
 	file=$(echo $i | sed 's/[\/_]/ /g;s/\.mp4//' | awk -F'[ ]' '{for(i=NF;i;i--)printf("%s"(i>1?" ":"\n"),$i)}'| awk '{print $2"_"$4$3$1}')
     fi
+    # $file is embedded in a generated `convert ... | bash` command below;
+    # refuse names that could break out of it.
+    [[ "$file" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Skipping unsafe filename: $i"; return; }
     convert $(echo $file | sed "s/full/clean/").jpg -alpha set -channel alpha -fx "(r+g+b)/3" png:- | convert $file.jpg - -composite tmp_$file.png
     composite -blend 80 tmp_$file.png grid.png tmp2_$file.png
     ts=$(sed $count'q;d' timestamps.txt)

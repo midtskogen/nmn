@@ -24,6 +24,11 @@
     .copy-btn { position: absolute; top: .4rem; right: .4rem; background: #30363d; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: .25rem .6rem; font-size: .75rem; cursor: pointer; font-family: inherit; }
     .copy-btn:hover { background: #3c444d; color: var(--text); }
     .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
+    .cmdline { display: block; position: relative; }
+    .copy-line { position: absolute; right: 0; top: 0; background: none; border: none; color: var(--muted); cursor: pointer; font-size: .9em; line-height: 1.55; padding: 0 .3em; opacity: 0; transition: opacity .15s; font-family: inherit; }
+    .cmdline:hover .copy-line, .copy-line:focus-visible { opacity: 1; }
+    .copy-line:hover { color: var(--text); }
+    .copy-line.copied { color: #3fb950; opacity: 1; }
     pre code { background: transparent; padding: 0; color: var(--text); }
     ul li { margin: .4rem 0; }
     .note { border-left: 3px solid var(--accent); padding-left: 1rem; color: var(--muted); font-size: .9rem; }
@@ -233,32 +238,70 @@ curl -H 'X-API-Key: YOUR_API_KEY' https://norskmeteornettverk.no/api/v1/tasks/ap
   <p class="note">For the full interactive spec, open <a href="index.html">Swagger UI</a>.</p>
 </div>
 <script>
-// Add a copy-to-clipboard button to every code block.
+// Copy-to-clipboard: one hover icon per command line, plus a
+// block-level "Copy all" button.  Lines ending in a backslash (and
+// indented continuations) are grouped so multi-line commands copy whole.
+function _copyText(text, onDone, onFail) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(onDone, onFail);
+  } else {
+    var ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); onDone(); } catch (e) { onFail(); }
+    document.body.removeChild(ta);
+  }
+}
+function _flash(btn, label) {
+  var orig = btn.textContent;
+  btn.textContent = label;
+  btn.classList.add('copied');
+  setTimeout(function () { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+}
 document.querySelectorAll('pre').forEach(function (pre) {
-  var btn = document.createElement('button');
-  btn.className = 'copy-btn';
-  btn.type = 'button';
-  btn.textContent = 'Copy';
-  btn.setAttribute('aria-label', 'Copy code block to clipboard');
-  btn.addEventListener('click', function () {
-    var code = pre.querySelector('code');
-    var text = code ? code.innerText : pre.innerText.replace(/^Copy\n/, '');
-    var done = function () {
-      btn.textContent = 'Copied!';
-      btn.classList.add('copied');
-      setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done, function () { btn.textContent = 'Failed'; });
-    } else {
-      // Fallback for non-secure contexts
-      var ta = document.createElement('textarea');
-      ta.value = text; document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = 'Failed'; }
-      document.body.removeChild(ta);
-    }
+  var code = pre.querySelector('code');
+  var text = (code || pre).innerText.replace(/\n$/, '');
+  var lines = text.split('\n');
+
+  // Group physical lines into logical commands.
+  var groups = [], cur = null;
+  lines.forEach(function (line) {
+    var cont = cur && (/\\\s*$/.test(cur[cur.length - 1]) || (/^\s/.test(line) && line.trim() !== ''));
+    if (cont) { cur.push(line); } else { cur = [line]; groups.push(cur); }
   });
-  pre.insertBefore(btn, pre.firstChild);
+
+  var frag = document.createDocumentFragment();
+  groups.forEach(function (g) {
+    var span = document.createElement('span');
+    span.className = 'cmdline';
+    span.textContent = g.join('\n');
+    if (g[0].trim() !== '' && !g[0].trim().startsWith('#')) {
+      var btn = document.createElement('button');
+      btn.className = 'copy-line';
+      btn.type = 'button';
+      btn.textContent = '⧉';
+      btn.title = 'Copy command';
+      btn.setAttribute('aria-label', 'Copy command to clipboard');
+      btn.addEventListener('click', function () {
+        _copyText(g.join('\n'), function () { _flash(btn, '✓'); }, function () { _flash(btn, '✗'); });
+      });
+      span.appendChild(btn);
+    }
+    frag.appendChild(span);
+    frag.appendChild(document.createTextNode('\n'));
+  });
+
+  (code || pre).textContent = '';
+  (code || pre).appendChild(frag);
+
+  var all = document.createElement('button');
+  all.className = 'copy-btn';
+  all.type = 'button';
+  all.textContent = 'Copy all';
+  all.setAttribute('aria-label', 'Copy entire code block to clipboard');
+  all.addEventListener('click', function () {
+    _copyText(text, function () { _flash(all, 'Copied!'); }, function () { _flash(all, 'Failed'); });
+  });
+  pre.insertBefore(all, pre.firstChild);
 });
 </script>
 </body>

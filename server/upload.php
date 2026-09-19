@@ -5,22 +5,19 @@
 // same merge+process pipeline as an rsync pull.
 //
 // Security model (mirrors report.php):
-//   - Shared-secret token REQUIRED (X-NMN-Token header, or &token=).
+//   - ssh-keygen signature (X-NMN-Sig) over "<dir>\n<body>" REQUIRED.
 //   - station must exist in stations.json (whitelist, not just \w).
 //   - dir must be a literal /meteor/camN/amsevents/YYYYMMDD/HHMMSS[_N] path.
 //   - Upload size is capped while streaming; dedupe + per-IP rate limit.
 //   - The body lands in quarantine OUTSIDE the event tree; only after
 //     receive_upload.py's member validation does anything reach meteor/.
 
-$token_file = '/var/www/.ssh/report_token';
-$REPORT_TOKEN = trim((string)@file_get_contents($token_file));
 $allowed_signers = '/var/www/.ssh/allowed_signers';   // station ssh pubkey(s)
 
 header('Content-Type: text/plain; charset=UTF-8');
 
 $dir     = (string)($_GET['dir'] ?? '');
 $station = preg_replace('/[^\w]/', '', (string)($_GET['station'] ?? ''));
-$token   = (string)($_SERVER['HTTP_X_NMN_TOKEN'] ?? $_GET['token'] ?? '');
 $sig_b64 = (string)($_SERVER['HTTP_X_NMN_SIG'] ?? '');
 $ip      = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
 $log_file = '/tmp/upload_php.log';
@@ -35,10 +32,10 @@ function deny(int $code, string $msg): void {
     exit;
 }
 
-// Authentication: an ssh-keygen signature over "<dir>\n<body>" made with the
-// station's private key (the same key the reverse tunnel uses - it never
-// leaves the station), verified against allowed_signers.  The shared token
-// is accepted as a fallback during the transition.
+// Authentication: an ssh-keygen signature over "<dir>\n<body>" made with
+// the station's private key (the key the reverse tunnel uses - it never
+// leaves the station), verified against allowed_signers.  Signature only;
+// there is no shared-secret fallback on this endpoint.
 $auth = '';
 
 // Whitelist station names against stations.json.
@@ -108,7 +105,7 @@ if ($out) fclose($out);
 if ($written === 0) { @unlink($archive); deny(400, 'empty body'); }
 if ($written > $MAX) { @unlink($archive); deny(413, 'too large'); }
 
-// Authenticate: signature over "<dir>\n<body>" beats the shared token.
+// Authenticate: signature over "<dir>\n<body>".
 if ($sig_b64 !== '') {
     $sigfile = $archive . '.sig';
     $payload = $archive . '.payload';
@@ -124,11 +121,6 @@ if ($sig_b64 !== '') {
     exec($v, $vo, $vrc);
     @unlink($sigfile); @unlink($payload);
     if ($vrc === 0) $auth = 'sig';
-}
-if ($auth === ''
-    && $REPORT_TOKEN !== '' && $token !== ''
-    && hash_equals($REPORT_TOKEN, $token)) {
-    $auth = 'token';
 }
 if ($auth === '') { @unlink($archive); deny(403, 'forbidden'); }
 

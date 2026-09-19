@@ -177,11 +177,30 @@ def _report_url(station_name: str, port: str, event_dir) -> str:
         'token': _report_token()})
 
 
-def _ping(url: str) -> Tuple[str, str]:
-    """Single report ping. Returns (http_code, body); '000' on failure."""
+def _ping(url: str, station_name: str = '', event_dir=None) -> Tuple[str, str]:
+    """Single report ping. Returns (http_code, body); '000' on failure.
+
+    When station_name/event_dir are given the ping is signed like an
+    upload: the signature covers "<station>\t<dir>", which is all the
+    endpoint needs to authenticate the request.
+    """
+    headers = []
+    if station_name and event_dir is not None:
+        norm_dir = '/' + str(event_dir).strip('/')
+        fd, payload_path = tempfile.mkstemp()
+        try:
+            with os.fdopen(fd, 'wb') as pf:
+                pf.write(f'{station_name}\t{norm_dir}'.encode())
+            sig = _sign_file(Path(payload_path))
+        finally:
+            Path(payload_path).unlink(missing_ok=True)
+            Path(payload_path + '.sig').unlink(missing_ok=True)
+        if sig:
+            headers = ['-H', f'X-NMN-Sig: {sig}']
     try:
         r = subprocess.run(
-            ['curl', '-s', '-w', '\n%{http_code}', '--max-time', '30', url],
+            ['curl', '-s', '-w', '\n%{http_code}', '--max-time', '30']
+            + headers + [url],
             capture_output=True, text=True, timeout=60)
         body, _, code = r.stdout.rpartition('\n')
         return code, body.strip()
@@ -267,7 +286,8 @@ def _deliver_report(station_name: str, port: str, event_dir) -> str:
     code, _ = _push_event(station_name, event_dir)
     if code.startswith('2'):
         return code
-    ping_code, _ = _ping(_report_url(station_name, port, event_dir))
+    ping_code, _ = _ping(_report_url(station_name, port, event_dir),
+                         station_name, event_dir)
     return code if code != '000' else ping_code
 
 
@@ -558,7 +578,7 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
             print(f"Push failed (HTTP {code}), falling back to pull ping")
         url = _report_url(station_name, port, event_dir)
         for attempt in range(3):
-            code, body = _ping(url)
+            code, body = _ping(url, station_name, event_dir)
             print(f"Report ping attempt {attempt + 1}/3: HTTP {code} {body}")
             if code.startswith('2') or code.startswith('4'):
                 break

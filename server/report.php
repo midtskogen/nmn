@@ -1,8 +1,11 @@
 <?php
 // Report-generation trigger called by stations after processing an event.
 // Security model:
-//   - Shared-secret token REQUIRED (X-NMN-Token header, or &token=);
-//     the secret lives in /var/www/.ssh/report_token, outside the web root.
+//   - ssh-keygen signature (X-NMN-Sig) over "<station>\t<dir>" made with
+//     the station's private key, verified against
+//     /var/www/.ssh/allowed_signers.  The shared token (X-NMN-Token
+//     header or &token=, secret in /var/www/.ssh/report_token) is the
+//     rollout fallback until all stations run the signing report.py.
 //   - station must exist in stations.json and map to a tunnel port in
 //     /var/www/.ssh/config - the client-supplied ?port= is ignored, so a
 //     ping can never aim a fetch at an arbitrary forwarded port.
@@ -11,11 +14,9 @@
 //   - One fetch per dir per hour (dedupe), plus a coarse per-IP rate limit.
 //   - Denied/skipped requests are logged to /tmp/report_php.log.
 
+// Empty token simply means token auth can never succeed - signature auth
+// does not depend on it, so this is deliberately non-fatal.
 $REPORT_TOKEN = trim((string)@file_get_contents('/var/www/.ssh/report_token'));
-if ($REPORT_TOKEN === '') {
-    http_response_code(500);
-    exit("token not configured\n");
-}
 
 header('Content-Type: text/plain; charset=UTF-8');
 
@@ -23,12 +24,13 @@ $dir     = (string)($_GET['dir'] ?? '');
 $station = preg_replace('/[^\w]/', '', (string)($_GET['station'] ?? ''));
 $port    = preg_replace('/[^\d]/', '', (string)($_GET['port'] ?? ''));
 $token   = (string)($_SERVER['HTTP_X_NMN_TOKEN'] ?? $_GET['token'] ?? '');
+$sig_b64 = (string)($_SERVER['HTTP_X_NMN_SIG'] ?? '');
 $ip      = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
 $log_file = '/tmp/report_php.log';
+$allowed_signers = '/var/www/.ssh/allowed_signers';
 
-// Shared-secret token is REQUIRED (deployed to stations via
-// /etc/default/nmn_report_token; see bin/report.py in the repo).
-if ($token === '' || !hash_equals($REPORT_TOKEN, $token)) {
+// Cheap gate: a request must carry *some* credential.
+if ($token === '' && $sig_b64 === '') {
     deny(403, 'forbidden');
 }
 
@@ -73,6 +75,28 @@ $clean_dir = '/' . trim($clean_dir, '/');
 if (!preg_match('#^/meteor/cam\d+/amsevents/\d{8}/\d{6}(_\d+)?$#', $clean_dir))
     deny(400, 'bad dir');
 
+// Authentication: signature over "<station>\t<dir>" is primary; the shared
+// token remains accepted until all stations run the signing report.py.
+$auth = '';
+if ($sig_b64 !== '') {
+    $sigfile = tempnam(sys_get_temp_dir(), 'nms');
+    $payfile = tempnam(sys_get_temp_dir(), 'nmp');
+    file_put_contents($sigfile, base64_decode($sig_b64));
+    file_put_contents($payfile, $station . "\t" . $clean_dir);
+    $v = 'ssh-keygen -Y verify -f ' . escapeshellarg($allowed_signers)
+       . ' -I nmn-station -n nmn-upload -s ' . escapeshellarg($sigfile)
+       . ' < ' . escapeshellarg($payfile) . ' 2>/dev/null';
+    exec($v, $vo, $vrc);
+    @unlink($sigfile); @unlink($payfile);
+    if ($vrc === 0) $auth = 'sig';
+}
+if ($auth === ''
+    && $REPORT_TOKEN !== '' && $token !== ''
+    && hash_equals($REPORT_TOKEN, $token)) {
+    $auth = 'token';
+}
+if ($auth === '') deny(403, 'forbidden');
+
 // Per-IP rate limit: 20 pings/hour. Dedupe: same dir once per hour.
 $rl_file = '/tmp/report_php_ratelimit.json';
 $fp = fopen($rl_file, 'c+');
@@ -97,8 +121,7 @@ if ($fp && flock($fp, LOCK_EX)) {
 }
 
 $ts = date('Y-m-d H:i:s');
-$token_ok = $token !== '' && hash_equals($REPORT_TOKEN, $token);
-$log_entry = "[$ts] station=$station port=$port dir=$clean_dir ip=$ip token=" . ($token_ok ? 'ok' : 'missing/bad') . "\n";
+$log_entry = "[$ts] station=$station port=$port dir=$clean_dir ip=$ip auth=$auth\n";
 
 $fetch_sh = '/home/httpd/norskmeteornettverk.no/bin/fetch.sh';
 if (!is_file($fetch_sh)) $fetch_sh = '/home/steinar/norskmeteornettverk.no/nmn/server/fetch.sh';

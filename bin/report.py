@@ -12,6 +12,8 @@ import configparser
 import datetime
 import calendar
 import fcntl
+import fnmatch
+import hashlib
 import json
 import math
 import os
@@ -62,10 +64,12 @@ SSH_TUNNEL_CONFIG_PATH = '/etc/default/ssh_tunnel'
 REMOTE_REPORT_URL = "https://norskmeteornettverk.no/ssh/report.php"
 REMOTE_UPLOAD_URL = "https://norskmeteornettverk.no/ssh/upload.php"
 # Same exclude set as the server's rsync pull in server/fetch.py — push must
-# deliver exactly the files a pull would have fetched.
+# deliver exactly the files a pull would have fetched.  .nmn_push_state is
+# local bookkeeping and must never be part of an upload.
 PUSH_EXCLUDES = [
     'frame-*', '*.pkl', '*.php', '*.pht*', '*.phar', '*.cgi', '*.pl',
     '*.shtml', '*.py', '*.pyc', '*.pyo', '*.sh', '.htaccess', '.htpasswd',
+    '.nmn_push_state',
 ]
 # Persistent report queue: a ping that fails goes here and is retried by a
 # detached drainer every REPORT_RETRY_INTERVAL seconds until the server
@@ -276,6 +280,25 @@ def _push_event(station_name: str, event_dir) -> Tuple[str, str]:
                 sig_p.unlink(missing_ok=True)
 
 
+def _push_excluded(name: str) -> bool:
+    return any(fnmatch.fnmatch(name, pat) for pat in PUSH_EXCLUDES)
+
+
+def _event_manifest_hash(event_dir) -> str:
+    """Content hash of exactly the file set a push would upload.
+
+    Lets a re-report skip the upload entirely when nothing changed —
+    the server already has the bytes, so only the ping matters.
+    """
+    h = hashlib.sha256()
+    for p in sorted(Path(event_dir).rglob('*')):
+        if not p.is_file() or _push_excluded(p.name):
+            continue
+        h.update(str(p.relative_to(event_dir)).encode())
+        h.update(p.read_bytes())
+    return h.hexdigest()
+
+
 def _deliver_report(station_name: str, port: str, event_dir) -> str:
     """Deliver a report: push the data over HTTPS, fall back to a pull ping.
 
@@ -283,8 +306,20 @@ def _deliver_report(station_name: str, port: str, event_dir) -> str:
     push hands the files to upload.php directly; the ping tells the server
     to pull the dir over the ssh tunnel.
     """
+    state_file = Path(event_dir) / '.nmn_push_state'
+    try:
+        if state_file.read_text().strip() == _event_manifest_hash(event_dir):
+            code, _ = _ping(_report_url(station_name, port, event_dir),
+                            station_name, event_dir)
+            return code
+    except OSError:
+        pass
     code, _ = _push_event(station_name, event_dir)
     if code.startswith('2'):
+        try:
+            state_file.write_text(_event_manifest_hash(event_dir))
+        except OSError:
+            pass
         return code
     ping_code, _ = _ping(_report_url(station_name, port, event_dir),
                          station_name, event_dir)
@@ -567,15 +602,35 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
         print(f"SSH tunnel is active on port {port}. Not using lftp.")
 
     # Preferred path: push the event dir straight to the server over HTTPS
-    # (the only outbound channel stations have).  On failure fall back to
-    # the pull ping, which asks the server to rsync the dir over the ssh
-    # tunnel.  If neither reaches the server the report is queued and the
-    # detached drainer keeps retrying until the server acknowledges it.
-    code, body = _push_event(station_name, event_dir)
-    print(f"Event push: HTTP {code} {body}")
+    # (the only outbound channel stations have).  If the event content is
+    # unchanged since the last successful push the server already holds
+    # the bytes — a pull ping is enough (server dedupes, or re-pulls only
+    # diffs via rsync).  On failure fall back to the pull ping; if neither
+    # reaches the server the report is queued and the detached drainer
+    # keeps retrying until the server acknowledges it.
+    manifest = _event_manifest_hash(event_dir)
+    state_file = Path(event_dir) / '.nmn_push_state'
+    try:
+        unchanged = state_file.read_text().strip() == manifest
+    except OSError:
+        unchanged = False
+    if unchanged:
+        code, body = _ping(_report_url(station_name, port, event_dir),
+                           station_name, event_dir)
+        print(f"Event unchanged since last push; ping only: "
+              f"HTTP {code} {body}")
+    else:
+        code, body = _push_event(station_name, event_dir)
+        print(f"Event push: HTTP {code} {body}")
+        if code.startswith('2'):
+            try:
+                state_file.write_text(manifest)
+            except OSError:
+                pass
     if not code.startswith('2'):
         if code != '404':  # 404 = upload.php not deployed yet; go straight to ping
-            print(f"Push failed (HTTP {code}), falling back to pull ping")
+            print(f"Direct delivery failed (HTTP {code}), "
+                  "falling back to pull ping")
         url = _report_url(station_name, port, event_dir)
         for attempt in range(3):
             code, body = _ping(url, station_name, event_dir)

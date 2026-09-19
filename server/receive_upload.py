@@ -30,7 +30,7 @@ MAX_MEMBERS = 1000
 
 # Mirrors the rsync --exclude list used by the pull path in fetch.py, plus a
 # couple of extra server-executable extensions for defence in depth.
-DENY_BASENAMES = {'.htaccess', '.htpasswd'}
+DENY_BASENAMES = {'.htaccess', '.htpasswd', '.nmn_push_state'}
 DENY_GLOBS = ('frame-*',)
 DENY_SUFFIXES = ('.pkl', '.php', '.phar', '.cgi', '.pl', '.shtml',
                  '.py', '.pyc', '.pyo', '.sh', '.phtml', '.htaccess')

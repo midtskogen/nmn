@@ -120,6 +120,7 @@ def decode_video_stats(video_path, max_frames=0, sample_interval=2,
     -------
     dict with day_mean, dark_frac, vgrad (all HxW float32) and meta.
     """
+    sample_interval = max(1, int(sample_interval))
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")

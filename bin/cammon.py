@@ -15,6 +15,7 @@ import logging
 import errno
 import signal
 import shutil
+import sys
 
 from ffmpy import FFmpeg
 
@@ -100,7 +101,6 @@ watches = prev_watches = set()
 thishour = nexthour = prevhour = lasteventfile = ''
 tophour = datetime.datetime.fromtimestamp(0, datetime.UTC)
 
-import sys
 for event in events:
     now = datetime.datetime.now();
     if args.maxfile != None and os.path.dirname(now.strftime(args.format)) != os.path.dirname(tophour.strftime(args.format)):

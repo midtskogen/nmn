@@ -577,17 +577,7 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
 
     station_name = _fs_safe(config.get('station', 'name'))
     if int(port) == 0:
-        print("SSH tunnel port is 0, using lftp to upload...")
-        remote_path = f"upload/meteor/{station_name}/"
-        # lftp -e interprets ';', quotes etc. as its own command syntax —
-        # quote both paths so metacharacters can't inject lftp commands.
-        lftp_cmd = 'mirror -R {} {}'.format(
-            "'" + str(event_dir).replace("'", "'\\''") + "'",
-            "'" + remote_path.replace("'", "'\\''") + "'")
-        command = ['lftp', '-e', lftp_cmd, 'norskmeteornettverk.no']
-        subprocess.run(command)
-    else:
-        print(f"SSH tunnel is active on port {port}. Not using lftp.")
+        print("SSH tunnel port is 0; HTTPS push still works without it.")
 
     # Preferred path: push the event dir straight to the server over HTTPS
     # (the only outbound channel stations have).  If the event content is

@@ -147,6 +147,81 @@ paths:
         '401': { description: Missing/invalid API key }
         '413': { description: Payload too large }
         '429': { $ref: '#/components/responses/RateLimit' }
+  /download:
+    get:
+      summary: Start a download with query parameters (no JSON body)
+      operationId: startDownloadSimple
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: station
+          in: query
+          required: true
+          description: Comma-separated station ids (amsNNN), max 10
+          schema: { type: string }
+        - name: camera
+          in: query
+          required: false
+          description: Comma-separated camera numbers (required except for timelapse)
+          schema: { type: string }
+        - name: file_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [lowres, hires, image, image_lowres, image_long, image_lowres_long, timelapse, timelapse_hires]
+            default: lowres
+        - name: date
+          in: query
+          required: true
+          description: UTC date, YYYY-MM-DD
+          schema: { type: string }
+        - name: hour
+          in: query
+          required: false
+          description: UTC hour 0-23 (required except timelapse)
+          schema: { type: integer }
+        - name: minute
+          in: query
+          required: false
+          description: UTC minute 0-59 (required except timelapse)
+          schema: { type: integer }
+        - name: length
+          in: query
+          required: false
+          description: Sequence length (days for timelapse), 1-100
+          schema: { type: integer, default: 1 }
+        - name: interval
+          in: query
+          required: false
+          description: Minutes between items (days for timelapse), 1-365
+          schema: { type: integer, default: 1 }
+        - name: duration
+          in: query
+          required: false
+          description: Minutes per video (multi-minute video/long exposure), 1-60
+          schema: { type: integer, default: 1 }
+        - name: stitch_equirect
+          in: query
+          required: false
+          description: Timelapse equirect projection (1/true/yes)
+          schema: { type: boolean }
+        - name: stitch_fisheye
+          in: query
+          required: false
+          description: Timelapse fisheye projection (1/true/yes)
+          schema: { type: boolean }
+        - name: lang
+          in: query
+          required: false
+          description: Language code for thumbnail annotations (e.g. en)
+          schema: { type: string }
+      responses:
+        '202': { description: Task queued JSON with task_id and poll_url }
+        '400': { description: Missing/invalid parameter }
+        '401': { description: Missing/invalid API key }
+        '429': { $ref: '#/components/responses/RateLimit' }
+        '503': { description: Too many concurrent downloads }
   /downloads/{task_id}:
     get:
       summary: Poll download status

@@ -78,7 +78,8 @@ Poll the task status endpoint until `status` becomes `complete` or `error`.
 | GET | `/predict/passes/{task_id}` | none | Poll prediction status |
 | POST | `/predict/aircraft` | none | Queue aircraft crossing prediction |
 | GET | `/predict/aircraft/{task_id}` | none | Poll prediction status |
-| POST | `/downloads` | key | Start file download |
+| GET | `/download?station=&camera=&date=&hour=&minute=` | key | Start download from a single URL |
+| POST | `/downloads` | key | Start file download (JSON payload) |
 | GET | `/downloads/{task_id}` | key | Poll download status |
 | DELETE | `/downloads/{task_id}` | key | Cancel/cleanup download |
 | POST | `/streams` | key | Start live stream |
@@ -164,15 +165,35 @@ A running task may return intermediate progress:
 
 ### Downloads
 
-Downloads require an API key. The payload is the same JSON format used by the web interface.
+Downloads require an API key.
+
+The simple form needs only a single URL — parameters go in the query string
+and the server builds the download payload itself:
 
 ```bash
-# payload.json
+curl -H 'X-API-Key: ak_live_...' \
+  'https://norskmeteornettverk.no/api/v1/download?station=ams173&camera=1&date=2026-08-31&hour=20&minute=0&file_type=image'
+```
+
+Parameters: `station` (comma-separated amsNNN), `camera` (comma-separated
+numbers), `date` (YYYY-MM-DD), `hour`, `minute` (UTC), `file_type`
+(`lowres`|`hires`|`image`|`image_lowres`|`image_long`|`image_lowres_long`|
+`timelapse`|`timelapse_hires`), `length`, `interval`, `duration`,
+`stitch_equirect`, `stitch_fisheye`, `lang`.  For timelapse file types
+`camera`/`hour`/`minute` are not needed; `length` is the number of days.
+
+The advanced form accepts the same JSON payload used by the web interface:
+
+```bash
+# payload.json — same fields as the query form, plus optional
+# pass_data/flight_pass_data/crossing_data blocks for pass downloads
 {
-  "files": [
-    {"station_id": "ams173", "cam": 1, "time": "2026-08-31_20:00", "file_type": "image"},
-    {"station_id": "ams173", "cam": 1, "time": "2026-08-31_20:05", "file_type": "image"}
-  ]
+  "stations": ["ams173"],
+  "cameras": [1],
+  "file_type": "image",
+  "date": "2026-08-31",
+  "hour": "20", "minute": "0",
+  "length": 5, "interval": 5
 }
 ```
 

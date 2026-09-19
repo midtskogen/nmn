@@ -356,11 +356,25 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
     query = urllib.parse.urlencode({
         'station': station_name, 'port': port, 'dir': str(event_dir),
         'token': token})
-    report_command = [
-        'curl', '-s', '-o', '/dev/null', '--max-time', '30',
-        f'{REMOTE_REPORT_URL}?{query}'
-    ]
-    subprocess.run(report_command, timeout=60)
+    url = f'{REMOTE_REPORT_URL}?{query}'
+    # A lost ping means the event is never fetched, so verify the HTTP
+    # status and retry on transport errors or 5xx.  2xx (including
+    # "already queued") and 4xx (denied input) are terminal answers.
+    for attempt in range(5):
+        try:
+            r = subprocess.run(
+                ['curl', '-s', '-w', '\n%{http_code}', '--max-time', '30', url],
+                capture_output=True, text=True, timeout=60)
+            body, _, code = r.stdout.rpartition('\n')
+        except Exception as e:
+            body, code = str(e), '000'
+        print(f"Report ping attempt {attempt + 1}/5: HTTP {code} {body.strip()}")
+        if code.startswith('2') or code.startswith('4'):
+            break
+        time.sleep(30)
+    if not code.startswith('2'):
+        print(f"WARNING: report ping not acknowledged (HTTP {code}); "
+              "server may never have been notified", file=sys.stderr)
     print("Upload and reporting complete.")
 
 

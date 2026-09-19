@@ -80,10 +80,10 @@ Poll the task status endpoint until `status` becomes `complete` or `error`.
 | GET | `/predict/aircraft/{task_id}` | none | Poll prediction status |
 | GET | `/download?station=&camera=&date=&hour=&minute=` | key | Start download from a single URL |
 | POST | `/downloads` | key | Start file download (JSON payload) |
-| GET | `/downloads/{task_id}` | key | Poll download status |
+| GET | `/downloads/{task_id}` | none | Poll download status |
 | DELETE | `/downloads/{task_id}` | key | Cancel/cleanup download |
 | POST | `/streams` | key | Start live stream |
-| GET | `/streams/{task_id}` | key | Poll stream status |
+| GET | `/streams/{task_id}` | none | Poll stream status |
 | DELETE | `/streams/{task_id}` | key | Stop stream |
 | POST | `/streams/{task_id}/transcode` | key | Request H.264 transcode |
 | GET | `/grids/{station_id}/{camera_num}` | key | Fetch grid overlay |
@@ -92,7 +92,7 @@ Poll the task status endpoint until `status` becomes `complete` or `error`.
 | GET | `/archive/annotation?station_id=&camera_num=&timestamp=` | key | Archive annotation overlay |
 | GET | `/archive/mask?station_id=&camera_num=&timestamp=` | key | Archive mask overlay |
 | POST | `/enhance` | key | Queue image enhancement |
-| GET | `/tasks/{task_id}` | key/status | Generic task status |
+| GET | `/tasks/{task_id}` | none | Generic task status |
 | GET | `/admin/stats` | key (admin) | Traffic stats JSON/HTML |
 | GET | `/docs` | none | Swagger UI |
 | GET | `/docs/openapi.yaml` | none | OpenAPI specification |

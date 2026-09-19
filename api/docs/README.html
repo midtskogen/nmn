@@ -93,10 +93,10 @@ curl https://norskmeteornettverk.no/api/v1/predict/passes/pass_task_...</code></
         <tr><td>GET</td><td><code>/predict/aircraft/{task_id}</code></td><td>none</td><td>Aircraft status</td></tr>
         <tr><td>GET</td><td><code>/download</code></td><td>key</td><td>Start download from a single URL</td></tr>
         <tr><td>POST</td><td><code>/downloads</code></td><td>key</td><td>Start file download (JSON)</td></tr>
-        <tr><td>GET</td><td><code>/downloads/{task_id}</code></td><td>key</td><td>Download status</td></tr>
+        <tr><td>GET</td><td><code>/downloads/{task_id}</code></td><td>none</td><td>Download status</td></tr>
         <tr><td>DELETE</td><td><code>/downloads/{task_id}</code></td><td>key</td><td>Cancel/cleanup</td></tr>
         <tr><td>POST</td><td><code>/streams</code></td><td>key</td><td>Start live stream</td></tr>
-        <tr><td>GET</td><td><code>/streams/{task_id}</code></td><td>key</td><td>Stream status</td></tr>
+        <tr><td>GET</td><td><code>/streams/{task_id}</code></td><td>none</td><td>Stream status</td></tr>
         <tr><td>DELETE</td><td><code>/streams/{task_id}</code></td><td>key</td><td>Stop stream</td></tr>
         <tr><td>POST</td><td><code>/streams/{task_id}/transcode</code></td><td>key</td><td>Request H.264 transcode</td></tr>
         <tr><td>GET</td><td><code>/grids/{station_id}/{camera_num}</code></td><td>key</td><td>Fetch grid overlay</td></tr>
@@ -105,8 +105,9 @@ curl https://norskmeteornettverk.no/api/v1/predict/passes/pass_task_...</code></
         <tr><td>GET</td><td><code>/archive/annotation</code></td><td>key</td><td>Archive annotation overlay</td></tr>
         <tr><td>GET</td><td><code>/archive/mask</code></td><td>key</td><td>Archive mask overlay</td></tr>
         <tr><td>POST</td><td><code>/enhance</code></td><td>key</td><td>Queue image enhancement</td></tr>
-        <tr><td>GET</td><td><code>/tasks/{task_id}</code></td><td>key/status</td><td>Generic task status</td></tr>
-        <tr><td>GET</td><td><code>/docs</code></td><td>none</td><td>Swagger UI</td></tr>
+        <tr><td>GET</td><td><code>/tasks/{task_id}</code></td><td>none</td><td>Generic task status</td></tr>
+        <tr><td>GET</td><td><code>/admin/stats</code></td><td>key (admin)</td><td>Traffic stats JSON/HTML</td></tr>
+        <tr><td>GET</td><td><code>/docs</code></td><td>none</td><td>This documentation</td></tr>
         <tr><td>GET</td><td><code>/docs/openapi.yaml</code></td><td>none</td><td>OpenAPI spec</td></tr>
       </tbody>
     </table>

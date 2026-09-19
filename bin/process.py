@@ -210,6 +210,18 @@ def load_configs(event_file: Path) -> tuple:
     return event_config, station_config, event_dir
 
 
+def _fs_safe(value: str) -> str:
+    """Return a filesystem/argv-safe token from a station-supplied string.
+
+    meteor.cfg / event.txt values are uploaded by stations and therefore
+    untrusted: a name containing '/' or '..' must not be able to redirect
+    output files outside the event directory, and a leading '-' must not be
+    parsed as a subprocess option.
+    """
+    cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(value)).lstrip('.-')
+    return cleaned or 'unnamed'
+
+
 def calculate_angular_distance(az1: float, alt1: float, az2: float, alt2: float) -> float:
     """Calculates the great-circle distance between two points in az/alt."""
     x1, x2 = math.radians(az1), math.radians(az2)
@@ -349,10 +361,10 @@ def run_video_processing(
     cleaned_videostart_str = videostart_str_full.rsplit('(', 1)[0].strip()
     videostart_ts = dt_parse(cleaned_videostart_str)
 
-    station_name = station_config.get('station', 'name')
+    station_name = _fs_safe(station_config.get('station', 'name'))
     base_name = f"{station_name}-{videostart_ts.strftime('%Y%m%d%H%M%S')}"
 
-    command = [sys.executable, str(Settings.MAKEVIDEOS_SCRIPT), base_name]
+    command = [sys.executable, str(Settings.MAKEVIDEOS_SCRIPT), '--', base_name]
     if credit:
         command.insert(2, "--credit")
         command.insert(3, credit)
@@ -467,7 +479,7 @@ def write_data_files(event_config, station_config, event_dir: Path):
     cleaned_videostart_str = videostart_str_full.rsplit('(', 1)[0].strip()
     videostart_ts = dt_parse(cleaned_videostart_str)
 
-    station_name = station_config.get('station', 'name')
+    station_name = _fs_safe(station_config.get('station', 'name'))
     base_name = f"{station_name}-{videostart_ts.strftime('%Y%m%d%H%M%S')}"
 
     timestamps = [float(t) for t in event_config.get('trail', 'timestamps').split()]

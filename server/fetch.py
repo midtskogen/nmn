@@ -22,6 +22,7 @@ import datetime
 import errno
 import fcntl
 import glob
+import html
 import io
 import json
 import logging
@@ -34,7 +35,6 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-import fcntl
 
 # Set umask to ensure files are created group-writable (0o664) and directories group-accessible (0o775)
 # This allows www-data to modify files created by steinar when they share the same group
@@ -453,10 +453,29 @@ def fetch_data(station: str, port: str, remote_dir: str, local_dir: Path) -> boo
     host = station if port == '0' else '192.168.2.10'
     ssh_port = '22' if port == '0' else port
 
+    # Hardening notes:
+    # - --safe-links keeps in-tree symlinks but drops links that point
+    #   outside the transferred tree, so a station cannot make Apache or a
+    #   later chmod/copy follow a link to e.g. /etc/passwd.
+    # - The extra excludes keep station-planted executable/config files
+    #   (.php, .htaccess) and deserialization caches (.pkl) out of the
+    #   publicly served tree.
     rsync_cmd = [
-        'rsync', '-av', '--exclude', 'frame-*', f'--bwlimit={speed}',
-        '--progress', '-e', f'ssh -o StrictHostKeyChecking=no -p {ssh_port}',
-        f'meteor@{host}:{remote_dir}/', str(local_dir)
+        'rsync', '-av', '--safe-links',
+        '--exclude', 'frame-*',
+        '--exclude', '*.pkl', '--exclude', '*.php', '--exclude', '*.pht*',
+        '--exclude', '*.phar', '--exclude', '*.cgi', '--exclude', '*.pl',
+        '--exclude', '*.shtml', '--exclude', '*.py', '--exclude', '*.pyc',
+        '--exclude', '*.pyo', '--exclude', '*.sh',
+        '--exclude', '.htaccess', '--exclude', '.htpasswd',
+        f'--bwlimit={speed}',
+        # accept-new pins the host key on first contact instead of accepting
+        # a changed/spoofed key on every connect (StrictHostKeyChecking=no).
+        # --timeout aborts on a stalled transfer so a hung station cannot
+        # keep the fetch worker alive forever.
+        '--timeout=600', '--contimeout=30',
+        '--progress', '-e', f'ssh -o StrictHostKeyChecking=accept-new -p {ssh_port}',
+        f'meteor@{host}:{shlex.quote(remote_dir)}/', str(local_dir)
     ]
 
     for attempt in range(Config.RSYNC_RETRIES):
@@ -464,8 +483,8 @@ def fetch_data(station: str, port: str, remote_dir: str, local_dir: Path) -> boo
         result = run_command(rsync_cmd, stream_output=True)
         if result.returncode == 0:
             logging.info("Rsync completed successfully.")
-            ssh_cmd = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=5',
-                       '-p', ssh_port, f'meteor@{host}', 'touch', f'{remote_dir}/uploaded']
+            ssh_cmd = ['ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=5',
+                       '-p', ssh_port, f'meteor@{host}', 'touch', shlex.quote(f'{remote_dir}/uploaded')]
             try:
                 subprocess.run(ssh_cmd, check=False, capture_output=True, timeout=30)
             except subprocess.TimeoutExpired:
@@ -481,16 +500,27 @@ def fetch_data(station: str, port: str, remote_dir: str, local_dir: Path) -> boo
 
 
 def set_permissions(directory: Path):
-    """Recursively sets directory and file permissions."""
+    """Recursively sets directory and file permissions.
+
+    Symlinks are skipped: chmod(2) follows links, so a station-planted link
+    could otherwise get the fetch user's chmod applied to an arbitrary
+    target (rsync --safe-links already limits this, but stay defensive).
+    """
     for root, dirs, files in os.walk(directory):
         for d in dirs:
+            p = Path(root, d)
+            if p.is_symlink():
+                continue
             try:
-                Path(root, d).chmod(0o775)
+                p.chmod(0o775)
             except OSError as e:
                 logging.debug(f"Could not set permissions on dir {root}/{d}: {e}")
         for f in files:
+            p = Path(root, f)
+            if p.is_symlink():
+                continue
             try:
-                Path(root, f).chmod(0o664)
+                p.chmod(0o664)
             except OSError as e:
                 logging.debug(f"Could not set permissions on file {root}/{f}: {e}")
 
@@ -692,7 +722,7 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
             table1 += f"""
     <tr><td>{translations.get("radiant_ra", "Radiant R.A.")}:</td><td> {ramin // 60:02d}:{ramin % 60:02d} ({orbit_data['ra']:.1f}°)</td></tr>
     <tr><td>{translations.get("radiant_dec", "Radiant Dec.")}:</td><td> {orbit_data['dec']:.1f}°</td></tr>
-    <tr><td>{translations.get("meteor_shower", "Meteor Shower")}:</td><td align=center> {shower_name}</td></tr>
+    <tr><td>{translations.get("meteor_shower", "Meteor Shower")}:</td><td align=center> {html.escape(str(shower_name))}</td></tr>
 """
         table1 += "</table>"
         
@@ -715,7 +745,7 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
     <tr><td>{translations.get("longitude_node", "Long. of Asc. Node")}:</td><td> {orbit_data['lnode']:.1f}°</td></tr>
     <tr><td>{translations.get("arg_periapsis", "Argument of Perihelion")}:</td><td> {orbit_data['argp']:.1f}°</td></tr>
     <tr><td>{translations.get("mean_anomaly", "Mean Anomaly")}:</td><td> {orbit_data['m0']:.1f}°</td></tr>
-    <tr><td>{translations.get("epoch", "Epoch")}:</td><td> {orbit_data['t0']}</td></tr>
+    <tr><td>{translations.get("epoch", "Epoch")}:</td><td> {html.escape(str(orbit_data['t0']))}</td></tr>
 </table>
 """
             if lang != 'en':
@@ -725,13 +755,25 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
         f.write('</td></tr></table>')
 
 
-def generate_station_html_report(output_path: Path, event_dir: Path, translations: dict):
-    """Generates the language-specific station HTML file with full details."""
+def generate_station_html_report(output_path: Path, event_dir: Path, translations: dict,
+                                 file_prefix: str = ''):
+    """Generates the language-specific station HTML file with full details.
+
+    The output is pure HTML: all existence checks are performed here at
+    generation time so the file can be served with readfile() — the previous
+    version embedded <?php blocks which would execute when include()d.
+    """
     with output_path.open('w', encoding='utf-8') as f:
         station_files = sorted(event_dir.glob('*/*/event.txt'))
         for event_file in station_files:
             station = event_file.parent.parent.name
             cam = event_file.parent.name
+            # These names are interpolated into generated HTML — restrict to a
+            # strict charset and skip malformed directory names.
+            if not (re.fullmatch(r'[A-Za-z0-9_-]+', station)
+                    and re.fullmatch(r'[A-Za-z0-9_-]+', cam)):
+                logging.warning(f"Skipping event file with unsafe dir names: {event_file}")
+                continue
             location = _STATION_DISPLAY_NAMES.get(station, station.title())
 
             cfg = configparser.ConfigParser()
@@ -741,10 +783,10 @@ def generate_station_html_report(output_path: Path, event_dir: Path, translation
             except Exception as e:
                 logging.warning(f"Could not parse event file {event_file}: {e}")
                 continue
-                
+
             ts_utc = datetime.datetime.fromtimestamp(ts_float, tz=pytz.utc)
             ts_str = ts_utc.strftime('%Y%m%d%H%M%S')
-            
+
             code = ''
             try:
                 code = cfg.get('station', 'code', fallback='').strip()
@@ -759,132 +801,110 @@ def generate_station_html_report(output_path: Path, event_dir: Path, translation
                     except IndexError:
                         pass
 
-            html_template = """
-<div class="container">
-  <div class="column">
-<h1>{location} ({code}) {cam}</h1>
-<?php
-$webm_path = "{station}/{cam}/fireball_neg.webm";
-$jpg_path = "{station}/{cam}/fireball.jpg";
-$webm_url = "{url_base}/{cam}/fireball_neg.webm";
-$webm_url2 = "{url_base}/{cam}/fireball_orig.webm";
-$jpg_url = "{url_base}/{cam}/fireball.jpg";
-
-// Logic to display language-specific brightness plot with a fallback to default
-$b_prefix = ($lang === '{default_lang_code}') ? '' : substr($lang, 0, 2) . '_';
-$specific_brightness_path = "{station}/{cam}/" . $b_prefix . "brightness.jpg";
-$specific_brightness_url = "{url_base}/{cam}/" . $b_prefix . "brightness.jpg";
-$default_brightness_path = "{station}/{cam}/brightness.jpg";
-$default_brightness_url = "{url_base}/{cam}/brightness.jpg";
-
-$display_brightness_path = null;
-$display_brightness_url = null;
-
-if (file_exists($specific_brightness_path)) {{
-    $display_brightness_path = $specific_brightness_path;
-    $display_brightness_url = $specific_brightness_url;
-}} elseif (file_exists($default_brightness_path)) {{
-    $display_brightness_path = $default_brightness_path;
-    $display_brightness_url = $default_brightness_url;
-}}
-
-$preview_img_path = null;
-$preview_img_url = null;
-$preview_href_url = null;
-
-if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{
-    $preview_img_path = "{station}/{cam}/{station_ts}-gnomonic-grid.jpg";
-    $preview_img_url = "{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg";
-    if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}-gnomonic.mp4";
-    }} else {{
-        $preview_href_url = $preview_img_url;
-    }}
-}} elseif (file_exists("{station}/{cam}/{station_ts}-grid.jpg")) {{
-    $preview_img_path = "{station}/{cam}/{station_ts}-grid.jpg";
-    $preview_img_url = "{url_base}/{cam}/{station_ts}-grid.jpg";
-    if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}-grid.mp4";
-    }} else {{
-        $preview_href_url = $preview_img_url;
-    }}
-}} elseif (file_exists("{station}/{cam}/{station_ts}.jpg")) {{
-    $preview_img_path = "{station}/{cam}/{station_ts}.jpg";
-    $preview_img_url = "{url_base}/{cam}/{station_ts}.jpg";
-    if (file_exists("{station}/{cam}/{station_ts}-orig.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}-orig.mp4";
-    }} elseif (file_exists("{station}/{cam}/{station_ts}.mp4")) {{
-        $preview_href_url = "{url_base}/{cam}/{station_ts}.mp4";
-    }} else {{
-        $preview_href_url = $preview_img_url;
-    }}
-}}
-?>
-    <div style="text-align: center;">
-        <?php if (file_exists($webm_path)) {{ ?>
-        <a href="<?php echo $webm_url2; ?>"><video autoplay loop muted playsinline style="max-width: 800px; width: 100%; height: auto; border: 1px solid black;"><source src="<?php echo $webm_url; ?>" type="video/webm"></video></a><br>
-        <?php }} elseif (file_exists($jpg_path)) {{ ?>
-        <a href="<?php echo $jpg_url; ?>"><img src="<?php echo $jpg_url; ?>" style="max-width: 800px; width: 100%; height: auto;" alt="fireball"><br></a>
-        <?php }} ?>
-    </div>
-<table><tr><td valign=top>
-<?php if ($preview_img_path !== null) {{ ?><a href="<?php echo $preview_href_url; ?>"><img src="<?php echo $preview_img_url; ?>" width=768 alt="preview"></a><?php }} ?>
-</td>
-<td valign=top>
-<table border=1>
-<tr><td><b>{videos_header}</b><br>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.mp4">{gnomonic_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.mp4">{gnomonic_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-orig.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-orig.mp4">{original_label}</a><br> <?php }} elseif (file_exists("{station}/{cam}/{station_ts}.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.mp4">{original_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-grid.mp4")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.mp4">{original_with_coords_label}</a><br> <?php }} ?>
-</td></tr>
-<tr><td><b>{images_header}</b><br>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic.jpg">{gnomonic_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid.jpg">{gnomonic_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-grid-uncorr.jpg">{gnomonic_uncorrected_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels.jpg">{gnomonic_with_labels_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-gnomonic-labels-uncorr.jpg">{gnomonic_uncorrected_with_labels_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.jpg">{original_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-grid.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-grid.jpg">{original_with_coords_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}-mask.jpg")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}-mask.jpg">{original_with_mask_label}</a><br> <?php }} ?>
-</td></tr>
-<tr><td><b>{text_files_header}</b><br>
-<?php if (file_exists("{station}/{cam}/event.txt")) {{ ?>• <a href="{url_base}/{cam}/event.txt">{detection_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/{station_ts}.txt")) {{ ?>• <a href="{url_base}/{cam}/{station_ts}.txt">{observation_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/centroid2.txt")) {{ ?>• <a href="{url_base}/{cam}/centroid2.txt">{coordinates_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/stderr.txt")) {{ ?>• <a href="{url_base}/{cam}/stderr.txt">{error_messages_label}</a><br> <?php }} ?>
-<?php if (file_exists("{station}/{cam}/report.log")) {{ ?>• <a href="{url_base}/{cam}/report.log">{log_file_label}</a><br> <?php }} ?>
-</td></tr></table>
-<?php if ($display_brightness_path !== null) {{ ?><a href="<?php echo $display_brightness_url; ?>"><img src="<?php echo $display_brightness_url; ?>" width=400 alt="{brightness_label}"><br></a> <?php }} ?>
-</td></tr></table>
-</p>
-</div></div>
-            """
-            
             url_base_path = f'/meteor/{event_dir.parent.name}/{event_dir.name}/{station}'
-            station_timestamp_str = f"{station}-{ts_str}"
+            ts = f"{station}-{ts_str}"
+            cam_dir = event_dir / station / cam
 
-            f.write(html_template.format(
-                url_base=url_base_path, station=station, cam=cam, station_ts=station_timestamp_str,
-                code=code, location=location, default_lang_code=DEFAULT_LANG,
-                videos_header=translations.get("videos", "Videos:"),
-                images_header=translations.get("images", "Images:"),
-                text_files_header=translations.get("text_files", "Text Files:"),
-                gnomonic_label=translations.get("gnomonic", "Gnomonic"),
-                gnomonic_with_coords_label=translations.get("gnomonic_with_coords", "Gnomonic with coordinates"),
-                original_label=translations.get("original", "Original"),
-                original_with_coords_label=translations.get("original_with_coords", "Original with coordinates"),
-                gnomonic_uncorrected_with_coords_label=translations.get("gnomonic_uncorrected_with_coords", "Uncorrected gnomonic with coordinates"),
-                gnomonic_with_labels_label=translations.get("gnomonic_with_labels", "Gnomonic with labels"),
-                gnomonic_uncorrected_with_labels_label=translations.get("gnomonic_uncorrected_with_labels", "Uncorrected gnomonic with labels"),
-                original_with_mask_label=translations.get("original_with_mask", "Original with mask"),
-                detection_label=translations.get("detection", "Detection"),
-                observation_label=translations.get("observation", "Observation"),
-                coordinates_label=translations.get("coordinates", "Coordinates"),
-                error_messages_label=translations.get("error_messages", "Error Messages"),
-                log_file_label=translations.get("log_file", "Log"),
-                brightness_label=translations.get("brightness", "Brightness")
-            ))
+            def _esc(v):
+                return html.escape(str(v), quote=True)
+
+            def _exists(name):
+                return (cam_dir / name).is_file()
+
+            def _url(name):
+                return _esc(f'{url_base_path}/{cam}/{name}')
+
+            def _link(name, label):
+                return f'• <a href="{_url(name)}">{_esc(label)}</a><br> '
+
+            # Preview image cascade (mirrors the old PHP template).
+            preview_img = preview_href = None
+            if _exists(f'{ts}-gnomonic-grid.jpg'):
+                preview_img = f'{ts}-gnomonic-grid.jpg'
+                preview_href = f'{ts}-gnomonic.mp4' if _exists(f'{ts}-gnomonic.mp4') else preview_img
+            elif _exists(f'{ts}-grid.jpg'):
+                preview_img = f'{ts}-grid.jpg'
+                preview_href = f'{ts}-grid.mp4' if _exists(f'{ts}-grid.mp4') else preview_img
+            elif _exists(f'{ts}.jpg'):
+                preview_img = f'{ts}.jpg'
+                if _exists(f'{ts}-orig.mp4'):
+                    preview_href = f'{ts}-orig.mp4'
+                elif _exists(f'{ts}.mp4'):
+                    preview_href = f'{ts}.mp4'
+                else:
+                    preview_href = preview_img
+
+            # Language-specific brightness plot with fallback to default.
+            brightness = None
+            for cand in (f'{file_prefix}brightness.jpg', 'brightness.jpg'):
+                if _exists(cand):
+                    brightness = cand
+                    break
+
+            tr = lambda k, d: translations.get(k, d)
+            parts = [
+                '<div class="container">\n  <div class="column">\n'
+                f'<h1>{_esc(location)} ({_esc(code)}) {_esc(cam)}</h1>\n'
+                '    <div style="text-align: center;">\n'
+            ]
+            if _exists('fireball_neg.webm'):
+                parts.append(
+                    f'        <a href="{_url("fireball_orig.webm")}"><video autoplay loop muted'
+                    f' playsinline style="max-width: 800px; width: 100%; height: auto;'
+                    f' border: 1px solid black;"><source src="{_url("fireball_neg.webm")}"'
+                    ' type="video/webm"></video></a><br>\n')
+            elif _exists('fireball.jpg'):
+                parts.append(
+                    f'        <a href="{_url("fireball.jpg")}"><img src="{_url("fireball.jpg")}"'
+                    ' style="max-width: 800px; width: 100%; height: auto;" alt="fireball"><br></a>\n')
+            parts.append('    </div>\n<table><tr><td valign=top>\n')
+            if preview_img:
+                parts.append(f'<a href="{_url(preview_href)}"><img src="{_url(preview_img)}" width=768 alt="preview"></a>\n')
+            parts.append(f'</td>\n<td valign=top>\n<table border=1>\n<tr><td><b>{_esc(tr("videos", "Videos:"))}</b><br>\n')
+
+            if _exists(f'{ts}-gnomonic.mp4'):
+                parts.append(_link(f'{ts}-gnomonic.mp4', tr('gnomonic', 'Gnomonic')))
+            if _exists(f'{ts}-gnomonic-grid.mp4'):
+                parts.append(_link(f'{ts}-gnomonic-grid.mp4', tr('gnomonic_with_coords', 'Gnomonic with coordinates')))
+            if _exists(f'{ts}-orig.mp4'):
+                parts.append(_link(f'{ts}-orig.mp4', tr('original', 'Original')))
+            elif _exists(f'{ts}.mp4'):
+                parts.append(_link(f'{ts}.mp4', tr('original', 'Original')))
+            if _exists(f'{ts}-grid.mp4'):
+                parts.append(_link(f'{ts}-grid.mp4', tr('original_with_coords', 'Original with coordinates')))
+
+            parts.append(f'</td></tr>\n<tr><td><b>{_esc(tr("images", "Images:"))}</b><br>\n')
+            for name, key, default in [
+                (f'{ts}-gnomonic.jpg', 'gnomonic', 'Gnomonic'),
+                (f'{ts}-gnomonic-grid.jpg', 'gnomonic_with_coords', 'Gnomonic with coordinates'),
+                (f'{ts}-gnomonic-grid-uncorr.jpg', 'gnomonic_uncorrected_with_coords', 'Uncorrected gnomonic with coordinates'),
+                (f'{ts}-gnomonic-labels.jpg', 'gnomonic_with_labels', 'Gnomonic with labels'),
+                (f'{ts}-gnomonic-labels-uncorr.jpg', 'gnomonic_uncorrected_with_labels', 'Uncorrected gnomonic with labels'),
+                (f'{ts}.jpg', 'original', 'Original'),
+                (f'{ts}-grid.jpg', 'original_with_coords', 'Original with coordinates'),
+                (f'{ts}-mask.jpg', 'original_with_mask', 'Original with mask'),
+            ]:
+                if _exists(name):
+                    parts.append(_link(name, tr(key, default)))
+
+            parts.append(f'</td></tr>\n<tr><td><b>{_esc(tr("text_files", "Text Files:"))}</b><br>\n')
+            for name, key, default in [
+                ('event.txt', 'detection', 'Detection'),
+                (f'{ts}.txt', 'observation', 'Observation'),
+                ('centroid2.txt', 'coordinates', 'Coordinates'),
+                ('stderr.txt', 'error_messages', 'Error Messages'),
+                ('report.log', 'log_file', 'Log'),
+            ]:
+                if _exists(name):
+                    parts.append(_link(name, tr(key, default)))
+
+            parts.append('</td></tr></table>\n')
+            if brightness:
+                parts.append(
+                    f'<a href="{_url(brightness)}"><img src="{_url(brightness)}" width=400'
+                    f' alt="{_esc(tr("brightness", "Brightness"))}"><br></a> ')
+            parts.append('\n</td></tr></table>\n</p>\n</div></div>\n')
+            f.write(''.join(parts))
 
 
 def _convert_ephem_angles(obj):
@@ -938,7 +958,7 @@ def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: d
         file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
         
         # HTML generation
-        generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
+        generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations, file_prefix)
         
         current_orbit_data = {'valid': False}
         orbit_data = plot_data.get('orbit', {}) if plot_data else {}
@@ -1839,7 +1859,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             try:
                 translations = load_translations(lang)
                 file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-                generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations)
+                generate_station_html_report(event_dir / f"{file_prefix}stations.html", event_dir, translations, file_prefix)
                 logging.info(f"Generated station report for language: [{lang}]")
             except Exception as e:
                 logging.error(f"Failed to generate station report for language '{lang}': {e}")
@@ -2353,7 +2373,7 @@ def main():
     setup_logging(log_path)
     logging.info(f"--- Starting FETCH for station {station}, remote dir {args.remote_dir} ---")
 
-    if not fetch_data(station, port, args.remote_dir, local_dir):
+    if not fetch_data(station, port, remote_cleaned, local_dir):
         logging.error("Failed to fetch data. Exiting.")
         sys.exit("Failed to fetch data.")
         

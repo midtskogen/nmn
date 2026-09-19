@@ -89,6 +89,18 @@ def load_config(event_file_path: Path) -> configparser.ConfigParser:
     return config
 
 
+def _fs_safe(value: str) -> str:
+    """Return a filesystem/URL-path-safe token from a config-supplied string.
+
+    The station name comes from meteor.cfg and is used in local filenames and
+    in the remote upload path — it must not contain separators or dots that
+    could traverse directories.
+    """
+    import re
+    cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(value)).lstrip('.-')
+    return cleaned or 'unnamed'
+
+
 def haversine_arc(az1: float, alt1: float, az2: float, alt2: float) -> float:
     """Calculates the angular separation (arc) in degrees between two points."""
     x1, x2 = math.radians(az1), math.radians(az2)
@@ -318,7 +330,7 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
     except FileNotFoundError:
         port = '0'
 
-    station_name = config.get('station', 'name')
+    station_name = _fs_safe(config.get('station', 'name'))
     if int(port) == 0:
         print("SSH tunnel port is 0, using lftp to upload...")
         remote_path = f"upload/meteor/{station_name}/"
@@ -345,10 +357,10 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
         'station': station_name, 'port': port, 'dir': str(event_dir),
         'token': token})
     report_command = [
-        'curl', '-s', '-o', '/dev/null',
+        'curl', '-s', '-o', '/dev/null', '--max-time', '30',
         f'{REMOTE_REPORT_URL}?{query}'
     ]
-    subprocess.run(report_command)
+    subprocess.run(report_command, timeout=60)
     print("Upload and reporting complete.")
 
 
@@ -447,7 +459,7 @@ def main():
     start_timestamp = calendar.timegm(start_dt.utctimetuple()) + start_dt.microsecond / 1_000_000.0
     # ---
 
-    station_name = config.get('station', 'name')
+    station_name = _fs_safe(config.get('station', 'name'))
     event_timestamp_str = start_dt.strftime('%Y%m%d%H%M%S')
     video_name = f"{station_name}-{event_timestamp_str}"
 

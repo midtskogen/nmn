@@ -9,6 +9,15 @@ ts=$2
 lat=$3
 long=$4
 
+# Args are interpolated into command lines below — keep them numeric/path-safe.
+if [ -z "$file" ] || [ ! -f "$file" ]; then
+    echo "usage: $0 <image> <timestamp> <lat> <long>" >&2
+    exit 1
+fi
+[[ $ts   =~ ^[0-9._-]+$ ]]  || { echo "invalid timestamp: $ts" >&2;   exit 1; }
+[[ $lat  =~ ^-?[0-9.]+$ ]]  || { echo "invalid latitude: $lat" >&2;   exit 1; }
+[[ $long =~ ^-?[0-9.]+$ ]]  || { echo "invalid longitude: $long" >&2; exit 1; }
+
 # Use astrometry.net to map x,y to ra,dec
 function solve {
     count=$((
@@ -152,5 +161,5 @@ fi
 
 ~/bin/drawgrid.py lens2.pto
 composite -blend 40 $1 grid.png grid.jpg
-echo convert -pointsize 12 $(~/bin/brightstar.py --latitude $lat --longitude $long $ts lens2.pto 2> /dev/null | sed 's/[(),]//g;s/'\''//g' | awk '{x=$1; y=$2; az=$3; alt=$4; $1=$2=$3=$4=""; sub(/ */, ""); printf("-stroke white -fill none -draw \"circle %f,%f %f,%f\" -stroke none -fill white -annotate +%f+%f \"%s [%.2f %.2f]\"\n", x, y, x+7, y, x+11, y-4, $0, az, alt)}') grid.png grid-labels.png | bash
+echo convert -pointsize 12 $(~/bin/brightstar.py --latitude $lat --longitude $long $ts lens2.pto 2> /dev/null | sed 's/[(),]//g;s/'\''//g' | awk '{x=$1; y=$2; az=$3; alt=$4; $1=$2=$3=$4=""; sub(/ */, ""); gsub(/[^-A-Za-z0-9 .]/, "", $0); printf("-stroke white -fill none -draw \"circle %f,%f %f,%f\" -stroke none -fill white -annotate +%f+%f \"%s [%.2f %.2f]\"\n", x, y, x+7, y, x+11, y-4, $0, az, alt)}') grid.png grid-labels.png | bash
 composite -blend 40 $1 grid-labels.png grid-labels.jpg

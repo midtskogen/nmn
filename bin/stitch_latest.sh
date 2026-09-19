@@ -154,10 +154,13 @@ NCAMS=7
 SSH_OPTS=()
 CTRL_SOCK=""
 if [ -n "$SSH_HOST" ]; then
-    CTRL_SOCK=$(mktemp -u /tmp/stitch_ssh_XXXXXX)
+    # mktemp -d gives an attacker-proof dir; mktemp -u would leave a
+    # predictable socket path open to a symlink race.
+    CTRL_DIR=$(mktemp -d /tmp/stitch_ssh_XXXXXX)
+    CTRL_SOCK="$CTRL_DIR/sock"
     ssh -fNM -S "$CTRL_SOCK" -o ConnectTimeout=10 "$SSH_HOST"
     SSH_OPTS=(-o "ControlPath=$CTRL_SOCK")
-    cleanup_ssh() { ssh -S "$CTRL_SOCK" -O exit "$SSH_HOST" 2>/dev/null || true; rm -f "$PIDFILE"; }
+    cleanup_ssh() { ssh -S "$CTRL_SOCK" -O exit "$SSH_HOST" 2>/dev/null || true; rm -rf "$CTRL_DIR"; rm -f "$PIDFILE"; }
     trap cleanup_ssh EXIT
     vlog "SSH ControlMaster to $SSH_HOST established"
 fi
@@ -167,7 +170,10 @@ rcmd() {
     if [ -n "$SSH_HOST" ]; then
         ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"
     else
-        eval "$@"
+        # bash -c in a subshell matches the remote-ssh semantics without
+        # eval'ing in this shell (a crafted arg can't clobber our
+        # variables or exit the script).
+        bash -c "$*"
     fi
 }
 
@@ -214,7 +220,10 @@ vlog "Found ${#REMOTE_FILES[@]} input files"
 if [ -n "$SSH_HOST" ]; then
     vlog "Fetching inputs from $SSH_HOST via SSH"
     TMPDIR=$(mktemp -d /tmp/stitch_inputs_XXXXXX)
-    trap 'rm -rf "$TMPDIR" "$LOCAL_OUTDIR"; cleanup_ssh' EXIT
+    # LOCAL_OUTDIR is only assigned after the fetches — initialise it so an
+    # early exit doesn't abort the trap on an unbound variable under set -u.
+    LOCAL_OUTDIR=""
+    trap 'rm -rf "$TMPDIR" ${LOCAL_OUTDIR:+"$LOCAL_OUTDIR"}; cleanup_ssh' EXIT
     # Mirror remote directory structure so stitcher can find lens.pto files.
     # Collect unique cam directories and their lens.pto files.
     INPUT_FILES=()

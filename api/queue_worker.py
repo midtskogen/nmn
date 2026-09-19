@@ -30,12 +30,17 @@ CONFIG_FILE = SECRETS_DIR / 'api_config.json'
 os.environ.setdefault('NMN_CONFIG_FILE', str(SECRETS_DIR / 'config.json'))
 os.environ.setdefault('NMN_CREDENTIALS_FILE', str(SECRETS_DIR / 'credentials.json'))
 
-# Let the existing Python logging module handle our own messages.
+# Let the existing Python logging module handle our own messages.  The log
+# file rotates itself — the launcher used to grow queue_worker.log without
+# bound via a shell redirect.
 import logging
+from logging.handlers import RotatingFileHandler
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[RotatingFileHandler(
+        Path(__file__).parent / 'queue_worker.log',
+        maxBytes=10 * 1024 * 1024, backupCount=3)]
 )
 logger = logging.getLogger('queue_worker')
 

@@ -18,8 +18,11 @@ function ensure_queue_worker_running() {
 
     $python = '/usr/bin/python3';
     $script = __DIR__ . '/queue_worker.py';
+    // The worker rotates queue_worker.log itself (RotatingFileHandler);
+    // this append redirect only catches output emitted before logging
+    // initialises (e.g. an import crash).
     $nohup = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($script)
-           . ' > ' . escapeshellarg(__DIR__ . '/queue_worker.log')
+           . ' >> ' . escapeshellarg(__DIR__ . '/queue_worker.log')
            . ' 2>&1 &';
     shell_exec($nohup);
 

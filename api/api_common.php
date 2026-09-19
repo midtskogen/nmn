@@ -222,8 +222,12 @@ function validate_api_key($endpoint_group) {
     if (!empty($key_data['expires']) && strtotime($key_data['expires']) < time()) {
         _api_auth_failed('expired_api_key', 'The supplied API key has expired.', 403);
     }
-    $allowed = $key_data['allowed_endpoints'] ?? [];
-    if (!empty($allowed) && !in_array($endpoint_group, $allowed, true)) {
+    // Default-deny: a key without an explicit allowed_endpoints list is
+    // authorized for nothing (not even read-only groups).  Requiring the
+    // list prevents a narrowly-scoped key issued without the field from
+    // silently gaining every group, including admin.
+    $allowed = $key_data['allowed_endpoints'] ?? null;
+    if (!is_array($allowed) || !in_array($endpoint_group, $allowed, true)) {
         _api_auth_failed('endpoint_not_allowed', 'This API key is not allowed to use this endpoint group.', 403);
     }
     return $key_data;

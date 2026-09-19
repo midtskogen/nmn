@@ -11,10 +11,15 @@ DirectoryIndex index.php
     RewriteRule ^(.*)$ index.php/$1 [L,QSA]
 
     # Block direct access to internal PHP helpers.
-    RewriteRule ^(api_common|rate_limit|query_logger|task_queue|queue_worker)\.php$ - [F,L]
+    RewriteRule ^(api_common|rate_limit|query_logger|task_queue|queue_worker|stats)\.php$ - [F,L]
 </IfModule>
 
-<FilesMatch "^(rate_limit|query_log|abuse_log|task_queue|queue_worker)\.(json|jsonl|pid|log)$">
+<FilesMatch "^(rate_limit|query_log|abuse_log|task_queue|queue_worker)\.(json|jsonl|pid|log)(\.old|\.tmp\..*)?$">
+    Require all denied
+</FilesMatch>
+
+# Runtime/helper scripts must never be served as source.
+<FilesMatch "\.(py|pyc|pyo)$">
     Require all denied
 </FilesMatch>
 

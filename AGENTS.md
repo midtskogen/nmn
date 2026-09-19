@@ -254,14 +254,19 @@
   into the public meteor tree. Hardened in place on bolide (station
   whitelist, event-shaped dir check, port range, per-IP rate limit,
   dedupe). It is NOT in the repo — keep it in sync if it changes.
-- The endpoint now REQUIRES a shared-secret token: stations send
-  `&token=` read from `/etc/default/nmn_report_token` (fallback
-  `~/.nmn_report_token`) in `bin/report.py`. Token deployed as root
-  (password auth) on 2026-09-18 to 13 primary stations + 10 backup
-  PCs (ams*b). Still pending (tunnels refused/offline): ams136
-  (vasteras), ams174b, ams180b, ams135b — each needs
-  `/etc/default/nmn_report_token` + updated `~/nmn/bin/report.py`
-  when it comes back. Station ssh port map lives in
+- Both report endpoints are now authenticated by ssh-keygen SIGNATURES:
+  `bin/report.py` signs `<station>\t<dir>` (pull ping) or `<dir>\n<body>`
+  (push upload) with the station's ssh key (namespace `nmn-upload`) and
+  sends it as `X-NMN-Sig`; the endpoints verify against
+  `/var/www/.ssh/allowed_signers` on bolide. The former shared token is
+  RETIRED (no code reads `/etc/default/nmn_report_token` or
+  `~/.nmn_report_token` anymore). `ssh/report.php` triggers the legacy
+  rsync pull (port pinned server-side via `/var/www/.ssh/config`, dir
+  anchored to `/meteor/camN/amsevents/YYYYMMDD/HHMMSS[_N]`);
+  `ssh/upload.php` (signature only) streams a station tar.gz into
+  `/var/www/incoming/` where `server/receive_upload.py` validates every
+  member before promoting into the meteor tree and running the same
+  merge+process pipeline as a pull. Station ssh port map lives in
   `/var/www/.ssh/config` on bolide (host 192.168.2.10, ports 10xxx).
 - `server/report.php` (public report form): uploads now map detected
   MIME to a fixed server-side extension (never the client's), base64

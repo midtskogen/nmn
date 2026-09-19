@@ -3,9 +3,7 @@
 // Security model:
 //   - ssh-keygen signature (X-NMN-Sig) over "<station>\t<dir>" made with
 //     the station's private key, verified against
-//     /var/www/.ssh/allowed_signers.  The shared token (X-NMN-Token
-//     header or &token=, secret in /var/www/.ssh/report_token) is the
-//     rollout fallback until all stations run the signing report.py.
+//     /var/www/.ssh/allowed_signers.  Signature only.
 //   - station must exist in stations.json and map to a tunnel port in
 //     /var/www/.ssh/config - the client-supplied ?port= is ignored, so a
 //     ping can never aim a fetch at an arbitrary forwarded port.
@@ -14,23 +12,18 @@
 //   - One fetch per dir per hour (dedupe), plus a coarse per-IP rate limit.
 //   - Denied/skipped requests are logged to /tmp/report_php.log.
 
-// Empty token simply means token auth can never succeed - signature auth
-// does not depend on it, so this is deliberately non-fatal.
-$REPORT_TOKEN = trim((string)@file_get_contents('/var/www/.ssh/report_token'));
-
 header('Content-Type: text/plain; charset=UTF-8');
 
 $dir     = (string)($_GET['dir'] ?? '');
 $station = preg_replace('/[^\w]/', '', (string)($_GET['station'] ?? ''));
 $port    = preg_replace('/[^\d]/', '', (string)($_GET['port'] ?? ''));
-$token   = (string)($_SERVER['HTTP_X_NMN_TOKEN'] ?? $_GET['token'] ?? '');
 $sig_b64 = (string)($_SERVER['HTTP_X_NMN_SIG'] ?? '');
 $ip      = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
 $log_file = '/tmp/report_php.log';
 $allowed_signers = '/var/www/.ssh/allowed_signers';
 
-// Cheap gate: a request must carry *some* credential.
-if ($token === '' && $sig_b64 === '') {
+// Cheap gate: a request must carry a signature to proceed.
+if ($sig_b64 === '') {
     deny(403, 'forbidden');
 }
 
@@ -75,8 +68,7 @@ $clean_dir = '/' . trim($clean_dir, '/');
 if (!preg_match('#^/meteor/cam\d+/amsevents/\d{8}/\d{6}(_\d+)?$#', $clean_dir))
     deny(400, 'bad dir');
 
-// Authentication: signature over "<station>\t<dir>" is primary; the shared
-// token remains accepted until all stations run the signing report.py.
+// Authentication: signature over "<station>\t<dir>" only.
 $auth = '';
 if ($sig_b64 !== '') {
     $sigfile = tempnam(sys_get_temp_dir(), 'nms');
@@ -89,11 +81,6 @@ if ($sig_b64 !== '') {
     exec($v, $vo, $vrc);
     @unlink($sigfile); @unlink($payfile);
     if ($vrc === 0) $auth = 'sig';
-}
-if ($auth === ''
-    && $REPORT_TOKEN !== '' && $token !== ''
-    && hash_equals($REPORT_TOKEN, $token)) {
-    $auth = 'token';
 }
 if ($auth === '') deny(403, 'forbidden');
 

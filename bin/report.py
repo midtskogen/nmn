@@ -165,20 +165,9 @@ def acquire_lock():
         print("Lock released.")
 
 
-def _report_token() -> str:
-    """Optional shared secret: the server validates inputs strictly; a token
-    lets it distinguish real stations."""
-    try:
-        return Path('/etc/default/nmn_report_token').read_text().strip() or \
-               (Path.home() / '.nmn_report_token').read_text().strip()
-    except OSError:
-        return ''
-
-
 def _report_url(station_name: str, port: str, event_dir) -> str:
     return REMOTE_REPORT_URL + '?' + urllib.parse.urlencode({
-        'station': station_name, 'port': port, 'dir': str(event_dir),
-        'token': _report_token()})
+        'station': station_name, 'port': port, 'dir': str(event_dir)})
 
 
 def _ping(url: str, station_name: str = '', event_dir=None) -> Tuple[str, str]:
@@ -259,8 +248,7 @@ def _push_event(station_name: str, event_dir) -> Tuple[str, str]:
         with os.fdopen(fd, 'wb') as pf, open(tar_path, 'rb') as tf:
             pf.write(norm_dir.encode() + b'\n')
             shutil.copyfileobj(tf, pf)
-        headers = ['-H', 'Content-Type: application/octet-stream',
-                   '-H', f'X-NMN-Token: {_report_token()}']
+        headers = ['-H', 'Content-Type: application/octet-stream']
         sig = _sign_file(Path(payload_path))
         if sig:
             headers += ['-H', f'X-NMN-Sig: {sig}']

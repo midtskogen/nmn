@@ -10,6 +10,7 @@ Usage:
 import configparser
 import datetime
 import calendar
+import fcntl
 import json
 import math
 import socket
@@ -55,6 +56,11 @@ except ImportError as e:
 METEOR_PROBABILITY_THRESHOLD = 0.5
 SSH_TUNNEL_CONFIG_PATH = '/etc/default/ssh_tunnel'
 REMOTE_REPORT_URL = "https://norskmeteornettverk.no/ssh/report.php"
+# Persistent report queue: a ping that fails goes here and is retried by a
+# detached drainer every REPORT_RETRY_INTERVAL seconds until the server
+# acknowledges it — server downtime must not lose detections.
+REPORT_QUEUE_PATH = Path.home() / '.nmn_report_queue'
+REPORT_RETRY_INTERVAL = 600
 # Assume processing scripts are in the user's bin directory
 METEORCROP_PATH = Path.home() / "bin" / "meteorcrop.py"
 PREDICT_PATH = Path.home() / "bin" / "predict.py"
@@ -142,6 +148,109 @@ def acquire_lock():
     finally:
         lock_socket.close()
         print("Lock released.")
+
+
+def _report_token() -> str:
+    """Optional shared secret: the server validates inputs strictly; a token
+    lets it distinguish real stations."""
+    try:
+        return Path('/etc/default/nmn_report_token').read_text().strip() or \
+               (Path.home() / '.nmn_report_token').read_text().strip()
+    except OSError:
+        return ''
+
+
+def _report_url(station_name: str, port: str, event_dir) -> str:
+    return REMOTE_REPORT_URL + '?' + urllib.parse.urlencode({
+        'station': station_name, 'port': port, 'dir': str(event_dir),
+        'token': _report_token()})
+
+
+def _ping(url: str) -> Tuple[str, str]:
+    """Single report ping. Returns (http_code, body); '000' on failure."""
+    try:
+        r = subprocess.run(
+            ['curl', '-s', '-w', '\n%{http_code}', '--max-time', '30', url],
+            capture_output=True, text=True, timeout=60)
+        body, _, code = r.stdout.rpartition('\n')
+        return code, body.strip()
+    except Exception as e:
+        return '000', str(e)
+
+
+def _enqueue_report(station_name: str, port: str, event_dir) -> None:
+    """Persist a failed report so it is retried until the server acks it."""
+    entry = f'{station_name}\t{port}\t{event_dir}\n'
+    try:
+        with open(REPORT_QUEUE_PATH, 'a+') as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            if entry not in f.readlines():
+                f.write(entry)
+    except OSError as e:
+        print(f"WARNING: could not queue report for {event_dir}: {e}",
+              file=sys.stderr)
+
+
+def _drain_queue() -> None:
+    """One pass over the retry queue: ping each entry once, drop successes."""
+    try:
+        with open(REPORT_QUEUE_PATH, 'r+') as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            entries = f.readlines()
+            remaining = []
+            for line in entries:
+                parts = line.rstrip('\n').split('\t')
+                if len(parts) != 3:
+                    continue
+                st, pt, dr = parts
+                code, _ = _ping(_report_url(st, pt, dr))
+                if code.startswith('2'):
+                    print(f"Queued report delivered: {dr}")
+                elif not code.startswith('4'):
+                    remaining.append(line)  # transient failure: retry later
+            if remaining:
+                f.seek(0)
+                f.truncate()
+                f.writelines(remaining)
+            else:
+                REPORT_QUEUE_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _spawn_queue_drainer() -> None:
+    """Start a detached retry process if one isn't already running."""
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), '--drain-queue'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        print(f"WARNING: could not spawn report queue drainer: {e}",
+              file=sys.stderr)
+
+
+def drain_report_queue() -> None:
+    """Detached drainer: keeps retrying queued reports until all are acked.
+
+    Runs under its own singleton (separate from the main report lock) so it
+    neither blocks nor multiplies.  A pass runs every REPORT_RETRY_INTERVAL
+    seconds — infrequent enough to not hammer an unavailable server.
+    """
+    lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        lock_socket.bind('\0' + Path(__file__).name + '-drain')
+    except socket.error:
+        return  # another drainer is already running
+    try:
+        while REPORT_QUEUE_PATH.exists():
+            _drain_queue()
+            if not REPORT_QUEUE_PATH.exists():
+                break
+            time.sleep(REPORT_RETRY_INTERVAL)
+    finally:
+        lock_socket.close()
 
 
 def run_video_creation(
@@ -345,36 +454,27 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
         print(f"SSH tunnel is active on port {port}. Not using lftp.")
 
     print("Pinging report URL...")
-    # Optional shared secret: the server accepts unauthenticated pings but
-    # validates inputs strictly; a token lets it distinguish real stations.
-    token = ''
-    try:
-        token = Path('/etc/default/nmn_report_token').read_text().strip() or \
-                (Path.home() / '.nmn_report_token').read_text().strip()
-    except OSError:
-        pass
-    query = urllib.parse.urlencode({
-        'station': station_name, 'port': port, 'dir': str(event_dir),
-        'token': token})
-    url = f'{REMOTE_REPORT_URL}?{query}'
     # A lost ping means the event is never fetched, so verify the HTTP
-    # status and retry on transport errors or 5xx.  2xx (including
-    # "already queued") and 4xx (denied input) are terminal answers.
-    for attempt in range(5):
-        try:
-            r = subprocess.run(
-                ['curl', '-s', '-w', '\n%{http_code}', '--max-time', '30', url],
-                capture_output=True, text=True, timeout=60)
-            body, _, code = r.stdout.rpartition('\n')
-        except Exception as e:
-            body, code = str(e), '000'
-        print(f"Report ping attempt {attempt + 1}/5: HTTP {code} {body.strip()}")
+    # status.  2xx (including "already queued") is success; 4xx is a
+    # terminal denial; anything else is retried a few times and then
+    # queued for indefinite background retries by the queue drainer.
+    url = _report_url(station_name, port, event_dir)
+    for attempt in range(3):
+        code, body = _ping(url)
+        print(f"Report ping attempt {attempt + 1}/3: HTTP {code} {body}")
         if code.startswith('2') or code.startswith('4'):
             break
         time.sleep(30)
-    if not code.startswith('2'):
-        print(f"WARNING: report ping not acknowledged (HTTP {code}); "
-              "server may never have been notified", file=sys.stderr)
+    if code.startswith('2'):
+        _drain_queue()  # server is reachable: flush any queued reports
+    elif code.startswith('4'):
+        print(f"WARNING: report ping denied (HTTP {code}): {body}",
+              file=sys.stderr)
+    else:
+        print(f"WARNING: server unreachable (HTTP {code}); queued for retry",
+              file=sys.stderr)
+        _enqueue_report(station_name, port, event_dir)
+        _spawn_queue_drainer()
     print("Upload and reporting complete.")
 
 
@@ -387,6 +487,9 @@ def main():
     creditfont = "Helvetica"
     logo_sequence = []
     argv = sys.argv[1:]
+    if '--drain-queue' in argv:
+        drain_report_queue()
+        sys.exit(0)
     usage = f"Usage: {sys.argv[0]} [--nologos] [--credit <string> [--creditpos <pos>] [--creditsize <size>] [--creditfont <font>]] [--logo <file> [--logopos <pos>]]... <event.txt>"
 
     remaining = []

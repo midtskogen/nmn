@@ -7,15 +7,19 @@ Usage:
     python report.py <event.txt>
 """
 
+import base64
 import configparser
 import datetime
 import calendar
 import fcntl
 import json
 import math
+import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 from contextlib import contextmanager
@@ -185,34 +189,72 @@ def _ping(url: str) -> Tuple[str, str]:
         return '000', str(e)
 
 
-def _push_event(station_name: str, event_dir) -> Tuple[str, str]:
-    """Push the event dir to the server as a streamed tar.gz.
+def _sign_file(path: Path) -> str:
+    """ssh-keygen sign a file with the station's tunnel key (base64 sig).
 
-    The station's only outbound channel to the server is HTTPS, so this
-    pipes `tar czf -` straight into a curl POST — no temp file, no memory
-    buffering.  Returns (http_code, body); '000' on transport failure.
+    Stations share one keypair, so the signature proves the upload came
+    from a station without transmitting any secret.
     """
+    for name in ('id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa'):
+        key = Path.home() / '.ssh' / name
+        if not key.is_file():
+            continue
+        try:
+            subprocess.run(
+                ['ssh-keygen', '-Y', 'sign', '-f', str(key),
+                 '-n', 'nmn-upload', str(path)],
+                check=True, capture_output=True, timeout=30)
+            return base64.b64encode(
+                Path(str(path) + '.sig').read_bytes()).decode()
+        except Exception:
+            continue
+    return ''
+
+
+def _push_event(station_name: str, event_dir) -> Tuple[str, str]:
+    """Push the event dir to the server as a tar.gz over HTTPS.
+
+    The payload "<dir>\n<tar>" is signed with the station ssh key; the
+    server verifies it against its allowed_signers before unpacking, so
+    nothing but a real station can hand data to the event tree.
+    Returns (http_code, body); '000' on transport failure.
+    """
+    norm_dir = '/' + str(event_dir).strip('/')
     url = REMOTE_UPLOAD_URL + '?' + urllib.parse.urlencode({
-        'station': station_name, 'dir': str(event_dir)})
-    tar_cmd = ['tar', 'czf', '-', '-C', str(event_dir)]
-    for pat in PUSH_EXCLUDES:
-        tar_cmd += ['--exclude', pat]
-    tar_cmd.append('.')
+        'station': station_name, 'dir': norm_dir})
+    tar_path = payload_path = None
     try:
-        tar = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL)
+        fd, tar_path = tempfile.mkstemp(suffix='.tar.gz')
+        os.close(fd)
+        tar_cmd = ['tar', 'czf', tar_path, '-C', str(event_dir)]
+        for pat in PUSH_EXCLUDES:
+            tar_cmd += ['--exclude', pat]
+        tar_cmd.append('.')
+        subprocess.run(tar_cmd, check=True, timeout=300,
+                       stderr=subprocess.DEVNULL)
+        fd, payload_path = tempfile.mkstemp()
+        with os.fdopen(fd, 'wb') as pf, open(tar_path, 'rb') as tf:
+            pf.write(norm_dir.encode() + b'\n')
+            shutil.copyfileobj(tf, pf)
+        headers = ['-H', 'Content-Type: application/octet-stream',
+                   '-H', f'X-NMN-Token: {_report_token()}']
+        sig = _sign_file(Path(payload_path))
+        if sig:
+            headers += ['-H', f'X-NMN-Sig: {sig}']
         r = subprocess.run(
             ['curl', '-s', '-w', '\n%{http_code}', '--max-time', '600',
-             '-X', 'POST', '--data-binary', '@-',
-             '-H', 'Content-Type: application/octet-stream',
-             '-H', f'X-NMN-Token: {_report_token()}', url],
-            stdin=tar.stdout, capture_output=True, text=True, timeout=660)
-        tar.stdout.close()
-        tar.wait(timeout=10)
+             '-X', 'POST', '--data-binary', '@' + tar_path] + headers + [url],
+            capture_output=True, text=True, timeout=660)
         body, _, code = r.stdout.rpartition('\n')
         return code, body.strip()
     except Exception as e:
         return '000', str(e)
+    finally:
+        for p in (tar_path, payload_path):
+            if p:
+                Path(p).unlink(missing_ok=True)
+                sig_p = Path(str(p) + '.sig')
+                sig_p.unlink(missing_ok=True)
 
 
 def _deliver_report(station_name: str, port: str, event_dir) -> str:

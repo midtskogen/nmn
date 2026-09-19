@@ -1752,6 +1752,53 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             except Exception as e:
                 logging.warning(f"FBSPD calculation failed. Continuing without speed profile: {e}", exc_info=True)
 
+            # A station can be a timing outlier without being a spatial one:
+            # an unrelated meteor observed seconds earlier/later still yields
+            # a geometrically fine trajectory fit (two stations always
+            # intersect), but its fragment cannot share the time axis and the
+            # speed-profile fit flags it (worst_station_code).  Split that
+            # station's cameras into a sibling event, then regenerate the
+            # core artifacts from the inlier-only observations.
+            worst_code = fbspd_plot_data.get('worst_station_code') if fbspd_plot_data else None
+            if worst_code:
+                forced_inlier = [i for i, p in enumerate(obs_file_paths)
+                                 if station_name_to_code.get(p.relative_to(event_dir).parts[0]) != worst_code]
+                if 0 < len(forced_inlier) < len(obs_file_paths):
+                    logging.info(f"Timing-outlier station '{worst_code}' detected by speed profile; splitting it into a separate event.")
+                    _maybe_split_event_outliers(
+                        event_dir, date, obs_filepath, obs_file_paths,
+                        metrack_info, {'inlier_indices': forced_inlier},
+                        station_name_to_code, metrack_opts, all_stations,
+                        use_orig_cen, infrasound_only, verbose, min_speed,
+                    )
+                    ti, tp = calculate_trajectory(str(obs_filepath), **metrack_opts)
+                    metrack_info, metrack_plot_data = ti, tp
+                    if tp:
+                        write_res_file(tp['track_start'], tp['track_end'],
+                                       tp['cross_pos_inliers'], tp['inlier_obs_data'], str(obs_filepath))
+                        resdat = readres(str(res_filename))
+                        fb2kml(str(res_filename))
+                    else:
+                        # Inlier set can no longer triangulate (e.g. only
+                        # same-station cameras remain): downgrade to a
+                        # media-only event and drop the artifacts computed
+                        # from the mixed-meteor data.
+                        try:
+                            (event_dir / '.no_trajectory').touch()
+                        except OSError:
+                            pass
+                        for pattern in ('obs_*.res', 'obs_*.kml', 'orbit.*', 'map.*',
+                                        'height.*', 'spd_acc.*', 'posvstime.*',
+                                        '*_map.*', '*_orbit.*', '*_height.*',
+                                        '*_spd_acc.*', '*_posvstime.*',
+                                        'tables.html', '*_tables.html'):
+                            for artifact in event_dir.glob(pattern):
+                                try:
+                                    artifact.unlink()
+                                except OSError:
+                                    pass
+                        raise ValueError("Inlier-only trajectory fit failed; downgrading to media-only event.")
+
             az, alt = calc_azalt(resdat.lat1[0], resdat.long1[0], resdat.height[0], resdat.lat1[1], resdat.long1[1], resdat.height[1])
             placename = get_location_from_coords(resdat.lat1[1], resdat.long1[1])
             if placename: 

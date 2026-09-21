@@ -162,7 +162,6 @@ def decode_video_stats(video_path, max_frames=0, sample_interval=2,
     day_dark = np.zeros((height, width), np.int32)
     day_grad = np.zeros((height, width), np.float64)
     n_day = 0
-    used = 0
     frame_idx = 0
     while True:
         ret, frame = cap.read()
@@ -172,13 +171,12 @@ def decode_video_stats(video_path, max_frames=0, sample_interval=2,
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
             if gray.mean() >= day_lo:
                 n_day += 1
-                used += 1
                 day_sum += gray
                 bg = _local_background(gray, blur_kernel)
                 day_dark += (gray < bg - margin)
                 day_grad += np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
         frame_idx += 1
-        if max_frames > 0 and used >= max_frames:
+        if max_frames > 0 and n_day >= max_frames:
             break
     cap.release()
 

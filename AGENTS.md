@@ -288,3 +288,18 @@
   usage error and every station fetch failed instantly. Connect
   timeouts must go in the -e ssh string as `-o ConnectTimeout=N`;
   `--timeout` (I/O stall) is valid in both modes.
+
+## Offline verification of `bin/` Python changes
+
+- Compile tracked scripts without importing them or writing bytecode:
+  ```sh
+  git ls-files -z 'bin/*.py' 'bin/**/*.py' | python3 -B -c 'import pathlib, sys; paths = sys.stdin.buffer.read().split(b"\0"); [compile(pathlib.Path(p.decode()).read_bytes(), p.decode(), "exec") for p in paths if p]'
+  ```
+- Do not blanket-import scripts or run every script with `--help`: some have
+  top-level station/device operations (for example `imx291time.py`). For narrow
+  refactors, AST-extract the affected functions and compare against `git show
+  HEAD:<path>` with filesystem, subprocess and network operations stubbed.
+- `bin/pto_mapper.py` contains `TestPtoMapping`. Run it in a temporary working
+  directory: its fixture writes and removes `test_project.pto` in the current
+  directory. Seed Python's `random` for repeatability and direct `NUMBA_CACHE_DIR`
+  to temporary storage. The test uses 100,000 random panorama points.

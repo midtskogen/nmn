@@ -305,7 +305,7 @@ def estimate_saturation_brightness(image_obj, center_xy, track_angle_rad, spacin
         track_vec = np.array([math.cos(track_angle_rad), math.sin(track_angle_rad)])
         perp_vec = np.array([-math.sin(track_angle_rad), math.cos(track_angle_rad)])
 
-        q, visited, area = deque([(center_x, center_y)]), set([(center_x, center_y)]), 0
+        q, visited, area = deque([(center_x, center_y)]), {(center_x, center_y)}, 0
 
         while q:
             x, y = q.popleft()

@@ -1933,11 +1933,14 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
     all_los_vectors = np.asarray([altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data_fit['altitudes'], full_obs_data_fit['azimuths'], full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'])])
     cross_pos_all, _ = _closest_points_batch(track_start, final_track_vec, all_pos_vectors, all_los_vectors, return_points=True)
     cross_pos_all = list(cross_pos_all)
+    start_dists = _dist_line_line_batch(track_start, final_track_vec, all_pos_vectors[:len(raw_data['names'])], all_los_vectors[:len(raw_data['names'])])
+    end_dists = _dist_line_line_batch(track_start, final_track_vec, all_pos_vectors[len(raw_data['names']):], all_los_vectors[len(raw_data['names']):])
+    spatial_residuals = (start_dists + end_dists) * 0.5
 
     plot_data = {
         'track_start': track_start, 'track_end': track_end, 'cross_pos_inliers': cross_pos_inliers,
         'cross_pos_all': cross_pos_all, 'full_obs_data': full_obs_data_fit, 'inlier_obs_data': inlier_obs_data,
-        'inlier_indices': inlier_indices
+        'inlier_indices': inlier_indices, 'spatial_residuals': spatial_residuals
     }
     return info, plot_data
 

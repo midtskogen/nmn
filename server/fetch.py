@@ -715,7 +715,7 @@ def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, pl
     <tr><td>{translations.get("direction", "Direction")}:</td><td> {np.fmod(orbit_data['az'] + 360, 360):.1f}°</td></tr>
     <tr><td>{translations.get("inclination_angle", "Inclination angle")}:</td><td> {orbit_data['alt']:.1f}°</td></tr>
 """
-        if orbit_data['entry_speed'] > 0:
+        if orbit_data.get('entry_speed') is not None and orbit_data['entry_speed'] > 0:
             table1 += f"    <tr><td>{translations.get('entry_speed', 'Entry speed')}:</td><td> {orbit_data['entry_speed']:.1f} km/s</td></tr>\n"
 
         if orbit_data['valid']:
@@ -999,13 +999,10 @@ def _generate_language_in_process(lang: str, event_dir_str: str, name_to_code: d
             current_orbit_data['showername'] = final_shower_name
             current_orbit_data['showername_sg'] = final_shower_name
             current_orbit_data['valid'] = True
-        elif force_plots and (has_metrack or has_fbspd):
-            # --force-plots: keep valid=False but still produce trajectory/speed
-            # plots and let the main process generate the triangulation report.
-            pass
-        else:
-            return (lang, None, current_orbit_data)
 
+        # A rejected orbit does not invalidate the atmospheric trajectory.
+        # Meteors ending above the orbit's altitude limits still need map,
+        # height, speed, and triangulation reports.
         if has_metrack or has_fbspd:
             plot_opts = {
                 'doplot': 'save',
@@ -1107,6 +1104,7 @@ def _maybe_split_event_outliers(
     infrasound_only: bool,
     verbose: bool,
     min_speed: float = None,
+    spatial_only: bool = False,
 ):
     """
     Split the observations rejected as trajectory outliers into sibling event
@@ -1115,14 +1113,16 @@ def _maybe_split_event_outliers(
     plausible trajectory, it becomes one multi-station split event with its
     own trajectory. Otherwise the outliers cannot belong to the same object
     and are split per station into media-only reports. The main report keeps
-    only the inliers.
+    only the inliers. When spatial_only is true, a rejected observation is
+    moved only if its sight lines are outside the RANSAC distance threshold;
+    timing/quality rejections are handled by the speed-profile split instead.
     """
     inlier_indices = metrack_plot_data.get('inlier_indices') if metrack_plot_data else None
     if not inlier_indices:
         return
 
     inlier_set = set(inlier_indices)
-    outlier_info_list = []  # (cam_dir, station_dir_name, code)
+    outlier_info_list = []  # (index, cam_dir, station_dir_name, code)
 
     for i, obs_file in enumerate(obs_file_paths):
         if i in inlier_set:
@@ -1135,10 +1135,30 @@ def _maybe_split_event_outliers(
                 code = obs_file.read_text().strip().split()[12]
             except Exception:
                 code = None
-        outlier_info_list.append((cam_dir, station_dir_name, code))
+        outlier_info_list.append((i, cam_dir, station_dir_name, code))
 
-    outlier_camera_dirs = {c for c, _, _ in outlier_info_list}
-    outlier_station_codes = {code for _, _, code in outlier_info_list if code}
+    if spatial_only:
+        residuals = metrack_plot_data.get('spatial_residuals')
+        if residuals is None or len(residuals) != len(obs_file_paths):
+            logging.warning("No per-observation spatial residuals; skipping spatial outlier split.")
+            return
+        threshold = metrack_opts.get('ransac_threshold', 1.0)
+        spatial_outliers = {
+            i for i, _, _, _ in outlier_info_list
+            if float(residuals[i]) > threshold
+        }
+        uncertain_outliers = {i for i, _, _, _ in outlier_info_list} - spatial_outliers
+        if uncertain_outliers:
+            inlier_set.update(uncertain_outliers)
+            kept = [obs_file_paths[i] for i in sorted(uncertain_outliers)]
+            logging.info(
+                "Keeping %d rejected observation(s) in the main event because they are spatially consistent: %s",
+                len(kept), ', '.join(str(p.relative_to(event_dir)) for p in kept)
+            )
+        outlier_info_list = [info for info in outlier_info_list if info[0] in spatial_outliers]
+
+    outlier_camera_dirs = {c for _, c, _, _ in outlier_info_list}
+    outlier_station_codes = {code for _, _, _, code in outlier_info_list if code}
     num_cameras = len(outlier_camera_dirs)
     num_stations = len(outlier_station_codes)
     logging.info(f"Trajectory outliers: {num_cameras} camera(s) from {num_stations} station code(s).")
@@ -1185,10 +1205,10 @@ def _maybe_split_event_outliers(
     # outliers cannot belong to the same object and are split per station,
     # each getting a media-only report.
     if outlier_plausible:
-        split_groups = [sorted({c for c, _, _ in outlier_info_list})]
+        split_groups = [sorted({c for _, c, _, _ in outlier_info_list})]
     else:
         by_station = {}
-        for cam_dir, st_name, code in outlier_info_list:
+        for _, cam_dir, st_name, code in outlier_info_list:
             by_station.setdefault(code or st_name, set()).add(cam_dir)
         split_groups = [sorted(cams) for _, cams in sorted(by_station.items())]
         if len(split_groups) > 1:
@@ -1722,7 +1742,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 event_dir, date, obs_filepath, obs_file_paths,
                 metrack_info, metrack_plot_data, station_name_to_code,
                 metrack_opts, all_stations, use_orig_cen,
-                infrasound_only, verbose, min_speed,
+                infrasound_only, verbose, min_speed, spatial_only=True,
             )
 
             inlier_codes = set(metrack_info.inlier_stations)
@@ -1753,19 +1773,31 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             except Exception as e:
                 logging.warning(f"FBSPD calculation failed. Continuing without speed profile: {e}", exc_info=True)
 
-            # A station can be a timing outlier without being a spatial one:
+            # A camera can be a timing outlier without being a spatial one:
             # an unrelated meteor observed seconds earlier/later still yields
             # a geometrically fine trajectory fit (two stations always
             # intersect), but its fragment cannot share the time axis and the
-            # speed-profile fit flags it (worst_station_code).  Split that
-            # station's cameras into a sibling event, then regenerate the
-            # core artifacts from the inlier-only observations.
+            # speed-profile fit flags it. Split only the offending centroid
+            # source; other cameras at the same station may be valid.
             worst_code = fbspd_plot_data.get('worst_station_code') if fbspd_plot_data else None
+            worst_source_index = fbspd_plot_data.get('worst_source_index') if fbspd_plot_data else None
             if worst_code:
+                outlier_camera_dirs = set()
+                if worst_source_index is not None:
+                    try:
+                        outlier_camera_dirs.add(Path(centroid_files[int(worst_source_index)]).parent)
+                    except (IndexError, TypeError, ValueError):
+                        logging.warning(f"Invalid timing-outlier source index {worst_source_index}; falling back to station code.")
+                if not outlier_camera_dirs:
+                    outlier_camera_dirs = {
+                        p.parent for p in obs_file_paths
+                        if station_name_to_code.get(p.relative_to(event_dir).parts[0]) == worst_code
+                    }
                 forced_inlier = [i for i, p in enumerate(obs_file_paths)
-                                 if station_name_to_code.get(p.relative_to(event_dir).parts[0]) != worst_code]
+                                 if p.parent not in outlier_camera_dirs]
                 if 0 < len(forced_inlier) < len(obs_file_paths):
-                    logging.info(f"Timing-outlier station '{worst_code}' detected by speed profile; splitting it into a separate event.")
+                    outlier_desc = ', '.join(str(p.relative_to(event_dir)) for p in sorted(outlier_camera_dirs))
+                    logging.info(f"Timing-outlier source '{worst_code}' ({outlier_desc}) detected by speed profile; splitting it into a separate event.")
                     _maybe_split_event_outliers(
                         event_dir, date, obs_filepath, obs_file_paths,
                         metrack_info, {'inlier_indices': forced_inlier},
@@ -2015,7 +2047,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     translations = load_translations(lang)
                     file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
                     current_orbit_data = orbit_data_by_lang.get(lang, {'valid': False})
-                    if current_orbit_data.get('valid') or (force_plots and current_orbit_data):
+                    if current_orbit_data:
                         generate_triangulation_html_report(
                             event_dir / f"{file_prefix}tables.html",
                             resdat,
@@ -2330,8 +2362,8 @@ def main():
     parser.add_argument(
         "--force-plots",
         action="store_true",
-        help="For reprocessing mode: generate trajectory, speed, and triangulation "
-             "reports even when the orbit solution is flagged as physically implausible."
+        help="Deprecated compatibility option; trajectory, speed, and triangulation "
+             "reports are generated whenever a valid atmospheric fit exists."
     )
     parser.add_argument(
         "--min-speed",

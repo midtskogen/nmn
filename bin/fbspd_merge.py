@@ -697,7 +697,7 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
         if debug:
             print(f"  -> Auto-derived minimum speed from altitude ({mean_alt_km:.1f} km): {min_speed:.2f} km/s")
     all_sitedata = get_sitecoord_fromdat(datname) if datname else []
-    all_cendat = [readcen(f) for f in cennames if Path(f).exists()]
+    all_cendat = [(idx, readcen(f)) for idx, f in enumerate(cennames) if Path(f).exists()]
     if not all_cendat: print("Error: No valid centroid data could be loaded."); return None, None
 
     if debug and all_sitedata:
@@ -707,7 +707,7 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
     path_p1, path_p2 = lonlat2xyz(resdat.long1[0], resdat.lat1[0], resdat.height[0]), lonlat2xyz(resdat.long1[1], resdat.lat1[1], resdat.height[1])
     path_vec_norm = (path_p2 - path_p1) / np.linalg.norm(path_p2 - path_p1)
     station_obs = []
-    for cendat in all_cendat:
+    for source_index, cendat in all_cendat:
         if cendat.ndata == 0: print(f"Warning: Skipping a centroid file because it contains no valid data points."); continue
         station_name_from_cen = cendat.sitestr[0].strip()
         if debug: print(f"--- Debug: Attempting to match station from .cen file: '{station_name_from_cen}'")
@@ -717,7 +717,13 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
             else: print(f"Warning: No site coords for {station_name_from_cen}. Skipping.")
             continue
         if debug: print(f"  -> MATCH SUCCESSFUL. Found coordinates for '{station_name_from_cen}'.")
-        name, lon, lat, height = site_info; cendat.site_info = {'name': name, 'lon': lon, 'lat': lat, 'height': height}; processed_data = _process_station(cendat, lonlat2xyz(lon, lat, height), path_p1, path_vec_norm); processed_data['reltime'] = cendat.reltime; station_obs.append(processed_data)
+        name, lon, lat, height = site_info
+        cendat.site_info = {'name': name, 'lon': lon, 'lat': lat, 'height': height}
+        processed_data = _process_station(cendat, lonlat2xyz(lon, lat, height), path_p1, path_vec_norm)
+        processed_data['reltime'] = cendat.reltime
+        processed_data['source_index'] = source_index
+        processed_data['source_name'] = name
+        station_obs.append(processed_data)
 
     if not station_obs: print("Error: Could not process any station data."); return None, None
 
@@ -742,16 +748,29 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
     if debug: print(f"Time axis shifted by {-first_obs_time:.4f}s to set t=0 at first observation.")
 
     print("\n--- Per-Station Fit Error ---"); station_errors, worst_station_idx = [], None
+    worst_source_index, worst_station_code = None, None
     if len(station_obs_split) > 1:
         for i, station in enumerate(station_obs_split):
             if len(station['pos']) == 0: continue
-            shifted_time = station['reltime'] + final_offsets[i] - first_obs_time; pred_pos = expfunc(shifted_time, *final_params); mse = np.mean((station['pos'] - pred_pos)**2); station_errors.append({'name': station_names[i], 'index': i, 'mse': mse})
+            shifted_time = station['reltime'] + final_offsets[i] - first_obs_time; pred_pos = expfunc(shifted_time, *final_params); mse = np.mean((station['pos'] - pred_pos)**2)
+            station_errors.append({'name': station_names[i], 'index': i, 'mse': mse,
+                                   'n_points': len(station['pos']),
+                                   'source_index': station.get('source_index'),
+                                   'source_name': station.get('source_name', station_names[i])})
         station_errors.sort(key=lambda x: x['mse'], reverse=True)
         for s in station_errors: print(f"  Fragment: {s['name']:<20} MSE: {s['mse']:.4f} km^2")
         if station_errors and len(station_errors) > 2:
             print(f"\n-> Fragment with highest error is '{station_errors[0]['name']}'."); worst_mse = station_errors[0]['mse']; other_mses = np.array([s['mse'] for s in station_errors[1:]]); threshold = 1 + np.mean(other_mses) + 10 * np.std(other_mses)
             if debug: print(f"   Outlier exclusion check: Worst MSE={worst_mse:.4f}, Threshold={threshold:.4f}")
-            if worst_mse > threshold: worst_station_idx = station_errors[0]['index']
+            if worst_mse > threshold:
+                candidate = station_errors[0]
+                source_errors = [s for s in station_errors if s['source_index'] == candidate['source_index']]
+                if all(s['mse'] > threshold for s in source_errors):
+                    worst_station_idx = candidate['index']
+                    worst_source_index = candidate['source_index']
+                    worst_station_code = candidate['source_name']
+                elif debug:
+                    print(f"   Source has fragments below the threshold; not treating it as an event outlier.")
 
     initial_speed = expfunc_1stder(0.0, *final_params); initial_speed_uncertainty, lower_bound_params, upper_bound_params = 0.0, None, None
     if pcov is not None and not np.isnan(pcov).any():
@@ -763,7 +782,9 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
 
     results = {'success': True, 'n_ok': n_ok, 'initial_speed': initial_speed, 'initial_speed_uncertainty': initial_speed_uncertainty}
     plot_data = {'final_merged_data': final_merged_data, 'final_params': final_params, 'lower_bound_params': lower_bound_params, 'upper_bound_params': upper_bound_params, 'n_ok': n_ok, 'sigma_level': sigma_level, 'station_id_array': station_id_array, 'worst_station_idx': worst_station_idx,
-                 'worst_station_code': station_names[worst_station_idx] if worst_station_idx is not None else None}
+                 'worst_station_code': worst_station_code,
+                 'worst_source_index': worst_source_index,
+                 'station_error_details': station_errors}
     
     return results, plot_data
 

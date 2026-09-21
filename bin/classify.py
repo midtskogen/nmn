@@ -725,8 +725,8 @@ def _get_stacking_data(args, data_dir, class_to_idx):
     device = "cpu"
     logging.info(f"--- Generating stacking data ---")
 
-    image_model_configs = {name: path for name, path in CONFIG["IMAGE_MODEL_CONFIGS"].items()}
-    video_model_configs = {name: path for name, path in CONFIG["VIDEO_MODEL_CONFIGS"].items()}
+    image_model_configs = CONFIG["IMAGE_MODEL_CONFIGS"].copy()
+    video_model_configs = CONFIG["VIDEO_MODEL_CONFIGS"].copy()
     
     def find_data_pairs(positive_dir, negative_dir):
         pairs = []

@@ -133,7 +133,7 @@ class LauncherDialog:
         ttk.Label(frame, text="Station:").grid(column=0, row=0, sticky=tk.W, pady=5)
         self.station_var = tk.StringVar()
         station_combo = ttk.Combobox(frame, textvariable=self.station_var, width=25)
-        station_combo['values'] = sorted(list(self.station_map.keys()))
+        station_combo['values'] = sorted(self.station_map)
         station_combo.grid(column=1, row=0, sticky=(tk.W, tk.E))
         if LAUNCHER_DEFAULTS.get('station_display'):
             self.station_var.set(LAUNCHER_DEFAULTS['station_display'])
@@ -1185,7 +1185,7 @@ class Zoom_Advanced(ttk.Frame):
             min_val = start_value - tolerance_value
             max_val = start_value + tolerance_value
             q = deque([(center_x, center_y)])
-            visited = set([(center_x, center_y)])
+            visited = {(center_x, center_y)}
             area = 0
             while q:
                 x, y = q.popleft()

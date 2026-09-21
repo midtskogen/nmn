@@ -66,26 +66,33 @@ def _load_spice_kernels():
     """
     Finds and loads the required SPICE kernels.
     """
-    possible_paths = [
-        # Script-relative only: orbit.py runs with CWD inside the event
-        # directory (populated from station uploads), so './data/' would let
-        # a station plant a malicious SPICE kernel that furnsh() loads.
-        str(Path(__file__).resolve().parent / 'data'),
-        '/var/www/html/bin/data',
-        os.path.expanduser('~/spice/data/')
-    ]
-    kernel_path = next((p for p in possible_paths if os.path.exists(p)), None)
-
-    if not kernel_path:
-        print("Error: SPICE kernel directory not found.")
-        return False
-
     kernels_to_load = [
         "lsk/naif0012.tls",
         "spk/planets/de440.bsp",
         "pck/pck00010.tpc",
         "pck/gm_de440.tpc"
     ]
+
+    possible_paths = [
+        # orbit.py runs with CWD inside the event directory (populated from
+        # station uploads), so never resolve kernels relative to './data'.
+        str(Path(__file__).resolve().parent / 'data'),
+        '/var/www/html/bin/data',
+        os.path.expanduser('~/spice/data/')
+    ]
+    existing_paths = [p for p in possible_paths if os.path.isdir(p)]
+    kernel_path = next((
+        p for p in existing_paths
+        if all(os.path.exists(os.path.join(p, kernel)) for kernel in kernels_to_load)
+    ), None)
+
+    if not kernel_path:
+        print("Error: No SPICE kernel directory contains all required files.")
+        for p in existing_paths:
+            missing = [kernel for kernel in kernels_to_load if not os.path.exists(os.path.join(p, kernel))]
+            if missing:
+                print(f"  {p}: missing {', '.join(missing)}")
+        return False
 
     print(f"--- Using SPICE kernel base path: {kernel_path} ---")
     try:

@@ -166,8 +166,7 @@ class CameraController:
     def invalidate_cache(self, ip):
         """Removes an IP's data from the cache."""
         with self.lock:
-            if ip in self.all_camera_data:
-                del self.all_camera_data[ip]
+            self.all_camera_data.pop(ip, None)
 
     def apply_settings(self, ip, subgroup, new_settings):
         try:

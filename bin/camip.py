@@ -52,11 +52,11 @@ def main():
 
     new_ip = str(ip_interface.ip)
     net = ip_interface.network
-    hosts = list(net.hosts())
-    if not hosts:
+    first_host = next(iter(net.hosts()), None)
+    if first_host is None:
         print(f"Invalid network {net}: no usable host addresses")
         sys.exit(1)
-    gateway_ip = str(hosts[0])  # First usable address
+    gateway_ip = str(first_host)  # First usable address
 
     print(f"Connecting to camera at {original_ip}")
     cam = DVRIPCam(original_ip, user='admin', password=password)

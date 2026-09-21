@@ -486,7 +486,7 @@ def main():
         minaz, maxaz = 0, 0
     else:
         # Determine the min and max azimuth, correctly handling the 0/360 wrap-around.
-        sorted_az = sorted(list(az_values))
+        sorted_az = sorted(az_values)
         
         if len(sorted_az) == 1:
             minaz = maxaz = sorted_az[0]
@@ -867,8 +867,6 @@ def main():
                     ra, dec = pos.radec_of(str(s[2]), str(s[3]))
                     if args.verbose:
                         label = s[4] + " " + str(round(s[5], 1)) + " [" + re.sub(r'\..*', '', str(ra)) + ", " + str(round(math.degrees(float(repr(dec))), 2)) + "]"
-                    elif args.nopos:
-                        label = s[4]
                     else:
                         label = s[4]
                 else:

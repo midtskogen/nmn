@@ -51,7 +51,7 @@ def _parse_pto_params(content):
             try:
                 coords = [int(c) for c in value_str.split(',')]
                 if len(coords) == 4:
-                    params[key] = (coords[0], coords[1], coords[2], coords[3])
+                    params[key] = tuple(coords)
             except (ValueError, IndexError):
                 print(f"Warning: Malformed crop 'S' parameter: {value_str}", file=sys.stderr)
             continue

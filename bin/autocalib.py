@@ -533,8 +533,8 @@ def _solve_image(t3, image, verbose=False, mask=None):
                       (640, 20.0), (768, 30.0), (480, 15.0)):
         central.append((size, size, 'rectilinear', fov, w / 2, h / 2))
     candidates = _try_solve_crops(t3, image, central, extract, verbose)
-    if candidates and min(candidates, key=lambda x: x[0])[0] < 1e-12:
-        best = min(candidates, key=lambda x: x[0])
+    best = min(candidates, key=lambda x: x[0]) if candidates else None
+    if best is not None and best[0] < 1e-12:
         _report_solve(best, verbose)
         return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
 
@@ -552,8 +552,8 @@ def _solve_image(t3, image, verbose=False, mask=None):
                               (min(w, int(round(w * 40 / INITIAL_FOV))), 40.0)):
                 off_center.append((size, size, 'equidistant', fov, cx, cy))
         candidates += _try_solve_crops(t3, image, off_center, extract, verbose)
-    if candidates and min(candidates, key=lambda x: x[0])[0] < 1e-12:
-        best = min(candidates, key=lambda x: x[0])
+    best = min(candidates, key=lambda x: x[0]) if candidates else None
+    if best is not None and best[0] < 1e-12:
         _report_solve(best, verbose)
         return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
 

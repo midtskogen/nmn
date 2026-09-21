@@ -72,7 +72,7 @@ def _interpol_radiant(rad_dates: List[str], coords: List[float], obs_yday: int) 
 
     # Fallback to mean if quadratic fit isn't possible
     if len(date_yday) < 3:
-        return np.mean(coords) if coords else None
+        return np.mean(coords)
 
     # Fit a 2nd-degree polynomial to the data
     try:

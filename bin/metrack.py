@@ -1663,7 +1663,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
             continue
         if best_final_model is None or current_score < best_final_model_score:
             best_final_model_score = current_score
-            best_final_model = (fit_results, inlier_obs_data, sorted(list(indices_set)))
+            best_final_model = (fit_results, inlier_obs_data, sorted(indices_set))
 
     if best_final_model is None:
         print("Robust fit failed to find a valid model. Falling back to simple fit on all data.")
@@ -1673,7 +1673,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
     unique_inlier_names = {raw_data['names'][i] for i in final_inlier_indices}
     
     if options.get('debug_ransac', False):
-        print(f"\nWinner: Weight {sum(weights[i] for i in final_inlier_indices):.1f}, Score {best_final_model_score[1]:.2f}, Stations: {sorted(list(unique_inlier_names))}")
+        print(f"\nWinner: Weight {sum(weights[i] for i in final_inlier_indices):.1f}, Score {best_final_model_score[1]:.2f}, Stations: {sorted(unique_inlier_names)}")
 
     print(f"Final robust solution uses {len(final_inlier_indices)} observations (Weight: {sum(weights[i] for i in final_inlier_indices):.1f}) from {len(unique_inlier_names)} unique stations.")
     return final_fit_results, final_obs_data, final_inlier_indices
@@ -1727,7 +1727,7 @@ def print_results(info):
     print(f"[Track] Ground Track:       {info.ground_track:.2f} km")
     print(f"[Track] Course / Incidence: {info.course:.2f} / {info.incidence:.2f} deg")
     if info.speed > 0: print(f"[Track] Avg. Speed:         {info.speed:.1f} km/s")
-    unique_inlier_names = sorted(list(set(info.inlier_stations)))
+    unique_inlier_names = sorted(set(info.inlier_stations))
     print(f"[Fit]   Inliers:            {len(info.inlier_stations)} observations from {len(unique_inlier_names)} unique stations")
     print(f"[Fit]   Inlier Stations:    {', '.join(unique_inlier_names)}")
     print(f"[Fit]   Error / Quality:    {info.error:.2f} / {info.fit_quality:.2f}")
@@ -1740,7 +1740,7 @@ def print_results(info):
 def write_stat_file(info, in_name):
     output_path = Path(in_name).with_suffix('.stat')
     config = configparser.ConfigParser()
-    unique_inlier_names = sorted(list(set(info.inlier_stations)))
+    unique_inlier_names = sorted(set(info.inlier_stations))
     config['track'] = {'startheight':f'{info.start_height:.1f} km','endheight':f'{info.end_height:.1f} km','groundtrack':f'{info.ground_track:.1f} km','course':f'{info.course:.1f} deg','incidence':f'{info.incidence:.1f} deg', 'speed':f'{info.speed:.1f} km/s'}
     config['fit'] = {'error':f'{info.error:.1f}','quality':f'{info.fit_quality:.2f}', 'inliers': ', '.join(unique_inlier_names)}
     config['radiant'] = {'ra':f'{info.radiant_ra:.2f} deg','dec':f'{info.radiant_dec:.2f} deg','ecl_long':f'{info.radiant_ecllong:.2f} deg','ecl_lat':f'{info.radiant_ecllat:.2f} deg','shower':info.shower}

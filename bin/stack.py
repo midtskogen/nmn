@@ -181,8 +181,6 @@ def get_video_properties_ffprobe(video_path: str) -> typing.Optional[dict]:
             "fps": float(fps),
             "duration": float(duration),
         }
-        if not all(k in data for k in ["width", "height", "fps", "duration"]):
-            raise ValueError("Missing essential video stream data.")
         return data
     except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError, ValueError, KeyError) as e:
         log.error(f"Could not read valid properties from '{video_path}' using ffprobe: {e}")

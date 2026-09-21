@@ -366,14 +366,10 @@ def run_video_processing(
 
     command = [sys.executable, str(Settings.MAKEVIDEOS_SCRIPT), '--', base_name]
     if credit:
-        command.insert(2, "--credit")
-        command.insert(3, credit)
-        command.insert(4, "--creditpos")
-        command.insert(5, creditpos)
-        command.insert(6, "--creditsize")
-        command.insert(7, str(creditsize))
-        command.insert(8, "--creditfont")
-        command.insert(9, creditfont)
+        command[2:2] = [
+            "--credit", credit, "--creditpos", creditpos,
+            "--creditsize", str(creditsize), "--creditfont", creditfont,
+        ]
     elif logos:
         # Preserve ordering and pairing: each --logopos applies to the --logo before it.
         # Here we support a simple pairing where the Nth --logopos corresponds to the Nth --logo.
@@ -579,7 +575,7 @@ def sanitize_event_config(event_config: configparser.ConfigParser) -> configpars
     if frame_brightness:
         candidates.append(len(frame_brightness))
 
-    n = min(candidates) if candidates else 0
+    n = min(candidates)
     if n <= 0:
         return event_config
 

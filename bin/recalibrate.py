@@ -119,8 +119,7 @@ def write_pto_for_optimisation(outfile, pto_data, image_index, control_points, l
         # Write control points linking the two image "references"
         # n0 refers to the first 'i' line, N1 to the second.
         # The 'found' coordinates are on image 0, 'expected' on image 1.
-        for cp in control_points:
-            x_expected, y_expected, x_found, y_found = cp
+        for x_expected, y_expected, x_found, y_found in control_points:
             f.write(f'c n0 N1 x{x_found:.4f} y{y_found:.4f} X{x_expected:.4f} Y{y_expected:.4f}\n')
 
         # Define the optimization variables in the multi-line 'v' format

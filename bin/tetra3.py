@@ -225,12 +225,12 @@ def _compute_centroids(vectors, size, fov, trim=True, projection='rectilinear'):
         scale_factor = -width / (2 * np.tan(fov / 2))
         centroids = scale_factor * vectors[:, 2:0:-1] / vectors[:, [0]]
     elif projection in ('equidistant', 'equisolid'):
-        theta = np.arctan2(norm(vectors[:, 1:], axis=1), vectors[:, 0])
+        transverse = norm(vectors[:, 1:], axis=1)
+        theta = np.arctan2(transverse, vectors[:, 0])
         if projection == 'equidistant':
             radius = theta * width / fov
         else:
             radius = 2 * (width / (4 * np.sin(fov / 4))) * np.sin(theta / 2)
-        transverse = norm(vectors[:, 1:], axis=1)
         radial_scale = np.divide(-radius, transverse, out=np.zeros_like(radius), where=transverse > 0)
         centroids = vectors[:, 2:0:-1] * radial_scale[:, None]
     else:
@@ -788,10 +788,7 @@ class Tetra3():
         star_table = star_table[brightness_ii, :]  # Sort by brightness
         num_entries = star_table.shape[0]
         # Trim and order catalogue ID array to match
-        if star_catalog in ('bsc5', 'hip_main', 'stars_py'):
-            star_catID = star_catID[kept][brightness_ii]
-        else:
-            star_catID = star_catID[kept, :][brightness_ii, :]
+        star_catID = star_catID[kept][brightness_ii]
         self._logger.info('Loaded ' + str(num_entries) + ' stars with magnitude below ' \
             + str(star_max_magnitude) + '.')
 
@@ -805,10 +802,7 @@ class Tetra3():
             star_table = star_table[kept, :]
             num_entries = star_table.shape[0]
             # Trim down catalogue ID to match
-            if star_catalog in ('bsc5', 'hip_main', 'stars_py'):
-                star_catID = star_catID[kept]
-            else:
-                star_catID = star_catID[kept, :]
+            star_catID = star_catID[kept]
             self._logger.info('Limited to RA range ' + str(np.rad2deg(range_ra)) + ', keeping ' \
                 + str(num_entries) + ' stars.')
         if range_dec is not None:
@@ -820,10 +814,7 @@ class Tetra3():
             star_table = star_table[kept, :]
             num_entries = star_table.shape[0]
             # Trim down catalogue ID to match
-            if star_catalog in ('bsc5', 'hip_main', 'stars_py'):
-                star_catID = star_catID[kept]
-            else:
-                star_catID = star_catID[kept, :]
+            star_catID = star_catID[kept]
             self._logger.info('Limited to DEC range ' + str(np.rad2deg(range_dec)) + ', keeping ' \
                 + str(num_entries) + ' stars.')
 
@@ -943,10 +934,7 @@ class Tetra3():
         pattern_index = (np.cumsum(keep_for_verifying)-1)
         pattern_list = pattern_index[np.array(list(pattern_list))].tolist()
         # Trim catalogue ID to match
-        if star_catalog in ('bsc5', 'hip_main', 'stars_py'):
-            star_catID = star_catID[keep_for_verifying]
-        else:
-            star_catID = star_catID[keep_for_verifying, :]
+        star_catID = star_catID[keep_for_verifying]
 
         # Create all pattens by calculating and sorting edge ratios and inserting into hash table
         self._logger.info('Start building catalogue.')

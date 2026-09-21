@@ -114,7 +114,7 @@ v
 def timestamp(img):
     ts = subprocess.run([str(pathlib.Path.home()) + "/bin/timestamp", img], stdout=subprocess.PIPE, text=True)
     try:
-        return int(ts.stdout.rstrip().lstrip())
+        return int(ts.stdout.strip())
     except ValueError:
         raise RuntimeError(f"Could not extract timestamp from '{img}'")
 

@@ -379,8 +379,7 @@ def _find_latest_json_for_camera(cams_id):
         candidates.append((dt, json_file, root))
     if not candidates:
         return None, None, None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    dt, json_file, root = candidates[0]
+    dt, json_file, root = max(candidates, key=lambda x: x[0])
     return json_file, root, dt.replace(tzinfo=UTC).timestamp()
 
 

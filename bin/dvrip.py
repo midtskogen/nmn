@@ -204,7 +204,7 @@ class DVRIPCam(object):
         self.logger.debug("<= %s", data)
         try:
             reply = json.loads(bytes(data[:-2]))
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:
             return {}
         return reply
 

@@ -382,12 +382,9 @@ async def watch_detections():
 
             old_hash = processed_detection_files.pop(filepath, None)
 
-            if old_hash is None:
-                logging.info(f"New detection file: {filepath}")
-                processed_detection_files[filepath] = new_hash
-                await run_command_async(args.exefile, filepath)
-            elif new_hash != old_hash:
-                logging.info(f"Modified detection file: {filepath}")
+            if old_hash is None or new_hash != old_hash:
+                change = "New" if old_hash is None else "Modified"
+                logging.info(f"{change} detection file: {filepath}")
                 processed_detection_files[filepath] = new_hash
                 await run_command_async(args.exefile, filepath)
             else:

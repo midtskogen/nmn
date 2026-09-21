@@ -72,12 +72,9 @@ def load_as6_camera_mapping(as6_json_path):
         cams_id = cam_info.get('cams_id')
         if not cams_id:
             continue
-        m = None
         match = re.search(r'(\d+)$', cam_key)
         if match:
-            m = int(match.group(1))
-        if m is not None:
-            cams_id_map[m] = cams_id
+            cams_id_map[int(match.group(1))] = cams_id
     return ams_id, cams_id_map
 
 

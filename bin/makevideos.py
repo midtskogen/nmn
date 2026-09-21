@@ -271,7 +271,7 @@ def _refine_gnomonic_track(initial_pixels, gnomonic_image_path, frames_count=Non
     coord_str = " ".join(output_parts[:2])
     point_coords = re.split(r'[,\s]+', coord_str)
     refined_pixels = tuple(map(float, point_coords[:4]))
-    brightness_values = output_parts[2:] if len(output_parts) > 2 else []
+    brightness_values = output_parts[2:]
 
     return refined_pixels, brightness_values
 

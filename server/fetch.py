@@ -1316,9 +1316,12 @@ def _rewrite_obs_to_inliers(obs_filepath: Path, obs_file_paths: list, inlier_set
         logging.warning(f"Could not rewrite main observation file: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
+    if nosplit:
+        all_stations = True
+        logging.info("--nosplit enabled: all observations stay in this event.")
     obs_filename = f"obs_{date.strftime('%Y-%m-%d_%H:%M:%S')}.txt"
     obs_filepath = event_dir / obs_filename
     res_filename = obs_filepath.with_suffix('.res')
@@ -1738,12 +1741,13 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 
             fb2kml(str(res_filename))
 
-            _maybe_split_event_outliers(
-                event_dir, date, obs_filepath, obs_file_paths,
-                metrack_info, metrack_plot_data, station_name_to_code,
-                metrack_opts, all_stations, use_orig_cen,
-                infrasound_only, verbose, min_speed, spatial_only=True,
-            )
+            if not nosplit:
+                _maybe_split_event_outliers(
+                    event_dir, date, obs_filepath, obs_file_paths,
+                    metrack_info, metrack_plot_data, station_name_to_code,
+                    metrack_opts, all_stations, use_orig_cen,
+                    infrasound_only, verbose, min_speed, spatial_only=True,
+                )
 
             inlier_codes = set(metrack_info.inlier_stations)
             
@@ -1781,7 +1785,14 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             # source; other cameras at the same station may be valid.
             worst_code = fbspd_plot_data.get('worst_station_code') if fbspd_plot_data else None
             worst_source_index = fbspd_plot_data.get('worst_source_index') if fbspd_plot_data else None
-            if worst_code:
+            if nosplit and worst_code:
+                logging.info(f"Timing-outlier source '{worst_code}' detected, but --nosplit keeps it in this event.")
+                fbspd_plot_data.update({
+                    'worst_station_idx': None,
+                    'worst_station_code': None,
+                    'worst_source_index': None,
+                })
+            elif worst_code:
                 outlier_camera_dirs = set()
                 if worst_source_index is not None:
                     try:
@@ -2336,8 +2347,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Fetch and process meteor data, or reprocess an existing event directory.",
         usage="""
-    To fetch:     python3 fetch.py <station> <port> <remote_dir>
-    To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen] [--force-plots] [--min-speed SPEED]
+    To fetch:     python3 fetch.py <station> <port> <remote_dir> [--nosplit]
+    To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen] [--force-plots] [--min-speed SPEED] [--nosplit]
         """
     )
     parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
@@ -2353,6 +2364,11 @@ def main():
         "--all",
         action="store_true",
         help="Skip elimination of outlier stations (disables RANSAC)."
+    )
+    parser.add_argument(
+        "--nosplit",
+        action="store_true",
+        help="Disable spatial and timing outlier splitting; keep all observations in the parent event (implies --all)."
     )
     parser.add_argument(
         "--origcen",
@@ -2421,7 +2437,8 @@ def main():
         try:
             process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all,
                       use_orig_cen=args.origcen, infrasound_only=args.infrasound,
-                      verbose=args.verbose, force_plots=args.force_plots, min_speed=args.min_speed)
+                      verbose=args.verbose, force_plots=args.force_plots, min_speed=args.min_speed,
+                      nosplit=args.nosplit)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -2482,13 +2499,15 @@ def main():
 
     process_event_with_lock(final_event_dir, processing_date,
                             all_stations=args.all, use_orig_cen=args.origcen,
-                            infrasound_only=args.infrasound, verbose=args.verbose)
+                            infrasound_only=args.infrasound, verbose=args.verbose,
+                            nosplit=args.nosplit)
     logging.info("--- Script finished. ---")
 
 
 def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
                             all_stations: bool = False, use_orig_cen: bool = False,
-                            infrasound_only: bool = False, verbose: bool = False):
+                            infrasound_only: bool = False, verbose: bool = False,
+                            nosplit: bool = False):
     # Acquire an exclusive lock on the event directory so that concurrent
     # fetch.py instances (for different stations of the same event) do not
     # run process_event() simultaneously.  The second instance will block
@@ -2529,7 +2548,7 @@ def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
         else:
             logging.info("Lock acquired. Starting process_event().")
 
-        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose)
+        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

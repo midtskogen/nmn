@@ -1090,6 +1090,31 @@ def send_tweet(event_dir: Path, date: datetime.datetime, placename: str, showern
             logging.error(f"Failed to send tweet using key {key}: {e}")
 
 
+def _coordinate_mapping_jump(cam_dir: Path):
+    event_file = cam_dir / 'event.txt'
+    try:
+        cfg = configparser.ConfigParser(interpolation=None)
+        cfg.read(event_file)
+        def parse_pairs(raw):
+            pairs = []
+            for value in raw.split():
+                x, y = value.split(',', 1)
+                pairs.append((float(x), float(y)))
+            return pairs
+        positions = parse_pairs(cfg.get('trail', 'positions', fallback=''))
+        coordinates = parse_pairs(cfg.get('trail', 'coordinates', fallback=''))
+        if len(positions) < 2 or len(positions) != len(coordinates):
+            return None
+        for (x0, y0), (x1, y1), (az0, alt0), (az1, alt1) in zip(positions, positions[1:], coordinates, coordinates[1:]):
+            pixel_step = math.hypot(x1 - x0, y1 - y0)
+            coord_step = math.hypot(az1 - az0, alt1 - alt0)
+            if coord_step >= 1.0 and (pixel_step <= 2.0 or coord_step / max(pixel_step, 1e-6) > 1.0):
+                return pixel_step, coord_step
+    except (OSError, ValueError, configparser.Error):
+        pass
+    return None
+
+
 def _maybe_split_event_outliers(
     event_dir: Path,
     date: datetime.datetime,
@@ -1804,45 +1829,64 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         p.parent for p in obs_file_paths
                         if station_name_to_code.get(p.relative_to(event_dir).parts[0]) == worst_code
                     }
-                forced_inlier = [i for i, p in enumerate(obs_file_paths)
-                                 if p.parent not in outlier_camera_dirs]
-                if 0 < len(forced_inlier) < len(obs_file_paths):
-                    outlier_desc = ', '.join(str(p.relative_to(event_dir)) for p in sorted(outlier_camera_dirs))
-                    logging.info(f"Timing-outlier source '{worst_code}' ({outlier_desc}) detected by speed profile; splitting it into a separate event.")
-                    _maybe_split_event_outliers(
-                        event_dir, date, obs_filepath, obs_file_paths,
-                        metrack_info, {'inlier_indices': forced_inlier},
-                        station_name_to_code, metrack_opts, all_stations,
-                        use_orig_cen, infrasound_only, verbose, min_speed,
+                unreliable_dirs = {}
+                for cam_dir in outlier_camera_dirs:
+                    jump = _coordinate_mapping_jump(cam_dir)
+                    if jump:
+                        unreliable_dirs[cam_dir] = jump
+                if unreliable_dirs:
+                    desc = ', '.join(
+                        f"{p.relative_to(event_dir)} ({coord_step:.2f} deg / {pixel_step:.1f} px)"
+                        for p, (pixel_step, coord_step) in sorted(unreliable_dirs.items())
                     )
-                    ti, tp = calculate_trajectory(str(obs_filepath), **metrack_opts)
-                    metrack_info, metrack_plot_data = ti, tp
-                    if tp:
-                        write_res_file(tp['track_start'], tp['track_end'],
-                                       tp['cross_pos_inliers'], tp['inlier_obs_data'], str(obs_filepath))
-                        resdat = readres(str(res_filename))
-                        fb2kml(str(res_filename))
-                    else:
-                        # Inlier set can no longer triangulate (e.g. only
-                        # same-station cameras remain): downgrade to a
-                        # media-only event and drop the artifacts computed
-                        # from the mixed-meteor data.
-                        try:
-                            (event_dir / '.no_trajectory').touch()
-                        except OSError:
-                            pass
-                        for pattern in ('obs_*.res', 'obs_*.kml', 'orbit.*', 'map.*',
-                                        'height.*', 'spd_acc.*', 'posvstime.*',
-                                        '*_map.*', '*_orbit.*', '*_height.*',
-                                        '*_spd_acc.*', '*_posvstime.*',
-                                        'tables.html', '*_tables.html',
-                                        'location.txt'):
-                            for artifact in event_dir.glob(pattern):
-                                try:
-                                    artifact.unlink()
-                                except OSError:
-                                    pass
-                        raise ValueError("Inlier-only trajectory fit failed; downgrading to media-only event.")
+                    logging.info(f"Timing-outlier source '{worst_code}' has inconsistent pixel-to-coordinate jumps; keeping: {desc}")
+                    outlier_camera_dirs -= set(unreliable_dirs)
+                if not outlier_camera_dirs:
+                    fbspd_plot_data.update({
+                        'worst_station_idx': None,
+                        'worst_station_code': None,
+                        'worst_source_index': None,
+                    })
+                else:
+                    forced_inlier = [i for i, p in enumerate(obs_file_paths)
+                                     if p.parent not in outlier_camera_dirs]
+                    if 0 < len(forced_inlier) < len(obs_file_paths):
+                        outlier_desc = ', '.join(str(p.relative_to(event_dir)) for p in sorted(outlier_camera_dirs))
+                        logging.info(f"Timing-outlier source '{worst_code}' ({outlier_desc}) detected by speed profile; splitting it into a separate event.")
+                        _maybe_split_event_outliers(
+                            event_dir, date, obs_filepath, obs_file_paths,
+                            metrack_info, {'inlier_indices': forced_inlier},
+                            station_name_to_code, metrack_opts, all_stations,
+                            use_orig_cen, infrasound_only, verbose, min_speed,
+                        )
+                        ti, tp = calculate_trajectory(str(obs_filepath), **metrack_opts)
+                        metrack_info, metrack_plot_data = ti, tp
+                        if tp:
+                            write_res_file(tp['track_start'], tp['track_end'],
+                                           tp['cross_pos_inliers'], tp['inlier_obs_data'], str(obs_filepath))
+                            resdat = readres(str(res_filename))
+                            fb2kml(str(res_filename))
+                        else:
+                            # Inlier set can no longer triangulate (e.g. only
+                            # same-station cameras remain): downgrade to a
+                            # media-only event and drop the artifacts computed
+                            # from the mixed-meteor data.
+                            try:
+                                (event_dir / '.no_trajectory').touch()
+                            except OSError:
+                                pass
+                            for pattern in ('obs_*.res', 'obs_*.kml', 'orbit.*', 'map.*',
+                                            'height.*', 'spd_acc.*', 'posvstime.*',
+                                            '*_map.*', '*_orbit.*', '*_height.*',
+                                            '*_spd_acc.*', '*_posvstime.*',
+                                            'tables.html', '*_tables.html',
+                                            'location.txt'):
+                                for artifact in event_dir.glob(pattern):
+                                    try:
+                                        artifact.unlink()
+                                    except OSError:
+                                        pass
+                            raise ValueError("Inlier-only trajectory fit failed; downgrading to media-only event.")
 
             az, alt = calc_azalt(resdat.lat1[0], resdat.long1[0], resdat.height[0], resdat.lat1[1], resdat.long1[1], resdat.height[1])
             placename = get_location_from_coords(resdat.lat1[1], resdat.long1[1])

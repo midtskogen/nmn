@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
 import math
+from datetime import datetime, timezone
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -102,6 +103,7 @@ class CenData:
         self.sitestr: np.ndarray = np.array([])
         self.datestr: np.ndarray = np.array([])
         self.timestr: np.ndarray = np.array([])
+        self.abstime: Optional[np.ndarray] = None
         self.site_info: dict = {}
 
 # --- File Reading Functions ---
@@ -121,6 +123,18 @@ def readres(inname: str) -> ResData:
     for k, v in data.items(): setattr(res, k, np.array(v))
     return res
 
+def _parse_cen_epoch(datestr: str, timestr: str) -> Optional[float]:
+    try:
+        dt = datetime.fromisoformat(f"{datestr}T{timestr}")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
 def readcen(inname: str) -> CenData:
     """Reads data from a centroid file and returns a CenData object."""
     cen_path = Path(inname)
@@ -134,6 +148,18 @@ def readcen(inname: str) -> CenData:
     cen = CenData()
     cen.ndata = len(data["seqid"])
     for k, v in data.items(): setattr(cen, k, np.array(v))
+    epochs = np.array([
+        _parse_cen_epoch(datestr, timestr)
+        for datestr, timestr in zip(cen.datestr, cen.timestr)
+    ], dtype=object)
+    if cen.ndata and all(epoch is not None for epoch in epochs):
+        epoch_arr = epochs.astype(float)
+        reltime_delta = cen.reltime - cen.reltime[0]
+        epoch_delta = epoch_arr - epoch_arr[0]
+        if np.max(np.abs(epoch_delta - reltime_delta)) <= 0.051:
+            cen.abstime = epoch_arr
+        else:
+            cen.abstime = epoch_arr[0] + reltime_delta
     return cen
 
 def get_sitecoord_fromdat(inname: str) -> List[Tuple[str, float, float, float]]:
@@ -289,7 +315,7 @@ def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False
     if num_stations < 2: return np.zeros(num_stations)
     
     # Store original order to return correct array later
-    original_station_order_map = {obs['site_info']['name']: i for i, obs in enumerate(station_obs)}
+    original_station_order_map = {id(obs): i for i, obs in enumerate(station_obs)}
     
     # Sort by number of points (descending) to prioritize high-quality data
     # We keep the reference to the original object so the map above works
@@ -402,20 +428,16 @@ def _find_offsets_by_triplet_method(station_obs: List[Dict], debug: bool = False
     if not result.success: print(f"Warning: Fine-grained offset optimization may have failed: {result.message}")
 
     # Map results back to the original array
-    final_offsets_map = {ref_name: 0.0}
-    for i, obs in enumerate(non_ref_obs): 
-        final_offsets_map[obs['site_info']['name']] = fine_offsets[i]
+    final_offsets_array = np.zeros(num_stations)
+    final_offsets_array[original_station_order_map[id(ref_obs)]] = 0.0
+    for i, obs in enumerate(non_ref_obs):
+        final_offsets_array[original_station_order_map[id(obs)]] = fine_offsets[i]
         
     # --- HANDLING REMAINING STATIONS ---
     # Any station not in the "Core" list currently has no offset. 
     # They will be aligned later by _refine_offsets_by_projection_method or _align_fragments_to_anchor_method
     # but we initialize them to 0 here.
     
-    final_offsets_array = np.zeros(num_stations)
-    for name, offset in final_offsets_map.items(): 
-        if name in original_station_order_map:
-            final_offsets_array[original_station_order_map[name]] = offset
-            
     return final_offsets_array
 
 def _refine_offsets_by_projection_method(station_obs: List[Dict], initial_offsets: np.ndarray, debug: bool = False, min_speed: float = 7.0) -> np.ndarray:
@@ -699,6 +721,12 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
     all_sitedata = get_sitecoord_fromdat(datname) if datname else []
     all_cendat = [(idx, readcen(f)) for idx, f in enumerate(cennames) if Path(f).exists()]
     if not all_cendat: print("Error: No valid centroid data could be loaded."); return None, None
+    if all(cendat.abstime is not None and cendat.abstime.size for _, cendat in all_cendat):
+        first_epoch = min(float(np.min(cendat.abstime)) for _, cendat in all_cendat)
+        for _, cendat in all_cendat:
+            cendat.reltime = cendat.abstime - first_epoch
+    elif debug:
+        print("Warning: Centroid timestamps unavailable; using per-file relative times.")
 
     if debug and all_sitedata:
         print("\n--- Debug: Stations found in .dat file ---"); print(f"Found {len(all_sitedata)} stations: [{', '.join([f'{s[0]}' for s in all_sitedata])}]"); print("------------------------------------------\n")

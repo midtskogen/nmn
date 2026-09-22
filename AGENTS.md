@@ -25,6 +25,11 @@
   now reject `min(start_h, end_h) < 5 km` — a degenerate all-inlier fit
   diving to ~1 km altitude used to pass the `max < 10 km` check and skip
   subset evaluation entirely.
+- Timing-split false positives: a station starting only ~3 s after the
+  event is not proof of a different meteor. Before trusting a high
+  speed-profile MSE, compare `event.txt` `positions` with `coordinates`;
+  jumps >1° for ≤2 px (or >1°/px) indicate corrupt refined centroid
+  mapping and should suppress source eviction.
 - `meteorcrop.py` video trimming: source videos are ~12 s ring-buffer clips
   that can start many seconds before the event (burned-in clock ≠ the
   `[video] start` event-window timestamp). `detect_meteor_activity()` now

@@ -146,6 +146,54 @@ def trim_log_file(log_path, max_lines):
     except Exception as e:
         logging.error(f"Could not trim log file {log_path}: {e}")
 
+def _fetch_tle_satnogs(ts, tle_data):
+    """Fallback TLE source: SatNOGS-DB (db.satnogs.org).  No auth, no
+    rate-limit documented, and it mirrors Space-Track/CelesTrak data —
+    used when celestrak.org is unreachable (it has outages and
+    aggressively IP-bans clients that poll too fast).
+    Iterates the full catalog and applies the same curated/brightness
+    logic as the CelesTrak path, with a generic default magnitude."""
+    url = 'https://db.satnogs.org/api/tle/?format=json'
+    pages = 0
+    FALLBACK_ABS_MAG = 4.5   # mid-of-road guess: between radar (3.5) and
+                             # dim debris (~6+); the brightness pre-filter
+                             # still bounds what we keep.
+    while url and pages < 60:
+        req = urllib.request.Request(url, headers={'User-Agent': 'nmn-sat-pred/1.0'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            payload = json.loads(r.read().decode('utf-8'))
+        if isinstance(payload, dict):          # DRF-paginated
+            entries, url = payload.get('results') or [], payload.get('next')
+        else:                                   # bare list
+            entries, url = payload, None
+        pages += 1
+        for e in entries:
+            line1, line2 = e.get('tle1') or '', e.get('tle2') or ''
+            if not (line1.startswith('1 ') and line2.startswith('2 ')):
+                continue
+            name = (e.get('tle0') or '').lstrip('0 ').strip() or e.get('name') or ''
+            try: satnum = int(line1[2:7])
+            except (ValueError, IndexError): continue
+            is_curated = name in SATELLITES_OF_INTEREST or satnum in SATELLITES_OF_INTEREST.values()
+            try:
+                temp_sat = EarthSatellite(line1, line2, name, ts)
+            except Exception:
+                continue
+            if is_curated:
+                abs_mag = SATELLITE_MAGNITUDES.get(name, 3.0)
+            else:
+                altitude_km = max(100.0, (temp_sat.model.a * WGS72_EARTH_RADIUS_KM) - WGS72_EARTH_RADIUS_KM)
+                best_case_mag = FALLBACK_ABS_MAG + 5 * np.log10(altitude_km / 1000.0)
+                if best_case_mag >= MAX_VISIBLE_MAGNITUDE + BEST_CASE_MAGNITUDE_MARGIN:
+                    continue
+                abs_mag = FALLBACK_ABS_MAG
+            existing = tle_data.get(name)
+            if existing is not None and existing.get('abs_mag', 99.0) <= abs_mag:
+                continue
+            tle_data[name] = {'satnum': satnum, 'line1': line1, 'line2': line2,
+                              'inclination': temp_sat.model.inclo, 'abs_mag': abs_mag}
+
+
 def get_tle_data(ts, status_file=None):
     """
     Fetches and caches Two-Line Element (TLE) data for satellites from CelesTrak.
@@ -178,11 +226,15 @@ def get_tle_data(ts, status_file=None):
         ("https://celestrak.org/NORAD/elements/gp.php?GROUP=radar&FORMAT=tle", 'radar'),
         ("https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle", 'active'),
     ]
+    celestrak_ok = False
+    consecutive_failures = 0
     for idx, (source_url, category) in enumerate(sources, start=1):
         try:
             req = urllib.request.Request(source_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30) as response:
                 lines = response.read().decode('utf-8').strip().splitlines()
+            celestrak_ok = True
+            consecutive_failures = 0
   
             # TLE data comes in 3-line sets (Name, Line 1, Line 2).
             for i in range(0, len(lines), 3):
@@ -233,9 +285,23 @@ def get_tle_data(ts, status_file=None):
             # could not refresh.
             logging.error(f"Could not process TLE from {source_url}: {e}")
             last_error = e
+            consecutive_failures += 1
+            # Two consecutive failures mean the host is down/blocked —
+            # stop serially timing out the remaining groups (~30s each)
+            # and go straight to the SatNOGS-DB fallback below.
+            if consecutive_failures >= 2 and not tle_data:
+                break
         if status_file:
             progress = 1 + int((idx / len(sources)) * 3)
             update_status(status_file, "progress", {"step": progress, "total": 100, "message": "status_loading_tle"})
+
+    if not tle_data and last_error is not None:
+        try:
+            logging.info("CelesTrak unreachable; trying SatNOGS-DB fallback.")
+            _fetch_tle_satnogs(ts, tle_data)
+        except Exception as e:
+            logging.error(f"SatNOGS-DB fallback failed: {e}")
+            last_error = e
 
     # Some curated satellites aren't members of any of the group downloads
     # above (e.g. CelesTrak's GROUP=active only lists satellites it
@@ -244,6 +310,11 @@ def get_tle_data(ts, status_file=None):
     # a curated entry doesn't silently go missing just because it fell out
     # of (or never belonged to) one of the bulk group downloads.
     missing_curated = {name: satnum for name, satnum in SATELLITES_OF_INTEREST.items() if name not in tle_data}
+    if not celestrak_ok:
+        # CelesTrak never answered: per-satellite CATNR fetches would just
+        # time out serially, and the SatNOGS bulk fallback above already
+        # covered whatever curated satellites exist upstream.
+        missing_curated = {}
     for name, satnum in missing_curated.items():
         try:
             url = f"https://celestrak.org/NORAD/elements/gp.php?CATNR={satnum}&FORMAT=tle"

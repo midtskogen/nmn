@@ -74,8 +74,11 @@ PUSH_EXCLUDES = [
 # Persistent report queue: a ping that fails goes here and is retried by a
 # detached drainer every REPORT_RETRY_INTERVAL seconds until the server
 # acknowledges it — server downtime must not lose detections.
+# Entries expire after REPORT_QUEUE_MAX_AGE so a permanently-denied report
+# (e.g. bad signature) doesn't retry forever.
 REPORT_QUEUE_PATH = Path.home() / '.nmn_report_queue'
 REPORT_RETRY_INTERVAL = 600
+REPORT_QUEUE_MAX_AGE = 7 * 86400
 # Assume processing scripts are in the user's bin directory
 METEORCROP_PATH = Path.home() / "bin" / "meteorcrop.py"
 PREDICT_PATH = Path.home() / "bin" / "predict.py"
@@ -316,12 +319,13 @@ def _deliver_report(station_name: str, port: str, event_dir) -> str:
 
 def _enqueue_report(station_name: str, port: str, event_dir) -> None:
     """Persist a failed report so it is retried until the server acks it."""
-    entry = f'{station_name}\t{port}\t{event_dir}\n'
+    key = f'{station_name}\t{port}\t{event_dir}'
+    entry = key + f'\t{int(time.time())}\n'
     try:
         with open(REPORT_QUEUE_PATH, 'a+') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             f.seek(0)
-            if entry not in f.readlines():
+            if not any(l.startswith(key) for l in f.readlines()):
                 f.write(entry)
     except OSError as e:
         print(f"WARNING: could not queue report for {event_dir}: {e}",
@@ -329,7 +333,14 @@ def _enqueue_report(station_name: str, port: str, event_dir) -> None:
 
 
 def _drain_queue() -> None:
-    """One pass over the retry queue: ping each entry once, drop successes."""
+    """One pass over the retry queue: retry each entry once, drop acks.
+
+    Every non-2xx failure keeps the entry (429 rate-limit, 5xx, 000
+    unreachable are all transient for our purposes; even 4xx denials
+    retry — a server-side fix like a restored allowed_signers can make
+    them succeed later).  Entries older than REPORT_QUEUE_MAX_AGE are
+    dropped so a truly permanent failure can't loop forever.
+    """
     try:
         with open(REPORT_QUEUE_PATH, 'r+') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
@@ -337,14 +348,19 @@ def _drain_queue() -> None:
             remaining = []
             for line in entries:
                 parts = line.rstrip('\n').split('\t')
-                if len(parts) != 3:
+                if len(parts) == 3:            # pre-timestamp format
+                    parts.append(str(int(time.time())))
+                if len(parts) != 4:
                     continue
-                st, pt, dr = parts
+                st, pt, dr, ts = parts
+                if time.time() - int(ts) > REPORT_QUEUE_MAX_AGE:
+                    print(f"Queued report expired: {dr}")
+                    continue
                 code = _deliver_report(st, pt, dr)
                 if code.startswith('2'):
                     print(f"Queued report delivered: {dr}")
-                elif not code.startswith('4'):
-                    remaining.append(line)  # transient failure: retry later
+                else:
+                    remaining.append('\t'.join(parts) + '\n')
             if remaining:
                 f.seek(0)
                 f.truncate()
@@ -618,12 +634,17 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
             time.sleep(30)
     if code.startswith('2'):
         _drain_queue()  # server is reachable: flush any queued reports
-    elif code.startswith('4'):
-        print(f"WARNING: report denied (HTTP {code}): {body}",
-              file=sys.stderr)
     else:
-        print(f"WARNING: server unreachable (HTTP {code}); queued for retry",
-              file=sys.stderr)
+        # No upload is ever lost: any failure — unreachable (000),
+        # rate-limited (429), denied (4xx), server error (5xx) — goes to
+        # the retry queue; the detached drainer keeps retrying until ack
+        # or REPORT_QUEUE_MAX_AGE expiry.
+        if code.startswith('4') and code != '429':
+            print(f"WARNING: report denied (HTTP {code}): {body} "
+                  f"(queued anyway)", file=sys.stderr)
+        else:
+            print(f"WARNING: report failed (HTTP {code}); "
+                  f"queued for retry", file=sys.stderr)
         _enqueue_report(station_name, port, event_dir)
         _spawn_queue_drainer()
     print("Upload and reporting complete.")

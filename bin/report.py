@@ -653,6 +653,7 @@ def upload_results(config: configparser.ConfigParser, event_dir: Path):
 def main():
     """Main execution function."""
     nologos = False
+    report_only = False
     credit = ""
     creditpos = "lower-right"
     creditsize = 24
@@ -662,7 +663,7 @@ def main():
     if '--drain-queue' in argv:
         drain_report_queue()
         sys.exit(0)
-    usage = f"Usage: {sys.argv[0]} [--nologos] [--credit <string> [--creditpos <pos>] [--creditsize <size>] [--creditfont <font>]] [--logo <file> [--logopos <pos>]]... <event.txt>"
+    usage = f"Usage: {sys.argv[0]} [--report-only] [--nologos] [--credit <string> [--creditpos <pos>] [--creditsize <size>] [--creditfont <font>]] [--logo <file> [--logopos <pos>]]... <event.txt>"
 
     remaining = []
     i = 0
@@ -670,6 +671,11 @@ def main():
         a = argv[i]
         if a == "--nologos":
             nologos = True
+            i += 1
+            continue
+
+        if a == "--report-only":
+            report_only = True
             i += 1
             continue
 
@@ -753,6 +759,30 @@ def main():
     video_name = f"{station_name}-{event_timestamp_str}"
 
     with acquire_lock():
+        if report_only:
+            # Skip video creation / reports / classification entirely —
+            # the previous full run already stored the classification in
+            # event.txt ([summary] meteor_probability); just re-report.
+            probability = config.getfloat('summary', 'meteor_probability',
+                                          fallback=-1.0)
+            if probability < 0:
+                print("No stored meteor_probability in event.txt; "
+                      "run a full report first.", file=sys.stderr)
+                sys.exit(1)
+            threshold = config.getfloat('classification', 'threshold',
+                                        fallback=METEOR_PROBABILITY_THRESHOLD)
+            if config.getfloat('trail', 'manual', fallback=0) > 0:
+                print("Manually reduced. Reporting to server.")
+                upload_results(config, event_dir)
+            elif probability >= threshold:
+                print(f"Probability ({probability:.4f}) is >= {threshold}. "
+                      f"Reporting to server.")
+                upload_results(config, event_dir)
+            else:
+                print(f"Probability ({probability:.4f}) is < {threshold}. "
+                      f"Not reporting to server.")
+            return
+
         video_output = run_video_creation(
             config,
             event_file_path,

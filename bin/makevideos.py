@@ -86,6 +86,11 @@ except ImportError as e:
 OVERLAY_OPACITY = 0.40
 BIN_DIR = Path(__file__).parent.resolve()
 
+# Exit code returned to report.py when the classifier rejects the event:
+# lets the caller skip all reporting work without an extra round-trip.
+EXIT_NON_METEOR = 42
+DEFAULT_METEOR_PROBABILITY_THRESHOLD = 0.5
+
 # In-memory cache for short-lived but repeated work inside one pipeline run.
 _VIDEO_RESOLUTION_CACHE: dict[str, tuple[int, int]] = {}
 
@@ -1430,6 +1435,51 @@ def search_for_videos(video_dir, start_unix):
         found_files.append(found_file)
     return found_files
 
+def _classify_event_gate(event_data, filenames, verbose):
+    """Build fireball_orig.jpg from the stills and run the meteor
+    classifier BEFORE the expensive video pipeline.  Returns the
+    probability, or None when classification could not run — fail-open,
+    the caller then continues the full pipeline so nothing is lost.
+    """
+    try:
+        run_command(
+            f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} --mode image "
+            f"--source-video {shlex.quote(filenames['full'])} .",
+            "Cropping meteor track (image) for early classification",
+            verbose)
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: classification crop failed, "
+              f"continuing full pipeline: {e}", file=sys.stderr)
+        return None
+    orig = Path('fireball_orig.jpg')
+    if not orig.is_file():
+        return None
+    try:
+        res = subprocess.run(
+            [sys.executable, str(BIN_DIR / 'predict.py'), str(orig)],
+            check=True, capture_output=True, text=True)
+        probability = float(res.stdout.strip().split()[-1])
+    except (subprocess.CalledProcessError, ValueError, IndexError) as e:
+        print(f"Warning: classifier failed, continuing full pipeline: {e}",
+              file=sys.stderr)
+        return None
+    print(f"Meteor probability: {probability:.4f}")
+    # Persist the verdict so 'report.py --report-only' can reuse it
+    # without re-running the classifier.
+    try:
+        cfg = configparser.ConfigParser()
+        cfg.read('event.txt')
+        if not cfg.has_section('summary'):
+            cfg.add_section('summary')
+        cfg.set('summary', 'meteor_probability', f"{probability:.6f}")
+        with open('event.txt', 'w') as f:
+            cfg.write(f)
+    except Exception as e:
+        print(f"Warning: could not store probability in event.txt: {e}",
+              file=sys.stderr)
+    return probability
+
+
 def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=False, nologos=False, credit="", creditpos="lower-right", creditsize=24, creditfont="Helvetica", logo_placements=None):
     """Runs the script in client mode."""
     print("--- Running in Client Mode ---")
@@ -1589,6 +1639,33 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
             except Exception:
                 pass
             
+            # --- Classify-first gate ---
+            # Build the classification crop + run the classifier in a few
+            # seconds; a rejected event exits here, before the expensive
+            # video reprojection/transcode work further down.
+            # event.txt must carry the refined startpos/endpos first —
+            # meteorcrop reads them.
+            update_event_file(event_data)
+            probability = _classify_event_gate(event_data, filenames, verbose)
+            crop_mode = "video"
+            if probability is not None:
+                try:
+                    _cfg = configparser.ConfigParser()
+                    _cfg.read('event.txt')
+                    threshold = _cfg.getfloat(
+                        'classification', 'threshold',
+                        fallback=DEFAULT_METEOR_PROBABILITY_THRESHOLD)
+                except Exception:
+                    threshold = DEFAULT_METEOR_PROBABILITY_THRESHOLD
+                if probability < threshold and not event_data.get('manual', 0):
+                    print(f"Non-meteor (probability {probability:.4f} < "
+                          f"{threshold}); skipping video pipeline.")
+                    sys.exit(EXIT_NON_METEOR)
+            else:
+                # Classification couldn't run — do the image+video pass
+                # so downstream still gets fireball_orig.jpg.
+                crop_mode = "both"
+
             # Run crop on CLEAN images and regenerate videos too
             clean_stacked = Path(f"{filenames['name']}-clean.jpg")
             try:
@@ -1597,12 +1674,10 @@ def run_client_mode(output_name, video_dir, start_unix, length_sec, verbose=Fals
             except Exception:
                 pass
             meteorcrop_cmd = (
-                f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} --mode both"
+                f"{sys.executable} {BIN_DIR / 'meteorcrop.py'} --mode {crop_mode}"
                 f" --source-video {filenames['full']}"  # force clean source video
                 f" ."
             )
-            # Update event.txt BEFORE meteorcrop so it reads the correct startpos/endpos.
-            update_event_file(event_data)
 
             print(f"   meteorcrop sources: video='{filenames['full']}' image='{filenames['jpg']}'")
             try:

@@ -445,7 +445,15 @@ def run_video_creation(
         command.insert(1, "--nologos")
     print(f"Running command: {' '.join(command)}")
     try:
-        proc = subprocess.run(command, cwd=event_dir, capture_output=True, text=True, check=True)
+        proc = subprocess.run(command, cwd=event_dir, capture_output=True, text=True)
+        if proc.returncode == 42:
+            # makevideos classified the event below the meteor threshold
+            # and stopped before the video pipeline (probability already
+            # written into event.txt [summary] meteor_probability).
+            return "NON_METEOR"
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(
+                proc.returncode, command, proc.stdout, proc.stderr)
         for line in reversed(proc.stdout.splitlines()):
             if line.startswith("AZALT:"):
                 return line.split()[1:]
@@ -795,12 +803,23 @@ def main():
             creditfont=creditfont,
             logo_sequence=logo_sequence,
         )
+        if video_output == "NON_METEOR":
+            print("Classified non-meteor by makevideos; "
+                  "no reporting needed.")
+            return
         if not video_output:
             sys.exit(1)
 
         generate_reports(config, video_output, event_dir, video_name, start_timestamp)
-        
-        probability = get_meteor_probability(event_dir)
+
+        # makevideos ran the classifier itself and stored the verdict in
+        # event.txt — reuse it.  Fall back to the full classify (older
+        # makevideos without the gate).
+        config = load_config(event_file_path)
+        probability = config.getfloat('summary', 'meteor_probability',
+                                      fallback=None)
+        if probability is None:
+            probability = get_meteor_probability(event_dir)
         
         update_event_file(config, video_output, event_file_path, probability, start_dt)
 

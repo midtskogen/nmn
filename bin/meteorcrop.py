@@ -385,6 +385,12 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
 
 def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: List[float], end_xy: List[float]) -> Tuple[int, int]:
     """Generates a precise, video-compatible PTO file for the stitcher."""
+    # Normalize track direction so the meteor always travels left-to-right in
+    # the rotated crop, whatever azimuth order the input endpoints happen to
+    # have (a reversed start/end would otherwise rotate ~180°).
+    if end_xy[0] < start_xy[0]:
+        start_xy, end_xy = end_xy, start_xy
+
     angle_rad = math.atan2(end_xy[1] - start_xy[1], end_xy[0] - start_xy[0])
     angle_deg = math.degrees(angle_rad)
     track_len = math.hypot(end_xy[0] - start_xy[0], end_xy[1] - start_xy[1])

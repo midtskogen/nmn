@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import termios
 import configparser
@@ -1183,7 +1184,22 @@ def generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, stacked
 
 def recalibrate_gnomonic_view(event_data, filenames, verbose):
     """Recalibrates the gnomonic view if necessary, with a fallback."""
+    corr_pto = Path(filenames['gnomonic_corr_grid_pto'])
+
+    def _corr_is_fresh():
+        # corr_grid is a pure function of the grid PTO and the gnomonic render;
+        # if it is newer than both inputs it is already current and rewriting
+        # it would just risk a torn read by concurrent consumers (meteorcrop).
+        try:
+            return (corr_pto.is_file()
+                    and corr_pto.stat().st_mtime >= Path(filenames['gnomonic_grid_pto']).stat().st_mtime
+                    and corr_pto.stat().st_mtime >= Path(filenames['gnomonic']).stat().st_mtime)
+        except OSError:
+            return False
+
     if event_data.get('recalibrate', False):
+        if _corr_is_fresh():
+            return
         try:
             recalibrate_cmd = (f"{sys.executable} {BIN_DIR}/recalibrate.py -c meteor.cfg "
                                f"{event_data['timestamp'] + event_data['duration'] // 2} "
@@ -1196,14 +1212,17 @@ def recalibrate_gnomonic_view(event_data, filenames, verbose):
                 print(f"Stderr from recalibrate.py:\n{e.stderr}", file=sys.stderr)
             shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
     else:
+        if _corr_is_fresh():
+            return
         shutil.copy(filenames['gnomonic_grid_pto'], filenames['gnomonic_corr_grid_pto'])
 
 def refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose, padding_value=1024):
     """Refines endpoints and recenters the gnomonic projection PTO around the refined midpoint."""
-    # Ensure gnomonic_corr_grid_pto exists for the refinement mapping.
+    # Ensure gnomonic_corr_grid_pto exists and matches the current render for
+    # the refinement mapping (recalibrate_gnomonic_view skips the expensive
+    # star calibration when corr_grid is already fresher than its inputs).
     try:
-        if not Path(filenames.get('gnomonic_corr_grid_pto', '')).exists():
-            recalibrate_gnomonic_view(event_data, filenames, verbose)
+        recalibrate_gnomonic_view(event_data, filenames, verbose)
     except Exception:
         pass
 
@@ -1310,7 +1329,7 @@ def _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, v
     return {"cropped_grid": cropped_grid_clean}
 
 
-def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbose, executor, future_stacked_jpg: Future):
+def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, verbose, executor, future_stacked_jpg: Future, meteorcrop_ready=None):
     """Runs the gnomonic processing by splitting it into parallel video and image/grid pipelines."""
     print("\n--- Processing Gnomonic View ---")
     azalt_start, azalt_end = event_data.get('start_azalt'), event_data.get('end_azalt')
@@ -1335,9 +1354,12 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
         logo_layer_1080p = f"{tmpdir}/logo_layer_1080p.png"
         future_logo_layer_1080p = executor.submit(create_logo_overlay, 1920, 1080, logo_paths, logo_layer_1080p)
 
-    # JPG stitch (~4s) and refinement run concurrently with the video stitch above.
+    # JPG stitch (~4s) runs concurrently with the video stitch above, but must
+    # finish before refinement: refinetrack works on -gnomonic.jpg, which would
+    # otherwise be a stale render from an earlier run (in old view geometry).
     future_gnomonic_jpg = executor.submit(_stitch_gnomonic_jpg, filenames, tmpdir, verbose)
 
+    future_gnomonic_jpg.result()
     refined_data = refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose)
 
     # If refinement shifted endpoints enough to regenerate the PTO, the video stitch
@@ -1350,7 +1372,17 @@ def _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, ve
                                                filenames['gnomonic_mp4_pto'], 1920, 1080, verbose)
         future_stitch = executor.submit(lambda: run_command(future_modified_pto2.result() and stitch_cmd_mp4, "Creating gnomonic video (refined)", verbose))
 
-    future_gnomonic_jpg.result()
+    # Everything meteorcrop.py reads is final at this point: publish the
+    # refined endpoints to event.txt, refresh the clean gnomonic snapshot
+    # (same-geometry input for refinetrack), then release meteorcrop.
+    update_event_file(event_data)
+    try:
+        if Path(filenames['gnomonic']).exists():
+            shutil.copyfile(filenames['gnomonic'], f"{filenames['name']}-gnomonic-clean.jpg")
+    except Exception:
+        pass
+    if meteorcrop_ready is not None:
+        meteorcrop_ready.set()
 
     # Grid pipeline depends on refined_data — submit now that refinement is done.
     future_grid_assets = executor.submit(_create_gnomonic_grid_and_image, event_data, filenames, tmpdir, logo_paths, verbose, refined_data)
@@ -1388,6 +1420,14 @@ def _run_gnomonic_view_sequentially(event_data, filenames, tmpdir, logo_paths, v
     generate_gnomonic_projection(event_data, filenames, tmpdir, verbose, filenames['jpg'])
 
     refined_data = refine_and_recenter_gnomonic_view(event_data, filenames, tmpdir, verbose)
+
+    # Snapshot the final clean gnomonic render (refreshed every run so a stale
+    # image in old view geometry can't poison refinetrack/meteorcrop later).
+    try:
+        if Path(filenames['gnomonic']).exists():
+            shutil.copyfile(filenames['gnomonic'], f"{filenames['name']}-gnomonic-clean.jpg")
+    except Exception:
+        pass
 
     # 2. Create the decorated grid (returns clean cropped grid)
     grid_assets = _create_gnomonic_grid_and_image(event_data, filenames, tmpdir, logo_paths, verbose, refined_data)
@@ -1850,19 +1890,31 @@ def main(args):
                 # — it has no dependency on either view pipeline.
                 future_full_view = executor.submit(_run_full_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
 
+                meteorcrop_ready = threading.Event() if gnomonic_enabled else None
                 if gnomonic_enabled:
-                    future_gnomonic = executor.submit(_run_gnomonic_view_in_parallel, event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg)
+                    def _gnomonic_then_release():
+                        try:
+                            _run_gnomonic_view_in_parallel(event_data, filenames, tmpdir, logo_paths, args.verbose, executor, future_stacked_jpg, meteorcrop_ready)
+                        finally:
+                            # Never leave meteorcrop waiting on a dead pipeline.
+                            meteorcrop_ready.set()
+                    future_gnomonic = executor.submit(_gnomonic_then_release)
                 else:
                     future_gnomonic = None
                     print("\nSkipping gnomonic view: requires 'positions' and 'coordinates' in event.txt.")
 
-                # meteorcrop: depends only on stack.py being done (clean jpg already restored above)
+                # meteorcrop reads the refined startpos/endpos in event.txt plus
+                # gnomonic_corr_grid.pto / gnomonic.pto / -gnomonic-clean.jpg —
+                # all finalized only once the gnomonic view has been refined and
+                # recentered, so it must wait for meteorcrop_ready.
                 meteorcrop_script = BIN_DIR / 'meteorcrop.py'
                 def _run_meteorcrop():
                     if not meteorcrop_script.exists():
                         print(f"Warning: {meteorcrop_script.name} not found. Skipping automatic cropping.", file=sys.stderr)
                         return
                     try:
+                        if meteorcrop_ready is not None:
+                            meteorcrop_ready.wait()
                         _cmd = (
                             f"{sys.executable} {meteorcrop_script} --mode both"
                             f" --source-video {filenames['source']}"
@@ -1882,7 +1934,7 @@ def main(args):
 
         try:
             clean_gnomonic = Path(f"{filenames['name']}-gnomonic-clean.jpg")
-            if gnomonic_enabled and Path(filenames['gnomonic']).exists() and not clean_gnomonic.exists():
+            if gnomonic_enabled and Path(filenames['gnomonic']).exists():
                 shutil.copyfile(filenames['gnomonic'], str(clean_gnomonic))
         except Exception:
             pass

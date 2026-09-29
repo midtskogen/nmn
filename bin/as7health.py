@@ -186,10 +186,10 @@ class ErrorCatalog:
         "NMN_MIRROR_PROC_DOWN": {"type": "failure", "description": "The 'mirror.py' process is not running.", "reason": "This process is responsible for data mirroring.", "fix": "Check the 'mirror' service status: 'systemctl status mirror'"},
         "NMN_MIRROR_SVC_NOT_ACTIVE": {"type": "failure", "description": "The 'mirror' systemd service is not active.", "reason": "The service is not running or has failed.", "fix": "Run 'sudo systemctl start mirror' and check logs: 'journalctl -u mirror'"},
         "NMN_MIRROR_SVC_NOT_ENABLED": {"type": "failure", "description": "The 'mirror' systemd service is not enabled.", "reason": "The service will not start automatically on boot.", "fix": "Run 'sudo systemctl enable mirror'"},
-        "NMN_AUTOSSH_PROC_DOWN": {"type": "failure", "description": "The 'autossh' process for 'meteor@norskmeteornettverk.no' is not running.", "reason": "The reverse SSH tunnel to the NMN server is down.", "fix": "Check the 'autossh-tunnel' service: 'systemctl status autossh-tunnel'"},
+        "NMN_AUTOSSH_PROC_DOWN": {"type": "failure", "description": "No SSH tunnel process for 'meteor@norskmeteornettverk.no' is running.", "reason": "The reverse SSH tunnel to the NMN server is down. The 'autossh-tunnel' service now runs plain 'ssh' directly (no autossh supervisor).", "fix": "Check the 'autossh-tunnel' service: 'systemctl status autossh-tunnel'"},
         "NMN_AUTOSSH_SVC_NOT_ACTIVE": {"type": "failure", "description": "The 'autossh-tunnel' systemd service is not active.", "reason": "The service is not running or has failed.", "fix": "Run 'sudo systemctl start autossh-tunnel' and check logs: 'journalctl -u autossh-tunnel'"},
         "NMN_AUTOSSH_SVC_NOT_ENABLED": {"type": "failure", "description": "The 'autossh-tunnel' systemd service is not enabled.", "reason": "The service will not start automatically on boot.", "fix": "Run 'sudo systemctl enable autossh-tunnel'"},
-        "NMN_SSH_PROC_DOWN": {"type": "failure", "description": "No active 'ssh' child process for 'meteor@norskmeteornettverk.no' was found.", "reason": "The 'autossh' process is running but has failed to establish an active SSH connection.", "fix": "Check 'systemctl status autossh-tunnel' and network connectivity."},
+        "NMN_SSH_PROC_DOWN": {"type": "failure", "description": "No active 'ssh' tunnel process for 'meteor@norskmeteornettverk.no' was found.", "reason": "The tunnel supervisor is running but has failed to establish an active SSH connection.", "fix": "Check 'systemctl status autossh-tunnel' and network connectivity."},
         "NMN_MIRROR_LOG_MISSING": {"type": "warning", "description": "Mirror log file '/home/meteor/mirror.log' is missing.", "reason": "The log file is missing, cannot check for errors.", "fix": "This may be normal if the service has never run. If it should be running, check service status."},
         "NMN_CAM_NO_DATE_DIRS": {"type": "warning", "description": "No date-formatted subdirectories (YYYYMMDD) found in {path}.", "reason": "The capture script may not be saving daily archives.", "fix": "Ensure the capture script is running and has permissions to create directories in {path}."},
         "NMN_CAM_STALE_DATE_DIRS": {"type": "warning", "description": "The most recent date directory in {path} is '{latest_dir}'.", "reason": "The capture script has not created a directory for today or yesterday. It may be stalled.", "fix": "Check the capture script and ensure it is running and processing new data."},
@@ -2514,8 +2514,11 @@ class AS7Diagnostic:
                         if ('autossh' in proc.info['cmdline'][0]) and ('meteor@norskmeteornettverk.no' in cmdline_str):
                             found_autossh = True
                         if ('ssh' in proc.info['cmdline'][0]) and ('meteor@norskmeteornettverk.no' in cmdline_str):
-                            # Basic check for likely tunnel process
-                            if '-o ForwardAgent yes' in cmdline_str or '-N' in cmdline_str: 
+                            # Tunnel connection: either autossh's ssh child (old unit)
+                            # or ssh run directly as the service main proc (new unit).
+                            # New units use ExitOnForwardFailure, so a running ssh
+                            # implies the -R forward is actually bound on the server.
+                            if '-o ForwardAgent yes' in cmdline_str or ('-N' in cmdline_str and 'localhost:22' in cmdline_str):
                                 found_ssh = True
                                 
                 except (self.psutil.NoSuchProcess, self.psutil.AccessDenied):
@@ -2534,19 +2537,13 @@ class AS7Diagnostic:
         else:
             self.log_success("Process 'mirror.py' is running.")
 
-        if not found_autossh:
-            if not self.is_root and not is_meteor_user:
-                 self.log_issue("PERMISSION_DENIED", {'check': "autossh process status. Run as root or meteor."})
-            else:
-                 self.log_issue("NMN_AUTOSSH_PROC_DOWN")
-        else:
-            self.log_success("Process 'autossh' for NMN is running.")
-            
         if not found_ssh:
-             if not self.is_root and not is_meteor_user:
-                  self.log_issue("PERMISSION_DENIED", {'check': "active ssh tunnel process status. Run as root or meteor."})
-             else:
-                  self.log_issue("NMN_SSH_PROC_DOWN")
+            if not self.is_root and not is_meteor_user:
+                self.log_issue("PERMISSION_DENIED", {'check': "SSH tunnel process status. Run as root or meteor."})
+            elif found_autossh:
+                self.log_issue("NMN_SSH_PROC_DOWN")
+            else:
+                self.log_issue("NMN_AUTOSSH_PROC_DOWN")
         else:
             self.log_success("Active 'ssh' tunnel process for NMN is running.")
 

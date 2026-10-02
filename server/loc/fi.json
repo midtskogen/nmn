@@ -153,5 +153,8 @@
     "player_brightness": "Kirkkaus",
     "player_contrast": "Kontrasti",
     "player_saturation": "Kylläisyys",
-    "player_reset_filters": "Palauta"
+    "player_reset_filters": "Palauta",
+    "theme_label": "Teema",
+    "theme_classic": "Klassinen",
+    "theme_night": "Yötaivas"
 }

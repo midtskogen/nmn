@@ -153,5 +153,8 @@
   "player_brightness": "Lysstyrke",
   "player_contrast": "Kontrast",
   "player_saturation": "Metning",
-  "player_reset_filters": "Nullstill filter"
+  "player_reset_filters": "Nullstill filter",
+  "theme_label": "Tema",
+  "theme_classic": "Klassisk",
+  "theme_night": "Nattehimmel"
 }

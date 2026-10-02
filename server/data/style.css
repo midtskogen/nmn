@@ -1213,6 +1213,22 @@ button:hover:not(:disabled) {
     font-size: 11px;
     color: #6c757d;
 }
+.stats-media-swap {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    line-height: 0;
+}
+.stats-fireball-thumb,
+.stats-fireball-video {
+    width: 110px;
+    height: 40px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    background: #000;
+    object-fit: cover;
+    object-position: center;
+}
 
 /* --- Video Preview Player Styles --- */
 .preview-modal {

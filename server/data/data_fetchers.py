@@ -590,6 +590,24 @@ def get_station_stats(station_id, start_date=None, end_date=None):
                     if 'end_lat' in traj:
                         evt['end_lat'] = traj['end_lat']
                         evt['end_lon'] = traj['end_lon']
+
+                    media = []
+                    try:
+                        for cam_dir in sorted(os.listdir(station_dir)):
+                            cam_path = os.path.join(station_dir, cam_dir)
+                            if not os.path.isdir(cam_path):
+                                continue
+                            if not os.path.isfile(os.path.join(cam_path, 'fireball_orig.jpg')):
+                                continue
+                            rel = f"{date_dir}/{time_dir}/{station_name}/{cam_dir}"
+                            item = {'img': f"/meteor/{rel}/fireball_orig.jpg"}
+                            if os.path.isfile(os.path.join(cam_path, 'fireball_orig.webm')):
+                                item['video'] = f"/meteor/{rel}/fireball_orig.webm"
+                            media.append(item)
+                    except (OSError, IOError):
+                        media = []
+                    if media:
+                        evt['media'] = media
                     events.append(evt)
                 except (KeyError, TypeError, ValueError):
                     # Skip malformed event data but continue processing others

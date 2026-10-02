@@ -88,7 +88,7 @@ L.GridLayer.Terminator = L.GridLayer.extend({
 // --- Public API ---
 
 export function initMap(mapId, onMoveEnd, onZoomEnd, t) {
-    const defaultMapView = [[64.7, 13.0], 5];
+    const defaultMapView = [[64.7, 17.0], 5];
     map = L.map(mapId, { maxZoom: 12, minZoom: 3 }).setView(...defaultMapView);
     
     L.tileLayer(`index.php?action=tile&type=satellite&z={z}&x={x}&y={y}`, {

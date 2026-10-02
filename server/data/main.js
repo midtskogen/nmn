@@ -1,5 +1,5 @@
 import * as uiManager from './ui_manager.js?v=20260822c';
-import * as mapHandler from './map_handler.js?v=20260822c';
+import * as mapHandler from './map_handler.js?v=20260822e';
 import * as chartHandler from './chart_handler.js';
 import * as api from './api.js';
 import { getSunTimes } from './calculations.js';
@@ -806,7 +806,7 @@ passData.passes : aircraftData.crossings;
         uiManager.showPanelError('satellite', t('loading_passes'));
         uiManager.showPanelError('aircraft', t('loading_aircraft'));
 
-        mapHandler.getMap().setView([64.7, 13.0], 5);
+        mapHandler.getMap().setView([64.7, 17.0], 5);
         uiManager.setUIState('ready');
     }
 

@@ -88,6 +88,12 @@ function get_user_ip() {
 function get_language($default_lang) {
     $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI', 'lv_LV'];
 
+    // Priority 0: Explicit ?lang= override (used by the language switcher,
+    // since JS cannot overwrite the HttpOnly lang cookie directly).
+    if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs, true)) {
+        return $_GET['lang'];
+    }
+
     // Priority 1: Check for an existing language cookie.
     if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
         return $_COOKIE['lang'];

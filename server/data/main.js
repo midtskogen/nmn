@@ -814,9 +814,9 @@ passData.passes : aircraftData.crossings;
     function initEventListeners() {
         document.getElementById('language-selector').addEventListener('click', (e) => {
             if (e.target.dataset.lang) {
-                const isHttps = location.protocol === 'https:';
-                document.cookie = `lang=${encodeURIComponent(e.target.dataset.lang)}; Path=/; Max-Age=31536000; SameSite=Lax${isHttps ? '; Secure' : ''}`;
-                location.reload();
+                const url = new URL(location.href);
+                url.searchParams.set('lang', e.target.dataset.lang);
+                location.href = url.toString();
             }
       
         });

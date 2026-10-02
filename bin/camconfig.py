@@ -302,6 +302,10 @@ def main():
                                   "The first two components identify the subgroup to read.\n"
                                   "Example: --get Camera.Param.ExposureParam.LeastTime\n"
                                   "         --get Camera.Param.GainParam"))
+    mode_group.add_argument("--clone", metavar="IP", type=str,
+                            help=("CLI MODE: Clone all settings from the given source IP to the\n"
+                                  "camera(s) given by --ip (same as the 'Clone from' dropdown in the GUI).\n"
+                                  "Example: --clone 192.168.76.71 --ip 192.168.76.72-77"))
     
     args = parser.parse_args()
     
@@ -1137,6 +1141,24 @@ def main():
         
         controller = CameraController(ips)
         run_flask_app(controller, port=args.port)
+
+    elif args.clone:
+        source_ip = args.clone
+        print(f"Cloning settings from {source_ip} to: {ips}")
+        failed = False
+        for ip in ips:
+            if ip == source_ip:
+                print(f"Skipping {ip} (it is the clone source).")
+                continue
+            result = controller.clone_settings(source_ip, ip)
+            if result["success"]:
+                print(f"  {ip}: {result['message']}")
+                for err in result.get("errors", []):
+                    print(f"    - {err}")
+            else:
+                failed = True
+                print(f"  {ip}: ERROR - {result['message']}")
+        if failed: sys.exit(1)
 
     elif args.get:
         def nested_get(d, keys):

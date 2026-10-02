@@ -4375,6 +4375,42 @@ export function displayStationStats(data, { onDateRangeChange, onEventClick, onE
         });
 
         const row = createEl('div', { className: 'stats-event-row' });
+
+        if (event.media && event.media.length > 0) {
+            for (const m of event.media) {
+                const holder = createEl('span', { className: 'stats-media-swap' });
+                const img = createEl('img', { className: 'stats-fireball-thumb', src: m.img, loading: 'lazy', alt: '' });
+                if (m.video) img.dataset.videosrc = m.video;
+                holder.addEventListener('mouseenter', () => {
+                    let video = holder.querySelector('video');
+                    if (!video && img.dataset.videosrc) {
+                        video = document.createElement('video');
+                        video.src = img.dataset.videosrc;
+                        video.loop = true;
+                        video.muted = true;
+                        video.playsInline = true;
+                        video.className = 'stats-fireball-video';
+                        holder.appendChild(video);
+                    }
+                    if (video) {
+                        img.style.display = 'none';
+                        video.style.display = 'inline-block';
+                        video.play().catch(() => {});
+                    }
+                });
+                holder.addEventListener('mouseleave', () => {
+                    const video = holder.querySelector('video');
+                    if (video) {
+                        video.pause();
+                        video.style.display = 'none';
+                    }
+                    img.style.display = 'inline-block';
+                });
+                holder.appendChild(img);
+                btn.insertBefore(holder, countBadge);
+            }
+        }
+
         row.appendChild(btn);
 
         const match = ts.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/);

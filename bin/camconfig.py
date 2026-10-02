@@ -17,6 +17,7 @@ from dvrip import DVRIPCam
 from pprint import pprint
 import threading
 import json
+import time
 
 # Telnet root password: xmhdipc
 
@@ -169,14 +170,25 @@ class CameraController:
             self.all_camera_data.pop(ip, None)
 
     def apply_settings(self, ip, subgroup, new_settings):
-        try:
-            cam = DVRIPCam(ip, user='admin', password='')
-            if not cam.login(): raise ConnectionError("Login failed.")
-            cam.set_info(subgroup, new_settings)
-            cam.close()
-            return {"success": True, "message": f"Settings for '{subgroup}' applied to {ip}."}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
+        # Applying some groups makes the camera reboot, which drops every
+        # connection for a while — retry connect failures until it is back.
+        last_err = None
+        for attempt in range(7):
+            try:
+                cam = DVRIPCam(ip, user='admin', password='')
+                if not cam.login(): raise ConnectionError("Login failed.")
+                cam.set_info(subgroup, new_settings)
+                cam.close()
+                if attempt > 0:
+                    return {"success": True, "message": f"Settings for '{subgroup}' applied to {ip} (after camera reboot)."}
+                return {"success": True, "message": f"Settings for '{subgroup}' applied to {ip}."}
+            except Exception as e:
+                last_err = e
+                if "connect" in str(e).lower() or "login" in str(e).lower():
+                    time.sleep(15)
+                    continue
+                return {"success": False, "message": str(e)}
+        return {"success": False, "message": str(last_err)}
 
     def reboot_camera(self, ip):
         try:
@@ -206,23 +218,32 @@ class CameraController:
             return {"success": False, "message": f"Could not load settings from source {source_ip}: {source_data['error']}"}
 
         errors = []
-        groups_to_clone = sorted([group for group in source_data if group != "error"])
-        
+        # Groups that cannot be written back via set_info (firmware rejects
+        # the packet and may drop/reboot the camera right after).
+        skip_groups = {"AVEnc.DefinitionCfgTable"}
+        skipped = [g for g in skip_groups if g in source_data]
+        groups_to_clone = sorted(
+            group for group in source_data
+            if group != "error" and group not in skip_groups
+        )
+
         for group_name in groups_to_clone:
             settings_data = source_data[group_name]
             if settings_data is None: continue # Skip empty groups
-            
+
             result = self.apply_settings(dest_ip, group_name, settings_data)
             
             if not result["success"]:
                 errors.append(f"Failed to apply '{group_name}': {result['message']}")
 
         self.invalidate_cache(dest_ip)
-        
+
+        msg = "Successfully cloned all settings."
+        if skipped: msg += f" Skipped unwritable groups: {', '.join(sorted(skipped))}."
         if errors:
             return {"success": True, "message": "Clone complete (with errors)", "errors": errors}
         else:
-            return {"success": True, "message": "Successfully cloned all settings."}
+            return {"success": True, "message": msg}
 
 
 def main():

@@ -62,7 +62,7 @@ body.theme-night #starfield {
 /* --- Night theme --- */
 body.theme-night {
     --primary-color: #ffd166;
-    --secondary-color: rgba(27, 39, 53, 0.55);
+    --secondary-color: rgba(27, 39, 53, 0.72);
     --border-color: rgba(90, 106, 127, 0.55);
     --text-color: #e0e6ed;
     --success-color: #1e4620;

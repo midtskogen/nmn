@@ -396,11 +396,24 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
 /* --- Night theme --- */
 body.theme-night {
   --primary: #ffd166; --primary-color: #ffd166; --accent: #ff8a80;
-  --bg: #090a0f; --card: rgba(27,39,53,0.55); --border: #3d4a5a;
+  --bg: #090a0f; --card: rgba(27,39,53,0.72); --border: #3d4a5a;
   --text: #e0e6ed; --muted: #a0aab8;
 }
 body.theme-dark .tab-btn { background: rgba(36,52,71,0.75); }
 body.theme-dark .tab-btn:hover { background: rgba(46,64,85,0.85); }
+/* Invert white plot backgrounds — hue-rotate restores the trace colours,
+   and lighten-blend makes the black background take the navy backdrop
+   (translucent card over the starfield) instead of pure black.
+   Photos and video (real footage, already dark) are untouched. */
+body.theme-dark img.plot,
+body.theme-dark .brightness-card img {
+  filter: invert(1) hue-rotate(180deg);
+  mix-blend-mode: lighten;
+}
+/* Interactive map/orbit iframes are inverted by an injected stylesheet
+   (see nmnThemeIframeSync below); lighten-blend then lets the navy
+   backdrop show through their dark pixels, like the static plots. */
+body.theme-dark iframe { mix-blend-mode: lighten; }
 </style>
 <link rel="stylesheet" href="/meteor/theme.css">
 </head>
@@ -1659,7 +1672,43 @@ function closeTextViewer() {
     }
 }
 </script>
-<script src="/meteor/theme.js"></script>
+<script>
+// Applies the night theme inside same-origin iframes (interactive Plotly
+// map/orbit animations): an injected filter inverts the white figure
+// background, and the parent page's lighten-blend on the iframe element
+// shines the navy backdrop through the now-dark pixels.
+function nmnThemeIframeSync() {
+    const night = document.body.classList.contains('theme-dark');
+    document.querySelectorAll('iframe').forEach(function (f) {
+        try {
+            const doc = f.contentDocument;
+            if (!doc || !doc.documentElement) return;
+            let st = doc.getElementById('nmn-night-style');
+            if (night && !st) {
+                st = doc.createElement('style');
+                st.id = 'nmn-night-style';
+                st.textContent = 'html{filter:invert(1) hue-rotate(180deg)}';
+                (doc.head || doc.documentElement).appendChild(st);
+            } else if (!night && st) {
+                st.remove();
+            }
+        } catch (e) { /* iframe not loaded yet */ }
+    });
+}
+new MutationObserver(function (muts) {
+    for (const m of muts) {
+        if (m.type === 'attributes' && m.target === document.body) { nmnThemeIframeSync(); return; }
+        m.addedNodes.forEach(function (n) {
+            if (n.tagName === 'IFRAME') {
+                n.addEventListener('load', nmnThemeIframeSync);
+                nmnThemeIframeSync();
+            }
+        });
+    }
+}).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true, childList: true });
+document.addEventListener('DOMContentLoaded', nmnThemeIframeSync);
+</script>
+<script src="/meteor/theme.js?v=20261002a"></script>
 
 </body>
 </html>

@@ -233,5 +233,8 @@
     "playback_slowed": "Přehrávání zpomaleno na",
     "video_load_error": "Video nelze přehrát — zkuste přímé stažení.",
     "video_error_highres": "Prohlížeč nemůže přehrát toto časosběrné video ve vysokém rozlišení ({width}×{height}). Dekódování H.264 v prohlížečích má horní limit rozlišení. Můžete si soubor stáhnout a přehrát ho v externím přehrávači.",
-    "video_error_generic": "Video se nepodařilo přehrát."
+    "video_error_generic": "Video se nepodařilo přehrát.",
+    "theme_label": "Motiv",
+    "theme_classic": "Klasické",
+    "theme_night": "Noční obloha"
 }

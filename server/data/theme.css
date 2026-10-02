@@ -1,0 +1,388 @@
+/* --- Theme switcher and animated starfield (shared with /meteor/) --- */
+#starfield {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: -1;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+}
+
+body.theme-night #starfield {
+    opacity: 1;
+}
+
+.theme-selector {
+    position: absolute;
+    top: 20px;
+    left: 0;
+    z-index: 1001;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.9em;
+    background: rgba(255, 255, 255, 0.5);
+    padding: 5px 10px;
+    border-radius: 8px;
+}
+
+.theme-selector .theme-label {
+    margin-right: 4px;
+}
+
+.theme-selector input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.theme-selector label {
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: opacity 0.2s ease;
+}
+
+.theme-selector label:hover {
+    opacity: 1;
+}
+
+.theme-selector label.active {
+    opacity: 1;
+    font-weight: bold;
+    color: var(--primary-color);
+    text-decoration: underline;
+}
+
+/* --- Night theme --- */
+body.theme-night {
+    --primary-color: #ffd166;
+    --secondary-color: rgba(27, 39, 53, 0.55);
+    --border-color: rgba(90, 106, 127, 0.55);
+    --text-color: #e0e6ed;
+    --success-color: #1e4620;
+    --error-color: #5a2a2a;
+    background-color: #090a0f;
+    color-scheme: dark;
+}
+
+/* Semi-transparent panels let the starfield show through. */
+body.theme-dark .container,
+body.theme-dark .full-width-container,
+body.theme-dark #map-panel,
+body.theme-dark #control-panel,
+body.theme-dark #satellite-panel,
+body.theme-dark #aircraft-panel,
+body.theme-dark #lightning-panel,
+body.theme-dark #meteor-panel,
+body.theme-dark #station-stats-panel,
+body.theme-dark #results-panel,
+body.theme-dark #video-modal-content,
+body.theme-dark .preview-modal {
+    background-color: var(--secondary-color);
+}
+
+body.theme-dark header h1 {
+    text-shadow: none;
+}
+
+/* The neumorphic design uses bright top-left "highlight" shadows that glow
+   on a dark background — remove every box shadow, then give elevated panels
+   a single subtle dark shadow. */
+body.theme-dark * {
+    box-shadow: none !important;
+}
+
+body.theme-dark #map-panel,
+body.theme-dark #control-panel,
+body.theme-dark #satellite-panel,
+body.theme-dark #aircraft-panel,
+body.theme-dark #lightning-panel,
+body.theme-dark #meteor-panel,
+body.theme-dark #station-stats-panel,
+body.theme-dark #results-panel,
+body.theme-dark #video-modal-content,
+body.theme-dark .preview-modal,
+body.theme-dark .full-width-container {
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5) !important;
+}
+
+body.theme-dark a {
+    color: var(--primary-color);
+}
+body.theme-dark a:visited {
+    color: #aaa;
+}
+
+body.theme-dark button {
+    background-color: rgba(36, 52, 71, 0.75);
+    color: var(--text-color);
+}
+body.theme-dark button:hover:not(:disabled) {
+    background-color: rgba(46, 64, 85, 0.85);
+    color: var(--text-color);
+}
+
+body.theme-dark .date-nav-btn,
+body.theme-dark .stats-period-btn,
+body.theme-dark .stats-date-go-btn,
+body.theme-dark .satellite-preset-btn,
+body.theme-dark .meteor-report-link,
+body.theme-dark .leaflet-control button,
+body.theme-dark .leaflet-reset-view-control {
+    background-color: rgba(36, 52, 71, 0.75);
+    color: var(--text-color);
+    border-color: var(--border-color);
+}
+
+body.theme-dark .date-nav-btn:hover:not(:disabled),
+body.theme-dark .stats-period-btn:hover:not(:disabled),
+body.theme-dark .stats-period-btn.active,
+body.theme-dark .satellite-preset-btn:hover,
+body.theme-dark .satellite-preset-btn.active,
+body.theme-dark .leaflet-reset-view-control:hover {
+    background-color: var(--primary-color);
+    color: #090a0f;
+    border-color: var(--primary-color);
+}
+
+body.theme-dark input:not([type=checkbox]):not([type=radio]),
+body.theme-dark select,
+body.theme-dark textarea,
+body.theme-dark .select-stepper select,
+body.theme-dark .stats-date-input,
+body.theme-dark #date-display,
+body.theme-dark #satellite-search-input,
+body.theme-dark #aircraft-search-input {
+    background-color: rgba(13, 20, 31, 0.65);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+}
+
+body.theme-dark fieldset {
+    border-color: var(--border-color);
+}
+body.theme-dark legend {
+    color: var(--primary-color);
+}
+
+body.theme-dark #language-selector,
+body.theme-dark .theme-selector {
+    background: rgba(0, 0, 0, 0.4);
+}
+
+body.theme-dark .progress-bar-inner {
+    color: #090a0f;
+}
+
+body.theme-dark .stats-event-item {
+    border-bottom-color: var(--border-color);
+}
+body.theme-dark .stats-event-item.multi {
+    border-left-color: #2f7a3e;
+}
+body.theme-dark .stats-event-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.06);
+}
+body.theme-dark .stats-station-badge {
+    background: rgba(36, 52, 71, 0.75);
+    color: #a0aab8;
+}
+body.theme-dark .stats-station-badge.multi {
+    background: #1e4620;
+    color: #8fd19e;
+}
+body.theme-dark .stats-event-detail {
+    color: #a0aab8;
+}
+
+body.theme-dark .live-stream-link {
+    background-color: rgba(36, 52, 71, 0.75);
+    color: var(--text-color);
+}
+body.theme-dark a.live-stream-link {
+    color: var(--primary-color);
+}
+body.theme-dark .live-stream-link:hover {
+    background-color: rgba(46, 64, 85, 0.85);
+    color: var(--text-color);
+}
+
+body.theme-dark .satellite-range-track {
+    background: #2a3a4d;
+}
+body.theme-dark .satellite-range-progress {
+    background: var(--primary-color);
+}
+body.theme-dark .satellite-range-input::-webkit-slider-thumb {
+    background: var(--primary-color);
+    border-color: rgba(13, 20, 31, 0.65);
+}
+body.theme-dark .satellite-range-input::-moz-range-thumb {
+    background: var(--primary-color);
+    border-color: rgba(13, 20, 31, 0.65);
+}
+body.theme-dark .satellite-range-tick {
+    background: #3d4a5a;
+}
+body.theme-dark .satellite-range-tick.major {
+    background: #5a6b7f;
+}
+body.theme-dark .satellite-range-tick-label {
+    color: #7d8b9c;
+}
+body.theme-dark .satellite-range-tick-label.major,
+body.theme-dark .satellite-range-labels {
+    color: #a0aab8;
+}
+
+body.theme-dark .stats-summary {
+    background: rgba(13, 20, 31, 0.65);
+    border-color: var(--border-color);
+}
+body.theme-dark .stats-single { color: #a0aab8; }
+body.theme-dark .stats-orbit { color: #9db2c8; }
+body.theme-dark .stats-multi { color: #58d68d; }
+body.theme-dark .stats-shower { color: #e8a35c; }
+body.theme-dark .stats-sporadic { color: #b07cc6; }
+body.theme-dark .stats-speed { color: #5dade2; }
+body.theme-dark .stats-alt { color: #48c9b0; }
+
+body.theme-dark .event-link {
+    background-color: rgba(36, 52, 71, 0.75);
+    color: var(--text-color);
+}
+body.theme-dark .event-link:hover {
+    background-color: rgba(46, 64, 85, 0.85);
+}
+body.theme-dark .event-link.selected {
+    background-color: var(--primary-color);
+    color: #090a0f;
+}
+
+body.theme-dark .satellite-group.pass-odd {
+    background-color: rgba(255, 255, 255, 0.04);
+}
+body.theme-dark .satellite-group.selected-pass {
+    background-color: rgba(114, 28, 36, 0.45);
+    border-left-color: #e07b84;
+}
+body.theme-dark .magnitude {
+    color: #a0aab8;
+}
+
+body.theme-dark .lightning-list li {
+    border-bottom-color: var(--border-color);
+}
+body.theme-dark .lightning-list li:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+body.theme-dark .lightning-list li.selected-lightning {
+    background-color: rgba(114, 28, 36, 0.45);
+    border-left-color: #e07b84;
+}
+body.theme-dark .strike-type-indicator.ic {
+    color: #999;
+}
+body.theme-dark .lightning-icon-white {
+    color: #bbb;
+}
+
+body.theme-dark .ground-track-label {
+    background: rgba(13, 20, 31, 0.75);
+    border-color: #555;
+    color: var(--text-color);
+}
+
+body.theme-dark hr {
+    border-color: var(--border-color);
+}
+
+/* --- Preview (image/video) modal --- */
+body.theme-dark .preview-filter-controls {
+    background: rgba(36, 52, 71, 0.5);
+}
+body.theme-dark .preview-filter-label {
+    color: #a0aab8;
+}
+body.theme-dark .preview-slider {
+    accent-color: var(--primary-color);
+}
+body.theme-dark .preview-control-btn {
+    background: rgba(36, 52, 71, 0.75);
+    color: var(--text-color);
+}
+body.theme-dark .preview-control-btn:hover {
+    background: rgba(46, 64, 85, 0.85);
+}
+body.theme-dark .preview-control-btn.screenshot {
+    background: rgba(40, 130, 75, 0.7);
+}
+body.theme-dark .preview-control-btn.screenshot:hover {
+    background: rgba(50, 150, 90, 0.85);
+}
+body.theme-dark .preview-control-btn.reset {
+    background: rgba(36, 52, 71, 0.75);
+}
+body.theme-dark .preview-control-btn.reset:hover {
+    background: rgba(46, 64, 85, 0.85);
+}
+body.theme-dark .preview-control-btn.nav-btn:disabled {
+    color: #5a6b7f;
+}
+body.theme-dark .preview-close-btn {
+    color: #a0aab8;
+}
+body.theme-dark .preview-close-btn:hover {
+    color: var(--text-color);
+}
+body.theme-dark .modal-drag-bar::after {
+    background: rgba(255, 255, 255, 0.35);
+}
+
+/* Misc muted greys that vanish on the dark background */
+body.theme-dark .time-set h6 {
+    color: #a0aab8;
+    border-bottom-color: var(--border-color);
+}
+body.theme-dark .checkbox-group label,
+body.theme-dark .form-group label,
+body.theme-dark fieldset label {
+    color: var(--text-color);
+}
+
+body.theme-dark .leaflet-bar {
+    border-color: var(--border-color);
+}
+body.theme-dark .leaflet-bar a {
+    background-color: rgba(36, 52, 71, 0.75);
+    color: var(--text-color);
+    border-bottom-color: var(--border-color);
+}
+body.theme-dark .leaflet-bar a:hover {
+    background-color: rgba(46, 64, 85, 0.85);
+    color: var(--primary-color);
+}
+body.theme-dark .leaflet-bar a.leaflet-disabled {
+    background-color: rgba(13, 20, 31, 0.65);
+    color: #5a6b7f;
+}
+
+body.theme-dark .leaflet-container {
+    background: rgba(13, 20, 31, 0.65);
+}
+body.theme-dark .leaflet-layer img {
+    filter: brightness(0.85) saturate(0.85);
+}
+body.theme-dark .leaflet-control-attribution {
+    background: rgba(13, 20, 31, 0.8);
+    color: #a0aab8;
+}
+body.theme-dark .leaflet-control-attribution a {
+    color: var(--primary-color);
+}

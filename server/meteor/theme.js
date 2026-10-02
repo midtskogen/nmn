@@ -27,6 +27,16 @@
                 if (label) label.classList.toggle('active', checked);
             });
             if (starfield) starfield.setOptions(theme);
+            // Swap media sources that declare a night variant (data-night-src).
+            document.querySelectorAll('source[data-night-src]').forEach(src => {
+                if (src.dataset.daySrc === undefined) src.dataset.daySrc = src.getAttribute('src');
+                const target = name === 'classic' ? src.dataset.daySrc : src.dataset.nightSrc;
+                if (target && src.getAttribute('src') !== target) {
+                    src.setAttribute('src', target);
+                    const video = src.closest('video');
+                    if (video) { video.load(); video.play().catch(() => {}); }
+                }
+            });
         }
 
         themeRadios.forEach(radio => {

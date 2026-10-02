@@ -140,6 +140,7 @@ foreach (glob('*/') as $stdir) {
 
         // Webm / fireball video
         $webm = file_exists($camdir.'/fireball_neg.webm') ? $camdir.'/fireball_neg.webm' : null;
+        $webm_night = file_exists($camdir.'/fireball.webm') ? $camdir.'/fireball.webm' : null;
         $webm_orig = file_exists($camdir.'/fireball_orig.webm') ? $camdir.'/fireball_orig.webm' : null;
 
         // Station label
@@ -159,7 +160,7 @@ foreach (glob('*/') as $stdir) {
         }
 
         if ($thumb || $webm) {
-            $station_cams[] = compact('station','cam','camdir','thumb','brightness','webm','webm_orig','label');
+            $station_cams[] = compact('station','cam','camdir','thumb','brightness','webm','webm_night','webm_orig','label');
         }
     }
 }
@@ -439,7 +440,7 @@ body.theme-dark .tab-btn:hover { background: rgba(46,64,85,0.85); }
     <div class="thumb-card<?php echo $i===0?' active':''; ?>" onclick="showStn(<?php echo $i; ?>, true)" id="tc-<?php echo $i; ?>">
       <?php if ($sc['webm']): ?>
       <div class="tc-webm-wrap">
-        <video autoplay loop muted playsinline><source src="<?php echo htmlspecialchars($sc['webm']); ?>" type="video/webm"></video>
+        <video autoplay loop muted playsinline><source src="<?php echo htmlspecialchars($sc['webm']); ?>"<?php if (!empty($sc['webm_night'])): ?> data-night-src="<?php echo htmlspecialchars($sc['webm_night']); ?>"<?php endif; ?> type="video/webm"></video>
       </div>
       <?php endif; ?>
       <div class="tc-img-wrap">
@@ -544,7 +545,7 @@ body.theme-dark .tab-btn:hover { background: rgba(46,64,85,0.85); }
           <img src="<?php echo htmlspecialchars($sc['thumb']); ?>" alt="<?php echo htmlspecialchars($sc['label']); ?>">
         <?php elseif ($sc['webm']): ?>
           <video autoplay loop muted playsinline>
-            <source src="<?php echo htmlspecialchars($sc['webm']); ?>" type="video/webm">
+            <source src="<?php echo htmlspecialchars($sc['webm']); ?>"<?php if (!empty($sc['webm_night'])): ?> data-night-src="<?php echo htmlspecialchars($sc['webm_night']); ?>"<?php endif; ?> type="video/webm">
           </video>
         <?php endif; ?>
       </div>
@@ -764,7 +765,7 @@ body.theme-dark .tab-btn:hover { background: rgba(46,64,85,0.85); }
           <img src="<?php echo htmlspecialchars($sc['thumb']); ?>" alt="<?php echo htmlspecialchars($sc['label']); ?>">
         <?php elseif ($sc['webm']): ?>
           <video autoplay loop muted playsinline>
-            <source src="<?php echo htmlspecialchars($sc['webm']); ?>" type="video/webm">
+            <source src="<?php echo htmlspecialchars($sc['webm']); ?>"<?php if (!empty($sc['webm_night'])): ?> data-night-src="<?php echo htmlspecialchars($sc['webm_night']); ?>"<?php endif; ?> type="video/webm">
           </video>
         <?php endif; ?>
       </div>

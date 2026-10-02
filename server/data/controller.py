@@ -292,9 +292,16 @@ HTML_TEMPLATE = """
 <script src="//cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="//cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <link rel="stylesheet" href="style.css?v=20260822b">
+<link rel="stylesheet" href="theme.css?v=20261002f">
 </head><body>
+<canvas id="starfield"></canvas>
 <div class="container">
     <header>
+        <div class="theme-selector">
+            <span class="theme-label">__{{theme_label}}__:</span>
+            <label><input type="radio" name="nmn-theme" value="classic" checked> __{{theme_classic}}__</label>
+            <label><input type="radio" name="nmn-theme" value="night"> __{{theme_night}}__</label>
+        </div>
         <div id="language-selector">
             <span data-lang="nb_NO" title="Norsk">🇳🇴</span>
             <span data-lang="en_GB" title="English">🇬🇧</span>
@@ -414,7 +421,8 @@ HTML_TEMPLATE = """
         <div id="results-log"></div>
     </footer>
 </div>
-<script src="main.js?v=20260822d" type="module"></script>
+<script src="theme.js?v=20261002a"></script>
+<script src="main.js?v=20260822g" type="module"></script>
 </body></html>
 """
 

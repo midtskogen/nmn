@@ -388,10 +388,30 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
 .text-timestamp{color:#dcdcaa}  /* timestamps in yellow */
 .text-row:nth-child(even){background:#0d1f35}  /* alternating row colors in dark blue */
 .text-header{background:#1a3a5c;color:#fff;padding:5px 10px;font-weight:bold}
+
+/* Theme selector (shared with /meteor/ index and /data/) */
+.theme-selector { position: absolute; top: 1em; left: 0; z-index: 100; }
+
+/* --- Night theme --- */
+body.theme-night {
+  --primary: #ffd166; --primary-color: #ffd166; --accent: #ff8a80;
+  --bg: #090a0f; --card: rgba(27,39,53,0.55); --border: #3d4a5a;
+  --text: #e0e6ed; --muted: #a0aab8;
+}
+body.theme-dark .tab-btn { background: rgba(36,52,71,0.75); }
+body.theme-dark .tab-btn:hover { background: rgba(46,64,85,0.85); }
 </style>
+<link rel="stylesheet" href="/meteor/theme.css">
 </head>
 <body>
+<canvas id="starfield"></canvas>
 <div class="page-wrapper">
+
+  <div class="theme-selector">
+    <span class="theme-label"><?php echo htmlspecialchars($t['theme_label'] ?? 'Tema'); ?>:</span>
+    <label><input type="radio" name="nmn-theme" value="classic" checked> <?php echo htmlspecialchars($t['theme_classic'] ?? 'Klassisk'); ?></label>
+    <label><input type="radio" name="nmn-theme" value="night"> <?php echo htmlspecialchars($t['theme_night'] ?? 'Nattehimmel'); ?></label>
+  </div>
 
   <div class="lang-sw">
     <a href="?lang=nb_NO" title="Norsk">🇳🇴</a>
@@ -1638,6 +1658,7 @@ function closeTextViewer() {
     }
 }
 </script>
+<script src="/meteor/theme.js"></script>
 
 </body>
 </html>

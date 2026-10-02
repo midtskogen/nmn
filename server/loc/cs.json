@@ -148,5 +148,8 @@
   "player_brightness": "Jas",
   "player_contrast": "Kontrast",
   "player_saturation": "Sytost",
-  "player_reset_filters": "Resetovat"
+  "player_reset_filters": "Resetovat",
+  "theme_label": "Motiv",
+  "theme_classic": "Klasické",
+  "theme_night": "Noční obloha"
 }

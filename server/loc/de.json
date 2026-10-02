@@ -148,5 +148,8 @@
   "player_brightness": "Helligkeit",
   "player_contrast": "Kontrast",
   "player_saturation": "Sättigung",
-  "player_reset_filters": "Zurücksetzen"
+  "player_reset_filters": "Zurücksetzen",
+  "theme_label": "Thema",
+  "theme_classic": "Klassisch",
+  "theme_night": "Nachthimmel"
 }

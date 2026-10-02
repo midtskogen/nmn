@@ -196,5 +196,19 @@
       "name": "finnskogen",
       "code": "FIN"
     }
+  },
+  "ams181": {
+    "astronomy": {
+      "latitude": 69.45436,
+      "longitude": 30.03999,
+      "elevation": 38,
+      "temperature": 5.0,
+      "pressure": 980.0
+    },
+    "station": {
+      "name": "svanhovd",
+      "display_name": "Svanhovd",
+      "code": "SVA"
+    }
   }
 }

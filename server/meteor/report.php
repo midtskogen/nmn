@@ -1813,7 +1813,7 @@ new MutationObserver(function (muts) {
 }).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true, childList: true });
 document.addEventListener('DOMContentLoaded', nmnThemeIframeSync);
 </script>
-<script src="/meteor/theme.js?v=20261003a"></script>
+<script src="/meteor/theme.js?v=20261004b"></script>
 
 </body>
 </html>

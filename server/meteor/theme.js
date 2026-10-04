@@ -61,6 +61,7 @@
     // opaque white. Chromatic terrain colours are kept unchanged.
     function themeMapImage(img, dark) {
         if (!img.dataset.origSrc) img.dataset.origSrc = img.getAttribute('src');
+        const isMap = /(?:^|[/_])map\.jpg(?:[?#]|$)/.test(img.dataset.origSrc);
         img.classList.toggle('nmn-darkmap', dark);
         if (!dark) {
             img.style.opacity = '';
@@ -83,7 +84,9 @@
             for (let i = 0, p = 0; p < px.length; p += 4, i++) {
                 const mx = Math.max(px[p], px[p + 1], px[p + 2]);
                 const mn = Math.min(px[p], px[p + 1], px[p + 2]);
-                mask[i] = !((mx - mn < 55) || (mx - mn < 80 && mx < 210));
+                mask[i] = isMap
+                    ? !((mx - mn < 55) || (mx - mn < 80 && mx < 210))
+                    : mx - mn > 8;
             }
             const integ = new Int32Array((W + 1) * (H + 1));
             for (let y = 0; y < H; y++)
@@ -104,7 +107,7 @@
                 const r = px[p], g = px[p + 1], b = px[p + 2];
                 const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
                 let achrom = !mask[i];
-                if (!achrom) {
+                if (isMap && !achrom) {
                     // few chromatic neighbours -> speck, not a feature
                     const frac = chromNeighbours(i % W, (i / W) | 0)
                         / ((Math.min(W - 1, (i % W) + 3) - Math.max(0, (i % W) - 3) + 1)
@@ -122,7 +125,20 @@
                 } else {
                     // chromatic: normalise brightness toward 200 keeping hue
                     // (dark sight lines brighten, bright overlays dim)
-                    const sc = Math.min(1.7, Math.max(0.55, 200 / Math.max(mx, 1)));
+                    let sc = Math.min(1.7, Math.max(0.55, 200 / Math.max(mx, 1)));
+                    if (!isMap) {
+                        // large, low-saturation light fills: blend into page
+                        if (sc < 0.9 && mx > 150 && (mx - mn) < 160) sc *= 0.35;
+                        // saturated blue lines have poor contrast on navy:
+                        // remap to gold, keeping per-pixel brightness
+                        else if (mx === b && b - r > 70 && b - g > 70) {
+                            const t = Math.min(255, b * sc);
+                            px[p]     = Math.round(t * 0.92);
+                            px[p + 1] = Math.round(t * 0.76);
+                            px[p + 2] = Math.round(t * 0.22);
+                            continue;
+                        }
+                    }
                     px[p]     = Math.round(Math.min(255, r * sc));
                     px[p + 1] = Math.round(Math.min(255, g * sc));
                     px[p + 2] = Math.round(Math.min(255, b * sc));

@@ -168,6 +168,10 @@ class ErrorCatalog:
         "NMN_CONFIG_MISSING": {"type": "failure", "description": "NMN config file '/etc/meteor.cfg' is missing.", "reason": "This file contains critical station configuration.", "fix": "Restore the file from a backup or create it with the required [astronomy] and [station] sections."},
         "NMN_CONFIG_NOT_READABLE": {"type": "failure", "description": "NMN config '/etc/meteor.cfg' is not readable by 'meteor'.", "reason": "The 'meteor' user must be able to read this file.", "fix": "Run 'sudo chmod 644 /etc/meteor.cfg' and verify ownership."},
         "NMN_CONFIG_PARSE_ERROR": {"type": "failure", "description": "NMN config '/etc/meteor.cfg' cannot be parsed.", "reason": "The file is corrupted or not a valid INI file.", "fix": "Check the file for syntax errors."},
+        "AMSCAMS_REPO_MISSING": {"type": "warning", "description": "amscams git repository is missing at '{path}'.", "reason": "The pipeline and the gitpull.py cron job depend on this repository.", "fix": "Restore the clone, e.g. 'sudo -u ams git clone git@github.com:mikehankey/amscams.git /home/ams/amscams'."},
+        "AMSCAMS_NO_REMOTE": {"type": "warning", "description": "amscams repo has no 'origin' remote configured.", "reason": "gitpull.py cannot update the station software without a remote.", "fix": "Run: sudo -u ams git -C /home/ams/amscams remote add origin git@github.com:mikehankey/amscams.git"},
+        "AMSCAMS_REMOTE_HTTPS": {"type": "warning", "description": "amscams remote '{url}' uses HTTPS.", "reason": "HTTPS remotes prompt for credentials, which hangs the unattended gitpull.py cron job.", "fix": "Switch to SSH: 'sudo -u ams git -C /home/ams/amscams remote set-url origin git@github.com:mikehankey/amscams.git' and ensure the deploy key is installed for the 'ams' user."},
+        "AMSCAMS_REPO_AUTH_FAIL": {"type": "warning", "description": "amscams repo cannot authenticate to its remote ({detail}).", "reason": "A non-interactive 'git ls-remote' failed; the deploy key is missing, not registered on GitHub, or the remote prompts for credentials, so the gitpull.py cron job will hang or fail.", "fix": "Copy the AS7DeployKey and ~/.ssh/config for the 'ams' user from a working station and verify 'sudo -u ams ssh -T git@github.com'."},
         "NMN_CONFIG_SECTION_MISSING": {"type": "failure", "description": "NMN config is missing required section '[{section}]'.", "reason": "The config file must contain both [astronomy] and [station] sections.", "fix": "Edit '/etc/meteor.cfg' and add the missing section."},
         "NMN_CONFIG_KEY_MISSING": {"type": "failure", "description": "NMN config is missing key '{key}' in section '[{section}]'.", "reason": "The config file is missing a required configuration key.", "fix": "Edit '/etc/meteor.cfg' and add the missing key."},
         "NMN_CONFIG_LAT_INVALID": {"type": "failure", "description": "NMN config latitude '{lat}' is invalid or out of range.", "reason": "Latitude must be a number between -90 and 90.", "fix": "Correct the 'latitude' value in '/etc/meteor.cfg'."},
@@ -372,6 +376,10 @@ class AS7Diagnostic:
             files = context.get('files', [])
             file_list = ', '.join(files[:5]) + (', ...' if len(files) > 5 else '')
             return f"NMN repo at '{context.get('path')}' has {context.get('count')} locally modified file(s): {file_list}"
+        if error_code in ("AMSCAMS_REPO_MISSING", "AMSCAMS_REMOTE_HTTPS", "AMSCAMS_REPO_AUTH_FAIL"):
+            return self.error_catalog.get_error(error_code)['description'].format(**context)
+        if error_code == "AMSCAMS_NO_REMOTE":
+            return "amscams repo has no 'origin' remote configured"
 
         info = self.error_catalog.get_error(error_code)
         return info['description'].format(**context)
@@ -405,7 +413,8 @@ class AS7Diagnostic:
         self.check_for_corrupt_files()
         self.check_processing_health()
         self.check_cron_jobs()
-        
+        self.check_amscams_git_access()
+
         if self.do_nmn_checks:
             self.run_nmn_checks() # Call the method
             
@@ -1823,6 +1832,60 @@ class AS7Diagnostic:
         except Exception as e:
             self.log_issue("PERMISSION_DENIED", {'check': f"reading 'ams' user's crontab: {e}"})
 
+
+    def check_amscams_git_access(self):
+        """Verify the amscams repo can pull non-interactively.
+
+        The gitpull.py cron job runs unattended: an HTTPS remote or a
+        missing deploy key makes it hang forever on a credential prompt.
+        Probe with GIT_TERMINAL_PROMPT=0 so failures surface immediately.
+        """
+        print("\n--- Checking amscams Git Access ---")
+        repo = "/home/ams/amscams"
+        if not os.path.isdir(os.path.join(repo, ".git")):
+            self.log_issue("AMSCAMS_REPO_MISSING", {'path': repo})
+            return
+
+        try:
+            current_user = pwd.getpwuid(os.getuid()).pw_name
+        except Exception:
+            current_user = None
+        base = ['sudo', '-u', 'ams'] if self.is_root and current_user != 'ams' else []
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/false",
+                   SSH_ASKPASS="/bin/false", SSH_ASKPASS_REQUIRE="never")
+        git = base + ['git', '-c', 'credential.helper=']
+
+        try:
+            res = subprocess.run(git + ['-C', repo, 'remote', 'get-url', 'origin'],
+                                 capture_output=True, text=True, timeout=15, env=env)
+            url = res.stdout.strip()
+        except Exception as e:
+            self.log_issue("PERMISSION_DENIED", {'check': f"reading remote url for {repo}: {e}"}, indent=1)
+            return
+
+        if not url:
+            self.log_issue("AMSCAMS_NO_REMOTE", indent=1)
+            return
+        if url.startswith(('http://', 'https://')):
+            self.log_issue("AMSCAMS_REMOTE_HTTPS", {'url': url}, indent=1)
+        else:
+            self.log_success(f"Remote URL is non-interactive ({url}).", indent=1)
+
+        try:
+            res = subprocess.run(git + ['-C', repo, 'ls-remote', 'origin', 'HEAD'],
+                                 capture_output=True, text=True, timeout=20, env=env)
+        except subprocess.TimeoutExpired:
+            self.log_issue("AMSCAMS_REPO_AUTH_FAIL", {'detail': 'timed out (likely credential prompt)'}, indent=1)
+            return
+        except Exception as e:
+            self.log_issue("PERMISSION_DENIED", {'check': f"git ls-remote for {repo}: {e}"}, indent=1)
+            return
+
+        if res.returncode == 0:
+            self.log_success("Git remote reachable and authenticated.", indent=1)
+        else:
+            detail = (res.stderr or res.stdout).strip().splitlines()
+            self.log_issue("AMSCAMS_REPO_AUTH_FAIL", {'detail': detail[-1][:160] if detail else 'unknown'}, indent=1)
 
     # =========================================================================
     # NMN CHECKS

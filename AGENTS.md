@@ -308,3 +308,21 @@
   directory: its fixture writes and removes `test_project.pto` in the current
   directory. Seed Python's `random` for repeatability and direct `NUMBA_CACHE_DIR`
   to temporary storage. The test uses 100,000 random panorama points.
+
+## Fireball crop direction and source-video validation
+
+- `20261003/034156/loten/cam2` has reversed motion in its supplied trail
+  endpoints; a correct PTO roll alone cannot fix it. The source video moves
+  approximately `(1349,3)` -> `(1298,46)` in native pixels. Static stack
+  refinement cannot establish temporal direction.
+- `20261003/224930_2/loten/cam5` has repeated/jumping detector positions that
+  produce a wrong crop axis, not merely a 180-degree reversal. Source-video
+  motion supplies a consistent replacement axis.
+- `meteorcrop.py` checks local source-video motion before generating the shared
+  image/video crop PTO. Confident motion corrects endpoint order or a badly
+  misaligned axis; ambiguous motion leaves the supplied geometry unchanged.
+  This changes crop products only, not `event.txt` astrometry or timestamps.
+- Run crop regression tests with
+  `python3 -B -m unittest discover -s bin -p test_meteorcrop.py`.
+  Verify real events in temporary directories with read-only source inputs;
+  do not rerun the full live fetch pipeline merely to test crop orientation.

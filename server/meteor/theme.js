@@ -27,6 +27,14 @@
                 if (label) label.classList.toggle('active', checked);
             });
             if (starfield) starfield.setOptions(theme);
+            // map.jpg + spd_acc.jpg: pixel-transform instead of CSS invert
+            // — white bg goes transparent, text/grid goes light, colours
+            // keep their hue (see themeMapImage).
+            const dark = name !== 'classic';
+            document.querySelectorAll('img.plot').forEach(img => {
+                if (/(map|spd_acc|height|posvstime|wind_profile)\.jpg/.test(img.dataset.origSrc || img.src))
+                    themeMapImage(img, dark);
+            });
             // Swap media sources that declare a night variant (data-night-src).
             document.querySelectorAll('source[data-night-src]').forEach(src => {
                 if (src.dataset.daySrc === undefined) src.dataset.daySrc = src.getAttribute('src');
@@ -45,6 +53,87 @@
 
         const saved = localStorage.getItem('nmn-meteor-theme') || 'classic';
         applyTheme(saved);
+    }
+
+    // Dark-theme transform for the static map image: achromatic pixels
+    // (white background, black text/grid) become white with alpha = 1-lum,
+    // so white turns transparent (navy card shows through) and black turns
+    // opaque white. Chromatic terrain colours are kept unchanged.
+    function themeMapImage(img, dark) {
+        if (!img.dataset.origSrc) img.dataset.origSrc = img.getAttribute('src');
+        img.classList.toggle('nmn-darkmap', dark);
+        if (!dark) {
+            img.style.opacity = '';
+            if (img.src !== img.dataset.origSrc) img.src = img.dataset.origSrc;
+            return;
+        }
+        img.style.opacity = '0';  // hidden until the night version is swapped in
+        const convert = () => {
+            const c = document.createElement('canvas');
+            c.width = img.naturalWidth;
+            c.height = img.naturalHeight;
+            const ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            const d = ctx.getImageData(0, 0, c.width, c.height);
+            const px = d.data;
+            const W = c.width, H = c.height;
+            // pass 1: chroma mask + integral image for a 7x7 box count,
+            // so isolated coloured specks can be demoted to achromatic
+            const mask = new Uint8Array(W * H);
+            for (let i = 0, p = 0; p < px.length; p += 4, i++) {
+                const mx = Math.max(px[p], px[p + 1], px[p + 2]);
+                const mn = Math.min(px[p], px[p + 1], px[p + 2]);
+                mask[i] = !((mx - mn < 55) || (mx - mn < 80 && mx < 210));
+            }
+            const integ = new Int32Array((W + 1) * (H + 1));
+            for (let y = 0; y < H; y++)
+                for (let x = 0; x < W; x++)
+                    integ[(y + 1) * (W + 1) + x + 1] =
+                        integ[y * (W + 1) + x + 1] + integ[(y + 1) * (W + 1) + x]
+                        - integ[y * (W + 1) + x] + mask[y * W + x];
+            const chromNeighbours = (x, y) => {
+                const x0 = Math.max(0, x - 3), y0 = Math.max(0, y - 3);
+                const x1 = Math.min(W - 1, x + 3), y1 = Math.min(H - 1, y + 3);
+                return integ[(y1 + 1) * (W + 1) + x1 + 1]
+                     - integ[y0 * (W + 1) + x1 + 1]
+                     - integ[(y1 + 1) * (W + 1) + x0]
+                     + integ[y0 * (W + 1) + x0];
+            };
+            // pass 2: transform
+            for (let i = 0, p = 0; p < px.length; p += 4, i++) {
+                const r = px[p], g = px[p + 1], b = px[p + 2];
+                const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+                let achrom = !mask[i];
+                if (!achrom) {
+                    // few chromatic neighbours -> speck, not a feature
+                    const frac = chromNeighbours(i % W, (i / W) | 0)
+                        / ((Math.min(W - 1, (i % W) + 3) - Math.max(0, (i % W) - 3) + 1)
+                         * (Math.min(H - 1, ((i / W) | 0) + 3) - Math.max(0, ((i / W) | 0) - 3) + 1));
+                    if (frac < 0.22) achrom = true;
+                }
+                if (achrom) {
+                    // white fades out, dark text/borders go bright; tint
+                    // follows the hue hint so water stays slightly blue
+                    // and land slightly green
+                    if (b > r && b > g)      { px[p] = 190; px[p+1] = 215; px[p+2] = 245; }
+                    else if (g > r && g > b) { px[p] = 205; px[p+1] = 240; px[p+2] = 210; }
+                    else                     { px[p] = 225; px[p+1] = 228; px[p+2] = 232; }
+                    px[p + 3] = Math.round(255 * Math.pow(1 - mx / 255, 0.55));
+                } else {
+                    // chromatic: normalise brightness toward 200 keeping hue
+                    // (dark sight lines brighten, bright overlays dim)
+                    const sc = Math.min(1.7, Math.max(0.55, 200 / Math.max(mx, 1)));
+                    px[p]     = Math.round(Math.min(255, r * sc));
+                    px[p + 1] = Math.round(Math.min(255, g * sc));
+                    px[p + 2] = Math.round(Math.min(255, b * sc));
+                }
+            }
+            ctx.putImageData(d, 0, 0);
+            img.src = c.toDataURL('image/png');
+            img.style.opacity = '';
+        };
+        if (img.complete && img.naturalWidth) convert();
+        else img.addEventListener('load', convert, { once: true });
     }
 
     function initStarfield(canvas) {

@@ -383,6 +383,128 @@ def get_projection_coords(event_dir: Path, config: configparser.ConfigParser) ->
     return _refine_gnomonic_coords(event_dir, start_xy, end_xy)
 
 
+def _fit_video_track(frames):
+    if len(frames) < 5:
+        return None
+    residual = np.array(frames, dtype=np.float32)
+    residual -= np.median(residual, axis=0)
+    residual -= 15
+    np.maximum(residual, 0, out=residual)
+    motion = np.maximum(residual[1:] - residual[:-1], 0)
+    del residual
+    strength = motion.sum(axis=(1, 2))
+    peak = int(np.argmax(strength))
+    active = np.flatnonzero(strength > max(500, strength[peak] * 0.15))
+    groups = np.split(active, np.flatnonzero(np.diff(active) > 2) + 1)
+    active = next((group for group in groups if peak in group), [])
+    if not 4 <= len(active) <= 120:
+        return None
+    points = []
+    for i in active:
+        weights = motion[i]
+        weights = np.where(weights >= max(10, weights.max() * 0.2), weights, 0)
+        total = weights.sum()
+        if total < 100:
+            continue
+        x = np.dot(weights.sum(axis=0), np.arange(weights.shape[1])) / total
+        y = np.dot(weights.sum(axis=1), np.arange(weights.shape[0])) / total
+        points.append((i + 1, x, y))
+    if len(points) < 4:
+        return None
+    points = np.asarray(points)
+    times, xy = points[:, 0], points[:, 1:]
+    i, j = np.triu_indices(len(points), 1)
+    velocity = np.median((xy[j] - xy[i]) / (times[j] - times[i])[:, None], axis=0)
+    origin = np.median(xy - times[:, None] * velocity, axis=0)
+    distance = np.linalg.norm(velocity) * (times[-1] - times[0])
+    errors = np.linalg.norm(xy - (origin + times[:, None] * velocity), axis=1)
+    if distance < 8 or np.quantile(errors, 0.8) > max(2, distance * 0.06):
+        return None
+    return origin + times[0] * velocity, origin + times[-1] * velocity
+
+
+def _get_video_track(source_video_path, base_pto_path, start_xy, end_xy):
+    pto = pto_mapper.parse_pto_file(str(base_pto_path))
+    mapped = [pto_mapper.map_pano_to_image(pto, *point) for point in (start_xy, end_xy)]
+    if any(point is None for point in mapped) or mapped[0][0] != mapped[1][0]:
+        return None
+    image_index = mapped[0][0]
+    image = pto[1][image_index]
+    cap = cv2.VideoCapture(str(source_video_path))
+    try:
+        if not cap.isOpened() or cap.get(cv2.CAP_PROP_FRAME_COUNT) > 600:
+            return None
+        size = np.array([cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT)])
+        if np.any(size <= 0):
+            return None
+        scale = size / [image['w'], image['h']]
+        endpoints = np.array([point[1:] for point in mapped]) * scale
+        if not np.isfinite(endpoints).all():
+            return None
+        margin = 80 * size[0] / 1920
+        lo = np.maximum(0, np.floor(endpoints.min(axis=0) - margin)).astype(int)
+        hi = np.minimum(size, np.ceil(endpoints.max(axis=0) + margin)).astype(int)
+        shape = hi - lo
+        if np.any(shape < 8):
+            return None
+        factor = min(1, 192 / max(shape))
+        small = np.maximum(1, np.round(shape * factor)).astype(int)
+        frames = []
+        while len(frames) <= 600:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            patch = frame[lo[1]:hi[1], lo[0]:hi[0]]
+            patch = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+            frames.append(cv2.resize(patch, tuple(small), interpolation=cv2.INTER_AREA))
+        if len(frames) > 600:
+            return None
+        track = _fit_video_track(frames)
+        if track is None:
+            return None
+        native = [(lo + (point + 0.5) * shape / small - 0.5) / scale for point in track]
+        projected = [pto_mapper.map_image_to_pano(pto, image_index, *point) for point in native]
+        if any(point is None for point in projected) or not np.isfinite(projected).all():
+            return None
+        return tuple(list(point) for point in projected)
+    finally:
+        cap.release()
+
+
+def refine_video_track(source_video_path, base_pto_path, start_xy, end_xy):
+    measured = _get_video_track(source_video_path, base_pto_path, start_xy, end_xy)
+    if measured is None:
+        print('   No reliable video track available; keeping supplied crop endpoints.')
+        return start_xy, end_xy
+    def segment_distance(point, start, end):
+        vector = np.subtract(end, start)
+        fraction = np.clip(np.dot(np.subtract(point, start), vector) / max(np.dot(vector, vector), 1e-9), 0, 1)
+        return np.linalg.norm(np.subtract(point, start) - fraction * vector)
+
+    separation = min(*(segment_distance(point, *measured) for point in (start_xy, end_xy)),
+                     *(segment_distance(point, start_xy, end_xy) for point in measured))
+    if separation > Settings.TRACK_WIDTH / 4:
+        print('   Video motion is away from the supplied trail; keeping crop endpoints.')
+        return start_xy, end_xy
+    axis = np.subtract(end_xy, start_xy)
+    motion = np.subtract(measured[1], measured[0])
+    length = np.linalg.norm(axis)
+    motion_length = np.linalg.norm(motion)
+    if motion_length < 1:
+        return start_xy, end_xy
+    cosine = np.dot(axis, motion) / (max(length, 1e-9) * motion_length)
+    delta = np.subtract(measured[0], start_xy)
+    offset = abs(axis[0] * delta[1] - axis[1] * delta[0]) / max(length, 1e-9)
+    if abs(cosine) < math.cos(math.radians(15)) or offset > Settings.TRACK_WIDTH / 4:
+        print(f'   Replacing inconsistent crop axis with video track: {measured}')
+        return measured
+    if cosine < 0:
+        print('   Reversing crop endpoints to match measured video motion.')
+        return end_xy, start_xy
+    print('   Crop direction confirmed by video motion.')
+    return start_xy, end_xy
+
+
 def create_fireball_pto(base_pto_path: Path, output_pto_path: Path, start_xy: List[float], end_xy: List[float]) -> Tuple[int, int]:
     """Generates a precise, video-compatible PTO file for the stitcher."""
     # Do NOT normalize endpoint order here: start_xy/end_xy are the meteor's
@@ -710,7 +832,7 @@ def _finalize_videos(event_dir: Path, original_vid: Path, processed_vid: Path, t
     print(f"✅ Success! Created '{final_orig_webm_path.name}'")
 
 
-def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path, final_w: int, final_h: int, delete_stitched_vid: bool = True):
+def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path: Path, final_w: int, final_h: int, delete_stitched_vid: bool = True, source_video_path: Optional[Path] = None):
     """
     Creates a background-subtracted and trimmed video of the meteor track.
     If delete_stitched_vid is False, the temporary stitched video is not removed.
@@ -723,7 +845,7 @@ def create_fireball_video(event_dir: Path, pto_path: Path, background_plate_path
     
     hevc_vid = next((v for v in candidates if "_hevc" in v.name), None)
     std_vid = next((v for v in candidates if "_hevc" not in v.name), None)
-    source_video_path = hevc_vid if hevc_vid else std_vid
+    source_video_path = source_video_path or (hevc_vid if hevc_vid else std_vid)
 
     if not source_video_path:
         raise MissingFileError(f"Could not find a source video in '{event_dir}'")
@@ -835,8 +957,6 @@ def main():
         if not gnomonic_base_pto_path.is_file():
             raise MissingFileError(f"Base projection PTO file not found at '{gnomonic_base_pto_path}'")
 
-        final_w, final_h = create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
-        
         # --- Source Detection Logic ---
         if args.source_video is not None:
             source_video_path = args.source_video.resolve()
@@ -858,7 +978,9 @@ def main():
 
         if not source_video_path.is_file():
             raise MissingFileError(f"Source video not found: '{source_video_path}'")
-        
+
+        start_xy, end_xy = refine_video_track(source_video_path, gnomonic_base_pto_path, start_xy, end_xy)
+        final_w, final_h = create_fireball_pto(gnomonic_base_pto_path, pto_path, start_xy, end_xy)
         background_plate_path = create_background_plate(event_dir, pto_path, source_video_path)
 
         # --- Mode-Specific Processing ---
@@ -866,7 +988,8 @@ def main():
         if args.mode == "video" or args.mode == "both":
             # background_plate_path was already created in the common setup phase
             # above; reuse it instead of regenerating it.
-            create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h)
+            create_fireball_video(event_dir, pto_path, background_plate_path, final_w, final_h,
+                                  source_video_path=source_video_path)
             
         if args.mode == "image" or args.mode == "both":
             # Process image independently using the best available static image source

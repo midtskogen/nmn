@@ -405,7 +405,10 @@ body.theme-dark .tab-btn:hover { background: rgba(46,64,85,0.85); }
    and lighten-blend makes the black background take the navy backdrop
    (translucent card over the starfield) instead of pure black.
    Photos and video (real footage, already dark) are untouched. */
-body.theme-dark img.plot,
+/* map.jpg is pixel-transformed by theme.js instead (class nmn-darkmap
+   opts it out): achromatic pixels become transparent/white while
+   terrain colours are preserved — inversion made the map look wrong. */
+body.theme-dark img.plot:not(.nmn-darkmap),
 body.theme-dark .brightness-card img {
   filter: invert(1) hue-rotate(180deg);
   mix-blend-mode: lighten;
@@ -1680,27 +1683,129 @@ function closeTextViewer() {
 function nmnThemeIframeSync() {
     const night = document.body.classList.contains('theme-dark');
     document.querySelectorAll('iframe').forEach(function (f) {
+        // hide until themed so the figure never flashes in day colours
+        if (night && !f._nmnDone) f.style.visibility = 'hidden';
         try {
             const doc = f.contentDocument;
             if (!doc || !doc.documentElement) return;
+            const w = f.contentWindow;
+            const fig = doc.querySelector('.js-plotly-plot, .plotly-graph-div');
+            // Plotly figures get a real night palette via relayout/restyle
+            // — same look as the pixel-mapped map.jpg.
+            const full = fig && fig._fullLayout;
+            if (w.Plotly && fig && fig.layout && full) {
+                const isScene = !!full.scene;
+                const isGeo = !!(full.geo && full.geo.showland && !isScene);
+                if (isScene || isGeo) {
+                    if (!f._nmnDay) {
+                        f._nmnDay = { layout: {}, opacity: null };
+                        const keys = ['paper_bgcolor','plot_bgcolor','font.color',
+                            'legend.bgcolor','legend.font.color'];
+                        if (isGeo) keys.push('geo.bgcolor','geo.landcolor','geo.lakecolor',
+                            'geo.oceancolor','geo.showocean','geo.subunitcolor',
+                            'geo.countrycolor','geo.coastlinecolor');
+                        if (isScene) ['x','y','z'].forEach(function(ax){
+                            ['backgroundcolor','gridcolor','linecolor','zerolinecolor']
+                                .forEach(function(p){ keys.push('scene.'+ax+'axis.'+p); });
+                        });
+                        keys.forEach(function(k){
+                            var parts=k.split('.'), v=full;
+                            parts.forEach(function(p){ v = v ? v[p] : undefined; });
+                            if (v !== undefined) f._nmnDay.layout[k] = v;
+                        });
+                        const surf = (fig.data||[]).find(t => t.type === 'surface');
+                        if (surf && surf.opacity !== undefined) f._nmnDay.opacity = surf.opacity;
+                    }
+                    const rel = night ? Object.assign({
+                        'paper_bgcolor':'rgba(27,39,53,0.55)',
+                        'plot_bgcolor':'rgba(0,0,0,0)',
+                        'font.color':'#dfe6ee',
+                        'legend.bgcolor':'rgba(36,52,71,0.85)',
+                        'legend.font.color':'#dfe6ee'
+                    }, isGeo ? {
+                        'geo.bgcolor':'rgba(0,0,0,0)',
+                        'geo.landcolor':'#33503f',
+                        'geo.lakecolor':'#263b52',
+                        'geo.oceancolor':'#263b52',
+                        'geo.showocean':true,
+                        'geo.subunitcolor':'#8a97a6',
+                        'geo.countrycolor':'#8a97a6',
+                        'geo.coastlinecolor':'#8a97a6'
+                    } : {
+                        'scene.xaxis.backgroundcolor':'#22313f',
+                        'scene.yaxis.backgroundcolor':'#22313f',
+                        'scene.zaxis.backgroundcolor':'#22313f',
+                        'scene.xaxis.gridcolor':'#4a5a6b',
+                        'scene.yaxis.gridcolor':'#4a5a6b',
+                        'scene.zaxis.gridcolor':'#4a5a6b',
+                        'scene.xaxis.linecolor':'#8a97a6',
+                        'scene.yaxis.linecolor':'#8a97a6',
+                        'scene.zaxis.linecolor':'#8a97a6',
+                        'scene.xaxis.zerolinecolor':'#8a97a6',
+                        'scene.yaxis.zerolinecolor':'#8a97a6',
+                        'scene.zaxis.zerolinecolor':'#8a97a6'
+                    }) : f._nmnDay.layout;
+                    w.Plotly.relayout(fig, rel);
+                    // dim the terrain surface by lowering opacity — the dark
+                    // background shows through, hues stay intact. (restyle of
+                    // colorscale resets gl3d surfaces to a default scale.)
+                    const surfIdx = (fig.data||[]).findIndex(t => t.type === 'surface');
+                    if (surfIdx >= 0) {
+                        w.Plotly.restyle(fig, { opacity: night ? 0.55 : (f._nmnDay.opacity ?? 1) }, [surfIdx]);
+                    }
+                    // dark body behind the figure margins
+                    let bst = doc.getElementById('nmn-night-body');
+                    if (night && !bst) {
+                        bst = doc.createElement('style');
+                        bst.id = 'nmn-night-body';
+                        bst.textContent = 'html,body{background:#141e28}';
+                        (doc.head || doc.documentElement).appendChild(bst);
+                    } else if (!night && bst) bst.remove();
+                    let st0 = doc.getElementById('nmn-night-style');
+                    if (st0) st0.remove();
+                    f._nmnDone = true;
+                    f.style.visibility = '';
+                    return;
+                }
+            }
             let st = doc.getElementById('nmn-night-style');
             if (night && !st) {
                 st = doc.createElement('style');
                 st.id = 'nmn-night-style';
                 st.textContent = 'html{filter:invert(1) hue-rotate(180deg)}';
                 (doc.head || doc.documentElement).appendChild(st);
+                // don't mark done — a Plotly figure may still appear and
+                // get the proper relayout; retries or success unhide it
             } else if (!night && st) {
                 st.remove();
+                f.style.visibility = '';
+            } else if (!night) {
+                f.style.visibility = '';
             }
         } catch (e) { /* iframe not loaded yet */ }
     });
 }
+// Plotly figures render async — keep retrying until the fig is styled
+// (a slow render used to leave the fallback invert filter in place)
+function nmnWatchIframe(f) {
+    let tries = 0;
+    const iv = setInterval(function () {
+        nmnThemeIframeSync();
+        if (f._nmnDone || ++tries > 20) {
+            f.style.visibility = '';  // never leave it hidden
+            clearInterval(iv);
+        }
+    }, 700);
+}
+document.querySelectorAll('iframe').forEach(function (f) {
+    f.addEventListener('load', function () { nmnWatchIframe(f); });
+});
 new MutationObserver(function (muts) {
     for (const m of muts) {
         if (m.type === 'attributes' && m.target === document.body) { nmnThemeIframeSync(); return; }
         m.addedNodes.forEach(function (n) {
             if (n.tagName === 'IFRAME') {
-                n.addEventListener('load', nmnThemeIframeSync);
+                n.addEventListener('load', function () { nmnWatchIframe(n); });
                 nmnThemeIframeSync();
             }
         });
@@ -1708,7 +1813,7 @@ new MutationObserver(function (muts) {
 }).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true, childList: true });
 document.addEventListener('DOMContentLoaded', nmnThemeIframeSync);
 </script>
-<script src="/meteor/theme.js?v=20261002a"></script>
+<script src="/meteor/theme.js?v=20261003a"></script>
 
 </body>
 </html>

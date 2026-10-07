@@ -1791,7 +1791,8 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             'obs_*.res', 'obs_*.kml', 'orbit.*', 'map.*', 'height.*', 'spd_acc.*', 'posvstime.*',
             'tables.html', '*_map.*', '*_orbit.*', '*_height.*', '*_spd_acc.*', '*_posvstime.*',
             '*_tables.html', '_fbspd_plot_data.pkl', '_metrack_plot_data.pkl',
-            'location.txt',
+            'location.txt', 'darkflight.*', 'map_darkflight.*', '*_map_darkflight.*',
+            '*_darkflight_table.html',
         )
         for pattern in stale_patterns:
             for artifact in event_dir.glob(pattern):

@@ -156,5 +156,14 @@
   "player_reset_filters": "Nullstill filter",
   "theme_label": "Tema",
   "theme_classic": "Klassisk",
-  "theme_night": "Nattehimmel"
+  "theme_night": "Nattehimmel",
+  "dark_flight": "Mørk flukt",
+  "df_end_position": "Sluttposisjon",
+  "df_end_speed": "Slutthastighet",
+  "df_entry_mass": "Estimert inngangsmasse",
+  "df_surviving_mass": "Estimert overlevende masse",
+  "df_impact": "Estimert nedslagspunkt",
+  "df_fall_area": "Nedfallsområde (MC)",
+  "df_estimated": "estimert",
+  "df_caption": "Estimert nedfallsområde for meteoritt. Punktene viser ulike fragmentasjonsscenarier."
 }

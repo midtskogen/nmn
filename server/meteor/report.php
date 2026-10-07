@@ -110,6 +110,8 @@ $stations_html = s4_ap("{$fp}stations.html","stations.html");
 $posvstime_jpg = s4_ap("{$fp}posvstime.jpg","posvstime.jpg");
 $spd_acc_jpg   = s4_ap("{$fp}spd_acc.jpg",  "spd_acc.jpg");
 $wind_jpg      = s4_ap("{$fp}wind_profile.jpg","wind_profile.jpg");
+$df_jpg        = s4_ap("{$fp}map_darkflight.jpg","map_darkflight.jpg");
+$df_table      = s4_ap("{$fp}darkflight_table.html","darkflight_table.html");
 $og_image      = s4_ap("{$fp}image.jpg","image.jpg");
 
 // ---- Collect station cameras ----
@@ -574,6 +576,14 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
     <div class="row">
       <?php if ($posvstime_jpg): ?><div class="col"><img class="plot" src="<?php echo $posvstime_jpg;?>" alt="position vs time"></div><?php endif; ?>
       <?php if ($spd_acc_jpg): ?><div class="col"><img class="plot" src="<?php echo $spd_acc_jpg;?>" alt="speed & acceleration"></div><?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($df_jpg || $df_table): ?>
+    <div class="row<?php echo ($df_jpg && $df_table) ? '' : ' row-single'; ?>">
+      <?php if ($df_jpg): ?><div class="col"><img class="plot" src="<?php echo $df_jpg;?>" alt="dark flight prediction">
+        <p class="caption"><?php echo htmlspecialchars($t['df_caption'] ?? 'Predicted fall area'); ?></p></div><?php endif; ?>
+      <?php if ($df_table): ?><div class="col"><?php readfile($df_table); ?></div><?php endif; ?>
     </div>
     <?php endif; ?>
 
@@ -1896,7 +1906,7 @@ new MutationObserver(function (muts) {
 }).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true, childList: true });
 document.addEventListener('DOMContentLoaded', nmnThemeIframeSync);
 </script>
-<script src="/meteor/theme.js?v=20261007n"></script>
+<script src="/meteor/theme.js?v=20261007o"></script>
 
 </body>
 </html>

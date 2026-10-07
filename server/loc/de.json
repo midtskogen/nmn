@@ -151,5 +151,14 @@
   "player_reset_filters": "Zurücksetzen",
   "theme_label": "Thema",
   "theme_classic": "Klassisch",
-  "theme_night": "Nachthimmel"
+  "theme_night": "Nachthimmel",
+  "dark_flight": "Dunkelflug",
+  "df_end_position": "Endposition",
+  "df_end_speed": "Endgeschwindigkeit",
+  "df_entry_mass": "Geschätzte Eintrittsmasse",
+  "df_surviving_mass": "Geschätzte Endmasse",
+  "df_impact": "Vorausgesagter Einschlag",
+  "df_fall_area": "Fallgebiet (MC)",
+  "df_estimated": "geschätzt",
+  "df_caption": "Vorausgesagtes Meteoriten-Fallgebiet. Marker zeigen verschiedene Fragmentierungsszenarien."
 }

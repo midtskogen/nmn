@@ -32,7 +32,7 @@
             // keep their hue (see themeMapImage).
             const dark = name !== 'classic';
             document.querySelectorAll('img.plot').forEach(img => {
-                if (/(map|spd_acc|height|posvstime|wind_profile)\.jpg/.test(img.dataset.origSrc || img.src))
+                if (/(map|map_darkflight|spd_acc|height|posvstime|wind_profile)\.jpg/.test(img.dataset.origSrc || img.src))
                     themeMapImage(img, dark);
             });
             // Swap media sources that declare a night variant (data-night-src).
@@ -62,7 +62,7 @@
     // opaque white. Chromatic terrain colours are kept unchanged.
     function themeMapImage(img, dark) {
         if (!img.dataset.origSrc) img.dataset.origSrc = img.getAttribute('src');
-        const isMap = /(?:^|[/_])map\.jpg(?:[?#]|$)/.test(img.dataset.origSrc);
+        const isMap = /(?:^|[/_])map(?:_darkflight)?\.jpg(?:[?#]|$)/.test(img.dataset.origSrc);
         img.classList.toggle('nmn-darkmap', dark);
         if (!dark) {
             img.style.opacity = '';

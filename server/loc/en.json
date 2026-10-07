@@ -156,5 +156,14 @@
   "player_reset_filters": "Reset",
   "theme_label": "Theme",
   "theme_classic": "Classic",
-  "theme_night": "Night Sky"
+  "theme_night": "Night Sky",
+  "dark_flight": "Dark flight",
+  "df_end_position": "End position",
+  "df_end_speed": "End speed",
+  "df_entry_mass": "Estimated entry mass",
+  "df_surviving_mass": "Estimated surviving mass",
+  "df_impact": "Predicted impact",
+  "df_fall_area": "Fall area (MC)",
+  "df_estimated": "estimated",
+  "df_caption": "Predicted meteorite fall area. Markers show different fragmentation scenarios."
 }

@@ -168,5 +168,7 @@
   "df_caption": "Prognozētā meteorīta kritiena zona. Marķieri parāda dažādus fragmentācijas scenārijus.",
   "df_unreliable": "neuzticams",
   "df_unreliable_note": "Masas novērtējums nav uzticams — spožā trajektorija pārāk īsa vai nesaderīga; karte parāda hipotētiskās fragmentu trajektorijas.",
-  "df_poorly_constrained": "vāji ierobežots"
+  "df_poorly_constrained": "vāji ierobežots",
+  "df_phot_mass": "Fotometriskā masa (gaismas līkne)",
+  "df_phot_note": "apakšējā robeža"
 }

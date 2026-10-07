@@ -163,5 +163,7 @@
   "df_caption": "Předpokládaná oblast dopadu meteoritu. Značky ukazují různé scénáře fragmentace.",
   "df_unreliable": "nespolehlivý",
   "df_unreliable_note": "Odhad hmotnosti je nespolehlivý — světelná dráha příliš krátká nebo nekonzistentní; mapa ukazuje hypotetické dráhy fragmentů.",
-  "df_poorly_constrained": "špatně vymezeno"
+  "df_poorly_constrained": "špatně vymezeno",
+  "df_phot_mass": "Fotometrická hmotnost (světelná křivka)",
+  "df_phot_note": "dolní mez"
 }

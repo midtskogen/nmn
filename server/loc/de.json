@@ -163,5 +163,7 @@
   "df_caption": "Vorausgesagtes Meteoriten-Fallgebiet. Marker zeigen verschiedene Fragmentierungsszenarien.",
   "df_unreliable": "unsicher",
   "df_unreliable_note": "Massenschätzung unsicher — Leuchtpfad zu kurz oder inkonsistent; die Karte zeigt hypothetische Fragmentbahnen.",
-  "df_poorly_constrained": "schlecht eingegrenzt"
+  "df_poorly_constrained": "schlecht eingegrenzt",
+  "df_phot_mass": "Photometrische Masse (Lichtkurve)",
+  "df_phot_note": "Untergrenze"
 }

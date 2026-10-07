@@ -177,5 +177,7 @@
     "df_caption": "Ennustettu meteoriitin putoamisalue. Merkit näyttävät eri pirstoutumisskenaarioita.",
     "df_unreliable": "epäluotettava",
     "df_unreliable_note": "Massa-arvio epäluotettava — valopolku liian lyhyt tai ristiriitainen; kartta näyttää hypoteettiset sirpaleradat.",
-    "df_poorly_constrained": "heikosti rajoitettu"
+    "df_poorly_constrained": "heikosti rajoitettu",
+    "df_phot_mass": "Fotometrinen massa (valokäyrä)",
+    "df_phot_note": "alaraja"
 }

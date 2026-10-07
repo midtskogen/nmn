@@ -103,28 +103,6 @@
                      - integ[(y1 + 1) * (W + 1) + x0]
                      + integ[y0 * (W + 1) + x0];
             };
-            // For the map, mark pixels outside the map frame: near-white
-            // areas connected to the image border (figure margins, outside
-            // the axes). Interior light areas — sea, uncovered tiles —
-            // keep the opaque dimmed blend like the map.html surface.
-            let outside = null;
-            if (isMap) {
-                outside = new Uint8Array(W * H);
-                const isLight = (i) => { const p = i * 4;
-                    return px[p] > 225 && px[p + 1] > 225 && px[p + 2] > 225; };
-                const queue = new Int32Array(W * H);
-                let qh = 0, qt = 0;
-                const seed = (i) => { if (!outside[i] && isLight(i)) { outside[i] = 1; queue[qt++] = i; } };
-                for (let x = 0; x < W; x++) { seed(x); seed((H - 1) * W + x); }
-                for (let y = 0; y < H; y++) { seed(y * W); seed(y * W + W - 1); }
-                while (qh < qt) {
-                    const i = queue[qh++], x = i % W, y = (i / W) | 0;
-                    if (x > 0)     { const n = i - 1; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
-                    if (x < W - 1) { const n = i + 1; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
-                    if (y > 0)     { const n = i - W; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
-                    if (y < H - 1) { const n = i + W; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
-                }
-            }
             // pass 2: transform
             for (let i = 0, p = 0; p < px.length; p += 4, i++) {
                 const r = px[p], g = px[p + 1], b = px[p + 2];
@@ -135,11 +113,7 @@
                     // is a continuous function of the pixel: no masks or
                     // thresholds, so JPEG noise can't flip a pixel's class
                     // and leave specks.
-                    if (outside && outside[i]) {
-                        // margin outside the map frame -> transparent fade
-                        px[p] = 225; px[p + 1] = 228; px[p + 2] = 232;
-                        px[p + 3] = Math.round(255 * Math.pow(1 - mx / 255, 0.55));
-                    } else {
+                    {
                         const bgr = r * 0.55 + 20 * 0.45;
                         const bgg = g * 0.55 + 30 * 0.45;
                         const bgb = b * 0.55 + 40 * 0.45;

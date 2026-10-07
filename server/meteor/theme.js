@@ -124,6 +124,25 @@
                     if (y > 0)     { const n = i - W; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
                     if (y < H - 1) { const n = i + W; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
                 }
+                // Grow into margin ink: achromatic neighbours of margin
+                // pixels (dark text cores, antialiased fringe) join the
+                // margin region so they take the white-ink path instead
+                // of being dimmed to invisible navy.
+                const isFringe = (i) => { const p = i * 4;
+                    return Math.max(px[p], px[p + 1], px[p + 2])
+                         - Math.min(px[p], px[p + 1], px[p + 2]) < 60; };
+                for (let pass = 0; pass < 5; pass++) {
+                    const grown = outside.slice();
+                    for (let i = 0; i < W * H; i++) {
+                        if (!outside[i]) continue;
+                        const x = i % W, y = (i / W) | 0;
+                        if (x > 0     && !grown[i - 1] && isFringe(i - 1)) grown[i - 1] = 1;
+                        if (x < W - 1 && !grown[i + 1] && isFringe(i + 1)) grown[i + 1] = 1;
+                        if (y > 0     && !grown[i - W] && isFringe(i - W)) grown[i - W] = 1;
+                        if (y < H - 1 && !grown[i + W] && isFringe(i + W)) grown[i + W] = 1;
+                    }
+                    outside = grown;
+                }
             }
             // pass 2: transform
             for (let i = 0, p = 0; p < px.length; p += 4, i++) {

@@ -129,27 +129,39 @@
             for (let i = 0, p = 0; p < px.length; p += 4, i++) {
                 const r = px[p], g = px[p + 1], b = px[p + 2];
                 const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-                let achrom = !mask[i];
-                if (isMap && !achrom) {
-                    // few chromatic neighbours -> speck, not a feature
-                    const frac = chromNeighbours(i % W, (i / W) | 0)
-                        / ((Math.min(W - 1, (i % W) + 3) - Math.max(0, (i % W) - 3) + 1)
-                         * (Math.min(H - 1, ((i / W) | 0) + 3) - Math.max(0, ((i / W) | 0) - 3) + 1));
-                    if (frac < 0.22) achrom = true;
+                if (isMap) {
+                    // Kartverket basemap palette — mirrors map.html's night
+                    // look (surface dimmed to 55% over #141e28). Everything
+                    // is a continuous function of the pixel: no masks or
+                    // thresholds, so JPEG noise can't flip a pixel's class
+                    // and leave specks.
+                    if (outside && outside[i]) {
+                        // margin outside the map frame -> transparent fade
+                        px[p] = 225; px[p + 1] = 228; px[p + 2] = 232;
+                        px[p + 3] = Math.round(255 * Math.pow(1 - mx / 255, 0.55));
+                    } else {
+                        const bgr = r * 0.55 + 20 * 0.45;
+                        const bgg = g * 0.55 + 30 * 0.45;
+                        const bgb = b * 0.55 + 40 * 0.45;
+                        // dark ink (labels, borders, grid) lifts toward
+                        // readable near-white; saturated features (trajectory,
+                        // markers, sight lines) lift toward vivid colour —
+                        // like the Plotly traces above the dimmed surface.
+                        const ink = Math.min(1, Math.max(0, (205 - mx) / 120));
+                        const sat = Math.min(1, Math.max(0, (mx - mn - 60) / 80));
+                        const vsc = Math.min(1.7, Math.max(1.0, 200 / Math.max(mx, 1)));
+                        const wInk = ink * (1 - sat), wSat = sat;
+                        px[p]     = Math.round(bgr + (235 - bgr) * wInk
+                            + (Math.min(255, r * vsc) - bgr) * wSat);
+                        px[p + 1] = Math.round(bgg + (238 - bgg) * wInk
+                            + (Math.min(255, g * vsc) - bgg) * wSat);
+                        px[p + 2] = Math.round(bgb + (244 - bgb) * wInk
+                            + (Math.min(255, b * vsc) - bgb) * wSat);
+                    }
+                    continue;
                 }
-                if (achrom && isMap && !(outside && outside[i])) {
-                    // Interior achromatic pixels: ink-coverage ramp from the
-                    // dimmed backdrop (light bg / water / tile edges) toward
-                    // opaque near-white text. A smooth ramp keeps the map's
-                    // anti-aliasing intact instead of a hard brightness cut.
-                    const cov = Math.min(1, Math.max(0, (210 - mx) / 100));
-                    const bgr = r * 0.55 + 20 * 0.45;
-                    const bgg = g * 0.55 + 30 * 0.45;
-                    const bgb = b * 0.55 + 40 * 0.45;
-                    px[p]     = Math.round(bgr + (235 - bgr) * cov);
-                    px[p + 1] = Math.round(bgg + (238 - bgg) * cov);
-                    px[p + 2] = Math.round(bgb + (244 - bgb) * cov);
-                } else if (achrom) {
+                let achrom = !mask[i];
+                if (achrom) {
                     // white fades out, dark text/borders go bright; tint
                     // follows the hue hint so water stays slightly blue
                     // and land slightly green

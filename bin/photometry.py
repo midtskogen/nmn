@@ -251,9 +251,13 @@ def photometric_mass(m_app, ranges_km, times_s, speeds_ms):
         return min(0.20, max(0.001, 0.0007 * (v_ms / 1000.0)))
     pts = [(t, m, r, v) for t, m, r, v in
            zip(times_s, m_app, ranges_km, speeds_ms)
-           if m is not None and r and r > 1.0]
+           if m is not None and r and r > 1.0 and np.isfinite(v)]
     if len(pts) < 2:
         return None
+    # reject corrupt inputs: meteor light curves span seconds, not minutes
+    if max(p[0] for p in pts) - min(p[0] for p in pts) > 60:
+        return None
+    pts = [(t, m, r, min(max(v, 3000.0), 72000.0)) for t, m, r, v in pts]
     ts = np.array([p[0] for p in pts])
     ts = ts - ts[0]
     lum = np.array([4 * math.pi * (r * 1e3) ** 2 * F_VEGA * 10 ** (-0.4 * m)

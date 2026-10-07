@@ -145,6 +145,11 @@
                     px[p]     = Math.round(r * 0.55 + 20 * 0.45);
                     px[p + 1] = Math.round(g * 0.55 + 30 * 0.45);
                     px[p + 2] = Math.round(b * 0.55 + 40 * 0.45);
+                } else if (achrom && isMap) {
+                    // Dark map text/labels: fully opaque near-white so labels
+                    // stay legible against the dimmed terrain.
+                    px[p] = 232; px[p + 1] = 235; px[p + 2] = 240;
+                    px[p + 3] = 255;
                 } else if (achrom) {
                     // white fades out, dark text/borders go bright; tint
                     // follows the hue hint so water stays slightly blue

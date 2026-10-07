@@ -156,5 +156,14 @@
     "player_reset_filters": "Palauta",
     "theme_label": "Teema",
     "theme_classic": "Klassinen",
-    "theme_night": "Yötaivas"
+    "theme_night": "Yötaivas",
+    "dark_flight": "Pimeä lento",
+    "df_end_position": "Loppupiste",
+    "df_end_speed": "Loppunopeus",
+    "df_entry_mass": "Arvioitu alkumassa",
+    "df_surviving_mass": "Arvioitu jäljellä oleva massa",
+    "df_impact": "Ennustettu iskupiste",
+    "df_fall_area": "Putoamisalue (MC)",
+    "df_estimated": "arvioitu",
+    "df_caption": "Ennustettu meteoriitin putoamisalue. Merkit näyttävät eri pirstoutumisskenaarioita."
 }

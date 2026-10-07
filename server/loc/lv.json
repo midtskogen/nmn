@@ -156,5 +156,14 @@
   "player_reset_filters": "Atiestatīt",
   "theme_label": "Tēma",
   "theme_classic": "Klasiskā",
-  "theme_night": "Nakts debess"
+  "theme_night": "Nakts debess",
+  "dark_flight": "Tumšais lidojums",
+  "df_end_position": "Beigu pozīcija",
+  "df_end_speed": "Beigu ātrums",
+  "df_entry_mass": "Aprēķinātā ieejas masa",
+  "df_surviving_mass": "Aprēķinātā atlikusī masa",
+  "df_impact": "Prognozētais kritiena punkts",
+  "df_fall_area": "Kritiena zona (MC)",
+  "df_estimated": "novērtējums",
+  "df_caption": "Prognozētā meteorīta kritiena zona. Marķieri parāda dažādus fragmentācijas scenārijus."
 }

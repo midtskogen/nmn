@@ -777,12 +777,6 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         logging.warning(f'darkflight: mass estimate {reliability} '
                         f'({"; ".join(issues)})')
 
-    # Nominal scenario mass: fade-consistent critical mass when unreliable,
-    # else the deceleration-inferred estimate
-    if reliability == 'unreliable' and m_crit > 0:
-        m_est = float(np.clip(m_crit, 1e-4, 100.0))
-    else:
-        m_est = float(np.clip(m_med if ref else 1.0, 1e-4, 100.0))
 
     # Entry-mass back-projection (needs height vs time along track)
     entry_estimates = []
@@ -797,6 +791,32 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                                     'm_crit_kg': e['m_crit_kg'],
                                     'm_fade_lo': e['m_fade_lo'],
                                     'm_fade_hi': e['m_fade_hi']})
+
+    # --- Photometric cross-check (star-calibrated light curve) ------------------
+    photometry = None
+    try:
+        import photometry as ph
+        photometry = ph.event_photometry(event_dir, resdat=resdat,
+                                         plot_data=fbspd_plot_data)
+    except Exception as e:
+        logging.debug(f'darkflight: photometry failed: {e}')
+
+    m_phot = photometry.get('m_phot_kg') if photometry else None
+    if m_phot and ref is not None and np.isfinite(m_med) and m_med > 0:
+        if m_med / m_phot > 50:
+            issues.append(
+                f'dynamic mass {m_med:.3g} kg >> photometric '
+                f'{m_phot:.3g} kg — likely bad track/fit')
+            if reliability == 'ok':
+                reliability = 'unreliable'
+
+    # Nominal scenario mass: photometric or fade-consistent mass when the
+    # deceleration fit is unreliable, else the deceleration-inferred estimate
+    if reliability == 'unreliable':
+        m_est = float(np.clip(m_phot or (m_crit if m_crit > 0 else 1.0),
+                              1e-4, 100.0))
+    else:
+        m_est = float(np.clip(m_med if ref else 1.0, 1e-4, 100.0))
 
     # Ground height near the nominal landing point
     h_ground = ground_elevation(end_lat, end_lon)

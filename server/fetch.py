@@ -709,6 +709,8 @@ def get_location_from_coords(lat, lon) -> str:
 
 
 def _fmt_mass(m_kg):
+    if m_kg >= 1000:
+        return f"{m_kg/1000:.2f} t"
     if m_kg >= 1:
         return f"{m_kg:.2f} kg"
     if m_kg >= 0.001:

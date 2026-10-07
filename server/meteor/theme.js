@@ -51,8 +51,9 @@
             radio.addEventListener('change', () => { if (radio.checked) applyTheme(radio.value); });
         });
 
+        const param = new URLSearchParams(location.search).get('theme');
         const saved = localStorage.getItem('nmn-meteor-theme') || 'classic';
-        applyTheme(saved);
+        applyTheme(param && themes[param] ? param : saved);
     }
 
     // Dark-theme transform for the static map image: achromatic pixels

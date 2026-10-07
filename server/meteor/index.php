@@ -280,7 +280,7 @@ $lang_short = substr($lang_code, 0, 2);
         /* === ADDED FOR IMAGE DISPLAY === */
         .media-container { margin-top: 5px; }
         .media-swap-container { display: flex; align-items: center; justify-content: center; gap: 5px; }
-        .media-swap-container img, .media-swap-container video { margin: 2px; border: 1px solid #ccc; width: 256px; height: auto; vertical-align: top; }
+        .media-swap-container img, .media-swap-container video { margin: 2px; border: 1px solid #ccc; border-radius: 3px; width: 256px; height: 72px; object-fit: cover; object-position: center; background: #000; vertical-align: top; }
         .image-separator { display: none; border: 0; border-top: 1px solid #888; margin: 15px 0 10px 0; }
         body.images-are-shown .image-separator { display: block; }
         
@@ -295,7 +295,7 @@ $lang_short = substr($lang_code, 0, 2);
         .info-column-left, .info-column-right { flex: 1; min-width: 0; }
         .static-content-wrapper { padding: 0 15px; }
         .scrollable-table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        .scrollable-table-container img { width: 256px; height: auto; }
+        .scrollable-table-container img { width: 256px; height: 72px; object-fit: cover; object-position: center; background: #000; }
         .image-checkbox { display: none; }
         
         /* === STYLES FOR ARCHIVE LIST === */

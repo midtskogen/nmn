@@ -168,5 +168,7 @@
   "df_caption": "Predicted meteorite fall area. Markers show different fragmentation scenarios.",
   "df_unreliable": "unreliable",
   "df_unreliable_note": "Mass estimate unreliable — luminous track too short or inconsistent; map shows hypothetical fragment paths.",
-  "df_poorly_constrained": "poorly constrained"
+  "df_poorly_constrained": "poorly constrained",
+  "df_phot_mass": "Photometric mass (light curve)",
+  "df_phot_note": "lower bound"
 }

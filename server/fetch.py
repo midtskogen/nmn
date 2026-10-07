@@ -750,6 +750,12 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                     rows.append(
                         f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
                         f'<td>~{_fmt_mass(est["m_fade_kg"])} ({rng_txt})</td></tr>')
+            ph = (results.get('photometric') or {}).get('m_phot_kg')
+            if ph:
+                rows.append(
+                    f'<tr><td>{t.get("df_phot_mass", "Photometric mass (light curve)")}:</td>'
+                    f'<td>~{_fmt_mass(ph)}'
+                    f' ({t.get("df_phot_note", "lower bound")})</td></tr>')
             if results.get('reliability') == 'unreliable':
                 rows.append(
                     f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">*'

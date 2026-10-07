@@ -832,6 +832,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         'm_est_ref_kg': m_est,
         'reliability': reliability,
         'issues': issues,
+        'photometric': photometry,
         'n_obs': int(n_obs), 'track_duration_s': float(duration),
         'scenarios': [{'name': s['name'], 'label': s['label'],
                        'impacts': [{'m': r['m'], **r['impact']}

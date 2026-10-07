@@ -145,7 +145,7 @@
                     px[p]     = Math.round(r * 0.55 + 20 * 0.45);
                     px[p + 1] = Math.round(g * 0.55 + 30 * 0.45);
                     px[p + 2] = Math.round(b * 0.55 + 40 * 0.45);
-                } else if (achrom && isMap) {
+                } else if (achrom && isMap && mx <= 120) {
                     // Dark map text/labels: fully opaque near-white so labels
                     // stay legible against the dimmed terrain.
                     px[p] = 232; px[p + 1] = 235; px[p + 2] = 240;

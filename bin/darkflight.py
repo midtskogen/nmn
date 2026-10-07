@@ -830,6 +830,9 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         'mass_estimates': mass_estimates,
         'entry_estimates': entry_estimates,
         'm_est_ref_kg': m_est,
+        'reliability': reliability,
+        'issues': issues,
+        'n_obs': int(n_obs), 'track_duration_s': float(duration),
         'scenarios': [{'name': s['name'], 'label': s['label'],
                        'impacts': [{'m': r['m'], **r['impact']}
                                    for r in s['results']]}

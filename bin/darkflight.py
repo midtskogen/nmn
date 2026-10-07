@@ -703,45 +703,100 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     track_dir /= np.linalg.norm(track_dir)
 
     # End speed & deceleration from fbspd fit
-    if fbspd_plot_data and fbspd_plot_data.get('final_params') is not None:
+    have_fit = (fbspd_plot_data is not None
+                and fbspd_plot_data.get('final_params') is not None)
+    pcov = None
+    if have_fit:
         from fbspd_merge import expfunc_1stder, expfunc_2ndder
         params = fbspd_plot_data['final_params']
-        t_last = float(np.max(fbspd_plot_data['final_merged_data']['reltime']))
-        v_end = float(expfunc_1stder(t_last, *params)) * 1000.0   # km/s -> m/s
-        a_end = float(abs(expfunc_2ndder(t_last, *params))) * 1000.0
-        t0_obs = float(np.min(fbspd_plot_data['final_merged_data']['reltime']))
+        pcov = fbspd_plot_data.get('pcov')
+        ts_obs = fbspd_plot_data['final_merged_data']['reltime']
+        hs_obs = fbspd_plot_data['final_merged_data']['height']
+        t0_obs = float(np.min(ts_obs)); t_last = float(np.max(ts_obs))
+        n_obs = len(ts_obs)
+
+        def v_of_t(t):
+            return float(expfunc_1stder(t, *params)) * 1000.0   # km/s -> m/s
+
+        def a_of_t(t):
+            return float(abs(expfunc_2ndder(t, *params))) * 1000.0
+
+        hfit = np.polyfit(ts_obs, hs_obs, 1) if len(ts_obs) > 2 else None
+
+        def h_of_t(t):
+            if hfit is not None:
+                return float(np.polyval(hfit, t)) * 1000.0
+            return end_h
+
+        v_end = v_of_t(t_last)
+        a_end = a_of_t(t_last)
     else:
-        v_end, a_end, t0_obs, t_last = 3000.0, 1e4, 0.0, 1.0
+        v_end, a_end, t0_obs, t_last, n_obs = 3000.0, 1e4, 0.0, 1.0, 0
         logging.warning('darkflight: no fbspd fit, using nominal v_end/a_end')
 
     atm = WindAtmosphere(wind_csv)
 
-    # Surviving-mass estimates over the density grid
-    mass_estimates = estimate_mass(v_end, a_end, end_h, atm=atm)
-    # reference density 3500, A=1.4
-    m_est = next(e['m_fade_kg'] for e in mass_estimates if e['rho'] == 3500)
-    m_est = float(np.clip(m_est, 1e-4, 100.0))
+    # Surviving-mass estimates over the density grid (whole-track fit)
+    mass_estimates = []
+    if have_fit:
+        mass_estimates = estimate_mass(v_of_t, a_of_t, h_of_t,
+                                       (t0_obs, t_last),
+                                       params=params, pcov=pcov)
+    ref = next((e for e in mass_estimates if e['rho'] == 3500), None)
+
+    # --- Reliability assessment -------------------------------------------------
+    # A meteor that fades while still fast (luminous regime ends ~3-4 km/s)
+    # must have a small surviving mass: it disappeared because it fully
+    # ablated, not because it slowed below the detection threshold.
+    # Deceleration-inferred mass >> critical ablation mass therefore flags
+    # an inconsistent/unreliable input (usually a bad trajectory or a
+    # poorly constrained deceleration fit).
+    issues = []
+    duration = t_last - t0_obs
+    if n_obs < 10:
+        issues.append(f'few centroid observations ({n_obs})')
+    if duration < 0.8:
+        issues.append(f'short luminous track ({duration:.2f} s)')
+    if ref is not None:
+        m_med, m_lo, m_hi, m_crit = (ref['m_fade_kg'], ref['m_fade_lo'],
+                                   ref['m_fade_hi'], ref['m_crit_kg'])
+        if m_hi > 0 and np.isfinite(m_med):
+            if m_hi / max(m_lo, 1e-12) > 50:
+                issues.append('deceleration poorly constrained')
+            if v_end > 4000.0 and m_med > 30 * max(m_crit, 1e-9):
+                issues.append('inconsistent with fade-out')
+            if m_med > 100.0:
+                issues.append('implausibly large surviving mass')
+    else:
+        m_med = m_crit = 0.0
+        issues.append('no speed/deceleration fit')
+    reliability = 'unreliable' if any(
+        i in ('inconsistent with fade-out', 'implausibly large surviving mass',
+              'no speed/deceleration fit') for i in issues) else         ('marginal' if issues else 'ok')
+    if reliability != 'ok':
+        logging.warning(f'darkflight: mass estimate {reliability} '
+                        f'({"; ".join(issues)})')
+
+    # Nominal scenario mass: fade-consistent critical mass when unreliable,
+    # else the deceleration-inferred estimate
+    if reliability == 'unreliable' and m_crit > 0:
+        m_est = float(np.clip(m_crit, 1e-4, 100.0))
+    else:
+        m_est = float(np.clip(m_med if ref else 1.0, 1e-4, 100.0))
 
     # Entry-mass back-projection (needs height vs time along track)
     entry_estimates = []
-    if fbspd_plot_data and fbspd_plot_data.get('final_params') is not None:
-        from fbspd_merge import expfunc_1stder
-        def v_of_t(t):
-            return float(expfunc_1stder(t, *params)) * 1000.0
-        # linear height vs t (straight-line track)
-        hs = fbspd_plot_data['final_merged_data']['height']
-        ts = fbspd_plot_data['final_merged_data']['reltime']
-        if len(ts) > 2:
-            hfit = np.polyfit(ts, hs, 1)
-            def h_of_t(t):
-                return float(np.polyval(hfit, t)) * 1000.0
-            for e in mass_estimates:
-                m_ent = entry_mass_estimate(e['m_fade_kg'], e['rho'], e['A'],
-                                            v_of_t, h_of_t, (ts[0], ts[-1]),
-                                            atm=atm)
-                entry_estimates.append({'rho': e['rho'], 'A': e['A'],
-                                        'm_entry_kg': m_ent,
-                                        'm_fade_kg': e['m_fade_kg']})
+    if have_fit:
+        for e in mass_estimates:
+            m_ent = entry_mass_estimate(e['m_fade_kg'], e['rho'], e['A'],
+                                        v_of_t, h_of_t, (t0_obs, t_last),
+                                        atm=atm)
+            entry_estimates.append({'rho': e['rho'], 'A': e['A'],
+                                    'm_entry_kg': m_ent,
+                                    'm_fade_kg': e['m_fade_kg'],
+                                    'm_crit_kg': e['m_crit_kg'],
+                                    'm_fade_lo': e['m_fade_lo'],
+                                    'm_fade_hi': e['m_fade_hi']})
 
     # Ground height near the nominal landing point
     h_ground = ground_elevation(end_lat, end_lon)

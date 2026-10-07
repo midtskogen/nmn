@@ -137,7 +137,10 @@ def _star_zeropoint(image_path, pto_path, timestamp, lat, lon, elev,
         zps.append(m_corr + 2.5 * math.log10(peak))
     if len(zps) < 3:
         return None
-    return float(np.median(zps)), len(zps), float(np.std(zps))
+    zp, sc = float(np.median(zps)), float(np.std(zps))
+    if sc > 1.5:                     # >~1.5 mag scatter = bad calibration
+        return None
+    return zp, len(zps), sc
 
 
 def extinction_mag(alt_deg):

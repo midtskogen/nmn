@@ -142,7 +142,7 @@
                     // dimmed backdrop (light bg / water / tile edges) toward
                     // opaque near-white text. A smooth ramp keeps the map's
                     // anti-aliasing intact instead of a hard brightness cut.
-                    const cov = Math.min(1, Math.max(0, (200 - mx) / 160));
+                    const cov = Math.min(1, Math.max(0, (210 - mx) / 100));
                     const bgr = r * 0.55 + 20 * 0.45;
                     const bgg = g * 0.55 + 30 * 0.45;
                     const bgb = b * 0.55 + 40 * 0.45;

@@ -274,7 +274,7 @@ function atomic_write($path, $contents) {
  * @return string The generated HTML.
  */
 function generateMediaItem($imgPath, $videoExt, $altText) {
-    static $sizeCache = [];
+
     $basePath = str_replace(['_orig.jpg', '.jpg'], '', $imgPath);
     $videoFullPath = $basePath . $videoExt;
     $webVideoPath = '/meteor/' . $videoFullPath;
@@ -286,21 +286,10 @@ function generateMediaItem($imgPath, $videoExt, $altText) {
     $altTextEsc = htmlspecialchars($altText, ENT_QUOTES);
     $videoDataAttr = file_exists($videoFullPath) ? "data-videosrc='{$webVideoPathEsc}'" : '';
     $placeholderSrc = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-    // Determine display dimensions: scale to width=256, preserve aspect ratio.
-    $displayWidth = 256;
-    $displayHeight = '';
-    if (!isset($sizeCache[$imgPath])) {
-        $info = @getimagesize($imgPath);
-        $sizeCache[$imgPath] = $info ? [$info[0], $info[1]] : null;
-    }
-    if ($sizeCache[$imgPath]) {
-        [$origW, $origH] = $sizeCache[$imgPath];
-        if ($origW > 0) {
-            $displayHeight = (int)round($origH * $displayWidth / $origW);
-        }
-    }
-    $sizeAttr = $displayHeight ? "width='{$displayWidth}' height='{$displayHeight}'" : "width='{$displayWidth}'";
-    $imageHTML = "<img src='{$placeholderSrc}' data-src='{$webImagePathEsc}' {$sizeAttr} loading='lazy' alt='{$altTextEsc}' {$videoDataAttr}>";
+    // Fixed 16:9 box (same trick as the station stats thumbnails): constant
+    // size means no per-image getimagesize() I/O and no layout reflow while
+    // lazy-loading. object-fit in CSS letterboxes odd aspect ratios.
+    $imageHTML = "<img src='{$placeholderSrc}' data-src='{$webImagePathEsc}' width='256' height='72' loading='lazy' alt='{$altTextEsc}' {$videoDataAttr}>";
     return "<div class='media-swap-container'>{$imageHTML}</div>";
 }
 
@@ -817,7 +806,7 @@ function generateArchivePageHeader($targetYear, $part, $t) {
         .location-details { font-size: 0.8em; }
         .media-container { margin-top: 5px; }
         .media-swap-container { display: inline-flex; flex-direction: column; align-items: center; gap: 5px; }
-        .media-swap-container img, .media-swap-container video { margin: 2px; border: 1px solid #ccc; width: 256px; height: auto; vertical-align: top; }
+        .media-swap-container img, .media-swap-container video { margin: 2px; border: 1px solid #ccc; border-radius: 3px; width: 256px; height: 72px; object-fit: cover; object-position: center; background: #000; vertical-align: top; }
         .image-separator { display: none; border: 0; border-top: 1px solid #888; margin: 15px 0 10px 0; }
         body.images-are-shown .image-separator { display: block; }
         .observation-link.low-altitude, .observation-link.low-altitude:visited { color: red; font-weight: bold; }

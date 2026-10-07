@@ -137,19 +137,18 @@
                          * (Math.min(H - 1, ((i / W) | 0) + 3) - Math.max(0, ((i / W) | 0) - 3) + 1));
                     if (frac < 0.22) achrom = true;
                 }
-                if (achrom && isMap && mx > 120 && !(outside && outside[i])) {
-                    // Light sea/margin areas: the iframe shows the whole
-                    // surface dimmed at 55% over #141e28 (opaque, not
-                    // transparent) — same blend here so water and tile
-                    // edges match map.html.
-                    px[p]     = Math.round(r * 0.55 + 20 * 0.45);
-                    px[p + 1] = Math.round(g * 0.55 + 30 * 0.45);
-                    px[p + 2] = Math.round(b * 0.55 + 40 * 0.45);
-                } else if (achrom && isMap && mx <= 120) {
-                    // Dark map text/labels: fully opaque near-white so labels
-                    // stay legible against the dimmed terrain.
-                    px[p] = 232; px[p + 1] = 235; px[p + 2] = 240;
-                    px[p + 3] = 255;
+                if (achrom && isMap && !(outside && outside[i])) {
+                    // Interior achromatic pixels: ink-coverage ramp from the
+                    // dimmed backdrop (light bg / water / tile edges) toward
+                    // opaque near-white text. A smooth ramp keeps the map's
+                    // anti-aliasing intact instead of a hard brightness cut.
+                    const cov = Math.min(1, Math.max(0, (200 - mx) / 160));
+                    const bgr = r * 0.55 + 20 * 0.45;
+                    const bgg = g * 0.55 + 30 * 0.45;
+                    const bgb = b * 0.55 + 40 * 0.45;
+                    px[p]     = Math.round(bgr + (235 - bgr) * cov);
+                    px[p + 1] = Math.round(bgg + (238 - bgg) * cov);
+                    px[p + 2] = Math.round(bgb + (244 - bgb) * cov);
                 } else if (achrom) {
                     // white fades out, dark text/borders go bright; tint
                     // follows the hue hint so water stays slightly blue

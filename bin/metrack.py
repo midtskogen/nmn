@@ -496,6 +496,11 @@ def _fetch_kartverket_topo(lons, lats, max_tiles=144):
     # Mostly-empty coverage means we're outside Kartverket's tile area.
     if fetched < max(1, n_tiles * 0.6):
         return None
+    # Tiles outside Norway fetch fine but render blank/transparent — bail
+    # to OSM when the stitched image has essentially no map content.
+    arr = np.asarray(canvas.convert('RGB'))
+    if ((arr < 245).any(axis=2)).mean() < 0.15:
+        return None
     # Upscale small mosaics so tile text reprojects smoothly instead of
     # stretching hard pixel edges (labels are fetched at a coarse zoom).
     if max(canvas.size) < 1200:

@@ -143,20 +143,16 @@
                         const bgr = r * 0.55 + 20 * 0.45;
                         const bgg = g * 0.55 + 30 * 0.45;
                         const bgb = b * 0.55 + 40 * 0.45;
-                        // dark ink (labels, borders, grid) lifts toward
-                        // readable near-white; saturated features (trajectory,
-                        // markers, sight lines) lift toward vivid colour —
-                        // like the Plotly traces above the dimmed surface.
-                        const ink = Math.min(1, Math.max(0, (205 - mx) / 120));
+                        // saturated features (trajectory, markers, sight
+                        // lines) lift toward vivid colour — like the
+                        // Plotly traces above the dimmed surface. Labels
+                        // and all other baked-in detail stay as rendered
+                        // (black text, natural antialiasing).
                         const sat = Math.min(1, Math.max(0, (mx - mn - 60) / 80));
                         const vsc = Math.min(1.7, Math.max(1.0, 200 / Math.max(mx, 1)));
-                        const wInk = ink * (1 - sat), wSat = sat;
-                        px[p]     = Math.round(bgr + (235 - bgr) * wInk
-                            + (Math.min(255, r * vsc) - bgr) * wSat);
-                        px[p + 1] = Math.round(bgg + (238 - bgg) * wInk
-                            + (Math.min(255, g * vsc) - bgg) * wSat);
-                        px[p + 2] = Math.round(bgb + (244 - bgb) * wInk
-                            + (Math.min(255, b * vsc) - bgb) * wSat);
+                        px[p]     = Math.round(bgr + (Math.min(255, r * vsc) - bgr) * sat);
+                        px[p + 1] = Math.round(bgg + (Math.min(255, g * vsc) - bgg) * sat);
+                        px[p + 2] = Math.round(bgb + (Math.min(255, b * vsc) - bgb) * sat);
                     }
                     continue;
                 }

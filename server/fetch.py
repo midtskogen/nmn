@@ -84,6 +84,13 @@ except ImportError:
     logging.warning("Module 'windprofile.py' not found. Wind profile generation will be skipped.")
     WINDPROFILE_AVAILABLE = False
 
+try:
+    import darkflight
+    DARKFLIGHT_AVAILABLE = True
+except ImportError:
+    logging.warning("Module 'darkflight.py' not found. Dark flight will be skipped.")
+    DARKFLIGHT_AVAILABLE = False
+
 
 def _collect_infra_sites(event_dir: Path):
     sites = []
@@ -699,6 +706,63 @@ def get_location_from_coords(lat, lon) -> str:
         logging.error(f"An error occurred while using the reverse_geocode module: {e}")
 
     return municipality.strip()
+
+
+def _fmt_mass(m_kg):
+    if m_kg >= 1:
+        return f"{m_kg:.2f} kg"
+    if m_kg >= 0.001:
+        return f"{m_kg*1000:.0f} g"
+    return f"{m_kg*1e6:.0f} mg"
+
+
+def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang):
+    """Write a darkflight summary HTML fragment per language."""
+    for lang in langs:
+        try:
+            t = load_translations(lang)
+            file_prefix = '' if lang == default_lang else f'{lang}_'
+            end = results['end_state']
+            rows = [
+                f'<tr><td>{t.get("df_end_position", "End position")}:</td>'
+                f'<td>{end["lat"]:.4f}N {end["lon"]:.4f}E, {end["h_m"]/1000:.1f} km</td></tr>',
+                f'<tr><td>{t.get("df_end_speed", "End speed")}:</td>'
+                f'<td>{end["v_end_ms"]/1000:.2f} km/s</td></tr>',
+            ]
+            if results.get('entry_estimates'):
+                est = next((e for e in results['entry_estimates'] if e['rho'] == 3500),
+                           results['entry_estimates'][0])
+                rows.append(
+                    f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
+                    f'<td>~{_fmt_mass(est["m_entry_kg"])}'
+                    f' ({t.get("df_estimated", "estimated")})</td></tr>')
+                rows.append(
+                    f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
+                    f'<td>~{_fmt_mass(est["m_fade_kg"])}</td></tr>')
+            s0 = next((s for s in results['scenarios'] if s['name'] == 'S0_intact'), None)
+            if s0 and s0['impacts']:
+                imp = s0['impacts'][0]
+                rows.append(
+                    f'<tr><td>{t.get("df_impact", "Predicted impact")}:</td>'
+                    f'<td>{imp["lat"]:.4f}N {imp["lon"]:.4f}E'
+                    f' ({_fmt_mass(imp["m"])}, v={imp["v"]:.0f} m/s)</td></tr>')
+            if results['mc']['impacts']:
+                lats = [i['lat'] for i in results['mc']['impacts']]
+                lons = [i['lon'] for i in results['mc']['impacts']]
+                rows.append(
+                    f'<tr><td>{t.get("df_fall_area", "Fall area (MC)")}:</td>'
+                    f'<td>{min(lats):.3f}-{max(lats):.3f}N, '
+                    f'{min(lons):.3f}-{max(lons):.3f}E</td></tr>')
+            frag = (f'<div class="text-section">'
+                    f'{t.get("dark_flight", "Dark flight")}</div>'
+                    f'<table class="dftable">' + ''.join(rows) + '</table>'
+                    f'<a href="darkflight.kml">KML</a> | '
+                    f'<a href="darkflight.geojson">GeoJSON</a> | '
+                    f'<a href="darkflight.json">JSON</a>')
+            (event_dir / f"{file_prefix}darkflight_table.html").write_text(
+                frag, encoding='utf-8')
+        except Exception as e:
+            logging.warning(f"darkflight table for {lang} failed: {e}")
 
 
 def generate_triangulation_html_report(output_path: Path, resdat, orbit_data, placename, translations: dict, lang: str):
@@ -2161,6 +2225,36 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
 
             except Exception as e:
                 logging.error(f"Failed to generate wind profile: {e}", exc_info=True)
+
+        # --- Dark flight simulation (needs end height <= 40 km) ---
+        if DARKFLIGHT_AVAILABLE:
+            try:
+                end_height_km = analysis_results['resdat'].height[1]
+                if end_height_km <= 40:
+                    wind_csv = event_dir / "wind_profile.csv"
+                    logging.info(f"Running dark flight simulation (end height {end_height_km:.1f} km)...")
+                    df_results = darkflight.run_darkflight(
+                        event_dir,
+                        analysis_results['resdat'],
+                        analysis_results.get('fbspd_results'),
+                        analysis_results.get('fbspd_plot_data'),
+                        wind_csv if wind_csv.exists() else None,
+                        mc_runs=0 if fast else 300,
+                    )
+                    # Convert the fall-area map to jpg per language
+                    svg_path = event_dir / 'map_darkflight.svg'
+                    if svg_path.exists():
+                        for lang in SUPPORTED_LANGS:
+                            file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                            svg_to_jpg(svg_path, event_dir / f"{file_prefix}map_darkflight.jpg",
+                                       Config.SVG_DEFAULT_DPI)
+                        if df_results:
+                            _append_darkflight_table(
+                                event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)
+                else:
+                    logging.info(f"End altitude {end_height_km:.1f} km above 40 km — assuming full disintegration, skipping dark flight.")
+            except Exception as e:
+                logging.error(f"Dark flight simulation failed: {e}", exc_info=True)
 
         # --- Infrasound fit (after wind profile if available) ---
         try:

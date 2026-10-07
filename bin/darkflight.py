@@ -1,0 +1,753 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+darkflight.py — Meteoroid dark-flight propagator.
+
+Propagates a meteoroid from the end of its luminous trajectory to the ground,
+in the rotating ECEF frame (gravity + atmospheric drag + ablation +
+Earth-rotation fictitious forces). Inspired by the Desert Fireball Network
+DFN_DarkFlight.py (Jansen-Sturgeon & Towner) and Vida's Supracenter
+darkflight, adapted to NMN event data:
+
+  * .res file          — straight-line track start/end (lon, lat, height)
+  * fbspd_merge fit    — speed v(t) and deceleration a(t) along the track
+  * wind_profile.csv   — Open-Meteo pressure-level wind/density profile
+  * US76 standard atmosphere above/below the measured profile
+
+Outputs impact predictions for a set of fragmentation scenarios, Monte-Carlo
+uncertainty runs, JSON/KML/GeoJSON files and a fall-area map.
+
+All quantities SI (m, kg, s) unless noted.
+
+Can be used as a module:  darkflight.run_darkflight(event_dir, ...)
+or as a script:           python3 darkflight.py <event_dir> [--mc N]
+"""
+
+import argparse
+import json
+import logging
+import math
+import csv
+import sys
+from pathlib import Path
+
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.interpolate import interp1d
+
+# --- Constants (SI) -----------------------------------------------------------
+MU_E = 3.986005e14            # Earth gravitational parameter [m3/s2]
+OMEGA = 7.292115e-5           # Earth rotation rate [rad/s]
+OMEGA_VEC = np.array([0.0, 0.0, OMEGA])
+A_EQ = 6378137.0              # WGS-84 semi-major axis [m]
+E2 = 6.69437999014e-3         # WGS-84 first eccentricity squared
+R_AIR = 287.05                # specific gas constant dry air [J/(kg K)]
+
+SHAPES = {'s': 1.21, 'c': 1.60, 'b': 2.7}   # sphere, cylinder, brick
+DENSITY_GRID = [1500, 2500, 3500, 5000, 7000]  # meteoroid densities kg/m3
+
+
+# --- Geodesy ------------------------------------------------------------------
+def llh2ecef(lon_deg, lat_deg, h_m):
+    """WGS-84 lon/lat(deg)/height(m) -> ECEF [m]."""
+    lat, lon = np.radians(lat_deg), np.radians(lon_deg)
+    N = A_EQ / np.sqrt(1 - E2 * np.sin(lat) ** 2)
+    return np.array([(N + h_m) * np.cos(lat) * np.cos(lon),
+                     (N + h_m) * np.cos(lat) * np.sin(lon),
+                     (N * (1 - E2) + h_m) * np.sin(lat)])
+
+
+def ecef2llh(r):
+    """ECEF [m] -> (lon_deg, lat_deg, h_m) iterative geodetic conversion."""
+    p = np.hypot(r[0], r[1])
+    lon = np.degrees(np.arctan2(r[1], r[0]))
+    lat = np.arctan2(r[2], p * (1 - E2))
+    for _ in range(15):
+        sin_lat = np.sin(lat)
+        N = A_EQ / np.sqrt(1 - E2 * sin_lat ** 2)
+        h = p / np.cos(lat) - N
+        lat_new = np.arctan2(r[2], p * (1 - E2 * N / (N + h)))
+        if abs(lat_new - lat) < 1e-12:
+            lat = lat_new
+            break
+        lat = lat_new
+    return lon, np.degrees(lat), h
+
+
+def enu2ecef_mat(lat_deg, lon_deg):
+    """Rotation matrix mapping an ENU vector at (lat, lon) to ECEF."""
+    lat, lon = np.radians(lat_deg), np.radians(lon_deg)
+    sl, cl, so, co = np.sin(lat), np.cos(lat), np.sin(lon), np.cos(lon)
+    return np.array([[-so, -sl * co, cl * co],
+                     [co, -sl * so, cl * so],
+                     [0.0, cl, sl]])
+
+
+def earth_radius_geodetic(lat_deg):
+    """WGS-84 ellipsoid surface radius at geodetic latitude [m]."""
+    lat = np.radians(lat_deg)
+    N = A_EQ / np.sqrt(1 - E2 * np.sin(lat) ** 2)
+    return np.hypot(N * np.cos(lat), N * (1 - E2) * np.sin(lat))
+
+
+# --- Standard atmosphere (US76, 0–84.9 km geopotential) -----------------------
+_US76_LAYERS = [  # (h_base_m, T_base_K, lapse_K/m, P_base_Pa)
+    (0.0,    288.15, -6.5e-3, 101325.0),
+    (11000., 216.65,  0.0,    22632.1),
+    (20000., 216.65,  1.0e-3, 5474.89),
+    (32000., 228.65,  2.8e-3, 868.02),
+    (47000., 270.65,  0.0,    110.91),
+    (51000., 270.65, -2.8e-3, 66.94),
+    (71000., 214.65, -2.0e-3, 3.9564),
+]
+_G0 = 9.80665
+_M_AIR = 0.0289644
+_R_UNIV = 8.31432
+
+
+def us76(h_m):
+    """US Standard Atmosphere 1976. Returns (T[K], P[Pa], rho[kg/m3])."""
+    h_geo = h_m * 6356766.0 / (6356766.0 + h_m)  # geometric -> geopotential
+    h_geo = max(0.0, min(h_geo, 84852.0))
+    for hb, Tb, Lb, Pb in reversed(_US76_LAYERS):
+        if h_geo >= hb:
+            if Lb == 0.0:
+                P = Pb * math.exp(-_G0 * _M_AIR * (h_geo - hb) / (_R_UNIV * Tb))
+                T = Tb
+            else:
+                T = Tb + Lb * (h_geo - hb)
+                P = Pb * (Tb / T) ** (_G0 * _M_AIR / (_R_UNIV * Lb))
+            rho = P * _M_AIR / (_R_UNIV * T)
+            return T, P, rho
+    return _US76_LAYERS[0][1], _US76_LAYERS[0][3], \
+        _US76_LAYERS[0][3] * _M_AIR / (_R_UNIV * _US76_LAYERS[0][1])
+
+
+# --- Wind + atmosphere ---------------------------------------------------------
+class WindAtmosphere:
+    """1-D vertical profile (Open-Meteo wind_profile.csv) over US76.
+
+    CSV columns: Height_m, Temp_K, Pressure_Pa, WindSpeed_ms, WindDir_deg
+    (direction wind blows *from*, meteorological convention).
+    Above the profile top: US76 density, wind held at the top-layer value.
+    Below the profile bottom: bottom-layer values.
+    """
+
+    def __init__(self, csv_path=None):
+        self.has_profile = False
+        self._rho_scale = 1.0
+        if csv_path and Path(csv_path).exists():
+            rows = []
+            with open(csv_path) as f:
+                for row in csv.reader(f):
+                    if not row or row[0].startswith('#'):
+                        continue
+                    rows.append([float(x) for x in row[:5]])
+            if len(rows) >= 4:
+                d = np.asarray(sorted(rows, key=lambda r: r[0]))
+                self.h = d[:, 0]
+                self.T = d[:, 1]
+                self.P = d[:, 2]
+                self.wspd = d[:, 3]
+                self.wdir = d[:, 4]
+                self.rho_p = self.P / (R_AIR * self.T)
+                # wind-to (opposite of wind-from), ENU components
+                rad = np.radians(self.wdir)
+                self.we = -self.wspd * np.sin(rad)
+                self.wn = -self.wspd * np.cos(rad)
+                self.h_min, self.h_max = self.h[0], self.h[-1]
+                # blend US76 density to match the profile top
+                _, _, rho_top_us76 = us76(self.h_max)
+                if rho_top_us76 > 0:
+                    self._rho_scale = self.rho_p[-1] / rho_top_us76
+                self.has_profile = True
+
+    def at(self, h_m):
+        """Returns (wind_enu[3], rho_a, T) at geometric height h_m."""
+        if self.has_profile and h_m <= self.h_max:
+            idx = np.searchsorted(self.h, h_m)
+            if idx == 0:
+                i0, i1, f = 0, 0, 0.0
+            elif idx >= len(self.h):
+                i0 = i1 = len(self.h) - 1
+                f = 0.0
+            else:
+                i0, i1 = idx - 1, idx
+                f = (h_m - self.h[i0]) / max(self.h[i1] - self.h[i0], 1e-9)
+            we = self.we[i0] + f * (self.we[i1] - self.we[i0])
+            wn = self.wn[i0] + f * (self.wn[i1] - self.wn[i0])
+            T = self.T[i0] + f * (self.T[i1] - self.T[i0])
+            rho = self.rho_p[i0] + f * (self.rho_p[i1] - self.rho_p[i0])
+            return np.array([we, wn, 0.0]), rho, T
+        # above profile (or no profile): US76, wind = last layer or zero
+        T, _, rho = us76(h_m)
+        rho *= self._rho_scale
+        if self.has_profile:
+            return np.array([self.we[-1], self.wn[-1], 0.0]), rho, T
+        return np.zeros(3), rho, T
+
+
+# --- Aerodynamics (ported from DFN atm_functions.py, MIT) ----------------------
+def _viscosity(T):
+    return 18.27e-6 * (291.15 + 120.0) / (T + 120.0) * (T / 291.15) ** 1.5
+
+
+def _speed_of_sound(T):
+    return 331.3 * math.sqrt(T / 273.15)
+
+
+def _interp_shape(A, vals):
+    return np.interp(A, [1.21, 1.6, 2.7], vals)
+
+
+def cd_hypersonic(A):
+    """Hypersonic drag coefficient by shape parameter A."""
+    return _interp_shape(A, [0.92, 1.3, 2.0])
+
+
+def _cd_subsonic(re, A):
+    """Sub-critical drag — Haider & Levenspiel (1989), ellipsoid approx."""
+    V = 1.0
+    sa_eq = (36 * np.pi * V ** 2) ** (1. / 3)
+    a_ax = np.sqrt(A * V ** (2. / 3) / np.pi)
+    c_ax = (3 * V ** (1. / 3)) / (4 * A)
+    thi = sa_eq / (4 * np.pi * ((a_ax ** 3.2 + 2 * (a_ax * c_ax) ** 1.6) / 3) ** (1. / 1.6))
+    thi_perp = sa_eq / 4 / (np.pi * a_ax ** 2)
+    a = np.exp(2.3288 - 6.4581 * thi + 2.4486 * thi ** 2)
+    b = 0.0964 + 0.5565 * thi
+    c = np.exp(4.905 - 13.8944 * thi + 18.4222 * thi ** 2 - 10.2599 * thi ** 3)
+    d = np.exp(1.4681 + 12.2584 * thi - 20.7322 * thi ** 2 + 15.8855 * thi ** 3)
+    return 24. / re * (1 + a * re ** b) + c / (1 + d / re)
+
+
+def _cd_fm(vel):
+    """Free-molecular drag — Khanukaeva (2005)."""
+    vk = vel / 1000.0
+    return 2.0 + np.sqrt(1.2) / (2.0 * vk) * (1.0 + vk ** 2 / 16.0 + 30.0)
+
+
+def dragcoeff(vel, temp, rho_a, A):
+    """Drag coefficient blending free-molecular, transition and continuum
+    regimes (DFN implementation: Miller & Bailey 1979, Khanukaeva 2005)."""
+    vel = max(vel, 1e-6)
+    mu_a = _viscosity(temp)
+    mach = vel / _speed_of_sound(temp)
+    re = rho_a * vel * 0.1 / mu_a          # characteristic length 0.1 m
+    kn = mach / re * np.sqrt(np.pi * 1.4 / 2.0)
+
+    if kn > 10.0:
+        return _cd_fm(vel)
+    if kn > 0.01:
+        cd_sub = _cd_subsonic(max(re, 1.0), A)
+        return cd_sub + (_cd_fm(vel) - cd_sub) * np.exp(-0.001 * re ** 2)
+
+    cd_sub = _cd_subsonic(max(re, 1.0), A)
+    cd_hyp = cd_hypersonic(A)
+    hw = _interp_shape(A, [0.5, 0.3, 0.1])
+    M_c = _interp_shape(A, [1.5, 1.2, 1.1])
+    logistic = lambda M: cd_sub + (cd_hyp - cd_sub) / (1 + np.exp(-(M - M_c) / hw))
+    cd_crit = _interp_shape(A, [1.0, logistic(mach) / 0.92, logistic(mach) / 0.92])
+    gumbel = lambda M: (cd_crit - logistic(M)) * np.exp(-(M - M_c) / hw
+                        - np.exp(-(M - M_c) / hw)) / np.exp(-1)
+    return logistic(mach) + gumbel(mach)
+
+
+def ablation_coeff(rho_m, A):
+    """Mass-loss coefficient c_ml [s2/m2] by meteoroid density class
+    (Sansom 2019 / DFN)."""
+    cd_hyp = cd_hypersonic(A)
+    if rho_m > 5000:
+        return 0.07e-6 * cd_hyp
+    if rho_m > 2500:
+        return 0.014e-6 * cd_hyp
+    if rho_m > 1500:
+        return 0.042e-6 * cd_hyp
+    return 0.1e-6 * cd_hyp
+
+
+# --- Propagator ---------------------------------------------------------------
+def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
+              erode=True, record_dt=0.5):
+    """Integrate a meteoroid to the ground.
+
+    r0_ecef, v0_ecef: ECEF state [m], [m/s];  m0 [kg]; rho_m [kg/m3];
+    A_shape: shape parameter (sphere 1.21 / cylinder 1.6 / brick 2.7);
+    atm: WindAtmosphere; h_ground [m]; erode: enable ablation.
+
+    Returns dict with time series (lon, lat, h, v, m) + impact dict.
+    """
+    c_ml = ablation_coeff(rho_m, A_shape) if erode else 0.0
+
+    def dynamics(t, X):
+        r, v, m = X[:3], X[3:6], X[6]
+        lon, lat, h = ecef2llh(r)
+        wind_enu, rho_a, T = atm.at(max(h, 0.0))
+        w_ecef = enu2ecef_mat(lat, lon) @ wind_enu
+        v_rel = v - w_ecef
+        vmag = np.linalg.norm(v_rel)
+        a_grav = -MU_E * r / np.linalg.norm(r) ** 3
+        a_cor = -2.0 * np.cross(OMEGA_VEC, v)
+        a_cf = -np.cross(OMEGA_VEC, np.cross(OMEGA_VEC, r))
+        if vmag > 1e-9:
+            cd = dragcoeff(vmag, T, rho_a, A_shape)
+            a_drag = -cd * A_shape * rho_a * vmag * v_rel \
+                     / (2 * m ** (1. / 3) * rho_m ** (2. / 3))
+        else:
+            a_drag = np.zeros(3)
+        dm = -c_ml * A_shape * rho_a * vmag ** 3 * m ** (2. / 3) \
+             / (2 * rho_m ** (2. / 3)) if vmag > 1e-9 else 0.0
+        return np.hstack([v, a_grav + a_cor + a_cf + a_drag, dm])
+
+    def hit_ground(t, X):
+        _, _, h = ecef2llh(X[:3])
+        return h - h_ground
+    hit_ground.terminal = True
+    hit_ground.direction = -1
+
+    def dust(t, X):
+        return X[6] - 1e-3
+    dust.terminal = True
+    dust.direction = -1
+
+    X0 = np.hstack([r0_ecef, v0_ecef, m0])
+    t_eval = np.arange(0, 1800, record_dt)
+    sol = solve_ivp(dynamics, (0, 1800), X0, method='DOP853',
+                    dense_output=True, t_eval=t_eval,
+                    events=[hit_ground, dust],
+                    rtol=1e-7, atol=1e-9)
+
+    t_end = sol.t_events[0][0] if sol.t_events[0] else \
+        (sol.t_events[1][0] if sol.t_events[1] else sol.t[-1])
+    X_end = sol.y_events[0][0] if sol.y_events and len(sol.y_events[0]) else sol.y[:, -1]
+
+    n = max(int(t_end / record_dt) + 2, 2)
+    ts = np.linspace(0, t_end, n)
+    Xs = sol.sol(ts)
+    path = [ecef2llh(Xs[:, i]) for i in range(Xs.shape[1])]
+    lon_arr = np.array([p[0] for p in path])
+    lat_arr = np.array([p[1] for p in path])
+    h_arr = np.array([p[2] for p in path])
+    v_arr = np.linalg.norm(Xs[3:6], axis=0)
+
+    lon_i, lat_i, h_i = ecef2llh(X_end[:3])
+    return {
+        't': ts, 'lon': lon_arr, 'lat': lat_arr, 'h': h_arr,
+        'v': v_arr, 'm': Xs[6],
+        'impact': {'lon': lon_i, 'lat': lat_i, 'h': h_i,
+                   'v': float(np.linalg.norm(X_end[3:6])),
+                   'm': float(X_end[6]), 't': float(t_end)},
+    }
+
+
+# --- Mass estimation from terminal deceleration --------------------------------
+def estimate_mass(v_end, a_end, h_m, rho_grid=None, A=1.4, atm=None):
+    """Invert the drag equation at the fade point to get surviving mass.
+
+    a_drag = cd*A*rhoa*v^2 / (2 * M^(1/3) * rho_m^(2/3))
+    => M_fade = [cd*A*rhoa*v^2 / (2*a_end)]^3 / rho_m^2
+
+    Returns list of dicts per density.
+    """
+    if rho_grid is None:
+        rho_grid = DENSITY_GRID
+    if atm is None:
+        atm = WindAtmosphere()
+    _, rho_a, T = atm.at(h_m)
+    cd = dragcoeff(v_end, T, rho_a, A)
+    k = cd * A * rho_a * v_end ** 2 / (2.0 * abs(a_end))
+    out = []
+    for rho_m in rho_grid:
+        m_fade = k ** 3 / rho_m ** 2
+        out.append({'rho': rho_m, 'A': A, 'm_fade_kg': m_fade})
+    return out
+
+
+def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
+    """Back-integrate ablation over the luminous track.
+
+    dM^(1/3)/dτ = (B/3) rhoa v^3 backward in time, B = c_ml*A/(2 rho_m^(2/3))
+    => M_entry^(1/3) = M_fade^(1/3) + (B/3) ∫ rhoa v^3 dt   (end -> start)
+    """
+    if atm is None:
+        atm = WindAtmosphere()
+    B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
+    ts = np.linspace(t_range[0], t_range[1], 400)
+    vs = np.array([v_of_t(t) for t in ts])
+    hs = np.array([h_of_t(t) for t in ts])
+    rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
+    integral = np.trapz(rhos * vs ** 3, ts)
+    m13 = m_fade ** (1. / 3) + (B / 3) * integral
+    return m13 ** 3
+
+
+# --- Fragmentation scenarios ---------------------------------------------------
+def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None):
+    """Return list of scenario dicts:
+    {'name', 'label', 'runs': [{'m':..,'rho':..,'A':..}], 'erode'}
+    m_est: estimated surviving mass [kg] (reference density/shape).
+    """
+    if masses_grid is None:
+        masses_grid = np.logspace(np.log10(0.005), np.log10(5.0), 16)
+    sc = []
+    sc.append({'name': 'S0_intact', 'label': 'Single body (estimated mass)',
+               'runs': [{'m': m_est, 'rho': rho_m, 'A': A}], 'erode': True})
+    sc.append({'name': 'S1_fallline', 'label': 'Fall line (mass grid)',
+               'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in masses_grid],
+               'erode': True})
+    for fr in (0.9, 0.7, 0.5):
+        sc.append({'name': f'S2_split_{int(fr*100)}', 'label':
+                   f'Two-piece split {fr:.0%}/{1-fr:.0%}',
+                   'runs': [{'m': m_est * fr, 'rho': rho_m, 'A': A},
+                            {'m': m_est * (1 - fr), 'rho': rho_m, 'A': A}],
+                   'erode': True})
+    for n in (2, 4, 8, 16, 32):
+        sc.append({'name': f'S3_equal_{n}', 'label': f'{n} equal fragments',
+                   'runs': [{'m': m_est / n, 'rho': rho_m, 'A': A}
+                            for _ in range(n)], 'erode': True})
+    # power-law dN/dM ~ M^-2, fragments down to 1 g (inverse-CDF sampling)
+    m_min = 0.001
+    u = np.linspace(0.05, 0.95, 60)
+    ms = 1.0 / (1.0 / m_min - u * (1.0 / m_min - 1.0 / m_est))
+    sc.append({'name': 'S4_powerlaw', 'label': 'Power-law fragment swarm',
+               'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in ms],
+               'erode': True})
+    # no-erosion variants of the interesting scenarios
+    for name in ('S0_intact', 'S3_equal_4'):
+        base = next(s for s in sc if s['name'] == name)
+        sc.append({**base, 'name': name + '_noerosion',
+                   'label': base['label'] + ' (no ablation)', 'erode': False})
+    return sc
+
+
+# --- Monte Carlo ---------------------------------------------------------------
+def _mc_worker(job):
+    r0, v0, m, rho, A, csv_path, h_ground, erode = job
+    atm = WindAtmosphere(csv_path)
+    return propagate(r0, v0, m, rho, A, atm, h_ground, erode=erode,
+                     record_dt=1.0)['impact']
+
+
+def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
+                pos_err=100.0, vel_frac_err=0.05, dir_err_deg=0.1,
+                mass_err=0.3, rho_err=500.0, shape_err=0.15,
+                wind_err=2.0, seed=0, pool=None):
+    """Perturbed runs around nominal state. Returns list of impact dicts."""
+    rng = np.random.default_rng(seed)
+    jobs = []
+    for _ in range(n_runs):
+        r_p = r0 + rng.normal(0, pos_err, 3)
+        v_p = v0_vec * rng.normal(1.0, vel_frac_err)
+        # small angular perturbation of direction
+        ortho = np.cross(v0_vec, [1, 0, 0])
+        if np.linalg.norm(ortho) < 1e-9:
+            ortho = np.cross(v0_vec, [0, 1, 0])
+        ortho /= np.linalg.norm(ortho)
+        d1 = rng.normal(0, np.radians(dir_err_deg)) * np.linalg.norm(v0_vec)
+        d2 = rng.normal(0, np.radians(dir_err_deg)) * np.linalg.norm(v0_vec)
+        ortho2 = np.cross(v0_vec, ortho); ortho2 /= np.linalg.norm(ortho2)
+        v_p = v_p + d1 * ortho + d2 * ortho2
+        m_p = max(1e-3, m0 * rng.uniform(1 - mass_err, 1 + mass_err))
+        rho_p = max(500.0, rng.normal(rho_m, rho_err))
+        A_p = float(np.clip(rng.normal(A, shape_err), 0.9, 3.0))
+        jobs.append((r_p, v_p, m_p, rho_p, A_p, csv_path, h_ground, True))
+    if pool is not None:
+        return pool.map(_mc_worker, jobs)
+    return [_mc_worker(j) for j in jobs]
+
+
+# --- Ground elevation ----------------------------------------------------------
+def ground_elevation(lat, lon):
+    """Ground height [m]. Kartverket for Norway, else Open-Meteo elevation."""
+    import requests
+    if 57.5 <= lat <= 71.5 and 3.0 <= lon <= 32.0:
+        try:
+            r = requests.get('https://ws.geonorge.no/hoydedata/v1/punkt',
+                             params={'nord': lat, 'ost': lon, 'koordsys': 4258},
+                             timeout=10)
+            if r.ok:
+                h = r.json().get('hoyde')
+                if h is not None:
+                    return float(h)
+        except Exception as e:
+            logging.debug(f'Kartverket elevation failed: {e}')
+    try:
+        r = requests.get('https://api.open-meteo.com/v1/elevation',
+                         params={'latitude': lat, 'longitude': lon},
+                         timeout=10)
+        if r.ok:
+            el = r.json().get('elevation')
+            if el:
+                return max(0.0, float(el[0]))
+    except Exception as e:
+        logging.debug(f'Open-Meteo elevation failed: {e}')
+    return 0.0
+
+
+# --- Output writers ------------------------------------------------------------
+def write_json(results, path):
+    def conv(o):
+        if isinstance(o, (np.floating, np.integer)):
+            return float(o)
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        raise TypeError
+    Path(path).write_text(json.dumps(results, indent=1, default=conv),
+                          encoding='utf-8')
+
+
+def write_geojson(scenarios, path):
+    feats = []
+    for sc in scenarios:
+        for run in sc['results']:
+            imp = run['impact']
+            feats.append({
+                'type': 'Feature',
+                'geometry': {'type': 'Point',
+                             'coordinates': [imp['lon'], imp['lat'], imp['h']]},
+                'properties': {'scenario': sc['name'], 'mass_kg': run['m'],
+                               'impact_speed_ms': imp['v']}})
+    Path(path).write_text(json.dumps(
+        {'type': 'FeatureCollection', 'features': feats}), encoding='utf-8')
+
+
+def write_kml(scenarios, end_llh, path):
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
+             f'<name>Dark flight</name>',
+             '<Folder><name>Fall paths</name>']
+    colours = ['ff1400ff', 'ff00a5ff', 'ff00ff00', 'ffaa00ff', 'ffffaa00']
+    for si, sc in enumerate(scenarios):
+        col = colours[si % len(colours)]
+        for run in sc['results']:
+            path_pts = ' '.join(
+                f'{lo:.6f},{la:.6f},{hh:.0f}'
+                for lo, la, hh in zip(run['lon'], run['lat'], run['h']))
+            parts.append(
+                f'<Placemark><name>{sc["name"]} {run["m"]*1000:.1f}g</name>'
+                f'<Style><LineStyle><color>{col}</color><width>1.5</width></LineStyle>'
+                f'</Style><LineString><altitudeMode>absolute</altitudeMode>'
+                f'<coordinates>{path_pts}</coordinates></LineString></Placemark>')
+            imp = run['impact']
+            parts.append(
+                f'<Placemark><name>{sc["name"]} impact {run["m"]*1000:.1f}g</name>'
+                f'<Point><coordinates>{imp["lon"]:.6f},{imp["lat"]:.6f},'
+                f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
+    parts.append('</Folder>')
+    parts.append('</Document></kml>')
+    Path(path).write_text(''.join(parts), encoding='utf-8')
+
+
+def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
+    """Fall-area map: Kartverket basemap, impact markers, MC ellipse."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    lons_all, lats_all = [end_llh[0]], [end_llh[1]]
+    for sc in scenarios:
+        for run in sc['results']:
+            lons_all += list(run['lon']) + [run['impact']['lon']]
+            lats_all += list(run['lat']) + [run['impact']['lat']]
+    for imp in (mc_impacts or []):
+        lons_all.append(imp['lon']); lats_all.append(imp['lat'])
+    pad = 0.15
+    lon_min, lon_max = min(lons_all) - pad, max(lons_all) + pad
+    lat_min, lat_max = min(lats_all) - pad, max(lats_all) + pad
+
+    kv = None
+    try:
+        from metrack import _fetch_kartverket_topo
+        kv = _fetch_kartverket_topo([lon_min, lon_max], [lat_min, lat_max])
+    except Exception as e:
+        logging.debug(f'Kartverket tiles unavailable for darkflight map: {e}')
+
+    pc = None
+    if kv:
+        try:
+            import cartopy.crs as ccrs
+            pc = ccrs.PlateCarree()
+            ax = plt.subplot(projection=ccrs.UTM(32))
+            img, ext = kv
+            ax.imshow(img, extent=ext, origin='upper',
+                      transform=ccrs.UTM(32))
+            ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=pc)
+        except Exception as e:
+            logging.debug(f'cartopy unavailable for darkflight map: {e}')
+            fig, ax = plt.subplots(figsize=(10, 9))
+    else:
+        fig, ax = plt.subplots(figsize=(10, 9))
+        ax.set_xlim(lon_min, lon_max); ax.set_ylim(lat_min, lat_max)
+
+    def trplot(x, y, **kw):
+        ax.plot(x, y, transform=pc, **kw) if pc else ax.plot(x, y, **kw)
+
+    cmap = plt.cm.viridis
+    for si, sc in enumerate(scenarios):
+        col = cmap(si / max(len(scenarios) - 1, 1))
+        for run in sc['results']:
+            trplot(run['lon'], run['lat'], lw=1.0, alpha=0.4,
+                   color=col)
+            trplot([run['impact']['lon']], [run['impact']['lat']],
+                   'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),
+                   color=col,
+                   label=sc['label'] if run is sc['results'][0] else None)
+    trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
+           label='End of luminous path')
+    if mc_impacts:
+        if pc:
+            ax.scatter([i['lon'] for i in mc_impacts],
+                       [i['lat'] for i in mc_impacts], s=2, c='magenta',
+                       alpha=0.4, label='Monte Carlo', transform=pc)
+        else:
+            ax.scatter([i['lon'] for i in mc_impacts],
+                       [i['lat'] for i in mc_impacts], s=2, c='magenta',
+                       alpha=0.4, label='Monte Carlo')
+    ax.legend(fontsize=8, loc='best')
+    if not pc:
+        ax.set_xlabel('Longitude'); ax.set_ylabel('Latitude')
+    if title:
+        ax.set_title(title)
+    plt.savefig(out_svg, bbox_inches='tight', pad_inches=0.05)
+    plt.close(fig)
+
+
+# --- Orchestration --------------------------------------------------------------
+def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
+                   wind_csv=None, mc_runs=300, seed=0, pool=None,
+                   verbose=False):
+    """Top-level: compute dark flight for an event directory.
+
+    resdat: ResData (from fbspd_merge.readres) with track start/end.
+    fbspd_plot_data: needs 'final_params' + merged reltime for end speed.
+    Returns results dict (also written to darkflight.json).
+    """
+    event_dir = Path(event_dir)
+    end_lon = float(resdat.long1[1]); end_lat = float(resdat.lat1[1])
+    end_h = float(resdat.height[1]) * 1000.0   # km -> m
+    start_lon = float(resdat.long1[0]); start_lat = float(resdat.lat1[0])
+    start_h = float(resdat.height[0]) * 1000.0
+
+    # Track direction at end point (straight-line assumption)
+    r_start = llh2ecef(start_lon, start_lat, start_h)
+    r_end = llh2ecef(end_lon, end_lat, end_h)
+    track_dir = r_end - r_start
+    track_dir /= np.linalg.norm(track_dir)
+
+    # End speed & deceleration from fbspd fit
+    if fbspd_plot_data and fbspd_plot_data.get('final_params') is not None:
+        from fbspd_merge import expfunc_1stder, expfunc_2ndder
+        params = fbspd_plot_data['final_params']
+        t_last = float(np.max(fbspd_plot_data['final_merged_data']['reltime']))
+        v_end = float(expfunc_1stder(t_last, *params)) * 1000.0   # km/s -> m/s
+        a_end = float(abs(expfunc_2ndder(t_last, *params))) * 1000.0
+        t0_obs = float(np.min(fbspd_plot_data['final_merged_data']['reltime']))
+    else:
+        v_end, a_end, t0_obs, t_last = 3000.0, 1e4, 0.0, 1.0
+        logging.warning('darkflight: no fbspd fit, using nominal v_end/a_end')
+
+    atm = WindAtmosphere(wind_csv)
+
+    # Surviving-mass estimates over the density grid
+    mass_estimates = estimate_mass(v_end, a_end, end_h, atm=atm)
+    # reference density 3500, A=1.4
+    m_est = next(e['m_fade_kg'] for e in mass_estimates if e['rho'] == 3500)
+    m_est = float(np.clip(m_est, 1e-4, 100.0))
+
+    # Entry-mass back-projection (needs height vs time along track)
+    entry_estimates = []
+    if fbspd_plot_data and fbspd_plot_data.get('final_params') is not None:
+        from fbspd_merge import expfunc_1stder
+        def v_of_t(t):
+            return float(expfunc_1stder(t, *params)) * 1000.0
+        # linear height vs t (straight-line track)
+        hs = fbspd_plot_data['final_merged_data']['height']
+        ts = fbspd_plot_data['final_merged_data']['reltime']
+        if len(ts) > 2:
+            hfit = np.polyfit(ts, hs, 1)
+            def h_of_t(t):
+                return float(np.polyval(hfit, t)) * 1000.0
+            for e in mass_estimates:
+                m_ent = entry_mass_estimate(e['m_fade_kg'], e['rho'], e['A'],
+                                            v_of_t, h_of_t, (ts[0], ts[-1]),
+                                            atm=atm)
+                entry_estimates.append({'rho': e['rho'], 'A': e['A'],
+                                        'm_entry_kg': m_ent,
+                                        'm_fade_kg': e['m_fade_kg']})
+
+    # Ground height near the nominal landing point
+    h_ground = ground_elevation(end_lat, end_lon)
+
+    v0_vec = track_dir * v_end
+    scenarios = build_scenarios(m_est)
+    for sc in scenarios:
+        sc['results'] = []
+        for run in sc['runs']:
+            res = propagate(r_end, v0_vec, run['m'], run['rho'], run['A'],
+                            atm, h_ground, erode=sc['erode'])
+            sc['results'].append({'m': run['m'], 'rho': run['rho'],
+                                  'impact': res['impact'],
+                                  'lon': res['lon'], 'lat': res['lat'],
+                                  'h': res['h'], 'v': res['v'],
+                                  'mass_t': res['m']})
+
+    # Monte Carlo
+    mc_impacts = []
+    if mc_runs > 0:
+        mc_impacts = monte_carlo(r_end, v0_vec, m_est, 3500.0, 1.4,
+                                 wind_csv, h_ground, n_runs=mc_runs,
+                                 seed=seed, pool=pool)
+
+    results = {
+        'event_dir': str(event_dir),
+        'end_state': {'lon': end_lon, 'lat': end_lat, 'h_m': end_h,
+                      'v_end_ms': v_end, 'a_end_ms2': a_end},
+        'wind_used': atm.has_profile,
+        'h_ground_m': h_ground,
+        'mass_estimates': mass_estimates,
+        'entry_estimates': entry_estimates,
+        'm_est_ref_kg': m_est,
+        'scenarios': [{'name': s['name'], 'label': s['label'],
+                       'impacts': [{'m': r['m'], **r['impact']}
+                                   for r in s['results']]}
+                      for s in scenarios],
+        'mc': {'n': len(mc_impacts), 'impacts': mc_impacts},
+    }
+    write_json(results, event_dir / 'darkflight.json')
+    write_geojson(scenarios, event_dir / 'darkflight.geojson')
+    write_kml(scenarios, (end_lon, end_lat, end_h),
+              event_dir / 'darkflight.kml')
+    try:
+        write_map(scenarios, (end_lon, end_lat, end_h), mc_impacts,
+                  event_dir / 'map_darkflight.svg')
+    except Exception as e:
+        logging.warning(f'darkflight map failed: {e}')
+    return results
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Dark-flight propagator')
+    ap.add_argument('event_dir')
+    ap.add_argument('--mc', type=int, default=300)
+    ap.add_argument('--seed', type=int, default=0)
+    args = ap.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    from fbspd_merge import readres, calculate_speed_profile
+    event_dir = Path(args.event_dir)
+    res_files = list(event_dir.glob('obs_*.res'))
+    if not res_files:
+        sys.exit('No .res file in ' + str(event_dir))
+    resdat = readres(str(res_files[0]))
+    import pickle
+    pkl = event_dir / '_fbspd_plot_data.pkl'
+    plot_data = results_fb = None
+    if pkl.exists():
+        with pkl.open('rb') as f:
+            results_fb, plot_data = pickle.load(f)
+    wind_csv = event_dir / 'wind_profile.csv'
+    run_darkflight(event_dir, resdat, results_fb, plot_data,
+                   wind_csv if wind_csv.exists() else None,
+                   mc_runs=args.mc, seed=args.seed)
+
+
+if __name__ == '__main__':
+    main()

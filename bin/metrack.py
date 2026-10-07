@@ -413,6 +413,87 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
     if 'show' in options.get('doplot', ''): pylab.show()
     pylab.close()
 
+def _fetch_kartverket_topo(lons, lats, max_tiles=49):
+    """Stitch Kartverket topo WMTS tiles (UTM32 grid) covering the lon/lat bbox.
+
+    Kartverket's free 'topo' tileset has far better Norwegian detail than the
+    OSM fallback. Returns (PIL.Image, (x_min, x_max, y_min, y_max) in
+    EPSG:25832 metres) for use as ax.imshow(..., transform=ccrs.UTM(32)),
+    or None if unavailable/outside coverage — caller should fall back to OSM.
+    """
+    import urllib.request
+    import concurrent.futures
+    try:
+        import cartopy.crs as ccrs
+        from PIL import Image
+    except Exception:
+        return None
+
+    # TileMatrixSet 'utm32n' (EPSG:25832): fixed top-left corner, 256 px tiles,
+    # resolution halving per zoom. z0 tile edge = 256 * 21664 m.
+    ORIGIN_X, ORIGIN_Y = -2000000.0, 9045984.0
+    BASE_TILE_W = 256.0 * 21664.0
+
+    try:
+        pts = ccrs.UTM(32).transform_points(
+            ccrs.PlateCarree(), np.asarray(lons, float), np.asarray(lats, float))
+        x0, x1 = float(pts[:, 0].min()), float(pts[:, 0].max())
+        y0, y1 = float(pts[:, 1].min()), float(pts[:, 1].max())
+    except Exception:
+        return None
+    if not np.isfinite([x0, x1, y0, y1]).all():
+        return None
+    pad = 0.05 * max(x1 - x0, y1 - y0, 10000.0)
+    x0, x1, y0, y1 = x0 - pad, x1 + pad, y0 - pad, y1 + pad
+
+    # Pick the finest zoom whose tile count stays within budget.
+    best = None
+    for zi in range(1, 19):
+        tw = BASE_TILE_W / (1 << zi)
+        tc0 = int(np.floor((x0 - ORIGIN_X) / tw)); tc1 = int(np.floor((x1 - ORIGIN_X) / tw))
+        tr0 = int(np.floor((ORIGIN_Y - y1) / tw)); tr1 = int(np.floor((ORIGIN_Y - y0) / tw))
+        if tc0 < 0 or tr0 < 0:
+            continue
+        n = (tc1 - tc0 + 1) * (tr1 - tr0 + 1)
+        if n > max_tiles:
+            break
+        best = (zi, tw, tc0, tc1, tr0, tr1)
+    if best is None:
+        return None
+    z, tw, c0, c1, r0, r1 = best
+    n_tiles = (c1 - c0 + 1) * (r1 - r0 + 1)
+
+    url = "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/utm32n/{:02d}/{}/{}.png"
+    canvas = Image.new('RGB', ((c1 - c0 + 1) * 256, (r1 - r0 + 1) * 256), (255, 255, 255))
+
+    def get(c_r):
+        c, r = c_r
+        req = urllib.request.Request(
+            url.format(z, r, c), headers={'User-Agent': 'norskmeteornettverk.no'})
+        with urllib.request.urlopen(req, timeout=15) as f:
+            im = Image.open(f); im.load()
+        return c, r, im
+
+    fetched = 0
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            for c, r, im in ex.map(get, [(c, r) for c in range(c0, c1 + 1)
+                                         for r in range(r0, r1 + 1)]):
+                im = im.convert('RGBA')
+                # Tiles outside Norway have transparent pixels — composite onto
+                # the white canvas instead of letting alpha become black.
+                canvas.paste(im, ((c - c0) * 256, (r - r0) * 256), im)
+                fetched += 1
+    except Exception:
+        pass
+    # Mostly-empty coverage means we're outside Kartverket's tile area.
+    if fetched < max(1, n_tiles * 0.6):
+        return None
+    extent = (ORIGIN_X + c0 * tw, ORIGIN_X + (c1 + 1) * tw,
+              ORIGIN_Y - (r1 + 1) * tw, ORIGIN_Y - r0 * tw)
+    return canvas, extent
+
+
 def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, options,
              translations: Optional[dict] = None, output_filename: Optional[str] = None):
     """Shows a map of the track and lines of sight, distinguishing inliers and outliers."""
@@ -463,12 +544,12 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     proj = ccrs.Gnomonic(central_longitude=np.mean([lon_left, lon_right]), central_latitude=np.mean([lat_bot, lat_top]))
     ax = pylab.axes(projection=proj)
     ax.set_extent([lon_left, lon_right, lat_bot, lat_top], crs=ccrs.PlateCarree())
-    
+
     resolution = {'c': '110m', 'l': '50m', 'i': '10m', 'h': '10m', 'f': '10m'}.get(options.get('mapres', 'i'), '10m')
     lat_span = abs(lat_top - lat_bot)
     zoom_level = max(6, min(int(np.log2(360 / (lat_span + 1))), 9))
-    
-    # Fetch OSM tiles with a hard wall-clock timeout.
+
+    # Fetch map tiles with a hard wall-clock timeout.
     # socket.setdefaulttimeout() only covers connect/handshake; ssl.read() can
     # still block indefinitely inside cartopy's ThreadPoolExecutor.  Running the
     # call in a daemon thread lets us abandon it if it hangs.
@@ -480,7 +561,13 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
         try:
             old_to = socket.getdefaulttimeout()
             socket.setdefaulttimeout(15)
-            ax.add_image(OSM(), zoom_level)
+            kv = _fetch_kartverket_topo([lon_left, lon_right], [lat_bot, lat_top])
+            if kv is not None:
+                img_kv, (kx0, kx1, ky0, ky1) = kv
+                ax.imshow(img_kv, extent=[kx0, kx1, ky0, ky1],
+                          transform=ccrs.UTM(32), origin='upper', zorder=0)
+            else:
+                ax.add_image(OSM(), zoom_level)
             # Force tile fetching now, inside the timeout window
             fig = pylab.gcf()
             if fig and fig.canvas:
@@ -676,7 +763,13 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         try:
             old_to = socket.getdefaulttimeout()
             socket.setdefaulttimeout(15)
-            ax_map.add_image(OSM(), zoom_level)
+            kv = _fetch_kartverket_topo([lon_left, lon_right], [lat_bot, lat_top])
+            if kv is not None:
+                img_kv, (kx0, kx1, ky0, ky1) = kv
+                ax_map.imshow(img_kv, extent=[kx0, kx1, ky0, ky1],
+                              transform=ccrs.UTM(32), origin='upper', zorder=0)
+            else:
+                ax_map.add_image(OSM(), zoom_level)
             # Force tile fetching now, inside the timeout window
             if fig_map and fig_map.canvas:
                 fig_map.canvas.draw()

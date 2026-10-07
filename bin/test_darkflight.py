@@ -50,7 +50,8 @@ def test_mass_inversion():
     _, rho_a, T = atm.at(h)
     cd = dragcoeff(v, T, rho_a, A)
     a = cd * A * rho_a * v ** 2 / (2 * m_true ** (1. / 3) * rho_m ** (2. / 3))
-    est = estimate_mass(v, a, h, rho_grid=[3500], A=A, atm=atm)
+    est = estimate_mass(lambda t: v, lambda t: a, lambda t: h,
+                        (0.0, 0.5), rho_grid=[3500], A=A, atm=atm)
     assert abs(est[0]['m_fade_kg'] - m_true) / m_true < 0.10
 
 

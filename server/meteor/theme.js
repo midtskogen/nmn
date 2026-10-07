@@ -102,6 +102,28 @@
                      - integ[(y1 + 1) * (W + 1) + x0]
                      + integ[y0 * (W + 1) + x0];
             };
+            // For the map, mark pixels outside the map frame: near-white
+            // areas connected to the image border (figure margins, outside
+            // the axes). Interior light areas — sea, uncovered tiles —
+            // keep the opaque dimmed blend like the map.html surface.
+            let outside = null;
+            if (isMap) {
+                outside = new Uint8Array(W * H);
+                const isLight = (i) => { const p = i * 4;
+                    return px[p] > 225 && px[p + 1] > 225 && px[p + 2] > 225; };
+                const queue = new Int32Array(W * H);
+                let qh = 0, qt = 0;
+                const seed = (i) => { if (!outside[i] && isLight(i)) { outside[i] = 1; queue[qt++] = i; } };
+                for (let x = 0; x < W; x++) { seed(x); seed((H - 1) * W + x); }
+                for (let y = 0; y < H; y++) { seed(y * W); seed(y * W + W - 1); }
+                while (qh < qt) {
+                    const i = queue[qh++], x = i % W, y = (i / W) | 0;
+                    if (x > 0)     { const n = i - 1; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
+                    if (x < W - 1) { const n = i + 1; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
+                    if (y > 0)     { const n = i - W; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
+                    if (y < H - 1) { const n = i + W; if (!outside[n] && isLight(n)) { outside[n] = 1; queue[qt++] = n; } }
+                }
+            }
             // pass 2: transform
             for (let i = 0, p = 0; p < px.length; p += 4, i++) {
                 const r = px[p], g = px[p + 1], b = px[p + 2];
@@ -114,7 +136,15 @@
                          * (Math.min(H - 1, ((i / W) | 0) + 3) - Math.max(0, ((i / W) | 0) - 3) + 1));
                     if (frac < 0.22) achrom = true;
                 }
-                if (achrom) {
+                if (achrom && isMap && mx > 120 && !(outside && outside[i])) {
+                    // Light sea/margin areas: the iframe shows the whole
+                    // surface dimmed at 55% over #141e28 (opaque, not
+                    // transparent) — same blend here so water and tile
+                    // edges match map.html.
+                    px[p]     = Math.round(r * 0.55 + 20 * 0.45);
+                    px[p + 1] = Math.round(g * 0.55 + 30 * 0.45);
+                    px[p + 2] = Math.round(b * 0.55 + 40 * 0.45);
+                } else if (achrom) {
                     // white fades out, dark text/borders go bright; tint
                     // follows the hue hint so water stays slightly blue
                     // and land slightly green
@@ -126,6 +156,17 @@
                     // chromatic: normalise brightness toward 200 keeping hue
                     // (dark sight lines brighten, bright overlays dim)
                     let sc = Math.min(1.7, Math.max(0.55, 200 / Math.max(mx, 1)));
+                    if (isMap && (mx - mn) < 90) {
+                        // Muted terrain colours: match the interactive
+                        // map.html night look where the surface is dimmed
+                        // to 55% opacity over the #141e28 backdrop.
+                        px[p]     = Math.round(r * 0.55 + 20 * 0.45);
+                        px[p + 1] = Math.round(g * 0.55 + 30 * 0.45);
+                        px[p + 2] = Math.round(b * 0.55 + 40 * 0.45);
+                        continue;
+                        // saturated lines/markers fall through: keep them
+                        // vivid like the Plotly traces in the iframe
+                    }
                     if (!isMap) {
                         // large, low-saturation light fills: blend into page
                         if (sc < 0.9 && mx > 150 && (mx - mn) < 160) sc *= 0.35;

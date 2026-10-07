@@ -5,26 +5,29 @@ photometry.py — Rough photometric mass estimation for meteors.
 
 Approach
 --------
-1. For each station camera we have a lens PTO (image <-> az/alt mapping) and
-   an event frame (fireball_orig.jpg). brightstar.py gives catalog stars'
-   pixel coordinates and magnitudes at the event time; we measure each
-   star's flux with a small aperture and fit a per-camera zero point
-   (instrumental magnitude vs catalog magnitude).
+1. Per station camera we have a gnomonic image (`*-gnomonic.jpg`) and
+   `gnomonic_corr_grid.pto` (image <-> az/alt). brightstar.py maps catalog
+   stars to image pixels at the event time; we measure each star's peak
+   pixel above background and fit a per-camera zero point.
 
-2. The meteor's per-frame peak brightness (event.txt 'trail/brightness',
-   pixel luma 0-255) is converted to apparent magnitude via that zero
-   point, then to absolute magnitude using the range from the station to
-   the trajectory point at that instant, plus a simple airmass extinction
-   correction.
+2. The meteor's per-point trail brightness (event.txt 'trail/brightness',
+   peak luma 0-255 measured in the same gnomonic image) is converted to
+   apparent magnitude via that zero point. Because the meteor moves
+   between frames, its flux is smeared along the trail, so peak-pixel
+   photometry *underestimates* total flux -> the resulting mass is a
+   conservative lower bound (order-of-magnitude).
 
-3. Luminous power L = 4 pi r^2 F_vega * 10^(-0.4 m); photometric mass
-   M_ph = 2/(tau v^2) * integral L dt  with luminous efficiency tau from
-   speed (Sansom et al. 2019 scaling).
+3. The range to each trail point is computed geometrically by intersecting
+   the camera line-of-sight (per-point az/alt from 'coordinates') with the
+   fitted trajectory line — no timing alignment needed.
 
-This is deliberately approximate — uncalibrated consumer cameras, JPEG
-compression, saturated pixels, non-linear response. It is used as an
-order-of-magnitude cross-check on the deceleration-derived mass, not as a
-precision measurement.
+4. Luminous power L = 4 pi r^2 F0 * 10^(-0.4 m); photometric mass
+   M_ph = integral L dt / (0.5 tau v^2) with speed-dependent luminous
+   efficiency tau (meteor-photometry convention, ~0.7% at 20 km/s).
+
+This is deliberately approximate (consumer cameras, JPEG, smearing,
+unmodeled extinction) — used as an order-of-magnitude cross-check on the
+deceleration-derived mass, not a precision measurement.
 
 Usage: photometry.py <event_dir>
 """
@@ -45,8 +48,38 @@ for p in (_SCRIPT, _SCRIPT.parent):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-F_VEGA = 2.5e-6        # W/m2 for a mag-0 star (V band, approx)
-EXTINCTION_K = 0.28    # mag per airmass, typical clear night
+F_VEGA = 2.5e-6        # W/m2 for a mag-0 star (approx, broadband)
+EXTINCTION_K = 0.28    # mag per airmass
+
+
+def llh2ecef(lon, lat, h_m):
+    """WGS-84 geodetic to ECEF (duplicated from darkflight to stay standalone)."""
+    a, f = 6378137.0, 1.0 / 298.257223563
+    e2 = f * (2 - f)
+    sin_lat, cos_lat = math.sin(math.radians(lat)), math.cos(math.radians(lat))
+    n = a / math.sqrt(1 - e2 * sin_lat * sin_lat)
+    return np.array([(n + h_m) * cos_lat * math.cos(math.radians(lon)),
+                     (n + h_m) * cos_lat * math.sin(math.radians(lon)),
+                     (n * (1 - e2) + h_m) * sin_lat])
+
+
+def altaz_to_vec_ecef(az_deg, alt_deg, lon, lat):
+    """Line-of-sight unit vector in ECEF for az/alt at observer lon/lat."""
+    az, alt = math.radians(az_deg), math.radians(alt_deg)
+    e = -math.sin(az); n_ = math.cos(az) * math.cos(alt)
+    u = math.sin(alt)
+    # ENU: east = -sin(az) cos(alt), north = cos(az) cos(alt), up = sin(alt)
+    en = -math.sin(az) * math.cos(alt)
+    nn = math.cos(az) * math.cos(alt)
+    uu = math.sin(alt)
+    lat_r, lon_r = math.radians(lat), math.radians(lon)
+    # ENU -> ECEF rotation
+    east = np.array([-math.sin(lon_r), math.cos(lon_r), 0.0])
+    north = np.array([-math.sin(lat_r) * math.cos(lon_r),
+                      -math.sin(lat_r) * math.sin(lon_r), math.cos(lat_r)])
+    up = np.array([math.cos(lat_r) * math.cos(lon_r),
+                   math.cos(lat_r) * math.sin(lon_r), math.sin(lat_r)])
+    return en * east + nn * north + uu * up
 
 
 def _load_event_txt(path):
@@ -57,9 +90,9 @@ def _load_event_txt(path):
 
 def _star_zeropoint(image_path, pto_path, timestamp, lat, lon, elev,
                     bright_limit=3.5):
-    """Instrumental zero point: mag = -2.5 log10(flux) + zp.
+    """Zero point from catalog stars measured as peak-pixel flux.
 
-    Returns (zp, n_stars, scatter_mag) or None.
+    Returns (zp, n_stars, scatter_mag) where mag = zp - 2.5log10(peak-bkg).
     """
     try:
         from PIL import Image
@@ -68,7 +101,7 @@ def _star_zeropoint(image_path, pto_path, timestamp, lat, lon, elev,
     try:
         out = subprocess.run(
             [sys.executable, str(_SCRIPT / 'brightstar.py'), str(timestamp),
-             str(pto_path), '-f', str(bright_limit), '-n', '60',
+             str(pto_path), '-f', str(bright_limit), '-n', '80',
              '-x', str(lon), '-y', str(lat), '-a', str(elev)],
             capture_output=True, text=True, timeout=60)
     except Exception as e:
@@ -77,188 +110,155 @@ def _star_zeropoint(image_path, pto_path, timestamp, lat, lon, elev,
     if out.returncode != 0:
         return None
 
-    # brightstar prints: sx sy az alt 'name' mag  (source-image coords)
-    stars = []
-    for line in out.stdout.splitlines():
-        m = re.match(r"^\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+'?(\w+)'?\s+([-\d.]+)", line)
-        if m:
-            sx, sy, az, alt, name, mag = m.groups()
-            stars.append((float(sx), float(sy), float(alt),
-                          name, float(mag)))
-    if not stars:
-        return None
-
     img = np.asarray(Image.open(image_path).convert('L'), dtype=float)
     ih, iw = img.shape
+    yy, xx = np.mgrid[-9:10, -9:10]
+    ring = (np.hypot(yy, xx) > 5) & (np.hypot(yy, xx) <= 9)
 
-    m_cat, m_inst = [], []
-    for sx, sy, alt, name, mag in stars:
-        x, y = int(round(sx)), int(round(sy))
-        if not (10 <= x < iw - 10 and 10 <= y < ih - 10):
+    zps = []
+    for line in out.stdout.splitlines():
+        m = re.match(r"^\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)"
+                     r"\s+'?(\w+)'?\s+([-\d.]+)", line)
+        if not m:
             continue
-        ap = img[y - 4:y + 5, x - 4:x + 5]          # aperture r=4
-        ann = img[y - 10:y + 11, x - 10:x + 11]      # annulus 7..10
-        mask = np.ones(ann.shape, bool)
-        mask[7 - 10 + 6:7 + 10 - 6, 7 - 10 + 6:7 + 10 - 6] = False
-        # inner 7x7 excluded -> annulus pixels
-        yy, xx = np.mgrid[-10:11, -10:11]
-        ring = (np.hypot(yy, xx) > 6)
-        bkg = np.median(ann[ring]) if ring.sum() else 0.0
-        flux = float(np.sum(ap - bkg))
-        if flux <= 0:
+        x, y = int(round(float(m.group(1)))), int(round(float(m.group(2))))
+        mag = float(m.group(6))
+        if not (12 <= x < iw - 12 and 12 <= y < ih - 12):
             continue
-        m_cat.append(mag)
-        m_inst.append(-2.5 * math.log10(flux))
-    if len(m_cat) < 3:
-        return None
-    zps = [mi + mc for mi, mc in zip(m_inst, m_cat)]
-    zp = float(np.median(zps))
-    scatter = float(np.std(zps)) if len(zps) > 3 else 1.0
-    return zp, len(zps), scatter
-
-
-def meteor_magnitudes(brightness, zp, exposure_s=0.04):
-    """Per-frame peak luma -> rough apparent magnitude.
-
-    Treats peak-pixel brightness as a flux proxy proportional to total
-    streak flux (moving meteor smears flux along the trail, so this is a
-    lower bound on flux / upper bound on magnitude in faint cases).
-    Aperture-equivalent flux ~ b (counts per exposure); stars are measured
-    the same way so the zero point absorbs the constant.
-    """
-    out = []
-    for b in brightness:
-        if b <= 1:
-            out.append(None)
+        ap = img[y - 4:y + 5, x - 4:x + 5]
+        ann = img[y - 9:y + 10, x - 9:x + 10]
+        bkg = float(np.median(ann[ring]))
+        peak = float(ap.max()) - bkg
+        if peak <= 3:          # too faint / saturated-out
             continue
-        out.append(zp - 2.5 * math.log10(b))
-    return out
-
-
-def extinction_corr(alt_deg):
-    """Airmass extinction correction (mag to add to observed m)."""
-    if alt_deg <= 0:
-        return 0.0
-    z = math.radians(90 - alt_deg)
-    x = 1.0 / (math.cos(z) + 0.50572 * (96.07995 - (90 - alt_deg)) ** -1.6364)
-    return -EXTINCTION_K * x     # subtract extinction
-
-
-def photometric_mass(m_app_list, ranges_km, times_s, speeds_ms,
-                     tau_fn=None):
-    """Integrate the light curve -> photometric mass [kg].
-
-    m_app_list: apparent magnitudes per sample (None = skip)
-    ranges_km: station-to-meteor distance per sample
-    times_s: timestamps (s)
-    speeds_ms: meteoroid speed per sample (m/s)
-    tau_fn: luminous efficiency as f(v_kms); default ~0.7%.
-    """
-    if tau_fn is None:
-        # Sansom et al. (2019): tau ~ 0.007 around 20 km/s, scales ~v
-        def tau_fn(v_ms):
-            return min(0.20, max(0.001, 0.0007 * (v_ms / 1000.0)))
-    pts = [(t, m, r, v) for t, m, r, v in
-           zip(times_s, m_app_list, ranges_km, speeds_ms) if m is not None]
-    if len(pts) < 2:
+        # extinction-correct catalog mag to apparent at that altitude
+        alt = float(m.group(4))
+        m_corr = mag + extinction_mag(alt)
+        zps.append(m_corr + 2.5 * math.log10(peak))
+    if len(zps) < 3:
         return None
-    lum = []
-    for t, m, r, v in pts:
-        flux = F_VEGA * 10 ** (-0.4 * m)          # W/m2 at observer
-        lum.append(4 * math.pi * (r * 1e3) ** 2 * flux)   # W
-    energy = np.trapz(lum, [p[0] for p in pts])           # J radiated
-    masses = []
-    for t, m, r, v in pts:
-        tau = tau_fn(v)
-        masses.append(2.0 / (tau * v ** 2))
-    # M = 2/(tau v^2) * ∫L dt, evaluated with mean weighting over curve
-    w = np.array([tau_fn(v) * v ** 2 for _, _, _, v in pts])
-    eff = np.trapz(w, [p[0] for p in pts]) / 2.0          # ∫(tau v²/2)dt
-    if eff <= 0:
-        return None
-    return energy / eff
+    return float(np.median(zps)), len(zps), float(np.std(zps))
 
 
-def camera_photometry(cam_dir, resdat=None, plot_data=None, timestamp=None):
-    """Best-effort photometric estimate for one camera directory.
+def extinction_mag(alt_deg):
+    """Magnitude penalty (positive) from airmass at altitude alt_deg."""
+    if alt_deg >= 45:
+        x = 1.0 / math.sin(math.radians(max(alt_deg, 1)))
+    else:
+        x = 1.0 / (math.cos(math.radians(90 - alt_deg)) +
+                   0.50572 * (96.07995 - alt_deg) ** -1.6364)
+    return EXTINCTION_K * max(x, 0)
 
-    Returns dict with per-frame magnitudes + photometric mass, or None.
+
+def range_to_track(lon, lat, elev, az, alt, r_start, r_end):
+    """Distance from observer to the closest approach of the track line
+    to the line-of-sight ray, evaluated at the point of closest approach.
+
+    Returns (range_km, t_frac along track 0..1) or None.
     """
+    r_obs = llh2ecef(lon, lat, elev)
+    d = altaz_to_vec_ecef(az, alt, lon, lat)
+    t_dir = r_end - r_start
+    tl = np.linalg.norm(t_dir)
+    if tl == 0:
+        return None
+    t_dir /= tl
+    w0 = r_obs - r_start
+    a = np.dot(d, t_dir)
+    denom = 1 - a * a
+    if abs(denom) < 1e-9:
+        return None
+    b, c = np.dot(d, w0), np.dot(t_dir, w0)
+    s_los = (a * c - b) / denom      # distance along LOS
+    s_trk = (c - a * b) / denom      # distance along track
+    if s_los <= 0:
+        return None
+    return s_los / 1000.0, s_trk / tl
+
+
+def camera_photometry(cam_dir, r_start=None, r_end=None, timestamp=None):
+    """Photometric estimate for one camera directory."""
     cam_dir = Path(cam_dir)
     etxt = cam_dir / 'event.txt'
     if not etxt.exists():
         return None
     cfg = _load_event_txt(etxt)
     try:
-        brightness = [float(b) for b in cfg.get('trail', 'brightness').split()]
-        coords = cfg.get('trail', 'coordinates').split()
-        timestamps = [float(t) for t in cfg.get('trail', 'timestamps').split()]
+        brightness = [float(b) for b in
+                      cfg.get('trail', 'brightness').split()]
+        coords = [[float(v) for v in c.split(',')] for c in
+                  cfg.get('trail', 'coordinates').split()]
+        timestamps = [float(t) for t in
+                      cfg.get('trail', 'timestamps').split()]
     except Exception:
         return None
-    if not brightness or not coords or len(brightness) != len(coords):
+    if not (brightness and coords and len(brightness) == len(coords)):
         return None
 
-    pto = None
-    for cand in ('lens.pto', 'fireball.pto'):
-        if (cam_dir / cand).exists():
-            pto = cam_dir / cand
-            break
-    img = None
-    for cand in ('fireball_orig.jpg', 'fireball.jpg'):
-        if (cam_dir / cand).exists():
-            img = cam_dir / cand
-            break
-    if pto is None or img is None or timestamp is None:
+    gnom = list(cam_dir.glob('*-gnomonic.jpg'))
+    pto = cam_dir / 'gnomonic_corr_grid.pto'
+    if not gnom or not pto.exists():
+        return None
+    if timestamp is None:
+        timestamp = float(timestamps[0]) if timestamps else None
+    if timestamp is None:
         return None
 
-    lat = float(cfg.get('summary', 'latitude', fallback=60.0))
-    lon = float(cfg.get('summary', 'longitude', fallback=10.0))
-    elev = float(cfg.get('summary', 'elevation', fallback=0.0))
+    lat = float(cfg.get('summary', 'latitude', fallback='60.0'))
+    lon = float(cfg.get('summary', 'longitude', fallback='10.0'))
+    elev = float(cfg.get('summary', 'elevation', fallback='0'))
 
-    zp_res = _star_zeropoint(img, pto, timestamp, lat, lon, elev)
+    zp_res = _star_zeropoint(gnom[0], pto, timestamp, lat, lon, elev)
     if zp_res is None:
         return None
     zp, n_stars, scatter = zp_res
 
-    # per-frame apparent magnitude (peak-pixel proxy)
-    m_app = meteor_magnitudes(brightness, zp)
+    try:
+        from PIL import Image
+        img = np.asarray(Image.open(gnom[0]).convert('L'), dtype=float)
+        bkg = float(np.median(img))
+    except Exception:
+        bkg = 20.0
 
-    # trajectory geometry -> range to each centroid point
-    ranges = None
-    if resdat is not None and plot_data is not None:
-        try:
-            from fbspd_merge import lonlat2xyz, expfunc
-            r_obs = llh2ecef_station(lon, lat, elev)
-            merged = plot_data['final_merged_data']
-            params = plot_data['final_params']
-            reltime = np.asarray(merged['reltime'])
-            pos_km = np.asarray(merged['pos'])
-            r_start = lonlat2xyz(float(resdat.long1[0]), float(resdat.lat1[0]),
-                                 float(resdat.height[0])) * 1000.0
-            r_end = lonlat2xyz(float(resdat.long1[1]), float(resdat.lat1[1]),
-                               float(resdat.height[1])) * 1000.0
-            track = (r_end - r_start) / np.linalg.norm(r_end - r_start)
-            p0 = float(expfunc(0.0, *params))
-            ranges = []
-            for t in timestamps:
-                s = (float(expfunc(t - reltime[0], *params)) - p0) * 1000.0
-                pt = r_start + track * s
-                ranges.append(np.linalg.norm(pt - r_obs) / 1000.0)
-        except Exception as e:
-            logging.debug(f'range calc failed: {e}')
-            ranges = None
-    if ranges is None:
-        # crude fallback: slant range ~ h/sin(alt)
-        ranges = [None] * len(m_app)
+    m_app, ranges, fracs = [], [], []
+    for b, (az, alt) in zip(brightness, coords):
+        peak = b - bkg
+        m_app.append(zp - 2.5 * math.log10(max(peak, 1.0)))
+        if r_start is not None and r_end is not None:
+            rg = range_to_track(lon, lat, elev, az, alt, r_start, r_end)
+            ranges.append(rg[0] if rg else None)
+            fracs.append(rg[1] if rg else None)
+        else:
+            ranges.append(None)
+            fracs.append(None)
 
     return {'zp': zp, 'n_stars': n_stars, 'scatter_mag': scatter,
-            'm_app': m_app, 'brightness': brightness,
-            'timestamps': timestamps, 'ranges_km': ranges}
+            'bkg': bkg, 'm_app': m_app, 'brightness': brightness,
+            'timestamps': timestamps, 'ranges_km': ranges,
+            'track_frac': fracs, 'lat': lat, 'lon': lon, 'elev': elev}
 
 
-def llh2ecef_station(lon, lat, elev_m):
-    import darkflight
-    return darkflight.llh2ecef(lon, lat, elev_m)
+def photometric_mass(m_app, ranges_km, times_s, speeds_ms):
+    """Integrate light curve -> photometric mass [kg] (lower bound).
+
+    Luminous efficiency tau ~ speed-dependent (Sansom et al. 2019):
+    tau = 0.007 at ~20 km/s scaling roughly linearly below, capped.
+    """
+    def tau(v_ms):
+        return min(0.20, max(0.001, 0.0007 * (v_ms / 1000.0)))
+    pts = [(t, m, r, v) for t, m, r, v in
+           zip(times_s, m_app, ranges_km, speeds_ms)
+           if m is not None and r and r > 1.0]
+    if len(pts) < 2:
+        return None
+    ts = np.array([p[0] for p in pts])
+    ts = ts - ts[0]
+    lum = np.array([4 * math.pi * (r * 1e3) ** 2 * F_VEGA * 10 ** (-0.4 * m)
+                    for t, m, r, v in pts])          # W
+    w = np.array([tau(v) * v ** 2 / 2.0 for t, m, r, v in pts])
+    energy = np.trapz(lum, ts)                       # J radiated
+    eff = np.trapz(w, ts)                            # ∫(tau v²/2)dt
+    return energy / eff if eff > 0 else None
 
 
 def event_photometry(event_dir, resdat=None, plot_data=None, timestamp=None):
@@ -273,44 +273,45 @@ def event_photometry(event_dir, resdat=None, plot_data=None, timestamp=None):
             from datetime import datetime, timezone
             dt = datetime.strptime(m.group(1) + m.group(2), '%Y%m%d%H%M%S')
             timestamp = dt.replace(tzinfo=timezone.utc).timestamp()
+
+    r_start = r_end = None
+    if resdat is not None:
+        r_start = llh2ecef(float(resdat.long1[0]), float(resdat.lat1[0]),
+                           float(resdat.height[0]) * 1000.0)
+        r_end = llh2ecef(float(resdat.long1[1]), float(resdat.lat1[1]),
+                         float(resdat.height[1]) * 1000.0)
+
     results = []
     for etxt in sorted(event_dir.glob('*/cam*/event.txt')):
-        r = camera_photometry(etxt.parent, resdat, plot_data, timestamp)
+        r = camera_photometry(etxt.parent, r_start, r_end, timestamp)
         if r:
             r['cam'] = str(etxt.parent.relative_to(event_dir))
             results.append(r)
 
-    # combine light curves across cameras (use fitted speed if available)
+    # speed along track from fbspd fit (fallback: nominal)
+    def speed_at_frac(frac):
+        if plot_data is not None and plot_data.get('final_params') is not None:
+            try:
+                from fbspd_merge import expfunc_1stder
+                rt = np.asarray(plot_data['final_merged_data']['reltime'])
+                t = rt[0] + frac * (rt[-1] - rt[0])
+                return float(expfunc_1stder(t, *plot_data['final_params'])) * 1000.0
+            except Exception:
+                pass
+        return 12000.0
+
     m_all = []
     for r in results:
-        ts, mags = r['timestamps'], r['m_app']
-        rngs = r['ranges_km']
-        speeds = None
-        if plot_data is not None:
-            from fbspd_merge import expfunc_1stder
-            reltime0 = float(np.min(plot_data['final_merged_data']['reltime']))
-            speeds = [float(expfunc_1stder(t - reltime0,
-                                         *plot_data['final_params'])) * 1000.0
-                      for t in ts]
-        else:
-            speeds = [12000.0] * len(ts)
-        if any(x is None for x in rngs):
-            continue
-        valid = [(t, m, rng, v) for t, m, rng, v in
-                 zip(ts, mags, rngs, speeds) if m is not None]
-        if len(valid) < 2:
-            continue
-        m_est = photometric_mass([v[1] for v in valid],
-                                 [v[2] for v in valid],
-                                 [v[0] for v in valid],
-                                 [v[3] for v in valid])
+        speeds = [speed_at_frac(f) if f is not None else 12000.0
+                  for f in r['track_frac']]
+        m_est = photometric_mass(r['m_app'], r['ranges_km'],
+                                 r['timestamps'], speeds)
         if m_est:
             r['m_phot_kg'] = m_est
             m_all.append(m_est)
-    out = {'per_cam': results,
-           'm_phot_kg': float(np.median(m_all)) if m_all else None,
-           'n_cams': len(m_all)}
-    return out
+    return {'per_cam': results,
+            'm_phot_kg': float(np.median(m_all)) if m_all else None,
+            'n_cams': len(m_all)}
 
 
 def main():
@@ -333,6 +334,8 @@ def main():
     r = event_photometry(event_dir, resdat, plot_data)
     for c in r['per_cam']:
         print(c['cam'], 'zp=', round(c['zp'], 2), 'stars=', c['n_stars'],
+              'mags=', [round(m, 1) if m else None for m in c['m_app']],
+              'ranges=', [round(x, 1) if x else None for x in c['ranges_km']],
               'm_phot=', c.get('m_phot_kg'))
     print('combined m_phot_kg:', r['m_phot_kg'])
 

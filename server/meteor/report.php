@@ -267,6 +267,7 @@ h1.page-title { color: var(--primary); font-family: var(--font-head); font-size:
 @media (max-width: 800px) { .row.row-single { max-width: 100%; } }
 iframe { width: 100%; min-height: 500px; aspect-ratio: 16 / 10; height: auto; border: none; border-radius: 6px; display: block; }
 img.plot { width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 6px; }
+img.plot.hgt { width: auto; max-width: 100%; }
 p.caption { text-align: center; font-size: 0.88em; margin: 0.5em 0 0; color: var(--muted); }
 
 /* -- Station detail tabs -- */
@@ -352,6 +353,9 @@ footer { text-align: center; color: var(--muted); font-size: 0.9em; margin-top: 
   .tab-btn { padding: 0.4em 0.9em; font-size: 0.85em; }
   .tab-panel-wrap { padding: 0.6em; }
   .col { overflow-x: auto; }
+  /* tables.html packs the two tables side by side in one outer <table>;
+     stack them vertically on phones */
+  .col > table > tbody > tr > td { display: block; width: 100%; }
   table.data-table td { padding: 0.35em 0.45em; font-size: 0.9em; }
   p.caption { font-size: 0.8em; }
   /* Mobile modal sizing */
@@ -557,7 +561,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
       <?php endif; ?>
       <?php if ($merge_orbit_block): ?>
       <div class="col">
-        <img class="plot" src="<?php echo $height_jpg;?>" alt="height profile">
+        <img class="plot hgt" src="<?php echo $height_jpg;?>" alt="height profile">
         <?php if ($tables_html) readfile($tables_html); ?>
       </div>
       <?php elseif ($tables_html): ?>

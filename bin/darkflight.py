@@ -340,26 +340,76 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
     }
 
 
-# --- Mass estimation from terminal deceleration --------------------------------
-def estimate_mass(v_end, a_end, h_m, rho_grid=None, A=1.4, atm=None):
-    """Invert the drag equation at the fade point to get surviving mass.
+# --- Mass estimation -----------------------------------------------------------
+def _decel_to_mass(a, v, rho_a, T, rho_m, A):
+    """Invert the drag equation: a = cd*A*rhoa*v^2/(2*M^{1/3}*rho_m^{2/3})."""
+    if a <= 0 or v <= 0:
+        return np.inf
+    cd = dragcoeff(v, T, rho_a, A)
+    k = cd * A * rho_a * v ** 2 / (2.0 * a)
+    return k ** 3 / rho_m ** 2
 
-    a_drag = cd*A*rhoa*v^2 / (2 * M^(1/3) * rho_m^(2/3))
-    => M_fade = [cd*A*rhoa*v^2 / (2*a_end)]^3 / rho_m^2
 
-    Returns list of dicts per density.
+def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
+                  atm=None, params=None, pcov=None, rng=None):
+    """Least-squares fit of mass to the whole deceleration curve.
+
+    Predicted decel for a body of mass M: a_pred(t) = cd(t)*A*rhoa(t)*v(t)^2
+    / (2*M^{1/3}*rho_m^{2/3}). We solve for M per density; uncertainty from
+    Monte-Carlo over the fit covariance (pcov) if supplied.
+
+    Returns list of dicts: rho, A, m_fade_kg (median), lo/hi 68% interval,
+    m_crit_kg (mass that exactly ablates to zero at the fade point).
     """
     if rho_grid is None:
         rho_grid = DENSITY_GRID
     if atm is None:
         atm = WindAtmosphere()
-    _, rho_a, T = atm.at(h_m)
-    cd = dragcoeff(v_end, T, rho_a, A)
-    k = cd * A * rho_a * v_end ** 2 / (2.0 * abs(a_end))
+    if rng is None:
+        rng = np.random.default_rng(0)
+
+    ts = np.linspace(t_range[0], t_range[1], 25)
+    vs = np.array([v_of_t(t) for t in ts])
+    aa = np.array([a_of_t(t) for t in ts])
+    hs = np.array([h_of_t(t) for t in ts])
     out = []
     for rho_m in rho_grid:
-        m_fade = k ** 3 / rho_m ** 2
-        out.append({'rho': rho_m, 'A': A, 'm_fade_kg': m_fade})
+        # least-squares: a_pred = C(t) * M^{-1/3} -> solve M^{-1/3}
+        C = np.array([dragcoeff(max(v, 1.0), atm.at(max(h, 0.0))[2],
+                                atm.at(max(h, 0.0))[1], A)
+                      * A * atm.at(max(h, 0.0))[1] * v ** 2
+                      / (2.0 * rho_m ** (2. / 3))
+                      for v, h in zip(vs, hs)])
+        m13inv = np.sum(C * aa) / np.sum(C * C) if np.sum(C * C) > 0 else 0.0
+        m_med = (1.0 / m13inv) ** 3 if m13inv > 0 else np.inf
+
+        # uncertainty: bootstrap over pcov
+        m_samples = []
+        if params is not None and pcov is not None:
+            try:
+                from fbspd_merge import expfunc_2ndder, expfunc_1stder
+                draws = np.random.default_rng(rng.integers(1 << 30))
+                for p in draws.multivariate_normal(params, pcov, size=200):
+                    a_s = np.abs(expfunc_2ndder(ts, *p))
+                    m13i = np.sum(C * a_s) / np.sum(C * C)
+                    if m13i > 0:
+                        m_samples.append((1.0 / m13i) ** 3)
+            except Exception:
+                pass
+        if len(m_samples) > 10:
+            lo, hi = np.percentile(m_samples, [16, 84])
+        else:
+            lo, hi = m_med * 0.5, m_med * 2.0
+
+        # critical entry mass: ablation integral along track
+        B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
+        rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
+        integral = np.trapz(rhos * vs ** 3, ts)
+        m_crit = (B / 3 * integral) ** 3
+
+        out.append({'rho': rho_m, 'A': A, 'm_fade_kg': float(m_med),
+                    'm_fade_lo': float(lo), 'm_fade_hi': float(hi),
+                    'm_crit_kg': float(m_crit)})
     return out
 
 

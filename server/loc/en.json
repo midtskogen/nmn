@@ -165,5 +165,7 @@
   "df_impact": "Predicted impact",
   "df_fall_area": "Fall area (MC)",
   "df_estimated": "estimated",
-  "df_caption": "Predicted meteorite fall area. Markers show different fragmentation scenarios."
+  "df_caption": "Predicted meteorite fall area. Markers show different fragmentation scenarios.",
+  "df_unreliable": "unreliable",
+  "df_unreliable_note": "Mass estimate unreliable — luminous track too short or inconsistent; map shows hypothetical fragment paths."
 }

@@ -160,5 +160,7 @@
   "df_impact": "Vorausgesagter Einschlag",
   "df_fall_area": "Fallgebiet (MC)",
   "df_estimated": "geschätzt",
-  "df_caption": "Vorausgesagtes Meteoriten-Fallgebiet. Marker zeigen verschiedene Fragmentierungsszenarien."
+  "df_caption": "Vorausgesagtes Meteoriten-Fallgebiet. Marker zeigen verschiedene Fragmentierungsszenarien.",
+  "df_unreliable": "unsicher",
+  "df_unreliable_note": "Massenschätzung unsicher — Leuchtpfad zu kurz oder inkonsistent; die Karte zeigt hypothetische Fragmentbahnen."
 }

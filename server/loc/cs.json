@@ -160,5 +160,7 @@
   "df_impact": "Předpokládaný dopad",
   "df_fall_area": "Oblast dopadu (MC)",
   "df_estimated": "odhad",
-  "df_caption": "Předpokládaná oblast dopadu meteoritu. Značky ukazují různé scénáře fragmentace."
+  "df_caption": "Předpokládaná oblast dopadu meteoritu. Značky ukazují různé scénáře fragmentace.",
+  "df_unreliable": "nespolehlivý",
+  "df_unreliable_note": "Odhad hmotnosti je nespolehlivý — světelná dráha příliš krátká nebo nekonzistentní; mapa ukazuje hypotetické dráhy fragmentů."
 }

@@ -220,7 +220,7 @@ body { font-family: var(--font-body); font-size: 16px; margin: 0; padding: 0;
   background: var(--bg); color: var(--text); line-height: 1.6; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-.page-wrapper { max-width: 1400px; margin: 0 auto; padding: 1em; position: relative; }
+.page-wrapper { max-width: none; margin: 0 auto; padding: 1em 2em; position: relative; }
 
 /* Lang switcher */
 .lang-sw { position: absolute; top: 1em; right: 1em; font-size: 1.4em; z-index: 100; }
@@ -236,8 +236,8 @@ h1.page-title { color: var(--primary); font-family: var(--font-head); font-size:
    ========================================================= */
 
 /* -- Thumbnail strip -- */
-.thumb-strip { display: flex; flex-wrap: wrap; gap: 0.8em; margin-bottom: 1.5em; }
-.thumb-card { flex: 1 1 200px; max-width: 280px; background: var(--card);
+.thumb-strip { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.8em; margin-bottom: 1.5em; }
+.thumb-card { flex: 0 1 240px; max-width: 280px; background: var(--card);
   border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); overflow: hidden;
   cursor: pointer; transition: box-shadow .3s; }
 .thumb-card:hover { box-shadow: 0 8px 24px rgba(0,0,0,.22); }
@@ -265,8 +265,8 @@ h1.page-title { color: var(--primary); font-family: var(--font-head); font-size:
 .col { flex: 1; background: var(--card); border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,.06); padding: 1.2em; }
 @media (max-width: 800px) { .row.row-single { max-width: 100%; } }
-iframe { width: 100%; min-height: 500px; border: none; border-radius: 6px; display: block; }
-img.plot { max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 6px; }
+iframe { width: 100%; min-height: 500px; aspect-ratio: 16 / 10; height: auto; border: none; border-radius: 6px; display: block; }
+img.plot { width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 6px; }
 p.caption { text-align: center; font-size: 0.88em; margin: 0.5em 0 0; color: var(--muted); }
 
 /* -- Station detail tabs -- */
@@ -322,6 +322,9 @@ img { max-width: 100%; height: auto; display: block; margin: 1em auto;
   border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,.1); }
 .text-center { text-align: center; }
 @media (max-width: 1024px) { iframe { min-height: 512px; height: 512px; } }
+@media (max-width: 600px) {
+  iframe { min-height: 320px; height: 55vw; }
+}
 table img { width: 100% !important; height: auto; }
 
 /* Shared */
@@ -329,10 +332,28 @@ hr { border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }
 footer { text-align: center; color: var(--muted); font-size: 0.9em; margin-top: 2em; padding: 1em 0; }
 
 @media (max-width: 800px) {
-  .row { flex-direction: column; }
-  .stn-detail { flex-direction: column; }
-  .thumb-strip { gap: 0.5em; }
-  .thumb-card { flex: 1 1 45%; max-width: none; }
+  /* Header: theme + flags in normal flow, stacked above the title
+     (absolute positioning makes them overlap the headline on phones) */
+  .lang-sw { position: static; display: flex; flex-wrap: wrap;
+    justify-content: center; align-items: center; gap: 0.3em; margin: 0.2em 0; }
+  .theme-label { font-size: 0.85em; }
+  .lang-sw a { font-size: 1.2em; }
+  .row { flex-direction: column; gap: 0.6em; margin-bottom: 0.6em; }
+  .col { padding: 0.7em; min-width: 0; }
+  .page-wrapper { padding: 0.4em; }
+  h1.page-title { font-size: 1.5em; margin-top: 0.3em; }
+  p { text-align: left; }
+  .stn-detail { flex-direction: column; gap: 0.7em; }
+  .thumb-strip { gap: 0.4em; }
+  .thumb-card { flex: 1 1 100%; max-width: none; }
+  .thumb-card .tc-img-wrap { height: 100px; }
+  .thumb-card .tc-label { height: 36px; font-size: 0.85em; }
+  .tab-bar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab-btn { padding: 0.4em 0.9em; font-size: 0.85em; }
+  .tab-panel-wrap { padding: 0.6em; }
+  .col { overflow-x: auto; }
+  table.data-table td { padding: 0.35em 0.45em; font-size: 0.9em; }
+  p.caption { font-size: 0.8em; }
   /* Mobile modal sizing */
   .modal-content{min-width:0!important;width:95vw!important;min-height:auto!important;max-height:98vh}
   .modal-backdrop{padding:10px}
@@ -392,6 +413,10 @@ video::-webkit-media-controls-fullscreen-button{display:none!important}
 
 /* Theme selector (shared with /meteor/ index and /data/) */
 .theme-selector { position: absolute; top: 1em; left: 0; z-index: 100; }
+@media (max-width: 800px) {
+  .theme-selector { position: static; display: flex; flex-wrap: wrap;
+    justify-content: center; align-items: center; gap: 0.3em; margin: 0.2em 0; }
+}
 
 /* --- Night theme --- */
 body.theme-night {
@@ -478,7 +503,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
     <div class="row">
       <?php if ($map_html && $map_jpg): ?>
         <div class="col">
-          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4mp');if(p){var f=document.createElement('iframe');f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);}});</script>
+          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4mp');if(p){var f=document.createElement('iframe');f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>
           <div id="s4mp"></div>
           <p class="caption">
             <a href="obs_<?php echo $date;?>_<?php echo $time;?>.kml"><?php echo htmlspecialchars($t['kml_file']??'KML'); ?></a>
@@ -507,7 +532,9 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
     </div>
     <?php endif; ?>
 
-    <?php if ($height_jpg || $wind_jpg): ?>
+    <?php $merge_orbit_block = $height_jpg && !$wind_jpg && ($orbit_jpg || $orbit_html); ?>
+
+    <?php if (($height_jpg || $wind_jpg) && !$merge_orbit_block): ?>
     <?php $both_hw = $height_jpg && $wind_jpg; ?>
     <div class="row<?php echo $both_hw ? '' : ' row-single'; ?>">
       <?php if ($height_jpg): ?><div class="col"><img class="plot" src="<?php echo $height_jpg;?>" alt="height profile"></div><?php endif; ?>
@@ -515,19 +542,26 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
     </div>
     <?php endif; ?>
 
-    <?php if ($orbit_jpg || $orbit_html || $tables_html): ?>
+    <?php if ($merge_orbit_block || $orbit_jpg || $orbit_html || $tables_html): ?>
     <div class="row">
-      <?php if ($tables_html): ?><div class="col"><?php readfile($tables_html); ?></div><?php endif; ?>
       <?php if ($orbit_jpg || $orbit_html): ?>
       <div class="col">
         <div id="s4op"><?php if ($orbit_jpg) echo "<img class='plot' src='{$orbit_jpg}' alt='orbit'>"; ?></div>
         <?php if ($orbit_html):
-          echo "<script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4op');if(p){var f=document.createElement('iframe');f.src='{$orbit_html}';p.parentNode.replaceChild(f,p);}});</script>";
+          echo "<script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4op');if(p){var f=document.createElement('iframe');f.src='{$orbit_html}';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>";
           echo "<p class='caption'>";
           if ($orbit_jpg) echo "<a href='{$orbit_jpg}'>".htmlspecialchars($t['non_interactive_plot']??'Static')."</a> | ";
           echo "<a href='{$orbit_html}'>".htmlspecialchars($t['interactive_plot']??'Interactive')."</a></p>";
         endif; ?>
       </div>
+      <?php endif; ?>
+      <?php if ($merge_orbit_block): ?>
+      <div class="col">
+        <img class="plot" src="<?php echo $height_jpg;?>" alt="height profile">
+        <?php if ($tables_html) readfile($tables_html); ?>
+      </div>
+      <?php elseif ($tables_html): ?>
+      <div class="col"><?php readfile($tables_html); ?></div>
       <?php endif; ?>
     </div>
     <?php endif; ?>
@@ -1680,6 +1714,31 @@ function closeTextViewer() {
 // map/orbit animations): an injected filter inverts the white figure
 // background, and the parent page's lighten-blend on the iframe element
 // shines the navy backdrop through the now-dark pixels.
+// Match an iframe's height to the sibling .col in the same .row, so the
+// interactive figure fills its column beside the static content — e.g.
+// map.html beside map.jpg, or orbit.html beside the height+tables block.
+// Tracks content load and resizes; no regeneration needed.
+function nmnMatchIframeHeight(f) {
+    const row = f.closest('.row');
+    if (!row) return;
+    const ref = Array.from(row.children).find(function (c) { return !c.contains(f); });
+    if (!ref) return;
+    f.style.aspectRatio = 'auto';
+    function sync() {
+        if (getComputedStyle(row).flexDirection === 'column') {
+            f.style.height = ''; return; // stacked layout: use default sizing
+        }
+        const cap = f.closest('.col').querySelector('.caption');
+        const h = ref.getBoundingClientRect().height - (cap ? cap.getBoundingClientRect().height : 0);
+        if (h > 100) f.style.height = h + 'px';
+    }
+    const imgs = ref.querySelectorAll('img');
+    imgs.forEach(function (img) {
+        if (!(img.complete && img.naturalWidth)) img.addEventListener('load', sync);
+    });
+    if (window.ResizeObserver) new ResizeObserver(sync).observe(ref);
+    sync();
+}
 function nmnThemeIframeSync() {
     const night = document.body.classList.contains('theme-dark');
     document.querySelectorAll('iframe').forEach(function (f) {
@@ -1758,7 +1817,9 @@ function nmnThemeIframeSync() {
                     if (night && !bst) {
                         bst = doc.createElement('style');
                         bst.id = 'nmn-night-body';
-                        bst.textContent = 'html,body{background:#141e28}';
+                        bst.textContent = 'html,body{background:#141e28}'
+                            + 'button{background:#243447;color:#dfe6ee;'
+                            + 'border:1px solid #4a5a6b;border-radius:3px}';
                         (doc.head || doc.documentElement).appendChild(bst);
                     } else if (!night && bst) bst.remove();
                     let st0 = doc.getElementById('nmn-night-style');

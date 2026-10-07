@@ -579,8 +579,8 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
             ax = fig.add_subplot(projection=ccrs.UTM(32))
             ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=pc)
             lat_span = lat_max - lat_min
-            zoom = int(np.log2(360 / (lat_span + 1.5)))
-            zoom = max(6, min(zoom, 11))
+            zoom = int(np.log2(360 / (lat_span + 1.5))) + 1
+            zoom = max(8, min(zoom, 12))
             from cartopy.io.img_tiles import OSM
             ax.add_image(OSM(), zoom)
         ax.gridlines(draw_labels=True, alpha=0.3)

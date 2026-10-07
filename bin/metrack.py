@@ -413,7 +413,7 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
     if 'show' in options.get('doplot', ''): pylab.show()
     pylab.close()
 
-def _fetch_kartverket_topo(lons, lats, max_tiles=49):
+def _fetch_kartverket_topo(lons, lats, max_tiles=144):
     """Stitch Kartverket topo WMTS tiles (UTM32 grid) covering the lon/lat bbox.
 
     Kartverket's free 'topo' tileset has far better Norwegian detail than the
@@ -461,6 +461,13 @@ def _fetch_kartverket_topo(lons, lats, max_tiles=49):
     if best is None:
         return None
     z, tw, c0, c1, r0, r1 = best
+    # Labels are drawn at a fixed pixel size per zoom level, so the finest
+    # tiles produce unreadably small text once scaled to the output size.
+    # Two zoom levels coarser makes labels ~4x larger relative to the map.
+    z = max(1, z - 2)
+    tw = BASE_TILE_W / (1 << z)
+    c0, c1 = int(np.floor((x0 - ORIGIN_X) / tw)), int(np.floor((x1 - ORIGIN_X) / tw))
+    r0, r1 = int(np.floor((ORIGIN_Y - y1) / tw)), int(np.floor((ORIGIN_Y - y0) / tw))
     n_tiles = (c1 - c0 + 1) * (r1 - r0 + 1)
 
     url = "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/utm32n/{:02d}/{}/{}.png"
@@ -557,6 +564,7 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     # fetching to happen within the timeout window, before savefig triggers it.
     import threading as _threading
     _tile_exc = [None]
+    _kv_used = [False]
     def _add_image():
         try:
             old_to = socket.getdefaulttimeout()
@@ -566,6 +574,7 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
                 img_kv, (kx0, kx1, ky0, ky1) = kv
                 ax.imshow(img_kv, extent=[kx0, kx1, ky0, ky1],
                           transform=ccrs.UTM(32), origin='upper', zorder=0)
+                _kv_used[0] = True
             else:
                 ax.add_image(OSM(), zoom_level)
             # Force tile fetching now, inside the timeout window
@@ -581,8 +590,11 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
     if _t.is_alive() or _tile_exc[0] is not None:
         # Tile fetch timed out or failed — fall back to vector features
         ax.add_feature(cfeature.LAND); ax.add_feature(cfeature.OCEAN)
-    
-    ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
+
+    # Kartverket tiles already render coastlines and borders; only draw the
+    # vector overlays on top of OSM/plain backgrounds.
+    if not _kv_used[0]:
+        ax.add_feature(cfeature.COASTLINE.with_scale(resolution)); ax.add_feature(cfeature.BORDERS.with_scale(resolution))
     gl = ax.gridlines(draw_labels=True, color='gray', alpha=0.5, linestyle='--', linewidth=0.5)
     gl.top_labels = gl.right_labels = False
     gl.xformatter, gl.yformatter = LongitudeFormatter(), LatitudeFormatter()
@@ -658,7 +670,7 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
 
     if 'save' in options.get('doplot', ''):
         filename = output_filename or 'map.svg'
-        pylab.savefig(filename, bbox_inches='tight', dpi=150)
+        pylab.savefig(filename, bbox_inches='tight', dpi=200)
         clean_svg(filename)
     if 'show' in options.get('doplot', ''): pylab.show()
     pylab.close()
@@ -790,7 +802,7 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     
     img = Image.open(buf).convert('RGB')
     
-    max_dim = 384
+    max_dim = 1024
     if max(img.size) > max_dim: img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS); print(f"Map image downsampled to {img.size} for better performance.")
     
     img = darken_blacks(img, 112)

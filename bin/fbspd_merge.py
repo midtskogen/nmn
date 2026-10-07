@@ -809,7 +809,7 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
         except (np.linalg.LinAlgError, ValueError) as e: print(f"Warning: Could not perform uncertainty simulation: {e}")
 
     results = {'success': True, 'n_ok': n_ok, 'initial_speed': initial_speed, 'initial_speed_uncertainty': initial_speed_uncertainty}
-    plot_data = {'final_merged_data': final_merged_data, 'final_params': final_params, 'lower_bound_params': lower_bound_params, 'upper_bound_params': upper_bound_params, 'n_ok': n_ok, 'sigma_level': sigma_level, 'station_id_array': station_id_array, 'worst_station_idx': worst_station_idx,
+    plot_data = {'final_merged_data': final_merged_data, 'final_params': final_params, 'pcov': pcov, 'lower_bound_params': lower_bound_params, 'upper_bound_params': upper_bound_params, 'n_ok': n_ok, 'sigma_level': sigma_level, 'station_id_array': station_id_array, 'worst_station_idx': worst_station_idx,
                  'worst_station_code': worst_station_code,
                  'worst_source_index': worst_source_index,
                  'station_error_details': station_errors}

@@ -734,13 +734,25 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
             if results.get('entry_estimates'):
                 est = next((e for e in results['entry_estimates'] if e['rho'] == 3500),
                            results['entry_estimates'][0])
+                if results.get('reliability') == 'unreliable':
+                    rows.append(
+                        f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
+                        f'<td>{t.get("df_unreliable", "unreliable")}*</td></tr>')
+                else:
+                    rng_txt = (f'{_fmt_mass(est.get("m_fade_lo", 0))}–'
+                               f'{_fmt_mass(est.get("m_fade_hi", 0))}')
+                    rows.append(
+                        f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
+                        f'<td>~{_fmt_mass(est["m_entry_kg"])}'
+                        f' ({t.get("df_estimated", "estimated")})</td></tr>')
+                    rows.append(
+                        f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
+                        f'<td>~{_fmt_mass(est["m_fade_kg"])} ({rng_txt})</td></tr>')
+            if results.get('reliability') == 'unreliable':
                 rows.append(
-                    f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
-                    f'<td>~{_fmt_mass(est["m_entry_kg"])}'
-                    f' ({t.get("df_estimated", "estimated")})</td></tr>')
-                rows.append(
-                    f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
-                    f'<td>~{_fmt_mass(est["m_fade_kg"])}</td></tr>')
+                    f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">*'
+                    f'{t.get("df_unreliable_note", "Mass estimate unreliable — luminous track too short or inconsistent; map shows hypothetical fragment paths.")}'
+                    f'</td></tr>')
             s0 = next((s for s in results['scenarios'] if s['name'] == 'S0_intact'), None)
             if s0 and s0['impacts']:
                 imp = s0['impacts'][0]

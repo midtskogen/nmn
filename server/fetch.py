@@ -739,8 +739,10 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                         f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
                         f'<td>{t.get("df_unreliable", "unreliable")}*</td></tr>')
                 else:
-                    rng_txt = (f'{_fmt_mass(est.get("m_fade_lo", 0))}–'
-                               f'{_fmt_mass(est.get("m_fade_hi", 0))}')
+                    lo, hi = est.get('m_fade_lo', 0), est.get('m_fade_hi', 0)
+                    rng_txt = (f'{_fmt_mass(lo)}–{_fmt_mass(hi)}'
+                               if hi / max(lo, 1e-12) <= 20
+                               else t.get('df_poorly_constrained', 'poorly constrained'))
                     rows.append(
                         f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
                         f'<td>~{_fmt_mass(est["m_entry_kg"])}'

@@ -564,19 +564,31 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
         logging.debug(f'Kartverket tiles unavailable for darkflight map: {e}')
 
     pc = None
-    if kv:
-        try:
-            import cartopy.crs as ccrs
-            pc = ccrs.PlateCarree()
+    ax = None
+    try:
+        import cartopy.crs as ccrs
+        pc = ccrs.PlateCarree()
+        if kv:
             ax = fig.add_subplot(projection=ccrs.UTM(32))
             img, ext = kv
             ax.imshow(img, extent=ext, origin='upper',
                       transform=ccrs.UTM(32))
             ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=pc)
-        except Exception as e:
-            logging.debug(f'cartopy unavailable for darkflight map: {e}')
-            pc = None
-    if pc is None:
+        else:
+            # Outside Kartverket coverage — fall back to OSM tiles
+            ax = fig.add_subplot(projection=ccrs.UTM(32))
+            ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=pc)
+            lat_span = lat_max - lat_min
+            zoom = int(np.log2(360 / (lat_span + 1.5)))
+            zoom = max(6, min(zoom, 11))
+            from cartopy.io.img_tiles import OSM
+            ax.add_image(OSM(), zoom)
+        ax.gridlines(draw_labels=True, alpha=0.3)
+    except Exception as e:
+        logging.debug(f'cartopy/OSM unavailable for darkflight map: {e}')
+        pc = None
+    if ax is None:
+        pc = None
         ax = fig.add_subplot()
         ax.set_xlim(lon_min, lon_max); ax.set_ylim(lat_min, lat_max)
 

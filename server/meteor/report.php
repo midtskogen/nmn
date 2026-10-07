@@ -1724,14 +1724,32 @@ function nmnMatchIframeHeight(f) {
     const ref = Array.from(row.children).find(function (c) { return !c.contains(f); });
     if (!ref) return;
     f.style.aspectRatio = 'auto';
+    // Make the Plotly figure inside the iframe actually fill the iframe box:
+    // the generated HTML gives the graph div a fixed pixel size.
+    function fillIframe() {
+        try {
+            const doc = f.contentDocument;
+            if (!doc) return;
+            if (!doc.getElementById('nmn-fill-style')) {
+                const st = doc.createElement('style');
+                st.id = 'nmn-fill-style';
+                st.textContent = '.js-plotly-plot,.plotly-graph-div{position:absolute;inset:0;width:100%!important;height:100%!important}';
+                (doc.head || doc.documentElement).appendChild(st);
+            }
+            const fig = doc.querySelector('.js-plotly-plot,.plotly-graph-div');
+            if (f.contentWindow.Plotly && fig) f.contentWindow.Plotly.Plots.resize(fig);
+        } catch (e) { /* not loaded yet */ }
+    }
     function sync() {
         if (getComputedStyle(row).flexDirection === 'column') {
-            f.style.height = ''; return; // stacked layout: use default sizing
+            f.style.height = ''; fillIframe(); return; // stacked layout: default sizing
         }
         const cap = f.closest('.col').querySelector('.caption');
         const h = ref.getBoundingClientRect().height - (cap ? cap.getBoundingClientRect().height : 0);
         if (h > 100) f.style.height = h + 'px';
+        fillIframe();
     }
+    f.addEventListener('load', function () { fillIframe(); setTimeout(fillIframe, 300); });
     const imgs = ref.querySelectorAll('img');
     imgs.forEach(function (img) {
         if (!(img.complete && img.naturalWidth)) img.addEventListener('load', sync);

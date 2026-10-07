@@ -288,13 +288,14 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
         a_grav = -MU_E * r / np.linalg.norm(r) ** 3
         a_cor = -2.0 * np.cross(OMEGA_VEC, v)
         a_cf = -np.cross(OMEGA_VEC, np.cross(OMEGA_VEC, r))
+        m_eff = max(m, 1e-6)
         if vmag > 1e-9:
             cd = dragcoeff(vmag, T, rho_a, A_shape)
             a_drag = -cd * A_shape * rho_a * vmag * v_rel \
-                     / (2 * m ** (1. / 3) * rho_m ** (2. / 3))
+                     / (2 * m_eff ** (1. / 3) * rho_m ** (2. / 3))
         else:
             a_drag = np.zeros(3)
-        dm = -c_ml * A_shape * rho_a * vmag ** 3 * m ** (2. / 3) \
+        dm = -c_ml * A_shape * rho_a * vmag ** 3 * m_eff ** (2. / 3) \
              / (2 * rho_m ** (2. / 3)) if vmag > 1e-9 else 0.0
         return np.hstack([v, a_grav + a_cor + a_cf + a_drag, dm])
 
@@ -316,9 +317,9 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
                     events=[hit_ground, dust],
                     rtol=1e-7, atol=1e-9)
 
-    t_end = sol.t_events[0][0] if sol.t_events[0] else \
-        (sol.t_events[1][0] if sol.t_events[1] else sol.t[-1])
-    X_end = sol.y_events[0][0] if sol.y_events and len(sol.y_events[0]) else sol.y[:, -1]
+    t_end = sol.t_events[0][0] if sol.t_events[0].size else \
+        (sol.t_events[1][0] if sol.t_events[1].size else sol.t[-1])
+    X_end = sol.y_events[0][0] if sol.y_events[0].size else sol.y[:, -1]
 
     n = max(int(t_end / record_dt) + 2, 2)
     ts = np.linspace(0, t_end, n)
@@ -578,8 +579,11 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
         fig, ax = plt.subplots(figsize=(10, 9))
         ax.set_xlim(lon_min, lon_max); ax.set_ylim(lat_min, lat_max)
 
-    def trplot(x, y, **kw):
-        ax.plot(x, y, transform=pc, **kw) if pc else ax.plot(x, y, **kw)
+    def trplot(*args, **kw):
+        if pc:
+            ax.plot(*args, transform=pc, **kw)
+        else:
+            ax.plot(*args, **kw)
 
     cmap = plt.cm.viridis
     for si, sc in enumerate(scenarios):

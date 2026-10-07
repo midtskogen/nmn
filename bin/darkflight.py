@@ -555,6 +555,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
     lon_min, lon_max = min(lons_all) - pad, max(lons_all) + pad
     lat_min, lat_max = min(lats_all) - pad, max(lats_all) + pad
 
+    fig = plt.figure(figsize=(10, 9))
     kv = None
     try:
         from metrack import _fetch_kartverket_topo
@@ -567,16 +568,16 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
         try:
             import cartopy.crs as ccrs
             pc = ccrs.PlateCarree()
-            ax = plt.subplot(projection=ccrs.UTM(32))
+            ax = fig.add_subplot(projection=ccrs.UTM(32))
             img, ext = kv
             ax.imshow(img, extent=ext, origin='upper',
                       transform=ccrs.UTM(32))
             ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=pc)
         except Exception as e:
             logging.debug(f'cartopy unavailable for darkflight map: {e}')
-            fig, ax = plt.subplots(figsize=(10, 9))
-    else:
-        fig, ax = plt.subplots(figsize=(10, 9))
+            pc = None
+    if pc is None:
+        ax = fig.add_subplot()
         ax.set_xlim(lon_min, lon_max); ax.set_ylim(lat_min, lat_max)
 
     def trplot(*args, **kw):

@@ -496,6 +496,11 @@ def _fetch_kartverket_topo(lons, lats, max_tiles=144):
     # Mostly-empty coverage means we're outside Kartverket's tile area.
     if fetched < max(1, n_tiles * 0.6):
         return None
+    # Upscale small mosaics so tile text reprojects smoothly instead of
+    # stretching hard pixel edges (labels are fetched at a coarse zoom).
+    if max(canvas.size) < 1200:
+        canvas = canvas.resize((canvas.width * 2, canvas.height * 2),
+                               Image.Resampling.LANCZOS)
     extent = (ORIGIN_X + c0 * tw, ORIGIN_X + (c1 + 1) * tw,
               ORIGIN_Y - (r1 + 1) * tw, ORIGIN_Y - r0 * tw)
     return canvas, extent

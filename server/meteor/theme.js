@@ -86,7 +86,7 @@
                 const mx = Math.max(px[p], px[p + 1], px[p + 2]);
                 const mn = Math.min(px[p], px[p + 1], px[p + 2]);
                 mask[i] = isMap
-                    ? !((mx - mn < 55) || (mx - mn < 80 && mx < 210))
+                    ? !((mx - mn < 70) || (mx - mn < 95 && mx < 190))
                     : mx - mn > 8;
             }
             const integ = new Int32Array((W + 1) * (H + 1));

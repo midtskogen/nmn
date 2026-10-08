@@ -1318,9 +1318,10 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     # Monte Carlo
     mc_impacts = []
     if mc_runs > 0:
-        mc_impacts = monte_carlo(r_end, v0_vec, m_est, 3500.0, 1.4,
-                                 wind_csv, h_ground, n_runs=mc_runs,
-                                 seed=seed, pool=pool)
+        mc_impacts = [i for i in monte_carlo(
+            r_end, v0_vec, m_est, 3500.0, 1.4, wind_csv, h_ground,
+            n_runs=mc_runs, seed=seed, pool=pool)
+            if i.get('landed', True)]
 
     results = {
         'event_dir': str(event_dir),

@@ -112,6 +112,7 @@ $spd_acc_jpg   = s4_ap("{$fp}spd_acc.jpg",  "spd_acc.jpg");
 $wind_jpg      = s4_ap("{$fp}wind_profile.jpg","wind_profile.jpg");
 $df_jpg        = s4_ap("{$fp}map_darkflight.jpg","map_darkflight.jpg");
 $df_table      = s4_ap("{$fp}darkflight_table.html","darkflight_table.html");
+$df_3d         = s4_ap("{$fp}darkflight_map3d.html","darkflight_map3d.html");
 $og_image      = s4_ap("{$fp}image.jpg","image.jpg");
 
 // ---- Collect station cameras ----
@@ -579,11 +580,20 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
     </div>
     <?php endif; ?>
 
-    <?php if ($df_jpg || $df_table): ?>
-    <div class="row<?php echo ($df_jpg && $df_table) ? '' : ' row-single'; ?>">
+    <?php if ($df_jpg || $df_table || $df_3d): ?>
+    <div class="row<?php echo ($df_jpg && ($df_table || $df_3d)) ? '' : ' row-single'; ?>">
+      <?php if ($df_table || $df_3d): ?>
+      <div class="col">
+        <?php if ($df_table) readfile($df_table); ?>
+        <?php if ($df_3d): ?>
+          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4df');if(p){var f=document.createElement('iframe');f.src='<?php echo $df_3d;?>';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>
+          <div id="s4df"></div>
+          <p class="caption"><a href="<?php echo $df_3d;?>"><?php echo htmlspecialchars($t['interactive_map']??'Interactive map'); ?></a></p>
+        <?php endif; ?>
+      </div>
+      <?php endif; ?>
       <?php if ($df_jpg): ?><div class="col"><img class="plot" src="<?php echo $df_jpg;?>" alt="dark flight prediction">
         <p class="caption"><?php echo htmlspecialchars($t['df_caption'] ?? 'Predicted fall area'); ?></p></div><?php endif; ?>
-      <?php if ($df_table): ?><div class="col"><?php readfile($df_table); ?></div><?php endif; ?>
     </div>
     <?php endif; ?>
 

@@ -737,9 +737,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
             if run['impact'].get('landed', True):
                 trplot([run['impact']['lon']], [run['impact']['lat']],
                        'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),
-                       color=col,
-                       label=sc_label(sc, translations)
-                       if run is first_landed else None)
+                       color=col)
                 m_kg = run['m']
                 m_txt = (f'{m_kg:.3g} kg' if m_kg >= 1
                          else f'{m_kg * 1000:.3g} g')
@@ -748,8 +746,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                     m_txt = m_txt.replace('.', dec)
                 labels2draw.append((run['impact']['lon'],
                                     run['impact']['lat'], m_txt, col))
-    trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
-           label=translations.get('df_end_luminous', 'End of luminous path'))
+    trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14)
 
     # collision-aware placement: measure real text bboxes with the
     # renderer, try candidate offsets in order, first fit wins
@@ -785,14 +782,10 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                             transform=pc if pc else ax.transData)
             placed_boxes.append(a.get_window_extent(renderer).expanded(1.08, 1.25))
     if mc_impacts:
-        if pc:
-            ax.scatter([i['lon'] for i in mc_impacts],
-                       [i['lat'] for i in mc_impacts], s=2, c='magenta',
-                       alpha=0.4, label='Monte Carlo', transform=pc)
-        else:
-            ax.scatter([i['lon'] for i in mc_impacts],
-                       [i['lat'] for i in mc_impacts], s=2, c='magenta',
-                       alpha=0.4, label='Monte Carlo')
+        kw = {'transform': pc} if pc else {}
+        ax.scatter([i['lon'] for i in mc_impacts],
+                   [i['lat'] for i in mc_impacts], s=2, c='magenta',
+                   alpha=0.4, **kw)
     # scale bar: ~1/4 of map width, rounded to a nice value
     span_m = (lon_max - lon_min) * 111320 * math.cos(
         math.radians((lat_min + lat_max) / 2))
@@ -817,8 +810,23 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                 color='black', transform=ax.transAxes, clip_on=False)
     ax.text(bx + bw / 2, by + 0.012, bar_txt, ha='center', va='bottom',
             fontsize=8, color='black', transform=ax.transAxes)
-    ax.legend(fontsize=7, loc='upper center', bbox_to_anchor=(0.5, -0.04),
-              ncol=2, framealpha=0.9)
+    from matplotlib.lines import Line2D
+    handles, labels = [], []
+    cmap_l = plt.cm.viridis
+    for si, sc in enumerate(plot_sc):
+        if sc['name'] == 'S1_fallline':
+            continue
+        col = cmap_l(si / max(len(plot_sc) - 1, 1))
+        handles.append(Line2D([], [], marker='o', ls='', color=col, ms=7))
+        labels.append(sc_label(sc, translations))
+    handles.append(Line2D([], [], marker='*', ls='', color='red', ms=12))
+    labels.append(translations.get('df_end_luminous', 'End of luminous path'))
+    if mc_impacts:
+        handles.append(Line2D([], [], marker='.', ls='', color='magenta',
+                              ms=7))
+        labels.append('Monte Carlo')
+    ax.legend(handles, labels, fontsize=7, loc='upper center',
+              bbox_to_anchor=(0.5, -0.04), ncol=2, framealpha=0.9)
     if not pc:
         ax.set_xlabel('Longitude'); ax.set_ylabel('Latitude')
     if title:
@@ -987,7 +995,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                 line=dict(color=col, width=3),
                 name=sc_label(sc, translations),
                 legendgroup=sc['name'],
-                showlegend=(ri == 0),
+                showlegend=(ri == 0 and sc['name'] != 'S1_fallline'),
                 hoverinfo='name', opacity=0.85))
             imp = run['impact']
             if imp.get('landed', True):

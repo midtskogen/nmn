@@ -463,7 +463,7 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None):
     m_est: estimated surviving mass [kg] (reference density/shape).
     """
     if masses_grid is None:
-        masses_grid = np.logspace(np.log10(0.005), np.log10(5.0), 16)
+        masses_grid = np.logspace(-3, np.log10(5.0), 16)  # 1 g .. 5 kg
     sc = []
     sc.append({'name': 'S0_intact', 'label': 'Single body (estimated mass)',
                'runs': [{'m': m_est, 'rho': rho_m, 'A': A}], 'erode': True})
@@ -492,7 +492,11 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None):
         base = next(s for s in sc if s['name'] == name)
         sc.append({**base, 'name': name + '_noerosion',
                    'label': base['label'] + ' (no ablation)', 'erode': False})
-    return sc
+    # nothing smaller than 1 gram is shown — drop sub-gram runs and
+    # scenarios left empty by the cut
+    for s in sc:
+        s['runs'] = [r for r in s['runs'] if r['m'] >= 1e-3]
+    return [s for s in sc if s['runs']]
 
 
 # --- Monte Carlo ---------------------------------------------------------------

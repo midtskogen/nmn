@@ -668,7 +668,15 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     kv = None
     try:
         from metrack import _fetch_kartverket_topo
-        kv = _fetch_kartverket_topo([lon_min, lon_max], [lat_min, lat_max])
+        # Kartverket covers Norway only — require real content at the
+        # luminous-path end point and every landed impact point.
+        poi = [(end_llh[0], end_llh[1])]
+        for sc in scenarios:
+            for run in sc['results']:
+                if run['impact'].get('landed', True):
+                    poi.append((run['impact']['lon'], run['impact']['lat']))
+        kv = _fetch_kartverket_topo([lon_min, lon_max], [lat_min, lat_max],
+                                    poi_lonlat=poi)
     except Exception as e:
         logging.debug(f'Kartverket tiles unavailable for darkflight map: {e}')
 

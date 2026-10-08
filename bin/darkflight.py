@@ -397,7 +397,7 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
             except Exception:
                 pass
         if len(m_samples) > 10:
-            lo, hi = np.percentile(m_samples, [16, 84])
+            lo, hi = np.percentile(np.clip(m_samples, 1e-6, 1e4), [16, 84])
         else:
             lo, hi = m_med * 0.5, m_med * 2.0
 
@@ -411,6 +411,24 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
                     'm_fade_lo': float(lo), 'm_fade_hi': float(hi),
                     'm_crit_kg': float(m_crit)})
     return out
+
+
+def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
+    """Back-integrate ablation over the luminous track.
+
+    dM^(1/3)/dτ = (B/3) rhoa v^3 backward in time, B = c_ml*A/(2 rho_m^(2/3))
+    => M_entry^(1/3) = M_fade^(1/3) + (B/3) ∫ rhoa v^3 dt   (end -> start)
+    """
+    if atm is None:
+        atm = WindAtmosphere()
+    B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
+    ts = np.linspace(t_range[0], t_range[1], 400)
+    vs = np.array([v_of_t(t) for t in ts])
+    hs = np.array([h_of_t(t) for t in ts])
+    rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
+    integral = np.trapz(rhos * vs ** 3, ts)
+    m13 = m_fade ** (1. / 3) + (B / 3) * integral
+    return m13 ** 3
 
 
 def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
@@ -538,9 +556,12 @@ def ground_elevation(lat, lon):
 def write_json(results, path):
     def conv(o):
         if isinstance(o, (np.floating, np.integer)):
-            return float(o)
+            v = float(o)
+            return v if np.isfinite(v) else None
+        if isinstance(o, float):
+            return o if math.isfinite(o) else None
         if isinstance(o, np.ndarray):
-            return o.tolist()
+            return [conv(x) for x in o.tolist()]
         raise TypeError
     Path(path).write_text(json.dumps(results, indent=1, default=conv),
                           encoding='utf-8')
@@ -734,6 +755,33 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         v_end, a_end, t0_obs, t_last, n_obs = 3000.0, 1e4, 0.0, 1.0, 0
         logging.warning('darkflight: no fbspd fit, using nominal v_end/a_end')
 
+    # --- Input sanity: reject physically impossible fits -------------------------
+    fit_valid = (np.isfinite(v_end) and np.isfinite(a_end)
+                 and 100.0 < v_end < 72000.0        # luminous regime ~3–72 km/s
+                 and 0.0 <= end_h <= 120000.0
+                 and 0.0 <= start_h <= 150000.0
+                 and a_end >= 0.0
+                 and t_last > t0_obs
+                 and t_last - t0_obs < 60.0)
+    if not fit_valid:
+        issues_pre = [f'invalid end state (v={v_end/1000:.2f} km/s, '
+                      f'h={end_h/1000:.1f} km, dur={t_last-t0_obs:.1f} s)']
+        logging.warning(f'darkflight: {issues_pre[0]} — skipping')
+        results = {
+            'event_dir': str(event_dir),
+            'end_state': {'lon': end_lon, 'lat': end_lat, 'h_m': end_h,
+                          'v_end_ms': float(v_end), 'a_end_ms2': float(a_end)},
+            'wind_used': False, 'h_ground_m': 0.0,
+            'mass_estimates': [], 'entry_estimates': [],
+            'm_est_ref_kg': 0.0,
+            'reliability': 'unreliable', 'issues': issues_pre,
+            'n_obs': int(n_obs if have_fit else 0),
+            'track_duration_s': float(t_last - t0_obs),
+            'scenarios': [], 'mc': {'n': 0, 'impacts': []},
+        }
+        write_json(results, event_dir / 'darkflight.json')
+        return results
+
     atm = WindAtmosphere(wind_csv)
 
     # Surviving-mass estimates over the density grid (whole-track fit)
@@ -761,7 +809,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         m_med, m_lo, m_hi, m_crit = (ref['m_fade_kg'], ref['m_fade_lo'],
                                    ref['m_fade_hi'], ref['m_crit_kg'])
         if m_hi > 0 and np.isfinite(m_med):
-            if m_hi / max(m_lo, 1e-12) > 50:
+            if m_hi / max(m_lo, 1e-12) > 20:
                 issues.append('deceleration poorly constrained')
             if v_end > 4000.0 and m_med > 30 * max(m_crit, 1e-9):
                 issues.append('inconsistent with fade-out')
@@ -772,25 +820,11 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         issues.append('no speed/deceleration fit')
     reliability = 'unreliable' if any(
         i in ('inconsistent with fade-out', 'implausibly large surviving mass',
-              'no speed/deceleration fit') for i in issues) else         ('marginal' if issues else 'ok')
+              'no speed/deceleration fit') for i in issues) else \
+        ('marginal' if issues else 'ok')
     if reliability != 'ok':
         logging.warning(f'darkflight: mass estimate {reliability} '
                         f'({"; ".join(issues)})')
-
-
-    # Entry-mass back-projection (needs height vs time along track)
-    entry_estimates = []
-    if have_fit:
-        for e in mass_estimates:
-            m_ent = entry_mass_estimate(e['m_fade_kg'], e['rho'], e['A'],
-                                        v_of_t, h_of_t, (t0_obs, t_last),
-                                        atm=atm)
-            entry_estimates.append({'rho': e['rho'], 'A': e['A'],
-                                    'm_entry_kg': m_ent,
-                                    'm_fade_kg': e['m_fade_kg'],
-                                    'm_crit_kg': e['m_crit_kg'],
-                                    'm_fade_lo': e['m_fade_lo'],
-                                    'm_fade_hi': e['m_fade_hi']})
 
     # --- Photometric cross-check (star-calibrated light curve) ------------------
     photometry = None
@@ -817,6 +851,20 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                               1e-4, 100.0))
     else:
         m_est = float(np.clip(m_med if ref else 1.0, 1e-4, 100.0))
+
+    # Entry-mass back-projection (needs height vs time along track)
+    entry_estimates = []
+    if have_fit:
+        for e in mass_estimates:
+            m_ent = entry_mass_estimate(e['m_fade_kg'], e['rho'], e['A'],
+                                        v_of_t, h_of_t, (t0_obs, t_last),
+                                        atm=atm)
+            entry_estimates.append({'rho': e['rho'], 'A': e['A'],
+                                    'm_entry_kg': m_ent,
+                                    'm_fade_kg': e['m_fade_kg'],
+                                    'm_crit_kg': e['m_crit_kg'],
+                                    'm_fade_lo': e['m_fade_lo'],
+                                    'm_fade_hi': e['m_fade_hi']})
 
     # Ground height near the nominal landing point
     h_ground = ground_elevation(end_lat, end_lon)
@@ -852,7 +900,6 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         'm_est_ref_kg': m_est,
         'reliability': reliability,
         'issues': issues,
-        'photometric': photometry,
         'n_obs': int(n_obs), 'track_duration_s': float(duration),
         'scenarios': [{'name': s['name'], 'label': s['label'],
                        'impacts': [{'m': r['m'], **r['impact']}

@@ -741,6 +741,17 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                        color=col,
                        label=sc_label(sc, translations)
                        if run is first_landed else None)
+                m_kg = run['m']
+                m_txt = (f'{m_kg:.3g} kg' if m_kg >= 1
+                         else f'{m_kg * 1000:.3g} g')
+                dec = translations.get('dec_sep', '.')
+                if dec != '.':
+                    m_txt = m_txt.replace('.', dec)
+                ax.annotate(m_txt, xy=(run['impact']['lon'],
+                                       run['impact']['lat']),
+                            xytext=(4, 4), textcoords='offset points',
+                            fontsize=7, color=col,
+                            transform=pc if pc else ax.transData)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
            label=translations.get('df_end_luminous', 'End of luminous path'))
     if mc_impacts:
@@ -752,6 +763,30 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
             ax.scatter([i['lon'] for i in mc_impacts],
                        [i['lat'] for i in mc_impacts], s=2, c='magenta',
                        alpha=0.4, label='Monte Carlo')
+    # scale bar: ~1/4 of map width, rounded to a nice value
+    span_m = (lon_max - lon_min) * 111320 * math.cos(
+        math.radians((lat_min + lat_max) / 2))
+    candidates = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
+    bar_m = min(candidates, key=lambda c: abs(c - span_m / 4))
+    if bar_m >= 1000:
+        bar_txt = f'{bar_m / 1000:.4g} km'
+        if translations.get('dec_sep', '.') != '.':
+            bar_txt = bar_txt.replace('.', ',')
+    else:
+        bar_txt = f'{bar_m} m'
+    bar_deg = bar_m / (111320 * math.cos(
+        math.radians((lat_min + lat_max) / 2)))
+    bx = lon_min + 0.05 * (lon_max - lon_min)
+    by = lat_min + 0.06 * (lat_max - lat_min)
+    trplot([bx, bx + bar_deg], [by, by], lw=3, color='black',
+           solid_capstyle='butt')
+    for _bx in (bx, bx + bar_deg):
+        trplot([_bx, _bx],
+               [by - 0.01 * (lat_max - lat_min), by + 0.01 * (lat_max - lat_min)],
+               lw=2, color='black')
+    ax.text(bx + bar_deg / 2, by + 0.015 * (lat_max - lat_min), bar_txt,
+            ha='center', va='bottom', fontsize=8, color='black',
+            transform=pc if pc else ax.transData)
     ax.legend(fontsize=7, loc='upper center', bbox_to_anchor=(0.5, -0.04),
               ncol=2, framealpha=0.9)
     if not pc:
@@ -876,6 +911,27 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         z=np.zeros((hgt, wid)),
         surfacecolor=remapped, cmin=0, cmax=max(1, len(sorted_pal) - 1),
         colorscale=cscale, showscale=False, hoverinfo='none')]
+
+    # scale bar on the ground plane (x = east, km)
+    span_km = (x_max_m - x_min_m) / 1000.0
+    _cands = [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20]
+    bar_km = min(_cands, key=lambda c: abs(c - span_km / 4))
+    if bar_km < 1:
+        bar_txt = f'{bar_km * 1000:.4g} m'
+    else:
+        bar_txt = f'{bar_km:.4g} km'
+    if translations.get('dec_sep', '.') != '.':
+        bar_txt = bar_txt.replace('.', ',')
+    bx0 = x_min_m / 1000.0 + 0.05 * span_km
+    by0 = y_min_m / 1000.0 + 0.05 * (y_max_m - y_min_m) / 1000.0
+    traces.append(go.Scatter3d(
+        x=[bx0, bx0 + bar_km], y=[by0, by0], z=[0, 0],
+        mode='lines', line=dict(color='black', width=4),
+        showlegend=False, hoverinfo='none'))
+    traces.append(go.Scatter3d(
+        x=[bx0 + bar_km / 2], y=[by0], z=[0], mode='text',
+        text=[bar_txt], textfont=dict(size=10, color='black'),
+        showlegend=False, hoverinfo='none'))
 
     plot_sc = [s for s in scenarios
                if s.get('erode', True) and s['name'] != 'S4_powerlaw']
@@ -1242,9 +1298,23 @@ def main():
         with pkl.open('rb') as f:
             results_fb, plot_data = pickle.load(f)
     wind_csv = event_dir / 'wind_profile.csv'
+    # same per-language files as fetch.py produces
+    lang_files = {'': {'dec_sep': '.'}}
+    loc_dir = Path(__file__).resolve().parent.parent / 'server' / 'loc'
+    for lang in ('en', 'cs', 'de', 'fi', 'lv'):
+        lf = loc_dir / f'{lang}.json'
+        if lf.exists():
+            t = json.loads(lf.read_text(encoding='utf-8'))
+            t['dec_sep'] = ',' if lang != 'en' else '.'
+            lang_files[f'{lang}_'] = t
+    if (loc_dir / 'nb.json').exists():
+        t = json.loads((loc_dir / 'nb.json').read_text(encoding='utf-8'))
+        t['dec_sep'] = ','
+        lang_files[''] = t
     run_darkflight(event_dir, resdat, results_fb, plot_data,
                    wind_csv if wind_csv.exists() else None,
-                   mc_runs=args.mc, seed=args.seed)
+                   mc_runs=args.mc, seed=args.seed,
+                   lang_files=lang_files)
 
 
 if __name__ == '__main__':

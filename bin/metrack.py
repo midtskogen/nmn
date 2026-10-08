@@ -1674,7 +1674,11 @@ def _create_subset_obs_data(full_obs_data, indices):
     """Creates a new obs_data dictionary containing only data for the given station indices."""
     n_full = len(full_obs_data['names']) // 2
     all_indices = list(indices) + [i + n_full for i in indices]
-    subset = {key: value[all_indices] if key != 'durations' else value[list(indices)] for key, value in full_obs_data.items() if isinstance(value, np.ndarray)}
+    station_level = ('durations', 'timestamps')
+    subset = {key: (value[list(indices)] if key in station_level
+                    else value[all_indices])
+              for key, value in full_obs_data.items()
+              if isinstance(value, np.ndarray)}
     subset['names'] = [full_obs_data['names'][i] for i in all_indices]
     return subset
 
@@ -1704,6 +1708,20 @@ def calculate_model_score(fit_results, inlier_obs_data, weights, indices_set, op
                     min_speed = _min_orbital_speed_for_height_km(min(start_h, end_h))
                 if calculated_speed < min_speed or calculated_speed > 100.0:
                     penalty += 1e9 
+
+    # Temporal consistency: every inlier's observation window must be
+    # within ~2 s (or 1.5x the median duration) of the consensus event
+    # time. A track seconds earlier/later is a different meteor whose
+    # line of sight only happened to give a plausible-looking fit.
+    ts = inlier_obs_data.get('timestamps')
+    if ts is not None:
+        durs = inlier_obs_data['durations']
+        valid = [(t, d) for t, d in zip(ts, durs) if t > 0]
+        if len(valid) >= 2:
+            t0 = float(np.median([t for t, _ in valid]))
+            slack = max(2.0, 1.5 * float(np.median([d for _, d in valid])))
+            if any(abs(t - t0) > slack for t, _ in valid):
+                penalty += 1e9
 
     # Safety Check: If MSE is huge, this is a bad fit (e.g. bird outlier), regardless of weight.
     # MSE approx = final_error (Chi2) / total_weight.
@@ -1905,7 +1923,9 @@ def _load_and_prepare_data(filepath):
         'longitudes': np.array(lons * 2), 'latitudes': np.array(lats * 2), 'heights_m': np.array(heights_m * 2),
         'azimuths': np.array(raw_data['az_start'] + raw_data['az_end']),
         'altitudes': np.array(raw_data['alt_start'] + raw_data['alt_end']),
-        'weights': np.array(weights * 2), 'durations': np.array(raw_data['duration']), 'names': names * 2
+        'weights': np.array(weights * 2), 'durations': np.array(raw_data['duration']),
+        'timestamps': np.array([t if t else 0.0 for t in raw_data['timestamp']]),
+        'names': names * 2
     }
     return raw_data, full_obs_data, borders
 

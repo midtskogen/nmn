@@ -2283,7 +2283,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         if svg_path.exists():
                             svg_to_jpg(svg_path, event_dir / f"{file_prefix}map_darkflight.jpg",
                                        Config.SVG_DARKFLIGHT_DPI)
-                        if df_results:
+                        if df_results and df_results.get('scenarios'):
                             _append_darkflight_table(
                                 event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)
                 else:

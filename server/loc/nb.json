@@ -175,7 +175,7 @@
   "df_sc_intact": "Enkelt legeme (estimert masse)",
   "df_sc_fallline": "Fallinje (massegrid)",
   "df_sc_split": "Todeling {p}%/{q}%",
-  "df_sc_equal": "{n} like fragmenter",
+  "df_sc_equal": "{n} like fragment",
   "df_sc_powerlaw": "Fragmentsverm (potenslov)",
   "df_sc_noabl": "(uten ablasjon)",
   "df_end_luminous": "Slutt på lysende bane"

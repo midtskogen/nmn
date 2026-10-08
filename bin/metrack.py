@@ -1915,6 +1915,26 @@ def _load_and_prepare_data(filepath):
     if not station_data_list:
         return {}, {}, None
 
+    # Drop observations whose timestamp is far from the consensus event
+    # time — a track seconds off is a different meteor entirely, so it
+    # belongs neither in the fit nor in the plots.
+    ts = [s['timestamp'] for s in station_data_list if s['timestamp']]
+    if len(ts) >= 3:
+        t0 = float(np.median(ts))
+        med_dur = float(np.median([s['duration'] for s in station_data_list
+                                   if s['duration']]))
+        slack = max(2.0, 1.5 * med_dur)
+        kept, dropped = [], []
+        for s in station_data_list:
+            (kept if not s['timestamp'] or abs(s['timestamp'] - t0) <= slack
+             else dropped).append(s)
+        for s in dropped:
+            logging.warning(
+                f"metrack: dropping '{s['names']}' obs — timestamp "
+                f"{s['timestamp']:.2f} is {abs(s['timestamp'] - t0):.1f}s "
+                f"from consensus {t0:.2f} (different meteor)")
+        station_data_list = kept
+
     raw_data = {key: [s[key] for s in station_data_list] for key in station_data_list[0]}
     
     lons, lats, heights_m, weights, names = raw_data['longitudes'], raw_data['latitudes'], raw_data['height_m'], raw_data['weight'], raw_data['names']

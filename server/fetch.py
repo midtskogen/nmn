@@ -782,6 +782,8 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                     f'<a href="darkflight.kml">KML</a> | '
                     f'<a href="darkflight.geojson">GeoJSON</a> | '
                     f'<a href="darkflight.json">JSON</a>')
+            if lang != 'en':
+                frag = re.sub(r'(?<=\d)\.(?=\d)', ',', frag)
             (event_dir / f"{file_prefix}darkflight_table.html").write_text(
                 frag, encoding='utf-8')
         except Exception as e:
@@ -1814,7 +1816,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             'obs_*.res', 'obs_*.kml', 'orbit.*', 'map.*', 'height.*', 'spd_acc.*', 'posvstime.*',
             'tables.html', '*_map.*', '*_orbit.*', '*_height.*', '*_spd_acc.*', '*_posvstime.*',
             '*_tables.html', '_fbspd_plot_data.pkl', '_metrack_plot_data.pkl',
-            'location.txt', 'darkflight.*', 'darkflight_map3d.html', 'map_darkflight.*', '*_map_darkflight.*',
+            'location.txt', 'darkflight.*', 'darkflight_map3d.html', '*_darkflight_map3d.html', 'map_darkflight.*', '*_map_darkflight.*',
             '*_darkflight_table.html',
         )
         for pattern in stale_patterns:
@@ -2257,6 +2259,12 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 if end_height_km <= 40:
                     wind_csv = event_dir / "wind_profile.csv"
                     logging.info(f"Running dark flight simulation (end height {end_height_km:.1f} km)...")
+                    lang_files = {}
+                    for lang in SUPPORTED_LANGS:
+                        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                        lt = dict(load_translations(lang))
+                        lt['dec_sep'] = ',' if lang != 'en' else '.'
+                        lang_files[file_prefix] = lt
                     df_results = darkflight.run_darkflight(
                         event_dir,
                         analysis_results['resdat'],
@@ -2264,12 +2272,13 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         analysis_results.get('fbspd_plot_data'),
                         wind_csv if wind_csv.exists() else None,
                         mc_runs=0 if fast else 300,
+                        lang_files=lang_files,
                     )
                     # Convert the fall-area map to jpg per language
-                    svg_path = event_dir / 'map_darkflight.svg'
-                    if svg_path.exists():
-                        for lang in SUPPORTED_LANGS:
-                            file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                    for lang in SUPPORTED_LANGS:
+                        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+                        svg_path = event_dir / f'{file_prefix}map_darkflight.svg'
+                        if svg_path.exists():
                             svg_to_jpg(svg_path, event_dir / f"{file_prefix}map_darkflight.jpg",
                                        Config.SVG_DARKFLIGHT_DPI)
                         if df_results:

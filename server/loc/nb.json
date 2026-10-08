@@ -169,7 +169,14 @@
   "df_caption": "Estimert nedfallsområde for meteoritt. Punktene viser ulike fragmentasjonsscenarier.",
   "df_unreliable": "usikker",
   "df_unreliable_note": "Masseestimatet er usikkert — lysende bane for kort eller inkonsistent; kartet viser hypotetiske fragmentbaner.",
-  "df_poorly_constrained": "dårlig avgrenset",
+  "df_poorly_constrained": "dårlig avgrensa",
   "df_phot_mass": "Fotometrisk masse (lyskurve)",
-  "df_phot_note": "nedre grense"
+  "df_phot_note": "nedre grense",
+  "df_sc_intact": "Enkelt legeme (estimert masse)",
+  "df_sc_fallline": "Fallinje (massegrid)",
+  "df_sc_split": "Todeling {p}%/{q}%",
+  "df_sc_equal": "{n} like fragmenter",
+  "df_sc_powerlaw": "Fragmentsverm (potenslov)",
+  "df_sc_noabl": "(uten ablasjon)",
+  "df_end_luminous": "Slutt på lysende bane"
 }

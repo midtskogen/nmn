@@ -499,6 +499,27 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None):
     return [s for s in sc if s['runs']]
 
 
+def sc_label(sc, t):
+    """Localised scenario label; falls back to the built-in English label."""
+    name = sc['name']
+    import re as _re
+    if name.endswith('_noerosion'):
+        base = sc_label({**sc, 'name': name[:-10]}, t)
+        return base + ' ' + t.get('df_sc_noabl', '(no ablation)')
+    key = {'S0_intact': 'df_sc_intact', 'S1_fallline': 'df_sc_fallline',
+           'S4_powerlaw': 'df_sc_powerlaw'}.get(name)
+    if key:
+        return t.get(key, sc['label'])
+    m = _re.match(r'S2_split_(\d+)', name)
+    if m:
+        return t.get('df_sc_split', sc['label']).format(
+            p=int(m.group(1)), q=100 - int(m.group(1)))
+    m = _re.match(r'S3_equal_(\d+)', name)
+    if m:
+        return t.get('df_sc_equal', sc['label']).format(n=int(m.group(1)))
+    return sc['label']
+
+
 # --- Monte Carlo ---------------------------------------------------------------
 def _mc_worker(job):
     r0, v0, m, rho, A, csv_path, h_ground, erode = job
@@ -624,8 +645,10 @@ def write_kml(scenarios, end_llh, path):
     Path(path).write_text(''.join(parts), encoding='utf-8')
 
 
-def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
+def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
+              translations=None):
     """Fall-area map: Kartverket basemap, impact markers, MC ellipse."""
+    translations = translations or {}
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -696,9 +719,10 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
                 trplot([run['impact']['lon']], [run['impact']['lat']],
                        'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),
                        color=col,
-                       label=sc['label'] if run is sc['results'][0] else None)
+                       label=sc_label(sc, translations)
+                       if run is sc['results'][0] else None)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
-           label='End of luminous path')
+           label=translations.get('df_end_luminous', 'End of luminous path'))
     if mc_impacts:
         if pc:
             ax.scatter([i['lon'] for i in mc_impacts],
@@ -843,7 +867,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                 x=x, y=y, z=[hh / 1000.0 for hh in run['h']],
                 mode='lines',
                 line=dict(color=col, width=3),
-                name=sc['label'] if ri == 0 else sc['label'],
+                name=sc_label(sc, translations),
                 legendgroup=sc['name'],
                 showlegend=(ri == 0),
                 hoverinfo='name', opacity=0.85))
@@ -853,6 +877,9 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                 m_kg = run['m']
                 m_txt = (f'{m_kg:.3g} kg' if m_kg >= 1
                          else f'{m_kg * 1000:.3g} g')
+                dec = translations.get('dec_sep', '.')
+                if dec != '.':
+                    m_txt = m_txt.replace('.', dec)
                 traces.append(go.Scatter3d(
                     x=ix, y=iy, z=[0], mode='markers+text',
                     marker=dict(size=5, color=col, symbol='circle'),
@@ -865,7 +892,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
     traces.append(go.Scatter3d(
         x=ex, y=ey, z=[end_llh[2] / 1000.0], mode='markers',
         marker=dict(size=9, color='red', symbol='diamond'),
-        name=translations.get('df_end_position', 'End of luminous path')))
+        name=translations.get('df_end_luminous', 'End of luminous path')))
     # MC impacts
     if mc_impacts:
         mx, my = project_points([i['lon'] for i in mc_impacts],
@@ -888,7 +915,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                z=center['z'] + dist * math.tan(elev))
 
     fig3 = go.Figure(data=traces, layout=go.Layout(
-        title=translations.get('df_title', 'Dark flight'),
+        title=translations.get('dark_flight', 'Dark flight'),
         title_x=0.5, title_y=0.95, showlegend=True,
         legend=dict(font=dict(size=10), x=0.01, y=0.99,
                     bgcolor='rgba(255,255,255,0.6)'),
@@ -941,7 +968,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
 # --- Orchestration --------------------------------------------------------------
 def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                    wind_csv=None, mc_runs=300, seed=0, pool=None,
-                   verbose=False):
+                   verbose=False, lang_files=None):
     """Top-level: compute dark flight for an event directory.
 
     resdat: ResData (from fbspd_merge.readres) with track start/end.
@@ -1148,16 +1175,19 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     write_geojson(scenarios, event_dir / 'darkflight.geojson')
     write_kml(scenarios, (end_lon, end_lat, end_h),
               event_dir / 'darkflight.kml')
-    try:
-        write_map(scenarios, (end_lon, end_lat, end_h), mc_impacts,
-                  event_dir / 'map_darkflight.svg')
-    except Exception as e:
-        logging.warning(f'darkflight map failed: {e}')
-    try:
-        write_map3d(scenarios, (end_lon, end_lat, end_h), mc_impacts,
-                    event_dir / 'darkflight_map3d.html')
-    except Exception as e:
-        logging.warning(f'darkflight 3d map failed: {e}')
+    for file_prefix, tr in (lang_files or {'': {}}).items():
+        try:
+            write_map(scenarios, (end_lon, end_lat, end_h), mc_impacts,
+                      event_dir / f'{file_prefix}map_darkflight.svg',
+                      translations=tr)
+        except Exception as e:
+            logging.warning(f'darkflight map failed: {e}')
+        try:
+            write_map3d(scenarios, (end_lon, end_lat, end_h), mc_impacts,
+                        event_dir / f'{file_prefix}darkflight_map3d.html',
+                        translations=tr)
+        except Exception as e:
+            logging.warning(f'darkflight 3d map failed: {e}')
     return results
 
 

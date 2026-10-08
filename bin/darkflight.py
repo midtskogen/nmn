@@ -760,12 +760,16 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                   (0, 20, 'center'), (0, -25, 'center'),
                   (0, 26, 'center'), (0, -31, 'center'),
                   (0, 32, 'center'), (0, -37, 'center')]
+    arrow_kw = dict(arrowstyle='-', lw=0.6, alpha=0.7,
+                    shrinkA=0, shrinkB=0)
     for lon, lat, txt, col in labels2draw:
         ann = None
         for dx, dy, ha in candidates:
             a = ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
                             textcoords='offset points', ha=ha,
                             fontsize=6.5, color=col,
+                            arrowprops=dict(arrow_kw, color=col)
+                            if (dx ** 2 + dy ** 2) ** 0.5 > 10 else None,
                             transform=pc if pc else ax.transData)
             bb = a.get_window_extent(renderer).expanded(1.08, 1.25)
             if any(bb.overlaps(b) for b in placed_boxes):
@@ -776,11 +780,13 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
             break
         if ann is None:
             # densest cluster — last resort: stack far above
-            a = ax.annotate(txt, xy=(lon, lat), xytext=(0, 45),
-                            textcoords='offset points', ha='center',
-                            fontsize=6, color=col,
-                            transform=pc if pc else ax.transData)
-            placed_boxes.append(a.get_window_extent(renderer).expanded(1.08, 1.25))
+            ann = ax.annotate(txt, xy=(lon, lat), xytext=(0, 45),
+                              textcoords='offset points', ha='center',
+                              fontsize=6, color=col,
+                              arrowprops=dict(arrow_kw, color=col),
+                              transform=pc if pc else ax.transData)
+            placed_boxes.append(
+                ann.get_window_extent(renderer).expanded(1.08, 1.25))
     if mc_impacts:
         kw = {'transform': pc} if pc else {}
         ax.scatter([i['lon'] for i in mc_impacts],

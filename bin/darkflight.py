@@ -753,40 +753,32 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     placed_boxes = []
-    candidates = [(4, 4, 'left'), (-4, 4, 'right'), (4, -8, 'left'),
-                  (-4, -8, 'right'), (0, 8, 'center'), (0, -13, 'center'),
-                  (8, 0, 'left'), (-8, 0, 'right'),
-                  (0, 14, 'center'), (0, -19, 'center'),
-                  (0, 20, 'center'), (0, -25, 'center'),
-                  (0, 26, 'center'), (0, -31, 'center'),
-                  (0, 32, 'center'), (0, -37, 'center')]
+    # radial candidate offsets — try every 30° at increasing radii, so a
+    # label lands in the nearest free direction (leader line included)
+    candidates = []
+    for r in (12, 20, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100):
+        for ang in range(0, 360, 30):
+            dx = r * math.cos(math.radians(ang))
+            dy = r * math.sin(math.radians(ang))
+            ha = ('center' if abs(dx) < r * 0.35
+                  else ('left' if dx > 0 else 'right'))
+            candidates.append((dx, dy, ha))
+    labels2draw.sort(key=lambda L: L[0])   # stable order along fall line
     arrow_kw = dict(arrowstyle='-', lw=0.6, alpha=0.7,
                     shrinkA=0, shrinkB=0)
     for lon, lat, txt, col in labels2draw:
-        ann = None
         for dx, dy, ha in candidates:
             a = ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
                             textcoords='offset points', ha=ha,
                             fontsize=6.5, color=col,
-                            arrowprops=dict(arrow_kw, color=col)
-                            if (dx ** 2 + dy ** 2) ** 0.5 > 10 else None,
+                            arrowprops=dict(arrow_kw, color=col),
                             transform=pc if pc else ax.transData)
-            bb = a.get_window_extent(renderer).expanded(1.08, 1.25)
+            bb = a.get_window_extent(renderer).expanded(1.05, 1.2)
             if any(bb.overlaps(b) for b in placed_boxes):
                 a.remove()
                 continue
             placed_boxes.append(bb)
-            ann = a
             break
-        if ann is None:
-            # densest cluster — last resort: stack far above
-            ann = ax.annotate(txt, xy=(lon, lat), xytext=(0, 45),
-                              textcoords='offset points', ha='center',
-                              fontsize=6, color=col,
-                              arrowprops=dict(arrow_kw, color=col),
-                              transform=pc if pc else ax.transData)
-            placed_boxes.append(
-                ann.get_window_extent(renderer).expanded(1.08, 1.25))
     if mc_impacts:
         kw = {'transform': pc} if pc else {}
         ax.scatter([i['lon'] for i in mc_impacts],

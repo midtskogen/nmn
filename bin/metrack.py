@@ -867,7 +867,7 @@ document.addEventListener("DOMContentLoaded", function () {{
 </script>"""
 
 
-def _wind_overlay_html(wind_csv, box):
+def _wind_overlay_html(wind_csv, box, wind_text=None):
     """Return the animated wind-particle overlay <script> for a 3D map, or ''.
 
     wind_csv: Path to wind_profile.csv (Height_m,Temp_K,Pressure_Pa,
@@ -895,12 +895,30 @@ def _wind_overlay_html(wind_csv, box):
         if not levels:
             return ''
         wind_json = json.dumps({'box': [float(v) for v in box], 'levels': levels})
+        wind_text = html_mod.escape(wind_text or 'Wind')
         return """
 <script>
 document.addEventListener("DOMContentLoaded", function () {
     const plot = document.querySelector(".js-plotly-plot");
     if (!plot) return;
     const wind = WIND_DATA_JSON;
+
+    // Toggle button appended to the rotation controls (right of Pause).
+    // The overlay starts hidden -- wind streaks only draw while enabled.
+    let windOn = false;
+    const ctrl = document.getElementById("map-rotation-controls");
+    if (ctrl) {
+        const btn = document.createElement('button');
+        btn.id = "map-wind-btn";
+        btn.textContent = "WIND_TEXT";
+        btn.style.cssText = "margin-left:5px; padding:4px 10px; cursor:pointer; opacity:0.55;";
+        btn.addEventListener("click", function () {
+            windOn = !windOn;
+            btn.style.opacity = windOn ? "1" : "0.55";
+            if (!windOn) ctx.clearRect(0, 0, overlay.width, overlay.height);
+        });
+        ctrl.appendChild(btn);
+    }
     const x0 = wind.box[0], x1 = wind.box[1], y0 = wind.box[2], y1 = wind.box[3];
     const N = 26;            // particles per altitude level
     const TRAIL = 0.35;      // streak length in seconds of travel
@@ -983,6 +1001,7 @@ document.addEventListener("DOMContentLoaded", function () {
     function tick(now) {
         const dt = Math.min(0.1, (now - last) / 1000);
         last = now;
+        if (!windOn) { requestAnimationFrame(tick); return; }
         ctx.clearRect(0, 0, overlay.width, overlay.height);
         const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
         const g = scn && scn.glplot, cam = g && g.camera;
@@ -1023,7 +1042,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
     requestAnimationFrame(tick);
 });
-</script>""".replace('WIND_DATA_JSON', wind_json)
+</script>""".replace('WIND_DATA_JSON', wind_json).replace('WIND_TEXT', wind_text)
     except Exception as e:
         print(f"Warning: could not embed wind animation: {e}")
         return ''
@@ -1473,7 +1492,8 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
             bx0, bx1, by0, by1 = x_min_km, x_max_km, y_min_km, y_max_km
         box = [max(bx0, x_min_km), min(bx1, x_max_km),
                max(by0, y_min_km), min(by1, y_max_km)]
-        wind_script = _wind_overlay_html(wind_csv, box)
+        wind_script = _wind_overlay_html(
+            wind_csv, box, translations.get("plot_interactive_wind"))
         if wind_script:
             if "</body>" in html:
                 html = html.replace("</body>", wind_script + "\n</body>", 1)

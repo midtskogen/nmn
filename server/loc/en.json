@@ -51,6 +51,7 @@
   "plot_map_interactive_zaxis": "Height (km)",
   "plot_interactive_play": "▶ Play",
   "plot_interactive_pause": "⏸ Pause",
+  "plot_interactive_wind": "Wind",
   "infrasound_source": "Infrasound source",
   "videos": "Videos",
   "images": "Images",

@@ -753,6 +753,14 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     placed_boxes = []
+    # reserve space around every impact marker — a label must not cover
+    # its own or any other point
+    from matplotlib.transforms import Bbox
+    to_disp = pc._as_mpl_transform(ax) if pc else ax.transData
+    for lon, lat, txt, col in labels2draw:
+        px, py = to_disp.transform((lon, lat))
+        placed_boxes.append(Bbox.from_extents(px - 5, py - 5,
+                                              px + 5, py + 5))
     # radial candidate offsets — try every 30° at increasing radii, so a
     # label lands in the nearest free direction (leader line included)
     candidates = []

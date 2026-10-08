@@ -709,7 +709,9 @@ def get_location_from_coords(lat, lon) -> str:
     return municipality.strip()
 
 
-def _fmt_mass(m_kg):
+def _fmt_mass(m_kg, t=None):
+    if not np.isfinite(m_kg):
+        return (t or {}).get('df_unreliable', 'unreliable')
     if m_kg >= 1000:
         return f"{m_kg/1000:.2f} t"
     if m_kg >= 1:
@@ -741,16 +743,16 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                         f'<td>{t.get("df_unreliable", "unreliable")}*</td></tr>')
                 else:
                     lo, hi = est.get('m_fade_lo', 0), est.get('m_fade_hi')
-                    rng_txt = (f'{_fmt_mass(lo)}–{_fmt_mass(hi)}'
+                    rng_txt = (f'{_fmt_mass(lo, t)}–{_fmt_mass(hi, t)}'
                                if hi and np.isfinite(hi) and hi / max(lo, 1e-12) <= 20
                                else t.get('df_poorly_constrained', 'poorly constrained'))
                     rows.append(
                         f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
-                        f'<td>~{_fmt_mass(est["m_entry_kg"])}'
+                        f'<td>~{_fmt_mass(est["m_entry_kg"], t)}'
                         f' ({t.get("df_estimated", "estimated")})</td></tr>')
                     rows.append(
                         f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
-                        f'<td>~{_fmt_mass(est["m_fade_kg"])} ({rng_txt})</td></tr>')
+                        f'<td>~{_fmt_mass(est["m_fade_kg"], t)} ({rng_txt})</td></tr>')
             ph = (results.get('photometric') or {}).get('m_phot_kg')
             if ph:
                 rows.append(

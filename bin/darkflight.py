@@ -1194,19 +1194,27 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     if ref is not None:
         m_med, m_lo, m_hi, m_crit = (ref['m_fade_kg'], ref['m_fade_lo'],
                                    ref['m_fade_hi'], ref['m_crit_kg'])
-        if m_hi > 0 and np.isfinite(m_med):
+        if not np.isfinite(m_med):
+            # zero/negative fitted deceleration makes the drag inversion
+            # diverge — the mass is not determinable at all
+            issues.append('deceleration non-invertible')
+            m_med = 0.0
+        elif np.isfinite(m_hi) and m_hi > 0:
             if m_hi / max(m_lo, 1e-12) > 20:
                 issues.append('deceleration poorly constrained')
             if v_end > 4000.0 and m_med > 30 * max(m_crit, 1e-9):
                 issues.append('inconsistent with fade-out')
             if m_med > 100.0:
                 issues.append('implausibly large surviving mass')
+        else:
+            issues.append('deceleration poorly constrained')
     else:
         m_med = m_crit = 0.0
         issues.append('no speed/deceleration fit')
     reliability = 'unreliable' if any(
         i in ('inconsistent with fade-out', 'implausibly large surviving mass',
-              'no speed/deceleration fit') for i in issues) else \
+              'no speed/deceleration fit',
+              'deceleration non-invertible') for i in issues) else \
         ('marginal' if issues else 'ok')
     if reliability != 'ok':
         logging.warning(f'darkflight: mass estimate {reliability} '

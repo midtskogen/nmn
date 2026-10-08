@@ -177,6 +177,7 @@
   "df_sc_split": "Dalījums divās daļās {p}%/{q}%",
   "df_sc_equal": "{n} vienādi fragmenti",
   "df_sc_powerlaw": "Fragmentu bars (pakāpes likums)",
+  "df_sc_strength": "Sabrukšana pazūdot (izturības ierobežota)",
   "df_sc_noabl": "(bez ablācijas)",
   "df_end_luminous": "Spīdošās trajektorijas gals"
 }

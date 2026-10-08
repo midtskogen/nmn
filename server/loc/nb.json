@@ -177,6 +177,7 @@
   "df_sc_split": "Todeling {p}%/{q}%",
   "df_sc_equal": "{n} like fragment",
   "df_sc_powerlaw": "Fragmentsverm (potenslov)",
+  "df_sc_strength": "Fragmentering ved fade-out (styrkebegrensa)",
   "df_sc_noabl": "(uten ablasjon)",
   "df_end_luminous": "Slutt på lysende bane"
 }

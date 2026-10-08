@@ -124,18 +124,49 @@ def us76(h_m):
 
 
 # --- Wind + atmosphere ---------------------------------------------------------
+_MSIS_CACHE = {}
+
+
+def _msis_profile(lat, lon, dt):
+    """NRLMSISE-00 (via pymsis) mass density & temperature on a height grid
+    for the event location/time. Returns (h_m, rho_kgm3, T_K) or None.
+    Uses climatological solar indices — at 10-60 km the solar-cycle
+    modulation of density is only a few percent."""
+    key = (round(lat, 1), round(lon, 1), dt.strftime('%Y-%m-%dT%H'))
+    if key in _MSIS_CACHE:
+        return _MSIS_CACHE[key]
+    prof = None
+    try:
+        import pymsis
+        hs = np.linspace(0.0, 90.0, 241)  # km
+        out = pymsis.calculate(dt, lon, lat, hs,
+                               f107s=150.0, f107as=150.0,
+                               aps=[[4.0] * 7])
+        rho = out[0, 0, 0, :, pymsis.Variable.MASS_DENSITY]
+        T = out[0, 0, 0, :, pymsis.Variable.TEMPERATURE]
+        prof = (hs * 1000.0, np.asarray(rho, float), np.asarray(T, float))
+    except Exception as e:
+        logging.debug(f'NRLMSISE unavailable ({e}); using US76')
+    _MSIS_CACHE[key] = prof
+    return prof
+
+
 class WindAtmosphere:
-    """1-D vertical profile (Open-Meteo wind_profile.csv) over US76.
+    """1-D vertical profile (Open-Meteo wind_profile.csv) over MSIS/US76.
 
     CSV columns: Height_m, Temp_K, Pressure_Pa, WindSpeed_ms, WindDir_deg
     (direction wind blows *from*, meteorological convention).
-    Above the profile top: US76 density, wind held at the top-layer value.
+    Above the profile top: NRLMSISE-00 (if lon/lat/event time given, else
+    US76) density, wind held at the top-layer value.
     Below the profile bottom: bottom-layer values.
     """
 
-    def __init__(self, csv_path=None):
+    def __init__(self, csv_path=None, lon=None, lat=None, event_dt=None):
         self.has_profile = False
         self._rho_scale = 1.0
+        self._msis = None
+        if lon is not None and lat is not None and event_dt is not None:
+            self._msis = _msis_profile(lat, lon, event_dt)
         if csv_path and Path(csv_path).exists():
             rows = []
             with open(csv_path) as f:
@@ -156,11 +187,26 @@ class WindAtmosphere:
                 self.we = -self.wspd * np.sin(rad)
                 self.wn = -self.wspd * np.cos(rad)
                 self.h_min, self.h_max = self.h[0], self.h[-1]
-                # blend US76 density to match the profile top
-                _, _, rho_top_us76 = us76(self.h_max)
-                if rho_top_us76 > 0:
-                    self._rho_scale = self.rho_p[-1] / rho_top_us76
+                # blend the background density to match the profile top
+                _, rho_top = self._base_T_rho(self.h_max)
+                if rho_top > 0:
+                    self._rho_scale = self.rho_p[-1] / rho_top
                 self.has_profile = True
+
+    def _base_T_rho(self, h_m):
+        """Background atmosphere (T, rho): NRLMSISE-00 if available else US76."""
+        if self._msis is not None:
+            hm, rho, T = self._msis
+            i = np.searchsorted(hm, h_m)
+            if i == 0:
+                return T[0], rho[0]
+            if i >= len(hm):
+                return T[-1], rho[-1]
+            f = (h_m - hm[i - 1]) / (hm[i] - hm[i - 1])
+            return T[i - 1] + f * (T[i] - T[i - 1]), \
+                np.exp(np.log(rho[i - 1]) + f * (np.log(rho[i]) - np.log(rho[i - 1])))
+        T, _, rho = us76(h_m)
+        return T, rho
 
     def at(self, h_m):
         """Returns (wind_enu[3], rho_a, T) at geometric height h_m."""
@@ -179,8 +225,8 @@ class WindAtmosphere:
             T = self.T[i0] + f * (self.T[i1] - self.T[i0])
             rho = self.rho_p[i0] + f * (self.rho_p[i1] - self.rho_p[i0])
             return np.array([we, wn, 0.0]), rho, T
-        # above profile (or no profile): US76, wind = last layer or zero
-        T, _, rho = us76(h_m)
+        # above profile (or no profile): MSIS/US76, wind = last layer or zero
+        T, rho = self._base_T_rho(h_m)
         rho *= self._rho_scale
         if self.has_profile:
             return np.array([self.we[-1], self.wn[-1], 0.0]), rho, T
@@ -263,6 +309,51 @@ def ablation_coeff(rho_m, A):
     if rho_m > 1500:
         return 0.042e-6 * cd_hyp
     return 0.1e-6 * cd_hyp
+
+
+def erosion_coeff(rho_m):
+    """Grain-shedding (erosion) coefficient [s2/m2], Borovicka (2007).
+    Erosion dominates the luminous-phase mass loss of weak material:
+    WMPL uses 0.33e-6 s2/m2 for cometary/chondritic-type bodies, and it
+    is the reason survival fractions of ~10% are realistic. Dense iron
+    does not shed grains and erodes negligibly."""
+    if rho_m > 5000:
+        return 0.005e-6
+    if rho_m > 2500:
+        return 0.33e-6
+    return 0.42e-6
+
+
+def compressive_strength(rho_m):
+    """Effective compressive strength [Pa] by density class — a
+    fragmentation threshold on the dynamic pressure Cd*rho_a*v^2.
+    Ranges from Popova et al. (2011) / Svestka (1994) reviews and the
+    ~0.1-1 MPa values fitted for chondritic meteorite falls."""
+    if rho_m > 5000:
+        return 5e6        # iron
+    if rho_m > 2500:
+        return 1e6        # ordinary chondrite
+    if rho_m > 1500:
+        return 2e5        # carbonaceous
+    return 5e4            # cometary/fragile
+
+
+def fragmentation_spectrum(m_total, mass_index=2.0,
+                           min_ratio=0.01, max_ratio=0.10,
+                           grain_ratio=0.25):
+    """WMPL-style disruption: `grain_ratio` of the mass turns to dust
+    (ablated, not tracked), the rest breaks into fragments whose masses
+    are `min_ratio`–`max_ratio` of the disrupted mass, drawn from a
+    power-law dN/dm ~ m^-mass_index (inverse-CDF sample, ~10 pieces)."""
+    m_frag = m_total * (1.0 - grain_ratio)
+    lo, hi = min_ratio * m_frag, max_ratio * m_frag
+    # inverse CDF for dN/dm ~ m^-a between lo and hi
+    u = np.linspace(0.05, 0.95, 10)
+    a = mass_index
+    inv = lambda x: ((1 - x) * lo ** (1 - a) + x * hi ** (1 - a)) ** (1 / (1 - a))
+    ms = inv(u)
+    # renormalise so the fragment masses sum to m_frag
+    return ms * (m_frag / ms.sum())
 
 
 # --- Propagator ---------------------------------------------------------------
@@ -408,8 +499,10 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
         else:
             lo, hi = m_med * 0.5, m_med * 2.0
 
-        # critical entry mass: ablation integral along track
-        B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
+        # critical entry mass: ablation+erosion integral along track —
+        # a body of this mass fully ablates AND erodes by the fade point
+        sigma = ablation_coeff(rho_m, A) + erosion_coeff(rho_m)
+        B = sigma * A / (2 * rho_m ** (2. / 3))
         rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
         integral = np.trapz(rhos * vs ** 3, ts)
         m_crit = (B / 3 * integral) ** 3
@@ -420,33 +513,21 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
     return out
 
 
-def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
+def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None,
+                        erode=True):
     """Back-integrate ablation over the luminous track.
 
-    dM^(1/3)/dτ = (B/3) rhoa v^3 backward in time, B = c_ml*A/(2 rho_m^(2/3))
+    dM^(1/3)/dτ = (B/3) rhoa v^3 backward in time, B = sigma*A/(2 rho_m^(2/3))
     => M_entry^(1/3) = M_fade^(1/3) + (B/3) ∫ rhoa v^3 dt   (end -> start)
+
+    erode: include the Borovicka grain-erosion channel — the mass-loss
+    coefficient becomes sigma + eta (erosion typically dominates ablation
+    for stony bodies during luminous flight).
     """
     if atm is None:
         atm = WindAtmosphere()
-    B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
-    ts = np.linspace(t_range[0], t_range[1], 400)
-    vs = np.array([v_of_t(t) for t in ts])
-    hs = np.array([h_of_t(t) for t in ts])
-    rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
-    integral = np.trapz(rhos * vs ** 3, ts)
-    m13 = m_fade ** (1. / 3) + (B / 3) * integral
-    return m13 ** 3
-
-
-def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
-    """Back-integrate ablation over the luminous track.
-
-    dM^(1/3)/dτ = (B/3) rhoa v^3 backward in time, B = c_ml*A/(2 rho_m^(2/3))
-    => M_entry^(1/3) = M_fade^(1/3) + (B/3) ∫ rhoa v^3 dt   (end -> start)
-    """
-    if atm is None:
-        atm = WindAtmosphere()
-    B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
+    sigma = ablation_coeff(rho_m, A) + (erosion_coeff(rho_m) if erode else 0.0)
+    B = sigma * A / (2 * rho_m ** (2. / 3))
     ts = np.linspace(t_range[0], t_range[1], 400)
     vs = np.array([v_of_t(t) for t in ts])
     hs = np.array([h_of_t(t) for t in ts])
@@ -457,10 +538,14 @@ def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
 
 
 # --- Fragmentation scenarios ---------------------------------------------------
-def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None):
+def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
+                    dyn_press=None):
     """Return list of scenario dicts:
     {'name', 'label', 'runs': [{'m':..,'rho':..,'A':..}], 'erode'}
     m_est: estimated surviving mass [kg] (reference density/shape).
+    dyn_press: dynamic pressure at luminous fade-out [Pa]; when it
+    exceeds the material's compressive strength, a strength-limited
+    breakup scenario (Borovicka power-law + grain loss) is added.
     """
     if masses_grid is None:
         masses_grid = np.logspace(-3, np.log10(5.0), 16)  # 1 g .. 5 kg
@@ -487,6 +572,17 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None):
     sc.append({'name': 'S4_powerlaw', 'label': 'Power-law fragment swarm',
                'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in ms],
                'erode': True})
+    # strength-limited breakup (Borovicka 2007 / WMPL disruption):
+    # dynamic pressure at fade-out exceeding the material's compressive
+    # strength means the body was already fragmenting — 25% of the mass
+    # is lost as grains, the rest breaks into a power-law spectrum
+    strength = compressive_strength(rho_m)
+    if dyn_press is not None and dyn_press > strength:
+        frags = fragmentation_spectrum(m_est)
+        sc.append({'name': 'S5_strength', 'label':
+                   'Breakup at fade-out (strength-limited)',
+                   'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in frags],
+                   'erode': True})
     # no-erosion variants of the interesting scenarios
     for name in ('S0_intact', 'S3_equal_4'):
         base = next(s for s in sc if s['name'] == name)
@@ -507,7 +603,7 @@ def sc_label(sc, t):
         base = sc_label({**sc, 'name': name[:-10]}, t)
         return base + ' ' + t.get('df_sc_noabl', '(no ablation)')
     key = {'S0_intact': 'df_sc_intact', 'S1_fallline': 'df_sc_fallline',
-           'S4_powerlaw': 'df_sc_powerlaw'}.get(name)
+           'S4_powerlaw': 'df_sc_powerlaw', 'S5_strength': 'df_sc_strength'}.get(name)
     if key:
         return t.get(key, sc['label'])
     m = _re.match(r'S2_split_(\d+)', name)
@@ -522,8 +618,9 @@ def sc_label(sc, t):
 
 # --- Monte Carlo ---------------------------------------------------------------
 def _mc_worker(job):
-    r0, v0, m, rho, A, csv_path, h_ground, erode = job
-    atm = WindAtmosphere(csv_path)
+    (r0, v0, m, rho, A, csv_path, h_ground, erode,
+     lon, lat, event_dt) = job
+    atm = WindAtmosphere(csv_path, lon=lon, lat=lat, event_dt=event_dt)
     return propagate(r0, v0, m, rho, A, atm, h_ground, erode=erode,
                      record_dt=1.0)['impact']
 
@@ -531,7 +628,8 @@ def _mc_worker(job):
 def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
                 pos_err=100.0, vel_frac_err=0.05, dir_err_deg=0.1,
                 mass_err=0.3, rho_err=500.0, shape_err=0.15,
-                wind_err=2.0, seed=0, pool=None):
+                wind_err=2.0, seed=0, pool=None,
+                lon=None, lat=None, event_dt=None):
     """Perturbed runs around nominal state. Returns list of impact dicts."""
     rng = np.random.default_rng(seed)
     jobs = []
@@ -550,7 +648,8 @@ def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
         m_p = max(1e-3, m0 * rng.uniform(1 - mass_err, 1 + mass_err))
         rho_p = max(500.0, rng.normal(rho_m, rho_err))
         A_p = float(np.clip(rng.normal(A, shape_err), 0.9, 3.0))
-        jobs.append((r_p, v_p, m_p, rho_p, A_p, csv_path, h_ground, True))
+        jobs.append((r_p, v_p, m_p, rho_p, A_p, csv_path, h_ground, True,
+                     lon, lat, event_dt))
     if pool is not None:
         return pool.map(_mc_worker, jobs)
     return [_mc_worker(j) for j in jobs]
@@ -1206,14 +1305,23 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         _clean_outputs(event_dir)
         return results
 
-    atm = WindAtmosphere(wind_csv)
+    # event time from the directory name .../YYYYMMDD/HHMMSS
+    try:
+        from datetime import datetime, timezone
+        event_dt = datetime.strptime(
+            f'{event_dir.parent.name} {event_dir.name}',
+            '%Y%m%d %H%M%S').replace(tzinfo=timezone.utc)
+    except Exception:
+        event_dt = None
+    atm = WindAtmosphere(wind_csv, lon=end_lon, lat=end_lat,
+                         event_dt=event_dt)
 
     # Surviving-mass estimates over the density grid (whole-track fit)
     mass_estimates = []
     if have_fit:
         mass_estimates = estimate_mass(v_of_t, a_of_t, h_of_t,
                                        (t0_obs, t_last),
-                                       params=params, pcov=pcov)
+                                       atm=atm, params=params, pcov=pcov)
     ref = next((e for e in mass_estimates if e['rho'] == 3500), None)
 
     # --- Reliability assessment -------------------------------------------------
@@ -1319,7 +1427,9 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     h_ground = ground_elevation(end_lat, end_lon)
 
     v0_vec = track_dir * v_end
-    scenarios = build_scenarios(m_est)
+    _, rho_end, _ = atm.at(max(end_h, 0.0))
+    dyn_press = cd_hypersonic(1.4) * rho_end * v_end ** 2
+    scenarios = build_scenarios(m_est, dyn_press=dyn_press)
     for sc in scenarios:
         sc['results'] = []
         for run in sc['runs']:
@@ -1336,7 +1446,8 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     if mc_runs > 0:
         mc_impacts = [i for i in monte_carlo(
             r_end, v0_vec, m_est, 3500.0, 1.4, wind_csv, h_ground,
-            n_runs=mc_runs, seed=seed, pool=pool)
+            n_runs=mc_runs, seed=seed, pool=pool,
+            lon=end_lon, lat=end_lat, event_dt=event_dt)
             if i.get('landed', True)]
 
     results = {

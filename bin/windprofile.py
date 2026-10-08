@@ -50,8 +50,9 @@ def get_wind_profile(latitude, longitude, timestamp, csv_output_file, dataset_fi
     lat, lon, and time, and saves it to a CSV file.
     
     NOTE: The Open-Meteo forecast API only provides pressure-level (high-altitude)
-    data for the last ~14 days. This function will gracefully fail for
-    older events.
+    data for the last ~14 days. Older events use the Historical Forecast
+    API (archived GFS pressure data back to 2021-03-23). Events older than
+    that fail gracefully.
 
     Args:
         latitude (float): Latitude.
@@ -73,17 +74,22 @@ def get_wind_profile(latitude, longitude, timestamp, csv_output_file, dataset_fi
         now = datetime.now(timezone.utc)
 
         # --- Open-Meteo API setup ---
-        
-        # Check if the requested date is older than ~14 days.
-        # The 'forecast' API only holds ~14-15 days of historical data.
-        # The 'archive' API does not provide this pressure-level data.
-        cutoff_days = 14
-        if (now - utc).days >= cutoff_days:
-            logging.warning(f"Event date {date_str} is >= {cutoff_days} days old. High-altitude wind profile data is not available via this API.")
-            return False, None
 
-        logging.info(f"Date {date_str} is < {cutoff_days} days old, using forecast API.")
-        api_url = "https://api.open-meteo.com/v1/forecast"
+        # The 'forecast' API only holds ~14-15 days of historical data.
+        # Older events fall back to the Historical Forecast API, which
+        # archives the same GFS pressure-level variables back to
+        # 2021-03-23.
+        cutoff_days = 14
+        hist_start = datetime(2021, 3, 23, tzinfo=timezone.utc)
+        if utc >= hist_start and (now - utc).days >= cutoff_days:
+            logging.info(f"Date {date_str} is >= {cutoff_days} days old, using historical forecast API.")
+            api_url = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+        elif utc < hist_start:
+            logging.warning(f"Event date {date_str} predates the historical forecast archive (2021-03-23). High-altitude wind profile data is not available.")
+            return False, None
+        else:
+            logging.info(f"Date {date_str} is < {cutoff_days} days old, using forecast API.")
+            api_url = "https://api.open-meteo.com/v1/forecast"
 
         # We only need data up to 30km (approx 10 hPa)
         # Use a more detailed list of pressure levels for higher resolution.
@@ -114,6 +120,8 @@ def get_wind_profile(latitude, longitude, timestamp, csv_output_file, dataset_fi
             "timezone": "UTC",
             "wind_speed_unit": "ms"
         }
+        if "historical" in api_url:
+            params["models"] = "gfs_seamless"
 
         logging.info(f"Fetching wind profile from Open-Meteo for {date_str}...")
         

@@ -2288,6 +2288,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                                 event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)
                 else:
                     logging.info(f"End altitude {end_height_km:.1f} km above 40 km — assuming full disintegration, skipping dark flight.")
+                    darkflight._clean_outputs(event_dir)
             except Exception as e:
                 logging.error(f"Dark flight simulation failed: {e}", exc_info=True)
 

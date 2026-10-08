@@ -1088,6 +1088,19 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
 
 
 # --- Orchestration --------------------------------------------------------------
+def _clean_outputs(event_dir):
+    """Remove generated dark-flight artifacts (maps, tables, exports)."""
+    for pat in ('map_darkflight.*', '*_map_darkflight.*',
+                'darkflight_map3d.html', '*_darkflight_map3d.html',
+                'darkflight.geojson', 'darkflight.kml',
+                'darkflight_table.html', '*_darkflight_table.html'):
+        for p in event_dir.glob(pat):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+
 def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                    wind_csv=None, mc_runs=300, seed=0, pool=None,
                    verbose=False, lang_files=None):
@@ -1166,6 +1179,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             'scenarios': [], 'mc': {'n': 0, 'impacts': []},
         }
         write_json(results, event_dir / 'darkflight.json')
+        _clean_outputs(event_dir)
         return results
 
     atm = WindAtmosphere(wind_csv)
@@ -1236,6 +1250,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             'scenarios': [], 'mc': {'n': 0, 'impacts': []},
         }
         write_json(results, event_dir / 'darkflight.json')
+        _clean_outputs(event_dir)
         return results
 
     # --- Photometric cross-check (star-calibrated light curve) ------------------

@@ -676,9 +676,10 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
         else:
             ax.plot(*args, **kw)
 
+    plot_sc = [s for s in scenarios if s.get('erode', True)]
     cmap = plt.cm.viridis
-    for si, sc in enumerate(scenarios):
-        col = cmap(si / max(len(scenarios) - 1, 1))
+    for si, sc in enumerate(plot_sc):
+        col = cmap(si / max(len(plot_sc) - 1, 1))
         for run in sc['results']:
             trplot(run['lon'], run['lat'], lw=1.0, alpha=0.4,
                    color=col)
@@ -725,7 +726,8 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         import matplotlib.pyplot as plt
         from PIL import Image
         import io, html as html_mod
-        from metrack import darken_blacks, _fetch_kartverket_topo
+        from metrack import (darken_blacks, _fetch_kartverket_topo,
+                             _rotation_controls_html, _wind_overlay_html)
     except Exception as e:
         logging.debug(f'darkflight 3d map unavailable: {e}')
         return False
@@ -820,9 +822,10 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         surfacecolor=remapped, cmin=0, cmax=max(1, len(sorted_pal) - 1),
         colorscale=cscale, showscale=False, hoverinfo='none')]
 
+    plot_sc = [s for s in scenarios if s.get('erode', True)]
     cmap = matplotlib.pyplot.get_cmap('viridis')
-    for si, sc in enumerate(scenarios):
-        c = cmap(si / max(len(scenarios) - 1, 1))
+    for si, sc in enumerate(plot_sc):
+        c = cmap(si / max(len(plot_sc) - 1, 1))
         col = f'rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})'
         for ri, run in enumerate(sc['results']):
             x, y = project_points(run['lon'], run['lat'])
@@ -887,11 +890,33 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         margin=dict(l=0, r=0, b=0, t=40)))
     out_html = Path(out_html)
     fig3.write_html(str(out_html), include_plotlyjs='cdn')
-    # full-bleed styling like metrack's map.html
     html_txt = out_html.read_text(encoding='utf-8')
     html_txt = html_txt.replace(
         '<head>', '<head><style>html,body{margin:0;padding:0;'
         'overflow:hidden;height:100%}</style>', 1)
+    # Rotation controls — same animation as metrack's map.html
+    rot = _rotation_controls_html(
+        center, dist, eye['z'] - center['z'],
+        translations.get('plot_interactive_play'),
+        translations.get('plot_interactive_pause'))
+    if '</body>' in html_txt:
+        html_txt = html_txt.replace('</body>', rot + '\n</body>', 1)
+    else:
+        html_txt += rot
+    # Wind particles — same overlay as metrack's map.html. Box covers the
+    # fall area (projected km coords).
+    try:
+        wind_csv = out_html.parent / 'wind_profile.csv'
+        box = [x_min_m / 1000.0, x_max_m / 1000.0,
+               y_min_m / 1000.0, y_max_m / 1000.0]
+        wjs = _wind_overlay_html(wind_csv, box)
+        if wjs:
+            if '</body>' in html_txt:
+                html_txt = html_txt.replace('</body>', wjs + '\n</body>', 1)
+            else:
+                html_txt += wjs
+    except Exception as e:
+        logging.debug(f'darkflight wind overlay failed: {e}')
     out_html.write_text(html_txt, encoding='utf-8')
     return True
 

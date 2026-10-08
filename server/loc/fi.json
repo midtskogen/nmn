@@ -172,5 +172,12 @@
     "df_unreliable_note": "Massa-arvio epäluotettava — valopolku liian lyhyt tai ristiriitainen; kartta näyttää hypoteettiset sirpaleradat.",
     "df_poorly_constrained": "heikosti rajoitettu",
     "df_phot_mass": "Fotometrinen massa (valokäyrä)",
-    "df_phot_note": "alaraja"
+    "df_phot_note": "alaraja",
+    "df_sc_intact": "Yksi kappale (arvioitu massa)",
+    "df_sc_fallline": "Putoamislinja (massahila)",
+    "df_sc_split": "Jakautuminen kahteen osaan {p}%/{q}%",
+    "df_sc_equal": "{n} yhtä suurta sirpaletta",
+    "df_sc_powerlaw": "Sirpaleparvi (potenssilaki)",
+    "df_sc_noabl": "(ei ablaatiota)",
+    "df_end_luminous": "Hehkuvan radan loppu"
 }

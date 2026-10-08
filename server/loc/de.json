@@ -166,5 +166,12 @@
   "df_unreliable_note": "Massenschätzung unsicher — Leuchtpfad zu kurz oder inkonsistent; die Karte zeigt hypothetische Fragmentbahnen.",
   "df_poorly_constrained": "schlecht eingegrenzt",
   "df_phot_mass": "Photometrische Masse (Lichtkurve)",
-  "df_phot_note": "Untergrenze"
+  "df_phot_note": "Untergrenze",
+  "df_sc_intact": "Einzelkörper (geschätzte Masse)",
+  "df_sc_fallline": "Falllinie (Massenraster)",
+  "df_sc_split": "Zweiteilung {p}%/{q}%",
+  "df_sc_equal": "{n} gleiche Fragmente",
+  "df_sc_powerlaw": "Fragmentschwarm (Potenzgesetz)",
+  "df_sc_noabl": "(ohne Ablation)",
+  "df_end_luminous": "Ende der Leuchtspur"
 }

@@ -756,9 +756,12 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     # reserve space around every impact marker — a label must not cover
     # its own or any other point
     from matplotlib.transforms import Bbox
-    to_disp = pc._as_mpl_transform(ax) if pc else ax.transData
     for lon, lat, txt, col in labels2draw:
-        px, py = to_disp.transform((lon, lat))
+        if pc:
+            px, py = ax.transData.transform(
+                ax.projection.transform_point(lon, lat, pc))
+        else:
+            px, py = ax.transData.transform((lon, lat))
         placed_boxes.append(Bbox.from_extents(px - 5, py - 5,
                                               px + 5, py + 5))
     # radial candidate offsets — try every 30° at increasing radii, so a

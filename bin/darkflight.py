@@ -716,13 +716,23 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
         else:
             ax.plot(*args, **kw)
 
-    plot_sc = [s for s in scenarios if s.get('erode', True)]
+    # unique runs: S3_equal_N scenarios have N identical trajectories —
+    # one line + one marker is enough.  The S4 power-law swarm is ~60
+    # near-identical sub-gram tracks — excluded from the plots entirely
+    # (kept in JSON/KML for completeness).
+    plot_sc = [s for s in scenarios
+               if s.get('erode', True) and s['name'] != 'S4_powerlaw']
     cmap = plt.cm.viridis
     for si, sc in enumerate(plot_sc):
         col = cmap(si / max(len(plot_sc) - 1, 1))
-        first_landed = next((r for r in sc['results']
-                             if r['impact'].get('landed', True)), None)
+        uniq, seen_m = [], set()
         for run in sc['results']:
+            if run['m'] not in seen_m:
+                seen_m.add(run['m'])
+                uniq.append(run)
+        first_landed = next((r for r in uniq
+                             if r['impact'].get('landed', True)), None)
+        for run in uniq:
             trplot(run['lon'], run['lat'], lw=1.0, alpha=0.4,
                    color=col)
             if run['impact'].get('landed', True):
@@ -838,9 +848,10 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                                     np.asarray(lats, float))
         return pts[:, 0] / 1000.0, pts[:, 1] / 1000.0
 
+    # 640px texture is plenty for a scene panel; 1024 -> ~2.5x smaller JSON
     img = Image.open(buf).convert('RGB')
-    if max(img.size) > 1024:
-        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+    if max(img.size) > 640:
+        img.thumbnail((640, 640), Image.Resampling.LANCZOS)
     img = darken_blacks(img, 112)
     quant = img.quantize(colors=16, method=Image.Quantize.MEDIANCUT)
     pal = quant.getpalette()
@@ -866,15 +877,25 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         surfacecolor=remapped, cmin=0, cmax=max(1, len(sorted_pal) - 1),
         colorscale=cscale, showscale=False, hoverinfo='none')]
 
-    plot_sc = [s for s in scenarios if s.get('erode', True)]
+    plot_sc = [s for s in scenarios
+               if s.get('erode', True) and s['name'] != 'S4_powerlaw']
     cmap = matplotlib.pyplot.get_cmap('viridis')
     for si, sc in enumerate(plot_sc):
         c = cmap(si / max(len(plot_sc) - 1, 1))
         col = f'rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})'
-        for ri, run in enumerate(sc['results']):
-            x, y = project_points(run['lon'], run['lat'])
+        uniq, seen_m = [], set()
+        for run in sc['results']:
+            if run['m'] not in seen_m:
+                seen_m.add(run['m'])
+                uniq.append(run)
+        for ri, run in enumerate(uniq):
+            # decimate the polyline — full res has ~1800 pts/trace
+            step = max(1, len(run['lon']) // 300)
+            lon_d = run['lon'][::step]; lat_d = run['lat'][::step]
+            h_d = list(run['h'])[::step]
+            x, y = project_points(lon_d, lat_d)
             traces.append(go.Scatter3d(
-                x=x, y=y, z=[hh / 1000.0 for hh in run['h']],
+                x=x, y=y, z=[hh / 1000.0 for hh in h_d],
                 mode='lines',
                 line=dict(color=col, width=3),
                 name=sc_label(sc, translations),

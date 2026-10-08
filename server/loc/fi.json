@@ -174,7 +174,7 @@
     "df_phot_mass": "Fotometrinen massa (valokäyrä)",
     "df_phot_note": "alaraja",
     "df_sc_intact": "Yksi kappale (arvioitu massa)",
-    "df_sc_fallline": "Putoamislinja (massahila)",
+    "df_sc_fallline": "Putoamislinja",
     "df_sc_split": "Jakautuminen kahteen osaan {p}%/{q}%",
     "df_sc_equal": "{n} yhtä suurta sirpaletta",
     "df_sc_powerlaw": "Sirpaleparvi (potenssilaki)",

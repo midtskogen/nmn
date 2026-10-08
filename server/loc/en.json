@@ -173,7 +173,7 @@
   "df_phot_mass": "Photometric mass (light curve)",
   "df_phot_note": "lower bound",
   "df_sc_intact": "Single body (estimated mass)",
-  "df_sc_fallline": "Fall line (mass grid)",
+  "df_sc_fallline": "Fall line",
   "df_sc_split": "Two-piece split {p}%/{q}%",
   "df_sc_equal": "{n} equal fragments",
   "df_sc_powerlaw": "Power-law fragment swarm",

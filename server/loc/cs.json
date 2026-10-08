@@ -168,7 +168,7 @@
   "df_phot_mass": "Fotometrická hmotnost (světelná křivka)",
   "df_phot_note": "dolní mez",
   "df_sc_intact": "Jednotné těleso (odhad hmotnosti)",
-  "df_sc_fallline": "Linie dopadu (mřížka hmotností)",
+  "df_sc_fallline": "Linie dopadu",
   "df_sc_split": "Rozdělení na dvě části {p}%/{q}%",
   "df_sc_equal": "{n} stejných fragmentů",
   "df_sc_powerlaw": "Roj fragmentů (mocninný zákon)",

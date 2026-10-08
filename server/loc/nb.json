@@ -173,7 +173,7 @@
   "df_phot_mass": "Fotometrisk masse (lyskurve)",
   "df_phot_note": "nedre grense",
   "df_sc_intact": "Enkelt legeme (estimert masse)",
-  "df_sc_fallline": "Fallinje (massegrid)",
+  "df_sc_fallline": "Fallinje",
   "df_sc_split": "Todeling {p}%/{q}%",
   "df_sc_equal": "{n} like fragment",
   "df_sc_powerlaw": "Fragmentsverm (potenslov)",

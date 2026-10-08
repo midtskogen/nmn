@@ -413,8 +413,12 @@ def plot_height(track_start, track_end, cross_pos, obs_data, inlier_indices, opt
     if 'show' in options.get('doplot', ''): pylab.show()
     pylab.close()
 
-def _fetch_kartverket_topo(lons, lats, max_tiles=144):
+def _fetch_kartverket_topo(lons, lats, max_tiles=144, poi_lonlat=None):
     """Stitch Kartverket topo WMTS tiles (UTM32 grid) covering the lon/lat bbox.
+
+    poi_lonlat: optional [(lon, lat), ...] points that must land on real map
+    content — Kartverket covers Norway only, so a track ending in Sweden or
+    at sea must not count a partial (Norway-side) mosaic as coverage.
 
     Kartverket's free 'topo' tileset has far better Norwegian detail than the
     OSM fallback. Returns (PIL.Image, (x_min, x_max, y_min, y_max) in
@@ -501,6 +505,26 @@ def _fetch_kartverket_topo(lons, lats, max_tiles=144):
     arr = np.asarray(canvas.convert('RGB'))
     if ((arr < 245).any(axis=2)).mean() < 0.15:
         return None
+    # Points of interest must land on real content: if e.g. the track end
+    # is outside Norway, the tile under it is blank even when the Norway
+    # side of the mosaic looks fine.
+    if poi_lonlat:
+        ext_x0 = ORIGIN_X + c0 * tw
+        ext_y_top = ORIGIN_Y - r0 * tw
+        for lo, la in poi_lonlat:
+            p = ccrs.UTM(32).transform_points(
+                ccrs.PlateCarree(), np.asarray([lo]), np.asarray([la]))[0]
+            if not np.isfinite(p).all():
+                return None
+            px = int((p[0] - ext_x0) / tw)
+            py = int((ext_y_top - p[1]) / tw)
+            if not (0 <= px < canvas.width and 0 <= py < canvas.height):
+                return None
+            x0w, x1w = max(0, px - 32), min(canvas.width, px + 33)
+            y0w, y1w = max(0, py - 32), min(canvas.height, py + 33)
+            win = arr[y0w:y1w, x0w:x1w]
+            if win.size == 0 or ((win < 245).any(axis=2)).mean() < 0.15:
+                return None
     # Upscale small mosaics so tile text reprojects smoothly instead of
     # stretching hard pixel edges (labels are fetched at a coarse zoom).
     if max(canvas.size) < 1200:
@@ -579,7 +603,11 @@ def plot_map(track_start, track_end, cross_pos, obs_data, inlier_indices, option
         try:
             old_to = socket.getdefaulttimeout()
             socket.setdefaulttimeout(15)
-            kv = _fetch_kartverket_topo([lon_left, lon_right], [lat_bot, lat_top])
+            poi = None
+            if not options.get('azonly', False) and track_start is not None:
+                poi = [xyz2lonlat(track_start)[:2], xyz2lonlat(track_end)[:2]]
+            kv = _fetch_kartverket_topo([lon_left, lon_right], [lat_bot, lat_top],
+                                        poi_lonlat=poi)
             if kv is not None:
                 img_kv, (kx0, kx1, ky0, ky1) = kv
                 ax.imshow(img_kv, extent=[kx0, kx1, ky0, ky1],
@@ -785,7 +813,11 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
         try:
             old_to = socket.getdefaulttimeout()
             socket.setdefaulttimeout(15)
-            kv = _fetch_kartverket_topo([lon_left, lon_right], [lat_bot, lat_top])
+            poi = None
+            if not options.get('azonly', False) and track_start is not None:
+                poi = [xyz2lonlat(track_start)[:2], xyz2lonlat(track_end)[:2]]
+            kv = _fetch_kartverket_topo([lon_left, lon_right], [lat_bot, lat_top],
+                                        poi_lonlat=poi)
             if kv is not None:
                 img_kv, (kx0, kx1, ky0, ky1) = kv
                 ax_map.imshow(img_kv, extent=[kx0, kx1, ky0, ky1],

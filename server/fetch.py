@@ -271,6 +271,7 @@ class Config:
     # Image processing settings
     SVG_DEFAULT_DPI = 300
     SVG_MAP_DPI = 80
+    SVG_DARKFLIGHT_DPI = 450
     SVG_ORBIT_DPI = 100
     
     # Tweet settings
@@ -2270,7 +2271,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         for lang in SUPPORTED_LANGS:
                             file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
                             svg_to_jpg(svg_path, event_dir / f"{file_prefix}map_darkflight.jpg",
-                                       Config.SVG_DEFAULT_DPI)
+                                       Config.SVG_DARKFLIGHT_DPI)
                         if df_results:
                             _append_darkflight_table(
                                 event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)

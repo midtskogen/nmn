@@ -712,6 +712,8 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     cmap = plt.cm.viridis
     for si, sc in enumerate(plot_sc):
         col = cmap(si / max(len(plot_sc) - 1, 1))
+        first_landed = next((r for r in sc['results']
+                             if r['impact'].get('landed', True)), None)
         for run in sc['results']:
             trplot(run['lon'], run['lat'], lw=1.0, alpha=0.4,
                    color=col)
@@ -720,7 +722,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                        'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),
                        color=col,
                        label=sc_label(sc, translations)
-                       if run is sc['results'][0] else None)
+                       if run is first_landed else None)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
            label=translations.get('df_end_luminous', 'End of luminous path'))
     if mc_impacts:

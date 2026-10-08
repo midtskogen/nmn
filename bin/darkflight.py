@@ -698,6 +698,9 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
             ax.scatter([i['lon'] for i in mc_impacts],
                        [i['lat'] for i in mc_impacts], s=2, c='magenta',
                        alpha=0.4, label='Monte Carlo')
+    # No lon/lat tick labels: their antialiased fringe sits against the dark
+    # frame spine and renders as specks after the site night-mode transform.
+    ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=7, loc='upper center', bbox_to_anchor=(0.5, -0.04),
               ncol=2, framealpha=0.9)
     if not pc:

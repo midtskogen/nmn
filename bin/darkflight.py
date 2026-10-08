@@ -804,19 +804,19 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
             bar_txt = bar_txt.replace('.', ',')
     else:
         bar_txt = f'{bar_m} m'
-    bar_deg = bar_m / (111320 * math.cos(
-        math.radians((lat_min + lat_max) / 2)))
-    bx = lon_min + 0.05 * (lon_max - lon_min)
-    by = lat_min + 0.06 * (lat_max - lat_min)
-    trplot([bx, bx + bar_deg], [by, by], lw=3, color='black',
-           solid_capstyle='butt')
-    for _bx in (bx, bx + bar_deg):
-        trplot([_bx, _bx],
-               [by - 0.01 * (lat_max - lat_min), by + 0.01 * (lat_max - lat_min)],
-               lw=2, color='black')
-    ax.text(bx + bar_deg / 2, by + 0.015 * (lat_max - lat_min), bar_txt,
-            ha='center', va='bottom', fontsize=8, color='black',
-            transform=pc if pc else ax.transData)
+    # draw in axes fraction so the bar stays horizontal under any
+    # projection (a constant-latitude line is slanted in UTM)
+    bx = 0.05
+    by = 0.07
+    bw = bar_m / span_m
+    ax.plot([bx, bx + bw], [by, by], lw=3, color='black',
+            solid_capstyle='butt', transform=ax.transAxes,
+            clip_on=False)
+    for _bx in (bx, bx + bw):
+        ax.plot([_bx, _bx], [by - 0.008, by + 0.008], lw=2,
+                color='black', transform=ax.transAxes, clip_on=False)
+    ax.text(bx + bw / 2, by + 0.012, bar_txt, ha='center', va='bottom',
+            fontsize=8, color='black', transform=ax.transAxes)
     ax.legend(fontsize=7, loc='upper center', bbox_to_anchor=(0.5, -0.04),
               ncol=2, framealpha=0.9)
     if not pc:
@@ -1014,13 +1014,14 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         x=ex, y=ey, z=[end_llh[2] / 1000.0], mode='markers',
         marker=dict(size=9, color='red', symbol='diamond'),
         name=translations.get('df_end_luminous', 'End of luminous path')))
-    # MC impacts
+    # MC impacts — lifted slightly above the ground plane so they
+    # don't z-fight with the textured surface
     if mc_impacts:
         mx, my = project_points([i['lon'] for i in mc_impacts],
                                 [i['lat'] for i in mc_impacts])
         traces.append(go.Scatter3d(
-            x=mx, y=my, z=[0] * len(mx), mode='markers',
-            marker=dict(size=2, color='magenta', opacity=0.35),
+            x=mx, y=my, z=[0.02] * len(mx), mode='markers',
+            marker=dict(size=3, color='magenta', opacity=0.45),
             name='Monte Carlo'))
 
     scene_dx = (x_max_m - x_min_m) / 1000.0

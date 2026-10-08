@@ -172,6 +172,7 @@
   "df_sc_split": "Zweiteilung {p}%/{q}%",
   "df_sc_equal": "{n} gleiche Fragmente",
   "df_sc_powerlaw": "Fragmentschwarm (Potenzgesetz)",
+  "df_sc_strength": "Aufbrechen bei Endhelligkeit (festigkeitsbegrenzt)",
   "df_sc_noabl": "(ohne Ablation)",
   "df_end_luminous": "Ende der Leuchtspur"
 }

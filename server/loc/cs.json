@@ -172,6 +172,7 @@
   "df_sc_split": "Rozdělení na dvě části {p}%/{q}%",
   "df_sc_equal": "{n} stejných fragmentů",
   "df_sc_powerlaw": "Roj fragmentů (mocninný zákon)",
+  "df_sc_strength": "Rozpad při zániku (omezeno pevností)",
   "df_sc_noabl": "(bez ablace)",
   "df_end_luminous": "Konec světelné dráhy"
 }

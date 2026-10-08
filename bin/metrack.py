@@ -516,8 +516,8 @@ def _fetch_kartverket_topo(lons, lats, max_tiles=144, poi_lonlat=None):
                 ccrs.PlateCarree(), np.asarray([lo]), np.asarray([la]))[0]
             if not np.isfinite(p).all():
                 return None
-            px = int((p[0] - ext_x0) / tw)
-            py = int((ext_y_top - p[1]) / tw)
+            px = int((p[0] - ext_x0) / tw * 256)
+            py = int((ext_y_top - p[1]) / tw * 256)
             if not (0 <= px < canvas.width and 0 <= py < canvas.height):
                 return None
             x0w, x1w = max(0, px - 32), min(canvas.width, px + 33)

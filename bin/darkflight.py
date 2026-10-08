@@ -661,7 +661,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
             zoom = max(8, min(zoom, 12))
             from cartopy.io.img_tiles import OSM
             ax.add_image(OSM(), zoom)
-        ax.gridlines(alpha=0.3)  # no degree labels — night-mode fringe artefacts
+        ax.gridlines(draw_labels=True, alpha=0.3)
     except Exception as e:
         logging.debug(f'cartopy/OSM unavailable for darkflight map: {e}')
         pc = None

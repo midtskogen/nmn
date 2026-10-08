@@ -732,7 +732,7 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                 f'<tr><td>{t.get("df_end_position", "End position")}:</td>'
                 f'<td>{end["lat"]:.4f}N {end["lon"]:.4f}E, {end["h_m"]/1000:.1f} km</td></tr>',
                 f'<tr><td>{t.get("df_end_speed", "End speed")}:</td>'
-                f'<td>{end["v_end_ms"]/1000:.2f} km/s</td></tr>',
+                f'<td>{end["v_end_ms"]/1000:.1f} km/s</td></tr>',
             ]
             if results.get('entry_estimates'):
                 est = next((e for e in results['entry_estimates'] if e['rho'] == 3500),

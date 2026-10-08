@@ -1237,15 +1237,13 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             # diverge — the mass is not determinable at all
             issues.append('deceleration non-invertible')
             m_med = 0.0
-        elif np.isfinite(m_hi) and m_hi > 0:
-            if m_hi / max(m_lo, 1e-12) > 20:
+        else:
+            if not (np.isfinite(m_hi) and m_hi > 0) or                     m_hi / max(m_lo, 1e-12) > 20:
                 issues.append('deceleration poorly constrained')
             if v_end > 4000.0 and m_med > 30 * max(m_crit, 1e-9):
                 issues.append('inconsistent with fade-out')
             if m_med > 100.0:
                 issues.append('implausibly large surviving mass')
-        else:
-            issues.append('deceleration poorly constrained')
     else:
         m_med = m_crit = 0.0
         issues.append('no speed/deceleration fit')

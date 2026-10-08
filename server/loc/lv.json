@@ -171,5 +171,12 @@
   "df_unreliable_note": "Masas novērtējums nav uzticams — spožā trajektorija pārāk īsa vai nesaderīga; karte parāda hipotētiskās fragmentu trajektorijas.",
   "df_poorly_constrained": "vāji ierobežots",
   "df_phot_mass": "Fotometriskā masa (gaismas līkne)",
-  "df_phot_note": "apakšējā robeža"
+  "df_phot_note": "apakšējā robeža",
+  "df_sc_intact": "Viens ķermenis (novērtētā masa)",
+  "df_sc_fallline": "Kritiena līnija (masu režģis)",
+  "df_sc_split": "Dalījums divās daļās {p}%/{q}%",
+  "df_sc_equal": "{n} vienādi fragmenti",
+  "df_sc_powerlaw": "Fragmentu bars (pakāpes likums)",
+  "df_sc_noabl": "(bez ablācijas)",
+  "df_end_luminous": "Spīdošās trajektorijas gals"
 }

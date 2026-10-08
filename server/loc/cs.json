@@ -166,5 +166,12 @@
   "df_unreliable_note": "Odhad hmotnosti je nespolehlivý — světelná dráha příliš krátká nebo nekonzistentní; mapa ukazuje hypotetické dráhy fragmentů.",
   "df_poorly_constrained": "špatně vymezeno",
   "df_phot_mass": "Fotometrická hmotnost (světelná křivka)",
-  "df_phot_note": "dolní mez"
+  "df_phot_note": "dolní mez",
+  "df_sc_intact": "Jednotné těleso (odhad hmotnosti)",
+  "df_sc_fallline": "Linie dopadu (mřížka hmotností)",
+  "df_sc_split": "Rozdělení na dvě části {p}%/{q}%",
+  "df_sc_equal": "{n} stejných fragmentů",
+  "df_sc_powerlaw": "Roj fragmentů (mocninný zákon)",
+  "df_sc_noabl": "(bez ablace)",
+  "df_end_luminous": "Konec světelné dráhy"
 }

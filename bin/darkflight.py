@@ -779,15 +779,22 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                     shrinkA=0, shrinkB=0)
     for lon, lat, txt, col in labels2draw:
         for dx, dy, ha in candidates:
-            a = ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
-                            textcoords='offset points', ha=ha,
-                            fontsize=6.5, color=col,
-                            arrowprops=dict(arrow_kw, color=col),
-                            transform=pc if pc else ax.transData)
-            bb = a.get_window_extent(renderer).expanded(1.05, 1.2)
+            # measure with a probe first — get_window_extent on an
+            # annotate with arrowprops includes the arrow and would
+            # always overlap its own marker reservation
+            probe = ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
+                                textcoords='offset points', ha=ha,
+                                fontsize=6.5, color=col,
+                                transform=pc if pc else ax.transData)
+            bb = probe.get_window_extent(renderer).expanded(1.05, 1.2)
+            probe.remove()
             if any(bb.overlaps(b) for b in placed_boxes):
-                a.remove()
                 continue
+            ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
+                        textcoords='offset points', ha=ha,
+                        fontsize=6.5, color=col,
+                        arrowprops=dict(arrow_kw, color=col),
+                        transform=pc if pc else ax.transData)
             placed_boxes.append(bb)
             break
     if mc_impacts:

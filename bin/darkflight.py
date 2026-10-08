@@ -637,7 +637,7 @@ def write_kml(scenarios, end_llh, path):
             if not imp.get('landed', True):
                 continue
             parts.append(
-                f'<Placemark><name>{sc["name"]} impact {run["m"]*1000:.1f}g</name>'
+                f'<Placemark><name>{run["m"]*1000:.1f} g</name>'
                 f'<Point><coordinates>{imp["lon"]:.6f},{imp["lat"]:.6f},'
                 f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
     parts.append('</Folder>')

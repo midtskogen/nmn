@@ -397,7 +397,13 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
             except Exception:
                 pass
         if len(m_samples) > 10:
-            lo, hi = np.percentile(np.clip(m_samples, 1e-6, 1e4), [16, 84])
+            # Clip at a hard meteoroid-plausibility ceiling but report the
+            # range as unbounded (hi=inf) when the percentile saturates,
+            # so the UI shows 'poorly constrained' instead of '10 t–10 t'.
+            cl = np.clip(m_samples, 1e-6, 1e4)
+            lo, hi = np.percentile(cl, [16, 84])
+            if np.percentile(m_samples, 84) >= 1e4:
+                hi = np.inf
         else:
             lo, hi = m_med * 0.5, m_med * 2.0
 

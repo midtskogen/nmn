@@ -336,7 +336,8 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
         'v': v_arr, 'm': Xs[6],
         'impact': {'lon': lon_i, 'lat': lat_i, 'h': h_i,
                    'v': float(np.linalg.norm(X_end[3:6])),
-                   'm': float(X_end[6]), 't': float(t_end)},
+                   'm': float(X_end[6]), 't': float(t_end),
+                   'landed': bool(sol.t_events[0].size)},
     }
 
 
@@ -578,6 +579,8 @@ def write_geojson(scenarios, path):
     for sc in scenarios:
         for run in sc['results']:
             imp = run['impact']
+            if not imp.get('landed', True):
+                continue
             feats.append({
                 'type': 'Feature',
                 'geometry': {'type': 'Point',
@@ -606,6 +609,8 @@ def write_kml(scenarios, end_llh, path):
                 f'</Style><LineString><altitudeMode>absolute</altitudeMode>'
                 f'<coordinates>{path_pts}</coordinates></LineString></Placemark>')
             imp = run['impact']
+            if not imp.get('landed', True):
+                continue
             parts.append(
                 f'<Placemark><name>{sc["name"]} impact {run["m"]*1000:.1f}g</name>'
                 f'<Point><coordinates>{imp["lon"]:.6f},{imp["lat"]:.6f},'
@@ -683,10 +688,11 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
         for run in sc['results']:
             trplot(run['lon'], run['lat'], lw=1.0, alpha=0.4,
                    color=col)
-            trplot([run['impact']['lon']], [run['impact']['lat']],
-                   'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),
-                   color=col,
-                   label=sc['label'] if run is sc['results'][0] else None)
+            if run['impact'].get('landed', True):
+                trplot([run['impact']['lon']], [run['impact']['lat']],
+                       'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),
+                       color=col,
+                       label=sc['label'] if run is sc['results'][0] else None)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
            label='End of luminous path')
     if mc_impacts:
@@ -838,12 +844,13 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                 showlegend=(ri == 0),
                 hoverinfo='name', opacity=0.85))
             imp = run['impact']
-            ix, iy = project_points([imp['lon']], [imp['lat']])
-            traces.append(go.Scatter3d(
-                x=ix, y=iy, z=[0], mode='markers',
-                marker=dict(size=5, color=col, symbol='circle'),
-                legendgroup=sc['name'], showlegend=False,
-                hoverinfo='none'))
+            if imp.get('landed', True):
+                ix, iy = project_points([imp['lon']], [imp['lat']])
+                traces.append(go.Scatter3d(
+                    x=ix, y=iy, z=[0], mode='markers',
+                    marker=dict(size=5, color=col, symbol='circle'),
+                    legendgroup=sc['name'], showlegend=False,
+                    hoverinfo='none'))
     # end of luminous path
     ex, ey = project_points([end_llh[0]], [end_llh[1]])
     traces.append(go.Scatter3d(

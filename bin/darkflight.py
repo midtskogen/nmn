@@ -909,7 +909,8 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         wind_csv = out_html.parent / 'wind_profile.csv'
         box = [x_min_m / 1000.0, x_max_m / 1000.0,
                y_min_m / 1000.0, y_max_m / 1000.0]
-        wjs = _wind_overlay_html(wind_csv, box)
+        wjs = _wind_overlay_html(
+            wind_csv, box, translations.get('plot_interactive_wind'))
         if wjs:
             if '</body>' in html_txt:
                 html_txt = html_txt.replace('</body>', wjs + '\n</body>', 1)

@@ -846,9 +846,14 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             imp = run['impact']
             if imp.get('landed', True):
                 ix, iy = project_points([imp['lon']], [imp['lat']])
+                m_kg = run['m']
+                m_txt = (f'{m_kg:.3g} kg' if m_kg >= 1
+                         else f'{m_kg * 1000:.3g} g')
                 traces.append(go.Scatter3d(
-                    x=ix, y=iy, z=[0], mode='markers',
+                    x=ix, y=iy, z=[0], mode='markers+text',
                     marker=dict(size=5, color=col, symbol='circle'),
+                    text=[m_txt], textposition='top center',
+                    textfont=dict(size=9, color=col),
                     legendgroup=sc['name'], showlegend=False,
                     hoverinfo='none'))
     # end of luminous path

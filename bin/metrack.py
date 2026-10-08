@@ -737,6 +737,298 @@ def darken_blacks(img, black_point=64):
     merged_ycbcr = Image.merge('YCbCr', (final_y_ch, cb_ch, cr_ch))
     return merged_ycbcr.convert('RGB')
 
+def _rotation_controls_html(camera_center, camera_distance, elev_offset_z,
+                            play_text=None, pause_text=None):
+    """Controls + requestAnimationFrame camera-rotation script for 3D maps.
+
+    Shared between plot_map_interactive (map.html) and darkflight's 3D map.
+    """
+    center_json = json.dumps(camera_center)
+    distance_json = json.dumps(camera_distance)
+    elev_json = json.dumps(elev_offset_z)
+    play_text = html_mod.escape(play_text or "▶ Play")
+    pause_text = html_mod.escape(pause_text or "⏸ Pause")
+    return f"""
+<style>
+  html, body {{ margin: 0; padding: 0; overflow: hidden; height: 100%; }}
+</style>
+<div id="map-rotation-controls" style="position:fixed; top:10px; left:10px; z-index:1000; font-family:sans-serif;">
+  <button id="map-play-btn" style="margin-right:5px; padding:4px 10px; cursor:pointer;">{play_text}</button>
+  <button id="map-pause-btn" style="padding:4px 10px; cursor:pointer;">{pause_text}</button>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {{
+    const plot = document.querySelector(".js-plotly-plot");
+    if (!plot) return;
+
+    const center = {center_json};
+    const distance = {distance_json};
+    const elevOffsetZ = {elev_json};
+    const rotationPeriodMs = 18000; // one full revolution in 18 seconds
+    const speed = 2 * Math.PI / rotationPeriodMs;
+    let angle = 0;
+    let lastTime = performance.now();
+    let animationPaused = false;
+    let reqId = null;
+
+    // Smooth zoom: intercept the wheel before the camera's own handler (which
+    // applies one fixed factor per tick = jumpy) and accumulate a target
+    // factor that the animation loop eases the eye distance toward.
+    let zoomTarget = 1.0;
+    plot.addEventListener('wheel', function (e) {{
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const dy = e.deltaY * (e.deltaMode === 1 ? 33 : 1);
+        zoomTarget *= Math.exp(-dy * 0.0012);
+        zoomTarget = Math.max(0.02, Math.min(50, zoomTarget));
+    }}, {{passive: false, capture: true}});
+
+    function step(now) {{
+        const dt = now - lastTime;
+        lastTime = now;
+        // Rotate the live gl3d camera directly: scroll zoom is applied as a
+        // dolly on the eye distance (eased), so it composes with rotation.
+        // eye/center/up are [x,y,z] arrays on the internal scene camera.
+        const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
+        if (scn && scn.camera && scn.camera.eye && scn.camera.center) {{
+            // cam.eye is the camera's computedEye: lookAt() calls
+            // recalcMatrix() first, which recomputes it from the controller
+            // state and wipes in-place mutations. Always build a fresh
+            // newEye array instead.
+            const e = scn.camera.eye;
+            const c = scn.camera.center;
+            let scale = 1;
+            if (Math.abs(Math.log(zoomTarget)) > 1e-3) {{
+                const f = Math.min(1, dt * 0.012);   // ~80ms ease
+                scale = Math.exp(Math.log(zoomTarget) * f);
+                zoomTarget = Math.exp(Math.log(zoomTarget) * (1 - f));
+            }}
+            if (!animationPaused || scale !== 1) {{
+                const ox = e[0] - c[0], oy = e[1] - c[1], oz = e[2] - c[2];
+                const a = Math.atan2(oy, ox) + (animationPaused ? 0 : dt * speed);
+                const r = (Math.hypot(ox, oy) || distance) * scale;
+                const newEye = [c[0] + r * Math.cos(a),
+                                c[1] + r * Math.sin(a),
+                                c[2] + oz * scale];
+                if (scn.camera.lookAt) {{
+                    scn.camera.lookAt(newEye, c, scn.camera.up);
+                }}
+                scn.render();
+            }}
+        }} else {{
+            angle += dt * speed;
+            Plotly.relayout(plot, {{
+                'scene.camera': {{
+                    up: {{x: 0, y: 0, z: 1}},
+                    center: center,
+                    eye: {{
+                        x: center.x + distance * Math.cos(angle),
+                        y: center.y + distance * Math.sin(angle),
+                        z: center.z + elevOffsetZ
+                    }}
+                }}
+            }});
+        }}
+        reqId = requestAnimationFrame(step);
+    }}
+
+    function startAnimation() {{
+        animationPaused = false;
+        lastTime = performance.now();
+        if (!reqId) {{
+            reqId = requestAnimationFrame(step);
+        }}
+    }}
+
+    function pauseAnimation() {{
+        // Keep the frame loop alive so wheel zoom still eases while paused.
+        animationPaused = true;
+    }}
+
+    function toggleAnimation(e) {{
+        e.preventDefault();
+        if (animationPaused) {{
+            startAnimation();
+        }} else {{
+            pauseAnimation();
+        }}
+    }}
+
+    const playBtn = document.getElementById("map-play-btn");
+    const pauseBtn = document.getElementById("map-pause-btn");
+    if (playBtn) playBtn.addEventListener("click", startAnimation);
+    if (pauseBtn) pauseBtn.addEventListener("click", pauseAnimation);
+
+    plot.addEventListener("contextmenu", toggleAnimation);
+    plot.addEventListener("mousedown", pauseAnimation);
+    plot.addEventListener("touchstart", pauseAnimation);
+    startAnimation();
+}});
+</script>"""
+
+
+def _wind_overlay_html(wind_csv, box):
+    """Return the animated wind-particle overlay <script> for a 3D map, or ''.
+
+    wind_csv: Path to wind_profile.csv (Height_m,Temp_K,Pressure_Pa,
+    WindSpeed_ms,WindDir_deg).  box: [x0, x1, y0, y1] km bounds in the
+    scene's projected coordinates; particles advect inside this box.
+    Shared by plot_map_interactive (map.html) and darkflight's 3D map.
+    """
+    try:
+        if not Path(wind_csv).is_file():
+            return ''
+        levels = []
+        with open(wind_csv, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split(',')
+                if len(parts) < 5:
+                    continue
+                h_m, speed_ms, dir_deg = float(parts[0]), float(parts[3]), float(parts[4])
+                rad = math.radians(dir_deg)
+                # Meteorological direction is where the wind comes FROM;
+                # the flow vector points the opposite way (east, north).
+                levels.append([h_m / 1000.0, -math.sin(rad), -math.cos(rad), speed_ms])
+        if not levels:
+            return ''
+        wind_json = json.dumps({'box': [float(v) for v in box], 'levels': levels})
+        return """
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const plot = document.querySelector(".js-plotly-plot");
+    if (!plot) return;
+    const wind = WIND_DATA_JSON;
+    const x0 = wind.box[0], x1 = wind.box[1], y0 = wind.box[2], y1 = wind.box[3];
+    const N = 26;            // particles per altitude level
+    const TRAIL = 0.35;      // streak length in seconds of travel
+    const SPEED_SCALE = 0.9; // visual km/s per m/s of wind speed
+
+    // Draw streaks on a 2D canvas overlay instead of restyling the gl3d
+    // scene every frame -- a Plotly.restyle re-renders the whole scene
+    // (incl. the map texture) and starves interaction.
+    const overlay = document.createElement('canvas');
+    overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
+    // Clip to the actual gl3d viewport (#scene), not the whole plot div --
+    // otherwise streaks bleed into the title margin and clip at a different
+    // edge than the scene objects.
+    const holder = plot.querySelector('#scene') || plot;
+    if (getComputedStyle(holder).position === 'static') holder.style.position = 'relative';
+    holder.appendChild(overlay);
+    const ctx = overlay.getContext('2d');
+    function resize() {
+        const dpr = window.devicePixelRatio || 1;
+        overlay.width = holder.clientWidth * dpr;
+        overlay.height = holder.clientHeight * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function hsl2rgb(h, s, l) {
+        h = ((h % 360) + 360) % 360 / 360;
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        const f = t => {
+            t = ((t % 1) + 1) % 1;
+            if (t < 1/6) return p + (q - p) * 6 * t;
+            if (t < 1/2) return q;
+            if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+            return p;
+        };
+        return [Math.round(f(h + 1/3) * 255), Math.round(f(h) * 255), Math.round(f(h - 1/3) * 255)];
+    }
+
+    let maxSpeed = 0;
+    wind.levels.forEach(L => { if (L[3] > maxSpeed) maxSpeed = L[3]; });
+    const levels = wind.levels.map(L => {
+        const parts = [];
+        for (let i = 0; i < N; i++)
+            parts.push({x: x0 + Math.random() * (x1 - x0), y: y0 + Math.random() * (y1 - y0)});
+        const norm = maxSpeed > 0 ? L[3] / maxSpeed : 0;
+        return {z: L[0], vx: L[1] * L[3] * SPEED_SCALE, vy: L[2] * L[3] * SPEED_SCALE,
+                rgb: hsl2rgb(210 - 160 * norm, 0.70, 0.50 - 0.28 * norm),
+                parts: parts};
+    });
+    const FADE_X = (x1 - x0) * 0.15, FADE_Y = (y1 - y0) * 0.15; // feather zone near box edges
+    const FADE_IN = 1.5;     // seconds for a respawned streak to reach full alpha
+    const BASE_A = 0.5;
+    // Stagger initial ages so the field starts populated instead of
+    // fading in uniformly.
+    levels.forEach(L => L.parts.forEach(p => { p.age = Math.random() * FADE_IN; }));
+
+    // Column-major 4x4 helpers (gl-plot3d layout)
+    function matMul(a, b) {
+        const c = new Array(16);
+        for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+            c[j * 4 + i] = a[i] * b[j * 4] + a[4 + i] * b[j * 4 + 1] + a[8 + i] * b[j * 4 + 2] + a[12 + i] * b[j * 4 + 3];
+        }
+        return c;
+    }
+    function perspective(fovy, aspect, near, far) {
+        const f = 1 / Math.tan(fovy / 2), ri = 1 / (near - far);
+        return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (near + far) * ri, -1, 0, 0, near * far * ri * 2, 0];
+    }
+    function project(M, x, y, z, w, h) {
+        const cw = M[3] * x + M[7] * y + M[11] * z + M[15];
+        if (cw <= 0.001) return null;
+        const cx = (M[0] * x + M[4] * y + M[8] * z + M[12]) / cw;
+        const cy = (M[1] * x + M[5] * y + M[9] * z + M[13]) / cw;
+        return [(cx + 1) * 0.5 * w, (1 - cy) * 0.5 * h];
+    }
+
+    let last = performance.now();
+    function tick(now) {
+        const dt = Math.min(0.1, (now - last) / 1000);
+        last = now;
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
+        const g = scn && scn.glplot, cam = g && g.camera;
+        const W = holder.clientWidth, H = holder.clientHeight;
+        if (cam && cam.matrix && W > 0 && H > 0) {
+            const ds = scn.dataScale || [1, 1, 1];
+            const cp = g.cameraParams || {};
+            // True pipeline: projection * view * model * diag(dataScale) * data
+            const view = cp.view || cam.matrix;
+            const proj = cp.projection || perspective(g.fovy || Math.PI / 4, W / H, g.zNear || 0.01, g.zFar || 1000);
+            const model = cp.model || [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+            const M = matMul(proj, matMul(view, matMul(model, [ds[0],0,0,0, 0,ds[1],0,0, 0,0,ds[2],0, 0,0,0,1])));
+            ctx.lineWidth = 2;
+            for (const L of levels) {
+                for (const p of L.parts) {
+                    p.x += L.vx * dt; p.y += L.vy * dt; p.age += dt;
+                    if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) {
+                        p.x = x0 + Math.random() * (x1 - x0);
+                        p.y = y0 + Math.random() * (y1 - y0);
+                        p.age = 0;
+                    }
+                    // Fade streaks out near the box edges so no hard boundary shows
+                    const ex = Math.min(p.x - x0, x1 - p.x) / FADE_X;
+                    const ey = Math.min(p.y - y0, y1 - p.y) / FADE_Y;
+                    const alpha = BASE_A * Math.max(0, Math.min(1, Math.min(ex, ey)))
+                                * Math.min(1, p.age / FADE_IN);
+                    if (alpha <= 0.02) continue;
+                    const a = project(M, p.x, p.y, L.z, W, H);
+                    const b = project(M, p.x - L.vx * TRAIL, p.y - L.vy * TRAIL, L.z, W, H);
+                    if (a && b) {
+                        ctx.strokeStyle = "rgba(" + L.rgb[0] + "," + L.rgb[1] + "," + L.rgb[2] + "," + alpha.toFixed(3) + ")";
+                        ctx.beginPath(); ctx.moveTo(b[0], b[1]); ctx.lineTo(a[0], a[1]); ctx.stroke();
+                    }
+                }
+            }
+        }
+        requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+});
+</script>""".replace('WIND_DATA_JSON', wind_json)
+    except Exception as e:
+        print(f"Warning: could not embed wind animation: {e}")
+        return ''
+
+
 def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_indices, options, speed_km_s=0,
                          translations: Optional[dict] = None, output_filename: Optional[str] = None):
     """
@@ -1142,131 +1434,10 @@ def plot_map_interactive(track_start, track_end, cross_pos, obs_data, inlier_ind
     filename = output_filename or "map.html"
     fig.write_html(filename, include_plotlyjs='cdn')
 
-    # Rotate the camera with requestAnimationFrame instead of Plotly.animate frames.
-    # This updates only the camera eye, so the 3D scene does not have to redraw all
-    # traces/surface for every frame and the HTML stays small (no embedded frames).
-    center_json = json.dumps(camera_center)
-    distance_json = json.dumps(camera_distance)
-    elev_json = json.dumps(elev_offset_z)
-    play_text = html_mod.escape(translations.get("plot_interactive_play", "▶ Play"))
-    pause_text = html_mod.escape(translations.get("plot_interactive_pause", "⏸ Pause"))
-    controls_and_script = f"""
-<style>
-  html, body {{ margin: 0; padding: 0; overflow: hidden; height: 100%; }}
-</style>
-<div id="map-rotation-controls" style="position:fixed; top:10px; left:10px; z-index:1000; font-family:sans-serif;">
-  <button id="map-play-btn" style="margin-right:5px; padding:4px 10px; cursor:pointer;">{play_text}</button>
-  <button id="map-pause-btn" style="padding:4px 10px; cursor:pointer;">{pause_text}</button>
-</div>
-<script>
-document.addEventListener("DOMContentLoaded", function () {{
-    const plot = document.querySelector(".js-plotly-plot");
-    if (!plot) return;
-
-    const center = {center_json};
-    const distance = {distance_json};
-    const elevOffsetZ = {elev_json};
-    const rotationPeriodMs = 18000; // one full revolution in 18 seconds
-    const speed = 2 * Math.PI / rotationPeriodMs;
-    let angle = 0;
-    let lastTime = performance.now();
-    let animationPaused = false;
-    let reqId = null;
-
-    // Smooth zoom: intercept the wheel before the camera's own handler (which
-    // applies one fixed factor per tick = jumpy) and accumulate a target
-    // factor that the animation loop eases the eye distance toward.
-    let zoomTarget = 1.0;
-    plot.addEventListener('wheel', function (e) {{
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        const dy = e.deltaY * (e.deltaMode === 1 ? 33 : 1);
-        zoomTarget *= Math.exp(-dy * 0.0012);
-        zoomTarget = Math.max(0.02, Math.min(50, zoomTarget));
-    }}, {{passive: false, capture: true}});
-
-    function step(now) {{
-        const dt = now - lastTime;
-        lastTime = now;
-        // Rotate the live gl3d camera directly: scroll zoom is applied as a
-        // dolly on the eye distance (eased), so it composes with rotation.
-        // eye/center/up are [x,y,z] arrays on the internal scene camera.
-        const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
-        if (scn && scn.camera && scn.camera.eye && scn.camera.center) {{
-            // cam.eye is the camera's computedEye: lookAt() calls
-            // recalcMatrix() first, which recomputes it from the controller
-            // state and wipes in-place mutations. Always build a fresh
-            // newEye array instead.
-            const e = scn.camera.eye;
-            const c = scn.camera.center;
-            let scale = 1;
-            if (Math.abs(Math.log(zoomTarget)) > 1e-3) {{
-                const f = Math.min(1, dt * 0.012);   // ~80ms ease
-                scale = Math.exp(Math.log(zoomTarget) * f);
-                zoomTarget = Math.exp(Math.log(zoomTarget) * (1 - f));
-            }}
-            if (!animationPaused || scale !== 1) {{
-                const ox = e[0] - c[0], oy = e[1] - c[1], oz = e[2] - c[2];
-                const a = Math.atan2(oy, ox) + (animationPaused ? 0 : dt * speed);
-                const r = (Math.hypot(ox, oy) || distance) * scale;
-                const newEye = [c[0] + r * Math.cos(a),
-                                c[1] + r * Math.sin(a),
-                                c[2] + oz * scale];
-                if (scn.camera.lookAt) {{
-                    scn.camera.lookAt(newEye, c, scn.camera.up);
-                }}
-                scn.render();
-            }}
-        }} else {{
-            angle += dt * speed;
-            Plotly.relayout(plot, {{
-                'scene.camera': {{
-                    up: {{x: 0, y: 0, z: 1}},
-                    center: center,
-                    eye: {{
-                        x: center.x + distance * Math.cos(angle),
-                        y: center.y + distance * Math.sin(angle),
-                        z: center.z + elevOffsetZ
-                    }}
-                }}
-            }});
-        }}
-        reqId = requestAnimationFrame(step);
-    }}
-
-    function startAnimation() {{
-        animationPaused = false;
-        lastTime = performance.now();
-        if (!reqId) {{
-            reqId = requestAnimationFrame(step);
-        }}
-    }}
-
-    function pauseAnimation() {{
-        // Keep the frame loop alive so wheel zoom still eases while paused.
-        animationPaused = true;
-    }}
-
-    function toggleAnimation(e) {{
-        e.preventDefault();
-        if (animationPaused) {{
-            startAnimation();
-        }} else {{
-            pauseAnimation();
-        }}
-    }}
-
-    const playBtn = document.getElementById("map-play-btn");
-    const pauseBtn = document.getElementById("map-pause-btn");
-    if (playBtn) playBtn.addEventListener("click", startAnimation);
-    if (pauseBtn) pauseBtn.addEventListener("click", pauseAnimation);
-
-    plot.addEventListener("contextmenu", toggleAnimation);
-    plot.addEventListener("mousedown", pauseAnimation);
-    plot.addEventListener("touchstart", pauseAnimation);
-    startAnimation();
-}});
-</script>"""
+    controls_and_script = _rotation_controls_html(
+        camera_center, camera_distance, elev_offset_z,
+        translations.get("plot_interactive_play"),
+        translations.get("plot_interactive_pause"))
     # Insert the controls inside the document body so the fixed-position panel
     # does not create extra page overflow.
     html_path = Path(filename)
@@ -1289,176 +1460,27 @@ document.addEventListener("DOMContentLoaded", function () {{
         html += controls_and_script
 
     # --- Animated wind-profile overlay ---
-    # If fetch.py pulled a sounding (wind_profile.csv: Height_m,Temp_K,Pressure_Pa,
-    # WindSpeed_ms,WindDir_deg), embed subtle per-altitude particle streaks that
-    # advect along the flow direction at a speed proportional to wind speed.
     wind_csv = html_path.parent / 'wind_profile.csv'
     if not wind_csv.is_file():
         wind_csv = Path('wind_profile.csv')
-    if wind_csv.is_file():
-        try:
-            levels = []
-            with open(wind_csv, encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    parts = line.split(',')
-                    if len(parts) < 5:
-                        continue
-                    h_m, speed_ms, dir_deg = float(parts[0]), float(parts[3]), float(parts[4])
-                    rad = math.radians(dir_deg)
-                    # Meteorological direction is where the wind comes FROM;
-                    # the flow vector points the opposite way (east, north).
-                    levels.append([h_m / 1000.0, -math.sin(rad), -math.cos(rad), speed_ms])
-            if levels:
-                if not options.get('azonly', False) and track_start is not None:
-                    # Box centred on the trajectory end point, twice the
-                    # half-extent of the track (+ margin) in x and y.
-                    hw_x = (max(seg_x) - min(seg_x)) / 2.0 + 20.0
-                    hw_y = (max(seg_y) - min(seg_y)) / 2.0 + 20.0
-                    bx0, bx1 = end_x - 2.0 * hw_x, end_x + 2.0 * hw_x
-                    by0, by1 = end_y - 2.0 * hw_y, end_y + 2.0 * hw_y
-                else:
-                    bx0, bx1, by0, by1 = x_min_km, x_max_km, y_min_km, y_max_km
-                bx0, bx1 = max(bx0, x_min_km), min(bx1, x_max_km)
-                by0, by1 = max(by0, y_min_km), min(by1, y_max_km)
-                wind_json = json.dumps({'box': [bx0, bx1, by0, by1], 'levels': levels})
-                wind_script = """
-<script>
-document.addEventListener("DOMContentLoaded", function () {
-    const plot = document.querySelector(".js-plotly-plot");
-    if (!plot) return;
-    const wind = WIND_DATA_JSON;
-    const x0 = wind.box[0], x1 = wind.box[1], y0 = wind.box[2], y1 = wind.box[3];
-    const N = 26;            // particles per altitude level
-    const TRAIL = 0.35;      // streak length in seconds of travel
-    const SPEED_SCALE = 0.9; // visual km/s per m/s of wind speed
-
-    // Draw streaks on a 2D canvas overlay instead of restyling the gl3d
-    // scene every frame -- a Plotly.restyle re-renders the whole scene
-    // (incl. the map texture) and starves interaction.
-    const overlay = document.createElement('canvas');
-    overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
-    // Clip to the actual gl3d viewport (#scene), not the whole plot div --
-    // otherwise streaks bleed into the title margin and clip at a different
-    // edge than the scene objects.
-    const holder = plot.querySelector('#scene') || plot;
-    if (getComputedStyle(holder).position === 'static') holder.style.position = 'relative';
-    holder.appendChild(overlay);
-    const ctx = overlay.getContext('2d');
-    function resize() {
-        const dpr = window.devicePixelRatio || 1;
-        overlay.width = holder.clientWidth * dpr;
-        overlay.height = holder.clientHeight * dpr;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-    resize();
-    window.addEventListener('resize', resize);
-
-    function hsl2rgb(h, s, l) {
-        h = ((h % 360) + 360) % 360 / 360;
-        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-        const p = 2 * l - q;
-        const f = t => {
-            t = ((t % 1) + 1) % 1;
-            if (t < 1/6) return p + (q - p) * 6 * t;
-            if (t < 1/2) return q;
-            if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-            return p;
-        };
-        return [Math.round(f(h + 1/3) * 255), Math.round(f(h) * 255), Math.round(f(h - 1/3) * 255)];
-    }
-
-    let maxSpeed = 0;
-    wind.levels.forEach(L => { if (L[3] > maxSpeed) maxSpeed = L[3]; });
-    const levels = wind.levels.map(L => {
-        const parts = [];
-        for (let i = 0; i < N; i++)
-            parts.push({x: x0 + Math.random() * (x1 - x0), y: y0 + Math.random() * (y1 - y0)});
-        const norm = maxSpeed > 0 ? L[3] / maxSpeed : 0;
-        return {z: L[0], vx: L[1] * L[3] * SPEED_SCALE, vy: L[2] * L[3] * SPEED_SCALE,
-                rgb: hsl2rgb(210 - 160 * norm, 0.70, 0.50 - 0.28 * norm),
-                parts: parts};
-    });
-    const FADE_X = (x1 - x0) * 0.15, FADE_Y = (y1 - y0) * 0.15; // feather zone near box edges
-    const FADE_IN = 1.5;     // seconds for a respawned streak to reach full alpha
-    const BASE_A = 0.5;
-    // Stagger initial ages so the field starts populated instead of
-    // fading in uniformly.
-    levels.forEach(L => L.parts.forEach(p => { p.age = Math.random() * FADE_IN; }));
-
-    // Column-major 4x4 helpers (gl-plot3d layout)
-    function matMul(a, b) {
-        const c = new Array(16);
-        for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
-            c[j * 4 + i] = a[i] * b[j * 4] + a[4 + i] * b[j * 4 + 1] + a[8 + i] * b[j * 4 + 2] + a[12 + i] * b[j * 4 + 3];
-        }
-        return c;
-    }
-    function perspective(fovy, aspect, near, far) {
-        const f = 1 / Math.tan(fovy / 2), ri = 1 / (near - far);
-        return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (near + far) * ri, -1, 0, 0, near * far * ri * 2, 0];
-    }
-    function project(M, x, y, z, w, h) {
-        const cw = M[3] * x + M[7] * y + M[11] * z + M[15];
-        if (cw <= 0.001) return null;
-        const cx = (M[0] * x + M[4] * y + M[8] * z + M[12]) / cw;
-        const cy = (M[1] * x + M[5] * y + M[9] * z + M[13]) / cw;
-        return [(cx + 1) * 0.5 * w, (1 - cy) * 0.5 * h];
-    }
-
-    let last = performance.now();
-    function tick(now) {
-        const dt = Math.min(0.1, (now - last) / 1000);
-        last = now;
-        ctx.clearRect(0, 0, overlay.width, overlay.height);
-        const scn = plot._fullLayout && plot._fullLayout.scene && plot._fullLayout.scene._scene;
-        const g = scn && scn.glplot, cam = g && g.camera;
-        const W = holder.clientWidth, H = holder.clientHeight;
-        if (cam && cam.matrix && W > 0 && H > 0) {
-            const ds = scn.dataScale || [1, 1, 1];
-            const cp = g.cameraParams || {};
-            // True pipeline: projection * view * model * diag(dataScale) * data
-            const view = cp.view || cam.matrix;
-            const proj = cp.projection || perspective(g.fovy || Math.PI / 4, W / H, g.zNear || 0.01, g.zFar || 1000);
-            const model = cp.model || [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
-            const M = matMul(proj, matMul(view, matMul(model, [ds[0],0,0,0, 0,ds[1],0,0, 0,0,ds[2],0, 0,0,0,1])));
-            ctx.lineWidth = 2;
-            for (const L of levels) {
-                for (const p of L.parts) {
-                    p.x += L.vx * dt; p.y += L.vy * dt; p.age += dt;
-                    if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) {
-                        p.x = x0 + Math.random() * (x1 - x0);
-                        p.y = y0 + Math.random() * (y1 - y0);
-                        p.age = 0;
-                    }
-                    // Fade streaks out near the box edges so no hard boundary shows
-                    const ex = Math.min(p.x - x0, x1 - p.x) / FADE_X;
-                    const ey = Math.min(p.y - y0, y1 - p.y) / FADE_Y;
-                    const alpha = BASE_A * Math.max(0, Math.min(1, Math.min(ex, ey)))
-                                * Math.min(1, p.age / FADE_IN);
-                    if (alpha <= 0.02) continue;
-                    const a = project(M, p.x, p.y, L.z, W, H);
-                    const b = project(M, p.x - L.vx * TRAIL, p.y - L.vy * TRAIL, L.z, W, H);
-                    if (a && b) {
-                        ctx.strokeStyle = "rgba(" + L.rgb[0] + "," + L.rgb[1] + "," + L.rgb[2] + "," + alpha.toFixed(3) + ")";
-                        ctx.beginPath(); ctx.moveTo(b[0], b[1]); ctx.lineTo(a[0], a[1]); ctx.stroke();
-                    }
-                }
-            }
-        }
-        requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
-});
-</script>""".replace('WIND_DATA_JSON', wind_json)
-                if "</body>" in html:
-                    html = html.replace("</body>", wind_script + "\n</body>", 1)
-                else:
-                    html += wind_script
-        except Exception as e:
-            print(f"Warning: could not embed wind animation: {e}")
+    try:
+        if not options.get('azonly', False) and track_start is not None:
+            hw_x = (max(seg_x) - min(seg_x)) / 2.0 + 20.0
+            hw_y = (max(seg_y) - min(seg_y)) / 2.0 + 20.0
+            bx0, bx1 = end_x - 2.0 * hw_x, end_x + 2.0 * hw_x
+            by0, by1 = end_y - 2.0 * hw_y, end_y + 2.0 * hw_y
+        else:
+            bx0, bx1, by0, by1 = x_min_km, x_max_km, y_min_km, y_max_km
+        box = [max(bx0, x_min_km), min(bx1, x_max_km),
+               max(by0, y_min_km), min(by1, y_max_km)]
+        wind_script = _wind_overlay_html(wind_csv, box)
+        if wind_script:
+            if "</body>" in html:
+                html = html.replace("</body>", wind_script + "\n</body>", 1)
+            else:
+                html += wind_script
+    except Exception as e:
+        print(f"Warning: could not embed wind animation: {e}")
 
     html_path.write_text(html, encoding="utf-8")
     print(f"Interactive 3D plot saved to {filename}")

@@ -701,6 +701,10 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
     # No lon/lat tick labels: their antialiased fringe sits against the dark
     # frame spine and renders as specks after the site night-mode transform.
     ax.set_xticks([]); ax.set_yticks([])
+    ax.tick_params(axis='both', which='both',
+                   bottom=False, top=False, left=False, right=False,
+                   labelbottom=False, labeltop=False,
+                   labelleft=False, labelright=False)
     ax.legend(fontsize=7, loc='upper center', bbox_to_anchor=(0.5, -0.04),
               ncol=2, framealpha=0.9)
     if not pc:

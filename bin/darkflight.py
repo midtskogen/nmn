@@ -751,33 +751,39 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
            label=translations.get('df_end_luminous', 'End of luminous path'))
 
-    # stagger mass labels: sort along the fall line (x) and alternate
-    # above/below at increasing offset levels when boxes would collide
-    labels2draw.sort(key=lambda L: L[0])
-    lon_span = max(lon_max - lon_min, 1e-9)
-    figw = fig.get_size_inches()[0]
-    axpos = ax.get_position()
-    in_per_deg = max(axpos.width * figw / lon_span, 1e-9)
-    occupied = {}   # (side, level) -> right edge of last label [deg lon]
+    # collision-aware placement: measure real text bboxes with the
+    # renderer, try candidate offsets in order, first fit wins
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    placed_boxes = []
+    candidates = [(4, 4, 'left'), (-4, 4, 'right'), (4, -8, 'left'),
+                  (-4, -8, 'right'), (0, 8, 'center'), (0, -13, 'center'),
+                  (8, 0, 'left'), (-8, 0, 'right'),
+                  (0, 14, 'center'), (0, -19, 'center'),
+                  (0, 20, 'center'), (0, -25, 'center'),
+                  (0, 26, 'center'), (0, -31, 'center'),
+                  (0, 32, 'center'), (0, -37, 'center')]
     for lon, lat, txt, col in labels2draw:
-        w_deg = (len(txt) * 6.5 * 0.55 / 72.0) / in_per_deg
-        placed = False
-        for lvl in range(6):
-            for side in (1, -1):
-                key = (side, lvl)
-                off = 4 + lvl * 11
-                gap = 3 / 72.0 / in_per_deg
-                if lon - w_deg / 2 - gap > occupied.get(key, -1e18):
-                    ax.annotate(txt, xy=(lon, lat),
-                                xytext=(0, side * off),
-                                textcoords='offset points', ha='center',
-                                fontsize=6.5, color=col,
-                                transform=pc if pc else ax.transData)
-                    occupied[key] = lon + w_deg / 2 + gap
-                    placed = True
-                    break
-            if placed:
-                break
+        ann = None
+        for dx, dy, ha in candidates:
+            a = ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
+                            textcoords='offset points', ha=ha,
+                            fontsize=6.5, color=col,
+                            transform=pc if pc else ax.transData)
+            bb = a.get_window_extent(renderer).expanded(1.08, 1.25)
+            if any(bb.overlaps(b) for b in placed_boxes):
+                a.remove()
+                continue
+            placed_boxes.append(bb)
+            ann = a
+            break
+        if ann is None:
+            # densest cluster — last resort: stack far above
+            a = ax.annotate(txt, xy=(lon, lat), xytext=(0, 45),
+                            textcoords='offset points', ha='center',
+                            fontsize=6, color=col,
+                            transform=pc if pc else ax.transData)
+            placed_boxes.append(a.get_window_extent(renderer).expanded(1.08, 1.25))
     if mc_impacts:
         if pc:
             ax.scatter([i['lon'] for i in mc_impacts],

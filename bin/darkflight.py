@@ -311,19 +311,6 @@ def ablation_coeff(rho_m, A):
     return 0.1e-6 * cd_hyp
 
 
-def erosion_coeff(rho_m):
-    """Grain-shedding (erosion) coefficient [s2/m2], Borovicka (2007).
-    Erosion dominates the luminous-phase mass loss of weak material:
-    WMPL uses 0.33e-6 s2/m2 for cometary/chondritic-type bodies, and it
-    is the reason survival fractions of ~10% are realistic. Dense iron
-    does not shed grains and erodes negligibly."""
-    if rho_m > 5000:
-        return 0.005e-6
-    if rho_m > 2500:
-        return 0.33e-6
-    return 0.42e-6
-
-
 def compressive_strength(rho_m):
     """Effective compressive strength [Pa] by density class — a
     fragmentation threshold on the dynamic pressure Cd*rho_a*v^2.
@@ -499,10 +486,12 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
         else:
             lo, hi = m_med * 0.5, m_med * 2.0
 
-        # critical entry mass: ablation+erosion integral along track —
-        # a body of this mass fully ablates AND erodes by the fade point
-        sigma = ablation_coeff(rho_m, A) + erosion_coeff(rho_m)
-        B = sigma * A / (2 * rho_m ** (2. / 3))
+        # critical entry mass: ablation integral along track — a body of
+        # this mass fully ablates by the fade point. Deliberately
+        # ablation-only: the surviving fragment's own mass loss is
+        # ablative; grain erosion applies to the parent body's weak
+        # matrix (handled as a breakup-scenario grain fraction).
+        B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
         rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
         integral = np.trapz(rhos * vs ** 3, ts)
         m_crit = (B / 3 * integral) ** 3
@@ -513,21 +502,20 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
     return out
 
 
-def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None,
-                        erode=True):
+def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
     """Back-integrate ablation over the luminous track.
 
-    dM^(1/3)/dτ = (B/3) rhoa v^3 backward in time, B = sigma*A/(2 rho_m^(2/3))
+    dM^(1/3)/dτ = (B/3) rhoa v^3 backward in time, B = c_ml*A/(2 rho_m^(2/3))
     => M_entry^(1/3) = M_fade^(1/3) + (B/3) ∫ rhoa v^3 dt   (end -> start)
 
-    erode: include the Borovicka grain-erosion channel — the mass-loss
-    coefficient becomes sigma + eta (erosion typically dominates ablation
-    for stony bodies during luminous flight).
+    Ablation only: this estimates the entry mass of the *surviving
+    fragment*, not the original parent body — the parent's mass lost to
+    fragmentation/grain erosion before the luminous end is not
+    recoverable from this track segment.
     """
     if atm is None:
         atm = WindAtmosphere()
-    sigma = ablation_coeff(rho_m, A) + (erosion_coeff(rho_m) if erode else 0.0)
-    B = sigma * A / (2 * rho_m ** (2. / 3))
+    B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
     ts = np.linspace(t_range[0], t_range[1], 400)
     vs = np.array([v_of_t(t) for t in ts])
     hs = np.array([h_of_t(t) for t in ts])

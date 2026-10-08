@@ -733,8 +733,6 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
         first_landed = next((r for r in uniq
                              if r['impact'].get('landed', True)), None)
         for run in uniq:
-            trplot(run['lon'], run['lat'], lw=1.0, alpha=0.4,
-                   color=col)
             if run['impact'].get('landed', True):
                 trplot([run['impact']['lon']], [run['impact']['lat']],
                        'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),

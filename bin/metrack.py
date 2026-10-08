@@ -904,14 +904,13 @@ document.addEventListener("DOMContentLoaded", function () {
     const wind = WIND_DATA_JSON;
 
     // Toggle button appended to the rotation controls (right of Pause).
-    // The overlay starts hidden -- wind streaks only draw while enabled.
-    let windOn = false;
+    let windOn = true;
     const ctrl = document.getElementById("map-rotation-controls");
     if (ctrl) {
         const btn = document.createElement('button');
         btn.id = "map-wind-btn";
         btn.textContent = "WIND_TEXT";
-        btn.style.cssText = "margin-left:5px; padding:4px 10px; cursor:pointer; opacity:0.55;";
+        btn.style.cssText = "margin-left:5px; padding:4px 10px; cursor:pointer;";
         btn.addEventListener("click", function () {
             windOn = !windOn;
             btn.style.opacity = windOn ? "1" : "0.55";

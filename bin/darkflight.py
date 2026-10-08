@@ -722,6 +722,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     # (kept in JSON/KML for completeness).
     plot_sc = [s for s in scenarios
                if s.get('erode', True) and s['name'] != 'S4_powerlaw']
+    labels2draw = []
     cmap = plt.cm.viridis
     for si, sc in enumerate(plot_sc):
         col = cmap(si / max(len(plot_sc) - 1, 1))
@@ -745,13 +746,38 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                 dec = translations.get('dec_sep', '.')
                 if dec != '.':
                     m_txt = m_txt.replace('.', dec)
-                ax.annotate(m_txt, xy=(run['impact']['lon'],
-                                       run['impact']['lat']),
-                            xytext=(4, 4), textcoords='offset points',
-                            fontsize=7, color=col,
-                            transform=pc if pc else ax.transData)
+                labels2draw.append((run['impact']['lon'],
+                                    run['impact']['lat'], m_txt, col))
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14,
            label=translations.get('df_end_luminous', 'End of luminous path'))
+
+    # stagger mass labels: sort along the fall line (x) and alternate
+    # above/below at increasing offset levels when boxes would collide
+    labels2draw.sort(key=lambda L: L[0])
+    lon_span = max(lon_max - lon_min, 1e-9)
+    figw = fig.get_size_inches()[0]
+    axpos = ax.get_position()
+    in_per_deg = max(axpos.width * figw / lon_span, 1e-9)
+    occupied = {}   # (side, level) -> right edge of last label [deg lon]
+    for lon, lat, txt, col in labels2draw:
+        w_deg = (len(txt) * 6.5 * 0.55 / 72.0) / in_per_deg
+        placed = False
+        for lvl in range(6):
+            for side in (1, -1):
+                key = (side, lvl)
+                off = 4 + lvl * 11
+                gap = 3 / 72.0 / in_per_deg
+                if lon - w_deg / 2 - gap > occupied.get(key, -1e18):
+                    ax.annotate(txt, xy=(lon, lat),
+                                xytext=(0, side * off),
+                                textcoords='offset points', ha='center',
+                                fontsize=6.5, color=col,
+                                transform=pc if pc else ax.transData)
+                    occupied[key] = lon + w_deg / 2 + gap
+                    placed = True
+                    break
+            if placed:
+                break
     if mc_impacts:
         if pc:
             ax.scatter([i['lon'] for i in mc_impacts],
@@ -933,6 +959,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
 
     plot_sc = [s for s in scenarios
                if s.get('erode', True) and s['name'] != 'S4_powerlaw']
+    label_flip = [0]
     cmap = matplotlib.pyplot.get_cmap('viridis')
     for si, sc in enumerate(plot_sc):
         c = cmap(si / max(len(plot_sc) - 1, 1))
@@ -968,10 +995,13 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                 traces.append(go.Scatter3d(
                     x=ix, y=iy, z=[0], mode='markers+text',
                     marker=dict(size=5, color=col, symbol='circle'),
-                    text=[m_txt], textposition='top center',
+                    text=[m_txt],
+                    textposition=('top center' if label_flip[0] == 0
+                                  else 'bottom center'),
                     textfont=dict(size=9, color=col),
                     legendgroup=sc['name'], showlegend=False,
                     hoverinfo='none'))
+                label_flip[0] ^= 1
     # end of luminous path
     ex, ey = project_points([end_llh[0]], [end_llh[1]])
     traces.append(go.Scatter3d(

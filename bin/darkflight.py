@@ -707,6 +707,195 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title=''):
     plt.close(fig)
 
 
+def write_map3d(scenarios, end_llh, mc_impacts, out_html,
+                translations=None):
+    """Interactive 3D fall-area map (plotly), similar to metrack map.html.
+
+    Ground tile image is rendered as a textured z=0 surface; scenario
+    trajectories are 3D lines ending at ground-impact markers; the
+    luminous-path end point is starred; Monte-Carlo impacts are a
+    ground-level scatter cloud.
+    """
+    translations = translations or {}
+    try:
+        import plotly.graph_objects as go
+        import cartopy.crs as ccrs
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from PIL import Image
+        import io, html as html_mod
+        from metrack import darken_blacks, _fetch_kartverket_topo
+    except Exception as e:
+        logging.debug(f'darkflight 3d map unavailable: {e}')
+        return False
+
+    lons_all, lats_all = [end_llh[0]], [end_llh[1]]
+    for sc in scenarios:
+        for run in sc['results']:
+            lons_all += list(run['lon']) + [run['impact']['lon']]
+            lats_all += list(run['lat']) + [run['impact']['lat']]
+    for imp in (mc_impacts or []):
+        lons_all.append(imp['lon']); lats_all.append(imp['lat'])
+    pad = 0.15
+    lon_min, lon_max = min(lons_all) - pad, max(lons_all) + pad
+    lat_min, lat_max = min(lats_all) - pad, max(lats_all) + pad
+
+    proj = ccrs.Gnomonic(central_longitude=(lon_min + lon_max) / 2,
+                         central_latitude=(lat_min + lat_max) / 2)
+    fig, ax = plt.subplots(figsize=(10, 10),
+                           subplot_kw={'projection': proj})
+    ax.set_extent([lon_min, lon_max, lat_min, lat_max],
+                  crs=ccrs.PlateCarree())
+
+    # Ground image: Kartverket (if POIs covered) else OSM
+    poi = [(end_llh[0], end_llh[1])]
+    for sc in scenarios:
+        if sc['results']:
+            imp = sc['results'][0]['impact']
+            poi.append((imp['lon'], imp['lat']))
+    kv = None
+    try:
+        kv = _fetch_kartverket_topo([lon_min, lon_max], [lat_min, lat_max],
+                                    poi_lonlat=poi)
+    except Exception:
+        pass
+    if kv is not None:
+        img_kv, (kx0, kx1, ky0, ky1) = kv
+        ax.imshow(img_kv, extent=[kx0, kx1, ky0, ky1],
+                  transform=ccrs.UTM(32), origin='upper', zorder=0)
+    else:
+        lat_span = lat_max - lat_min
+        zoom = int(math.ceil(math.log2(1440 / max(lat_span, 0.05))))
+        zoom = max(6, min(zoom, 13))
+        try:
+            from cartopy.io.img_tiles import OSM
+            ax.add_image(OSM(), zoom)
+        except Exception:
+            import cartopy.feature as cfeature
+            ax.add_feature(cfeature.LAND)
+            ax.add_feature(cfeature.OCEAN)
+    try:
+        fig.canvas.draw()
+    except Exception:
+        pass
+    x_min_m, x_max_m, y_min_m, y_max_m = ax.get_extent()
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                pad_inches=0, transparent=False)
+    plt.close(fig)
+    buf.seek(0)
+
+    def project_points(lons, lats):
+        pts = proj.transform_points(ccrs.PlateCarree(),
+                                    np.asarray(lons, float),
+                                    np.asarray(lats, float))
+        return pts[:, 0] / 1000.0, pts[:, 1] / 1000.0
+
+    img = Image.open(buf).convert('RGB')
+    if max(img.size) > 1024:
+        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+    img = darken_blacks(img, 112)
+    quant = img.quantize(colors=16, method=Image.Quantize.MEDIANCUT)
+    pal = quant.getpalette()
+    pal_rgb = [tuple(pal[i:i + 3]) for i in range(0, len(pal), 3)]
+    lum = [0.2126 * r + 0.7152 * g + 0.0722 * b for r, g, b in pal_rgb]
+    order = sorted(range(len(pal_rgb)), key=lambda i: lum[i])
+    sorted_pal = [pal_rgb[i] for i in order]
+    old2new = {o: n for n, o in enumerate(order)}
+    idx = np.array(quant)
+    lut = np.zeros(256, dtype=np.uint8)
+    for o, n in old2new.items():
+        lut[o] = n
+    remapped = np.flipud(lut[idx])
+    cscale = [[i / max(1, len(sorted_pal) - 1),
+               f'rgb({r},{g},{b})']
+              for i, (r, g, b) in enumerate(sorted_pal)]
+    hgt, wid = remapped.shape
+
+    traces = [go.Surface(
+        x=np.linspace(x_min_m / 1000.0, x_max_m / 1000.0, wid),
+        y=np.linspace(y_min_m / 1000.0, y_max_m / 1000.0, hgt),
+        z=np.zeros((hgt, wid)),
+        surfacecolor=remapped, cmin=0, cmax=max(1, len(sorted_pal) - 1),
+        colorscale=cscale, showscale=False, hoverinfo='none')]
+
+    cmap = matplotlib.pyplot.get_cmap('viridis')
+    for si, sc in enumerate(scenarios):
+        c = cmap(si / max(len(scenarios) - 1, 1))
+        col = f'rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})'
+        for ri, run in enumerate(sc['results']):
+            x, y = project_points(run['lon'], run['lat'])
+            traces.append(go.Scatter3d(
+                x=x, y=y, z=[hh / 1000.0 for hh in run['h']],
+                mode='lines',
+                line=dict(color=col, width=3),
+                name=sc['label'] if ri == 0 else sc['label'],
+                legendgroup=sc['name'],
+                showlegend=(ri == 0),
+                hoverinfo='name', opacity=0.85))
+            imp = run['impact']
+            ix, iy = project_points([imp['lon']], [imp['lat']])
+            traces.append(go.Scatter3d(
+                x=ix, y=iy, z=[0], mode='markers',
+                marker=dict(size=5, color=col, symbol='circle'),
+                legendgroup=sc['name'], showlegend=False,
+                hoverinfo='none'))
+    # end of luminous path
+    ex, ey = project_points([end_llh[0]], [end_llh[1]])
+    traces.append(go.Scatter3d(
+        x=ex, y=ey, z=[end_llh[2] / 1000.0], mode='markers',
+        marker=dict(size=9, color='red', symbol='diamond'),
+        name=translations.get('df_end_position', 'End of luminous path')))
+    # MC impacts
+    if mc_impacts:
+        mx, my = project_points([i['lon'] for i in mc_impacts],
+                                [i['lat'] for i in mc_impacts])
+        traces.append(go.Scatter3d(
+            x=mx, y=my, z=[0] * len(mx), mode='markers',
+            marker=dict(size=2, color='magenta', opacity=0.35),
+            name='Monte Carlo'))
+
+    scene_dx = (x_max_m - x_min_m) / 1000.0
+    scene_dy = (y_max_m - y_min_m) / 1000.0
+    half = max(scene_dx, scene_dy) / 2.0 or 1.0
+    cx = (x_min_m + x_max_m) / 2000.0
+    cy = (y_min_m + y_max_m) / 2000.0
+    center = dict(x=float((ex[0] - cx) / half),
+                  y=float((ey[0] - cy) / half), z=0.0)
+    dist = 1.3
+    elev = math.radians(35)
+    eye = dict(x=center['x'] + dist, y=center['y'],
+               z=center['z'] + dist * math.tan(elev))
+
+    fig3 = go.Figure(data=traces, layout=go.Layout(
+        title=translations.get('df_title', 'Dark flight'),
+        title_x=0.5, title_y=0.95, showlegend=True,
+        legend=dict(font=dict(size=10), x=0.01, y=0.99,
+                    bgcolor='rgba(255,255,255,0.6)'),
+        scene=dict(
+            xaxis=dict(title=translations.get('plot_map_interactive_xaxis',
+                                              'East/West Distance (km)'),
+                       range=[x_min_m / 1000.0, x_max_m / 1000.0]),
+            yaxis=dict(title=translations.get('plot_map_interactive_yaxis',
+                                              'North/South Distance (km)'),
+                       range=[y_min_m / 1000.0, y_max_m / 1000.0]),
+            zaxis=dict(title=translations.get('plot_map_interactive_zaxis',
+                                              'Height (km)')),
+            aspectmode='data', dragmode='turntable',
+            camera=dict(up=dict(x=0, y=0, z=1), center=center, eye=eye)),
+        margin=dict(l=0, r=0, b=0, t=40)))
+    out_html = Path(out_html)
+    fig3.write_html(str(out_html), include_plotlyjs='cdn')
+    # full-bleed styling like metrack's map.html
+    html_txt = out_html.read_text(encoding='utf-8')
+    html_txt = html_txt.replace(
+        '<head>', '<head><style>html,body{margin:0;padding:0;'
+        'overflow:hidden;height:100%}</style>', 1)
+    out_html.write_text(html_txt, encoding='utf-8')
+    return True
+
+
 # --- Orchestration --------------------------------------------------------------
 def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                    wind_csv=None, mc_runs=300, seed=0, pool=None,
@@ -922,6 +1111,11 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                   event_dir / 'map_darkflight.svg')
     except Exception as e:
         logging.warning(f'darkflight map failed: {e}')
+    try:
+        write_map3d(scenarios, (end_lon, end_lat, end_h), mc_impacts,
+                    event_dir / 'darkflight_map3d.html')
+    except Exception as e:
+        logging.warning(f'darkflight 3d map failed: {e}')
     return results
 
 

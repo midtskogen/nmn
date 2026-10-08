@@ -131,7 +131,11 @@
                 const isFringe = (i) => { const p = i * 4;
                     return Math.max(px[p], px[p + 1], px[p + 2])
                          - Math.min(px[p], px[p + 1], px[p + 2]) < 60; };
-                for (let pass = 0; pass < 5; pass++) {
+                // fringe pass count scales with image size — tick labels
+                // in high-DPI renders (darkflight ~3700px wide) have
+                // strokes ~10px thick, 5 passes can't reach the cores
+                const fringePasses = Math.max(5, Math.round(Math.min(W, H) / 150));
+                for (let pass = 0; pass < fringePasses; pass++) {
                     const grown = outside.slice();
                     for (let i = 0; i < W * H; i++) {
                         if (!outside[i]) continue;

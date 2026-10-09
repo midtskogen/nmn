@@ -1421,32 +1421,53 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             x=mx, y=my, z=[0.02] * len(mx), mode='markers',
             marker=dict(size=3, color='red', opacity=0.35),
             name='Monte Carlo'))
-        # shaded hull of the impact cloud on the ground plane
+        # shaded hull of the impact cloud on the ground plane —
+        # spline-smoothed ring, translucent fill + opaque edge
         ring = _mc_hull(mc_impacts)
         if ring is not None:
             hx, hy = project_points(ring[:, 0], ring[:, 1])
-            # fan-triangulate the convex ring for Mesh3d
-            cx, cy = np.mean(hx), np.mean(hy)
+            try:
+                from scipy.interpolate import splprep, splev
+                tck, _ = splprep([hx[:-1], hy[:-1]], s=0, per=True)
+                sx, sy = splev(np.linspace(0, 1, 200), tck)
+            except Exception:
+                sx, sy = hx, hy
+            cx, cy = np.mean(sx), np.mean(sy)
             tri_i, tri_j, tri_k = [], [], []
-            vxs = [cx] + list(hx)
-            vys = [cy] + list(hy)
-            for k in range(len(hx)):
+            vxs = [cx] + list(sx)
+            vys = [cy] + list(sy)
+            for k in range(len(sx)):
                 tri_i.append(0)
                 tri_j.append(k + 1)
-                tri_k.append(1 + (k + 1) % len(hx))
+                tri_k.append(1 + (k + 1) % len(sx))
             traces.append(go.Mesh3d(
                 x=vxs, y=vys, z=[0.02] * len(vxs),
                 i=tri_i, j=tri_j, k=tri_k,
-                color='red', opacity=0.75, name='Fall area (MC)',
+                color='red', opacity=0.4, name='Fall area (MC)',
                 showscale=False))
+            traces.append(go.Scatter3d(
+                x=list(sx), y=list(sy), z=[0.02] * len(sx),
+                mode='lines', line=dict(color='red', width=3),
+                name='Fall area edge', showlegend=False,
+                hoverinfo='skip'))
 
     scene_dx = (x_max_m - x_min_m) / 1000.0
     scene_dy = (y_max_m - y_min_m) / 1000.0
     half = max(scene_dx, scene_dy) / 2.0 or 1.0
     cx = (x_min_m + x_max_m) / 2000.0
     cy = (y_min_m + y_max_m) / 2000.0
-    center = dict(x=float((ex[0] - cx) / half),
-                  y=float((ey[0] - cy) / half), z=0.0)
+    # default rotation centre: above the Monte Carlo impact cloud when
+    # it exists, else above the end of the luminous path
+    if mc_impacts:
+        fx, fy = project_points(
+            [float(np.mean([i['lon'] for i in mc_impacts]))],
+            [float(np.mean([i['lat'] for i in mc_impacts]))])
+        cx0, cy0 = fx[0], fy[0]
+        z0 = 0.15          # hover above the ground plane
+    else:
+        cx0, cy0, z0 = ex[0], ey[0], 0.0
+    center = dict(x=float((cx0 - cx) / half),
+                  y=float((cy0 - cy) / half), z=z0)
     dist = 1.3
     elev = math.radians(35)
     eye = dict(x=center['x'] + dist, y=center['y'],

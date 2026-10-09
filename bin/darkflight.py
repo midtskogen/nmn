@@ -590,6 +590,19 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
     return [s for s in sc if s['runs']]
 
 
+def _merge_label_masses(labels, tol=0.1):
+    """labels: [(lon, lat, txt, col, mass)]. Drop entries whose mass is
+    within ±tol of an already-kept one (keeps the first in track order,
+    which follows scenario order — intact body first)."""
+    kept, seen = [], []
+    for lon, lat, txt, col, m in labels:
+        if any(abs(m - s) <= tol * s for s in seen):
+            continue
+        seen.append(m)
+        kept.append((lon, lat, txt, col, m))
+    return kept
+
+
 def sc_label(sc, t):
     """Localised scenario label; falls back to the built-in English label."""
     name = sc['name']
@@ -820,14 +833,11 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     cmap = plt.cm.viridis
     for si, sc in enumerate(plot_sc):
         col = cmap(si / max(len(plot_sc) - 1, 1))
-        uniq, seen_m = [], []
+        uniq, seen_m = [], set()
         for run in sc['results']:
-            # merge masses within ±10% — no point labelling near-identical
-            # impact points separately
-            if any(abs(run['m'] - m) <= 0.1 * m for m in seen_m):
-                continue
-            seen_m.append(run['m'])
-            uniq.append(run)
+            if run['m'] not in seen_m:
+                seen_m.add(run['m'])
+                uniq.append(run)
         first_landed = next((r for r in uniq
                              if r['impact'].get('landed', True)), None)
         for run in uniq:
@@ -842,7 +852,12 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                 if dec != '.':
                     m_txt = m_txt.replace('.', dec)
                 labels2draw.append((run['impact']['lon'],
-                                    run['impact']['lat'], m_txt, col))
+                                    run['impact']['lat'], m_txt, col,
+                                    run['m']))
+    # merge labels within ±10% mass across all scenarios — a swarm of
+    # near-identical fragments gets one label for the lot
+    labels2draw = [(lon, lat, txt, col) for lon, lat, txt, col, m in
+                   _merge_label_masses(labels2draw)]
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14)
 
     # collision-aware placement: measure real text bboxes with the

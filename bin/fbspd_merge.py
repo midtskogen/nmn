@@ -607,6 +607,16 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
             print("Error: Both exponential and quadratic fits failed.")
             return None, 0, None, np.inf
 
+    # A converged exponential can still be unphysical: if its fitted speed
+    # crosses zero within the observed window the meteor would have to
+    # reverse direction. Reject such solutions and let the quadratic
+    # (constant-deceleration) fallback take over.
+    if res_exp and res_exp.success:
+        v_check = expfunc_1stder(np.linspace(reltime.min(), reltime.max(), 100), *res_exp.x)
+        if np.any(v_check <= 0):
+            if debug: print("Rejected exponential: fitted speed crosses zero within the data.")
+            res_exp.success = False
+
     if res_exp and res_exp.success and (res_quad is None or not res_quad.success or res_exp.cost < res_quad.cost):
         if debug: print("Selected robust exponential model.")
         params, pcov, cost = res_exp.x, get_pcov(res_exp, n_pts, len(res_exp.x)), res_exp.cost

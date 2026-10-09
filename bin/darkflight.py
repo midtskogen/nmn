@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import csv
+import os
 import sys
 from pathlib import Path
 
@@ -41,6 +42,14 @@ OMEGA = 7.292115e-5           # Earth rotation rate [rad/s]
 OMEGA_VEC = np.array([0.0, 0.0, OMEGA])
 A_EQ = 6378137.0              # WGS-84 semi-major axis [m]
 E2 = 6.69437999014e-3         # WGS-84 first eccentricity squared
+try:
+    from numba import njit as _njit
+except ImportError:
+    def _njit(*a, **k):
+        def deco(f):
+            return f
+        return deco
+
 R_AIR = 287.05                # specific gas constant dry air [J/(kg K)]
 
 SHAPES = {'s': 1.21, 'c': 1.60, 'b': 2.7}   # sphere, cylinder, brick
@@ -350,6 +359,222 @@ def fragmentation_spectrum(m_total, mass_index=2.0,
     return ms * (m_frag / ms.sum())
 
 
+# --- Numba-compiled dynamics --------------------------------------------------
+# All scalar math — scipy/numpy calls per ODE step are the bottleneck
+# (np.cross alone was ~40% of runtime). The atmosphere is passed as
+# flat arrays so the jitted function never touches Python objects.
+
+@_njit(cache=True)
+def _ecef2llh_nb(rx, ry, rz):
+    p = math.hypot(rx, ry)
+    lon = math.atan2(ry, rx)
+    lat = math.atan2(rz, p * (1 - E2))
+    for _ in range(15):
+        sin_lat = math.sin(lat)
+        N = A_EQ / math.sqrt(1 - E2 * sin_lat * sin_lat)
+        h = p / math.cos(lat) - N
+        lat_new = math.atan2(rz, p * (1 - E2 * N / (N + h)))
+        if abs(lat_new - lat) < 1e-12:
+            lat = lat_new
+            break
+        lat = lat_new
+    return lon, lat, h          # radians
+
+
+@_njit(cache=True)
+def _ecef2llh_arr(rx, ry, rz):
+    """Vectorised ECEF->(lon, lat rad, h) for path output."""
+    n = len(rx)
+    lons = np.empty(n); lats = np.empty(n); hs = np.empty(n)
+    for i in range(n):
+        lons[i], lats[i], hs[i] = _ecef2llh_nb(rx[i], ry[i], rz[i])
+    return lons, lats, hs
+
+
+@_njit(cache=True)
+def _us76_nb(h_m):
+    h_geo = h_m * 6356766.0 / (6356766.0 + h_m)
+    if h_geo < 0.0:
+        h_geo = 0.0
+    if h_geo > 84852.0:
+        h_geo = 84852.0
+    hb = (0.0, 11000., 20000., 32000., 47000., 51000., 71000.)
+    Tb = (288.15, 216.65, 216.65, 228.65, 270.65, 270.65, 214.65)
+    Lb = (-6.5e-3, 0.0, 1.0e-3, 2.8e-3, 0.0, -2.8e-3, -2.0e-3)
+    Pb = (101325.0, 22632.1, 5474.89, 868.02, 110.91, 66.94, 3.9564)
+    for i in range(6, -1, -1):
+        if h_geo >= hb[i]:
+            if Lb[i] == 0.0:
+                P = Pb[i] * math.exp(-_G0 * _M_AIR * (h_geo - hb[i])
+                                     / (_R_UNIV * Tb[i]))
+                T = Tb[i]
+            else:
+                T = Tb[i] + Lb[i] * (h_geo - hb[i])
+                P = Pb[i] * (Tb[i] / T) ** (_G0 * _M_AIR
+                                            / (_R_UNIV * Lb[i]))
+            return T, P * _M_AIR / (_R_UNIV * T)
+    return 288.15, 101325.0 * _M_AIR / (_R_UNIV * 288.15)
+
+
+@_njit(cache=True)
+def _interp_nb(x, xs, ys):
+    """np.interp equivalent for ascending xs."""
+    if x <= xs[0]:
+        return ys[0]
+    n = len(xs)
+    if x >= xs[n - 1]:
+        return ys[n - 1]
+    i = np.searchsorted(xs, x)
+    f = (x - xs[i - 1]) / (xs[i] - xs[i - 1])
+    return ys[i - 1] + f * (ys[i] - ys[i - 1])
+
+
+@_njit(cache=True)
+def _atm_at_nb(h_m, has_prof, ph, pT, prho, pwe, pwn,
+               has_msis, mh, mrho, mT, rho_scale):
+    """(wind_e, wind_n, wind_u, rho, T). Wind profile below ph[-1],
+    MSIS/US76 above."""
+    if has_prof and h_m <= ph[len(ph) - 1]:
+        we = _interp_nb(h_m, ph, pwe)
+        wn = _interp_nb(h_m, ph, pwn)
+        T = _interp_nb(h_m, ph, pT)
+        rho = _interp_nb(h_m, ph, prho)
+        return we, wn, 0.0, rho, T
+    # background atmosphere
+    if has_msis:
+        T = _interp_nb(h_m, mh, mT)
+        # log-linear density interp
+        if h_m <= mh[0]:
+            rho = mrho[0]
+        elif h_m >= mh[len(mh) - 1]:
+            rho = mrho[len(mrho) - 1]
+        else:
+            i = np.searchsorted(mh, h_m)
+            f = (h_m - mh[i - 1]) / (mh[i] - mh[i - 1])
+            rho = math.exp(math.log(mrho[i - 1])
+                           + f * (math.log(mrho[i]) - math.log(mrho[i - 1])))
+    else:
+        T, rho = _us76_nb(h_m)
+    rho *= rho_scale
+    if has_prof:
+        return pwe[len(pwe) - 1], pwn[len(pwn) - 1], 0.0, rho, T
+    return 0.0, 0.0, 0.0, rho, T
+
+
+@_njit(cache=True)
+def _shape_interp_nb(A, v0, v1, v2):
+    xs = (1.21, 1.6, 2.7)
+    ys = (v0, v1, v2)
+    if A <= xs[0]:
+        return ys[0]
+    if A >= xs[2]:
+        return ys[2]
+    if A < xs[1]:
+        f = (A - xs[0]) / (xs[1] - xs[0])
+        return ys[0] + f * (ys[1] - ys[0])
+    f = (A - xs[1]) / (xs[2] - xs[1])
+    return ys[1] + f * (ys[2] - ys[1])
+
+
+@_njit(cache=True)
+def _cd_subsonic_nb(re, A):
+    V = 1.0
+    sa_eq = (36 * np.pi * V * V) ** (1. / 3)
+    a_ax = np.sqrt(A * V ** (2. / 3) / np.pi)
+    c_ax = (3 * V ** (1. / 3)) / (4 * A)
+    thi = sa_eq / (4 * np.pi * ((a_ax ** 3.2 + 2 * (a_ax * c_ax) ** 1.6)
+                                / 3) ** (1. / 1.6))
+    a = np.exp(2.3288 - 6.4581 * thi + 2.4486 * thi ** 2)
+    b = 0.0964 + 0.5565 * thi
+    c = np.exp(4.905 - 13.8944 * thi + 18.4222 * thi ** 2
+               - 10.2599 * thi ** 3)
+    d = np.exp(1.4681 + 12.2584 * thi - 20.7322 * thi ** 2
+               + 15.8855 * thi ** 3)
+    return 24. / re * (1 + a * re ** b) + c / (1 + d / re)
+
+
+@_njit(cache=True)
+def _cd_fm_nb(vel):
+    vk = vel / 1000.0
+    return 2.0 + np.sqrt(1.2) / (2.0 * vk) \
+        * (1.0 + vk ** 2 / 16.0 + 30.0)
+
+
+@_njit(cache=True)
+def _dragcoeff_nb(vel, temp, rho_a, A):
+    if vel < 1e-6:
+        vel = 1e-6
+    mu_a = 18.27e-6 * (291.15 + 120.0) / (temp + 120.0) \
+        * (temp / 291.15) ** 1.5
+    sos = 331.3 * math.sqrt(temp / 273.15)
+    mach = vel / sos
+    re = rho_a * vel * 0.1 / mu_a
+    kn = mach / re * np.sqrt(np.pi * 1.4 / 2.0)
+    if kn > 10.0:
+        return _cd_fm_nb(vel)
+    if kn > 0.01:
+        cd_sub = _cd_subsonic_nb(max(re, 1.0), A)
+        return cd_sub + (_cd_fm_nb(vel) - cd_sub) \
+            * np.exp(-0.001 * re * re)
+    cd_sub = _cd_subsonic_nb(max(re, 1.0), A)
+    cd_hyp = _shape_interp_nb(A, 0.92, 1.3, 2.0)
+    hw = _shape_interp_nb(A, 0.5, 0.3, 0.1)
+    M_c = _shape_interp_nb(A, 1.5, 1.2, 1.1)
+    # logistic at mach
+    e1 = np.exp(-(mach - M_c) / hw)
+    logi = cd_sub + (cd_hyp - cd_sub) / (1 + e1)
+    cd_crit = _shape_interp_nb(A, 1.0, logi / 0.92, logi / 0.92)
+    gum = (cd_crit - logi) * np.exp(-(mach - M_c) / hw
+                                    - np.exp(-(mach - M_c) / hw)) / np.exp(-1)
+    return logi + gum
+
+
+@_njit(cache=True)
+def _dynamics_nb(t, X, c_ml, A_sh, rho_m,
+                 has_prof, ph, pT, prho, pwe, pwn,
+                 has_msis, mh, mrho, mT, rho_scale):
+    rx, ry, rz = X[0], X[1], X[2]
+    vx, vy, vz = X[3], X[4], X[5]
+    m = X[6]
+    lon, lat, h = _ecef2llh_nb(rx, ry, rz)
+    we, wn, wu, rho_a, T = _atm_at_nb(
+        h if h > 0.0 else 0.0, has_prof, ph, pT, prho, pwe, pwn,
+        has_msis, mh, mrho, mT, rho_scale)
+    sl = math.sin(lat); cl = math.cos(lat)
+    so = math.sin(lon); co = math.cos(lon)
+    # enu2ecef: w_ecef = R @ wind_enu
+    wx = -so * we - sl * co * wn + cl * co * wu
+    wy = co * we - sl * so * wn + cl * so * wu
+    wz = cl * wn + sl * wu
+    vrx, vry, vrz = vx - wx, vy - wy, vz - wz
+    vmag = math.sqrt(vrx * vrx + vry * vry + vrz * vrz)
+    rnorm = math.sqrt(rx * rx + ry * ry + rz * rz)
+    g = -MU_E / rnorm ** 3
+    agx, agy, agz = g * rx, g * ry, g * rz
+    # Coriolis -2*OMEGA x v ; centrifugal -OMEGA x (OMEGA x r)
+    om = OMEGA
+    acx = -2.0 * om * -vy + om * om * rx
+    acy = -2.0 * om * vx + om * om * ry
+    acz = 0.0
+    m_eff = m if m > 1e-6 else 1e-6
+    ax = ay = az = 0.0
+    dm = 0.0
+    if vmag > 1e-9:
+        cd = _dragcoeff_nb(vmag, T, rho_a, A_sh)
+        k = cd * A_sh * rho_a * vmag \
+            / (2 * m_eff ** (1. / 3) * rho_m ** (2. / 3))
+        ax, ay, az = -k * vrx, -k * vry, -k * vrz
+        dm = -c_ml * A_sh * rho_a * vmag ** 3 * m_eff ** (2. / 3) \
+            / (2 * rho_m ** (2. / 3))
+    out = np.empty(7)
+    out[0], out[1], out[2] = vx, vy, vz
+    out[3] = agx + acx + ax
+    out[4] = agy + acy + ay
+    out[5] = agz + acz + az
+    out[6] = dm
+    return out
+
+
 # --- Propagator ---------------------------------------------------------------
 def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
               erode=True, record_dt=0.5):
@@ -363,29 +588,28 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
     """
     c_ml = ablation_coeff(rho_m, A_shape) if erode else 0.0
 
+    # pack the atmosphere once — the jitted dynamics sees only arrays
+    if atm.has_profile:
+        ph, pT, prho = atm.h, atm.T, atm.rho_p
+        pwe, pwn = atm.we, atm.wn
+    else:
+        ph = pT = prho = pwe = pwn = np.zeros(1)
+    if atm._msis is not None:
+        mh, mrho, mT = [np.asarray(a, dtype=np.float64)
+                        for a in atm._msis]
+        has_msis = True
+    else:
+        mh = mrho = mT = np.zeros(1)
+        has_msis = False
+    dyn_args = (c_ml, A_shape, rho_m,
+                atm.has_profile, ph, pT, prho, pwe, pwn,
+                has_msis, mh, mrho, mT, atm._rho_scale)
+
     def dynamics(t, X):
-        r, v, m = X[:3], X[3:6], X[6]
-        lon, lat, h = ecef2llh(r)
-        wind_enu, rho_a, T = atm.at(max(h, 0.0))
-        w_ecef = enu2ecef_mat(lat, lon) @ wind_enu
-        v_rel = v - w_ecef
-        vmag = np.linalg.norm(v_rel)
-        a_grav = -MU_E * r / np.linalg.norm(r) ** 3
-        a_cor = -2.0 * np.cross(OMEGA_VEC, v)
-        a_cf = -np.cross(OMEGA_VEC, np.cross(OMEGA_VEC, r))
-        m_eff = max(m, 1e-6)
-        if vmag > 1e-9:
-            cd = dragcoeff(vmag, T, rho_a, A_shape)
-            a_drag = -cd * A_shape * rho_a * vmag * v_rel \
-                     / (2 * m_eff ** (1. / 3) * rho_m ** (2. / 3))
-        else:
-            a_drag = np.zeros(3)
-        dm = -c_ml * A_shape * rho_a * vmag ** 3 * m_eff ** (2. / 3) \
-             / (2 * rho_m ** (2. / 3)) if vmag > 1e-9 else 0.0
-        return np.hstack([v, a_grav + a_cor + a_cf + a_drag, dm])
+        return _dynamics_nb(t, X, *dyn_args)
 
     def hit_ground(t, X):
-        _, _, h = ecef2llh(X[:3])
+        _, _, h = _ecef2llh_nb(X[0], X[1], X[2])
         return h - h_ground
     hit_ground.terminal = True
     hit_ground.direction = -1
@@ -409,10 +633,9 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
     n = max(int(t_end / record_dt) + 2, 2)
     ts = np.linspace(0, t_end, n)
     Xs = sol.sol(ts)
-    path = [ecef2llh(Xs[:, i]) for i in range(Xs.shape[1])]
-    lon_arr = np.array([p[0] for p in path])
-    lat_arr = np.array([p[1] for p in path])
-    h_arr = np.array([p[2] for p in path])
+    lon_arr, lat_arr, h_arr = _ecef2llh_arr(Xs[0], Xs[1], Xs[2])
+    lon_arr = np.degrees(lon_arr)
+    lat_arr = np.degrees(lat_arr)
     v_arr = np.linalg.norm(Xs[3:6], axis=0)
 
     lon_i, lat_i, h_i = ecef2llh(X_end[:3])
@@ -625,6 +848,12 @@ def sc_label(sc, t):
 
 
 # --- Monte Carlo ---------------------------------------------------------------
+def _prop_worker(job):
+    (si, run, r0, v0, atm, h_ground, erode) = job
+    return si, run, propagate(r0, v0, run['m'], run['rho'], run['A'],
+                              atm, h_ground, erode=erode)
+
+
 def _mc_worker(job):
     (r0, v0, m, rho, A, csv_path, h_ground, erode,
      lon, lat, event_dt) = job
@@ -1559,33 +1788,49 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     dyn_press = cd_hypersonic(1.4) * rho_end * v_end ** 2
     scenarios = build_scenarios(m_est, rho_m=rho_ref or 3500.0,
                                 dyn_press=dyn_press)
-    for sc in scenarios:
-        sc['results'] = []
-        for run in sc['runs']:
-            res = propagate(r_end, v0_vec, run['m'], run['rho'], run['A'],
-                            atm, h_ground, erode=sc['erode'])
-            sc['results'].append({'m': run['m'], 'rho': run['rho'],
-                                  'impact': res['impact'],
-                                  'lon': res['lon'], 'lat': res['lat'],
-                                  'h': res['h'], 'v': res['v'],
-                                  'mass_t': res['m']})
 
-    # Monte Carlo
-    mc_impacts = []
-    if mc_runs > 0:
-        # if the S5 breakup scenario fired, the real fall is a fragment
-        # strewn field — draw MC masses from its spectrum instead of
-        # perturbing a single nominal body
-        s5 = next((s for s in scenarios if s['name'] == 'S5_strength'),
-                  None)
-        m_samples = (np.array([r['m'] for r in s5['runs']])
-                     if s5 is not None else None)
-        mc_impacts = [i for i in monte_carlo(
-            r_end, v0_vec, m_est, 3500.0, 1.4, wind_csv, h_ground,
-            n_runs=mc_runs, seed=seed, pool=pool,
-            lon=end_lon, lat=end_lat, event_dt=event_dt,
-            mass_samples=m_samples)
-            if i.get('landed', True)]
+    # Parallel propagation: each run is independent and CPU-bound.
+    # Numba cache=True means workers reuse the compiled code.
+    jobs = [(si, run, r_end, v0_vec, atm, h_ground, sc['erode'])
+            for si, sc in enumerate(scenarios)
+            for run in sc['runs']]
+    own_pool = pool is None and (len(jobs) > 4 or mc_runs > 0)
+    if own_pool:
+        from concurrent.futures import ProcessPoolExecutor
+        pool = ProcessPoolExecutor(
+            max_workers=min(os.cpu_count() or 4, 16))
+    try:
+        if pool is not None:
+            results_list = list(pool.map(_prop_worker, jobs))
+        else:
+            results_list = [_prop_worker(j) for j in jobs]
+        for si, run, res in results_list:
+            scenarios[si].setdefault('results', []).append(
+                {'m': run['m'], 'rho': run['rho'],
+                 'impact': res['impact'],
+                 'lon': res['lon'], 'lat': res['lat'],
+                 'h': res['h'], 'v': res['v'],
+                 'mass_t': res['m']})
+
+        # Monte Carlo
+        mc_impacts = []
+        if mc_runs > 0:
+            # if the S5 breakup scenario fired, the real fall is a
+            # fragment strewn field — draw MC masses from its spectrum
+            # instead of perturbing a single nominal body
+            s5 = next((s for s in scenarios if s['name'] == 'S5_strength'),
+                      None)
+            m_samples = (np.array([r['m'] for r in s5['runs']])
+                         if s5 is not None else None)
+            mc_impacts = [i for i in monte_carlo(
+                r_end, v0_vec, m_est, 3500.0, 1.4, wind_csv, h_ground,
+                n_runs=mc_runs, seed=seed, pool=pool,
+                lon=end_lon, lat=end_lat, event_dt=event_dt,
+                mass_samples=m_samples)
+                if i.get('landed', True)]
+    finally:
+        if own_pool:
+            pool.shutdown()
 
     results = {
         'event_dir': str(event_dir),

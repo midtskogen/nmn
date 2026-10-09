@@ -991,19 +991,58 @@ def write_kml(scenarios, end_llh, path):
     Path(path).write_text(''.join(parts), encoding='utf-8')
 
 
-def _mc_hull(mc_impacts):
-    """Convex hull of the MC impact cloud -> (N+1, 2) closed ring of
-    (lon, lat), or None when fewer than 3 points."""
-    if not mc_impacts or len(mc_impacts) < 3:
+def _mc_outline(pts, pad_frac=0.15, pad_min=None):
+    """Buffered outline around a point cloud -> closed ring (N+1,2).
+
+    Convex hull buffered outward by pad_frac * max cloud radius
+    (or pad_min if larger). Buffering rounds corners and always
+    encloses every input point, even for degenerate/sliver hulls."""
+    pts = np.asarray(pts, dtype=float)
+    if len(pts) == 0:
         return None
-    pts = np.array([[i['lon'], i['lat']] for i in mc_impacts])
+    if len(pts) == 1:
+        pts = np.vstack([pts, pts + 1e-9])  # make a tiny segment
+    cx, cy = pts.mean(axis=0)
+    rad = np.sqrt(((pts - [cx, cy]) ** 2).sum(axis=1)).max()
+    pad = max(pad_frac * rad, pad_min or 0.0)
     try:
-        from scipy.spatial import ConvexHull
-        hull = ConvexHull(pts)
+        from shapely.geometry import MultiPoint
+        poly = MultiPoint(pts).convex_hull.buffer(
+            pad, resolution=64)
+        return np.asarray(poly.exterior.coords)
     except Exception:
+        # no shapely: fallback = radially dilated convex hull
+        try:
+            from scipy.spatial import ConvexHull
+            hull = ConvexHull(pts)
+        except Exception:
+            return None
+        ring = pts[hull.vertices]
+        cxr, cyr = ring.mean(axis=0)
+        d = ring - [cxr, cyr]
+        rr = np.sqrt((d ** 2).sum(axis=1))
+        ring = [cxr, cyr] + d * (1 + pad / np.maximum(rr, 1e-9))[:, None]
+        return np.vstack([ring, ring[0]])
+
+
+def _mc_ring_ll(mc_impacts, pad_frac=0.25, pad_min_km=0.15):
+    """Closed lon/lat ring enclosing all MC impacts: convex hull
+    buffered outward by 25% of cloud radius (>=150 m floor), in
+    metric space. Returns (N+1, 2) array or None."""
+    if not mc_impacts:
         return None
-    ring = pts[hull.vertices]
-    return np.vstack([ring, ring[0]])
+    lats = np.array([i['lat'] for i in mc_impacts])
+    lons = np.array([i['lon'] for i in mc_impacts])
+    lat0 = math.radians(lats.mean())
+    c = 111.32
+    xs = lons * c * math.cos(lat0)
+    ys = lats * c
+    ring = _mc_outline(np.vstack([xs, ys]).T, pad_frac=pad_frac,
+                       pad_min=pad_min_km)
+    if ring is None:
+        return None
+    return np.vstack([ring[:, 0] / (c * math.cos(lat0)),
+                      ring[:, 1] / c]).T
 
 
 def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
@@ -1165,22 +1204,9 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
             break
     if mc_impacts:
         kw = {'transform': pc} if pc else {}
-        ring = _mc_hull(mc_impacts)
+        ring = _mc_ring_ll(mc_impacts)
         if ring is not None:
-            # dilate ~10% (floor ~0.01 deg) then spline-smooth the ring
-            cxr, cyr = np.mean(ring[:-1, 0]), np.mean(ring[:-1, 1])
-            dx, dy = ring[:, 0] - cxr, ring[:, 1] - cyr
-            rad = np.sqrt(dx * dx + dy * dy)
-            scale = 1.0 + min(1.0, max(0.10,
-                                       0.01 / max(rad.max(), 1e-6)))
-            rx, ry = cxr + dx * scale, cyr + dy * scale
-            try:
-                from scipy.interpolate import splprep, splev
-                tck, _ = splprep([rx[:-1], ry[:-1]], s=0, per=True)
-                sx, sy = splev(np.linspace(0, 1, 200), tck)
-            except Exception:
-                sx, sy = rx, ry
-            ax.fill(sx, sy, facecolor='red', alpha=0.4,
+            ax.fill(ring[:, 0], ring[:, 1], facecolor='red', alpha=0.4,
                     edgecolor='red', linewidth=1.2, linestyle='-',
                     **kw)
         ax.scatter([i['lon'] for i in mc_impacts],
@@ -1434,26 +1460,11 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             x=mx, y=my, z=[0.02] * len(mx), mode='markers',
             marker=dict(size=3, color='red', opacity=0.35),
             name='Monte Carlo', hoverinfo='skip'))
-        # shaded hull of the impact cloud on the ground plane —
-        # spline-smoothed ring, translucent fill + opaque edge
-        ring = _mc_hull(mc_impacts)
+        # shaded buffered-hull ring around the MC cloud — translucent
+        # fill + opaque edge on the ground plane
+        ring = _mc_ring_ll(mc_impacts)
         if ring is not None:
-            hx, hy = project_points(ring[:, 0], ring[:, 1])
-            # dilate the hull outward ~10% (floor 0.2 km, cap 2x) from
-            # its centroid so the shaded area encloses every MC point
-            # even after spline smoothing cuts corners. project_points
-            # returns km.
-            cxr, cyr = np.mean(hx[:-1]), np.mean(hy[:-1])
-            dx, dy = hx - cxr, hy - cyr
-            rad = np.sqrt(dx * dx + dy * dy)
-            scale = 1.0 + min(1.0, max(0.10, 0.2 / max(rad.max(), 1e-6)))
-            hx, hy = cxr + dx * scale, cyr + dy * scale
-            try:
-                from scipy.interpolate import splprep, splev
-                tck, _ = splprep([hx[:-1], hy[:-1]], s=0, per=True)
-                sx, sy = splev(np.linspace(0, 1, 200), tck)
-            except Exception:
-                sx, sy = hx, hy
+            sx, sy = project_points(ring[:, 0], ring[:, 1])
             cx, cy = np.mean(sx), np.mean(sy)
             tri_i, tri_j, tri_k = [], [], []
             vxs = [cx] + list(sx)

@@ -599,7 +599,12 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
             print("Error: Both exponential and linear fits failed.")
             return None, 0, None, np.inf
     
-    if res_exp and res_exp.success and (res_lin is None or not res_lin.success or res_exp.cost < res_lin.cost):
+    # Prefer the exponential model whenever it converged: its bounds force
+    # accel0 <= -1e-9, i.e. the physical prior that a meteor always shows
+    # *some* deceleration. The linear model is its degenerate limit and
+    # yields exactly zero deceleration, which is unphysical and breaks
+    # downstream mass inversion.
+    if res_exp and res_exp.success:
         if debug: print("Selected robust exponential model.")
         params, pcov, cost = res_exp.x, get_pcov(res_exp, n_pts, len(res_exp.x)), res_exp.cost
         return params, n_pts, pcov, cost

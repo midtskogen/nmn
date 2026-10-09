@@ -247,6 +247,9 @@ def altaz2xyz(alt_deg: float, az_deg: float, obs_lon: float, obs_lat: float) -> 
 
 def linfunc(x: float, a: float, b: float) -> float: return a * x + b
 
+def quadfunc(x: float, v0: float, a: float, p0: float) -> float:
+    return p0 + v0 * x + 0.5 * a * x**2
+
 def expfunc(t: np.ndarray, v0: float, accel0: float, k: float, p0: float) -> np.ndarray:
     if abs(k) < 1e-6: return p0 + v0 * t + 0.5 * accel0 * t**2
     return p0 + (v0 - accel0 / k) * t + (accel0 / (k**2)) * (np.exp(k * t) - 1)
@@ -589,34 +592,39 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
             print("  -> Warning: Exponential fit failed with a ValueError (likely overflow). Falling back to linear fit.")
         res_exp = None
     
-    res_lin = None
-    lin_bounds = ([min_speed, -np.inf], [np.inf, np.inf])
+    # Fallback model: quadratic position = constant deceleration. This is
+    # the k->0 limit of expfunc, and unlike a pure linear fit it always
+    # reports a nonzero (physical) deceleration.
+    res_quad = None
+    quad_bounds = ([min_speed, -np.inf, -np.inf], [np.inf, 0.0, np.inf])
     try:
-        lin_params_initial_guess, _ = curve_fit(linfunc, reltime, pos, sigma=1./sig, bounds=lin_bounds)
-        res_lin = least_squares(residual_func, lin_params_initial_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, linfunc), bounds=lin_bounds)
+        quad_guess, _ = curve_fit(quadfunc, reltime, pos, sigma=1./sig)
+        quad_guess[0] = np.clip(quad_guess[0], quad_bounds[0][0], quad_bounds[1][0])
+        quad_guess[1] = min(quad_guess[1], 0.0)
+        res_quad = least_squares(residual_func, quad_guess, loss='soft_l1', f_scale=fscale, args=(reltime, pos, sig, quadfunc), bounds=quad_bounds)
     except (RuntimeError, ValueError):
         if not (res_exp and res_exp.success):
-            print("Error: Both exponential and linear fits failed.")
+            print("Error: Both exponential and quadratic fits failed.")
             return None, 0, None, np.inf
-    
-    # Prefer the exponential model whenever it converged: its bounds force
-    # accel0 <= -1e-9, i.e. the physical prior that a meteor always shows
-    # *some* deceleration. The linear model is its degenerate limit and
-    # yields exactly zero deceleration, which is unphysical and breaks
-    # downstream mass inversion.
-    if res_exp and res_exp.success:
+
+    if res_exp and res_exp.success and (res_quad is None or not res_quad.success or res_exp.cost < res_quad.cost):
         if debug: print("Selected robust exponential model.")
         params, pcov, cost = res_exp.x, get_pcov(res_exp, n_pts, len(res_exp.x)), res_exp.cost
         return params, n_pts, pcov, cost
-    if res_lin and res_lin.success:
-        if debug: print("Selected robust linear model as fallback.")
-        lin_params = res_lin.x
-        final_params = np.array([lin_params[0], 0, 0, lin_params[1]])
-        lin_pcov = get_pcov(res_lin, n_pts, len(lin_params))
+    if res_quad and res_quad.success:
+        if debug: print("Selected robust quadratic model as fallback.")
+        v0_q, a_q, p0_q = res_quad.x
+        final_params = np.array([v0_q, a_q, 0.0, p0_q])
+        quad_pcov = get_pcov(res_quad, n_pts, len(res_quad.x))
         final_pcov = None
-        if lin_pcov is not None:
-            final_pcov = np.zeros((4, 4)); final_pcov[0, 0], final_pcov[3, 3] = lin_pcov[0, 0], lin_pcov[1, 1]; final_pcov[0, 3], final_pcov[3, 0] = lin_pcov[0, 1], lin_pcov[1, 0]
-        return final_params, n_pts, final_pcov, res_lin.cost
+        if quad_pcov is not None:
+            # map (v0, a, p0) covariance into the expfunc slot indices (0, 1, 3)
+            final_pcov = np.zeros((4, 4))
+            idx = [0, 1, 3]
+            for i, ii in enumerate(idx):
+                for j, jj in enumerate(idx):
+                    final_pcov[ii, jj] = quad_pcov[i, j]
+        return final_params, n_pts, final_pcov, res_quad.cost
     print("Error: Could not find a successful fit for the data.")
     return None, 0, None, np.inf
 

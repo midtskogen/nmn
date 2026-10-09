@@ -1206,9 +1206,14 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
         kw = {'transform': pc} if pc else {}
         ring = _mc_ring_ll(mc_impacts)
         if ring is not None:
-            ax.fill(ring[:, 0], ring[:, 1], facecolor='red', alpha=0.4,
-                    edgecolor='red', linewidth=1.2, linestyle='-',
+            # light fill + hatching so the terrain stays readable
+            ax.fill(ring[:, 0], ring[:, 1], facecolor='red', alpha=0.08,
+                    edgecolor='none', **kw)
+            ax.fill(ring[:, 0], ring[:, 1], facecolor='none',
+                    edgecolor='red', linewidth=0.0, hatch='///',
                     **kw)
+            ax.plot(ring[:, 0], ring[:, 1], color='red',
+                    linewidth=1.2, **kw)
         ax.scatter([i['lon'] for i in mc_impacts],
                    [i['lat'] for i in mc_impacts], s=2, c='red',
                    alpha=0.25, **kw)
@@ -1476,13 +1481,53 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             traces.append(go.Mesh3d(
                 x=vxs, y=vys, z=[0.02] * len(vxs),
                 i=tri_i, j=tri_j, k=tri_k,
-                color='red', opacity=0.3, name='Fall area (MC)',
+                color='red', opacity=0.15, name='Fall area (MC)',
                 showscale=False, hoverinfo='skip'))
             traces.append(go.Scatter3d(
                 x=list(sx), y=list(sy), z=[0.02] * len(sx),
                 mode='lines', line=dict(color='red', width=3),
                 name='Fall area edge', showlegend=False,
                 hoverinfo='skip'))
+            # hatch lines at 45°, clipped to the polygon
+            try:
+                from shapely.geometry import (Polygon, LineString,
+                                              MultiLineString)
+                poly = Polygon(list(zip(sx, sy)))
+                x0, y0, x1, y1 = poly.bounds
+                diag = math.hypot(x1 - x0, y1 - y0)
+                spacing = max(diag / 15.0, 0.05)
+                segs, hx_ll, hy_ll = [], [], []
+                t = -diag
+                while t < diag:
+                    # line at 45 deg offset t along the normal (-1,1)/sqrt2
+                    cxx, cyy = (x0 + x1) / 2 - t / math.sqrt(2), \
+                               (y0 + y1) / 2 + t / math.sqrt(2)
+                    ex1 = (cxx - diag / math.sqrt(2),
+                           cyy - diag / math.sqrt(2))
+                    ex2 = (cxx + diag / math.sqrt(2),
+                           cyy + diag / math.sqrt(2))
+                    cl = poly.intersection(LineString([ex1, ex2]))
+                    if isinstance(cl, LineString):
+                        cc = list(cl.coords)
+                        segs += [(cc[i], cc[i + 1])
+                                 for i in range(len(cc) - 1)]
+                    elif isinstance(cl, MultiLineString):
+                        for ls in cl.geoms:
+                            cc = list(ls.coords)
+                            segs += [(cc[i], cc[i + 1])
+                                     for i in range(len(cc) - 1)]
+                    t += spacing
+                for a, b in segs:
+                    hx_ll += [a[0], b[0], None]
+                    hy_ll += [a[1], b[1], None]
+                traces.append(go.Scatter3d(
+                    x=hx_ll, y=hy_ll, z=[0.02] * len(hx_ll),
+                    mode='lines',
+                    line=dict(color='red', width=1.5),
+                    name='MC hatch', showlegend=False,
+                    hoverinfo='skip'))
+            except Exception:
+                pass
 
     scene_dx = (x_max_m - x_min_m) / 1000.0
     scene_dy = (y_max_m - y_min_m) / 1000.0

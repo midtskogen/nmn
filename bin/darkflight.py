@@ -1413,6 +1413,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         logging.debug(f'darkflight: photometry failed: {e}')
 
     m_phot = photometry.get('m_phot_kg') if photometry else None
+    mag_anchor = None
     if m_phot is None and peak_mag is not None and have_fit:
         # manually supplied peak magnitude (normalised to 100 km) anchors
         # the mass when star-calibrated photometry is unavailable. The
@@ -1476,6 +1477,9 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                          f'v={v_of_t(t_pk)/1000:.1f} km/s) -> '
                          f'luminous mass ~{m_lum:.2f} kg, at fade-out '
                          f'~{m_phot:.3f} kg after ablation{frag_note}')
+            mag_anchor = {'peak_mag': float(peak_mag),
+                          'm_luminous_kg': float(m_lum),
+                          'm_fade_kg': float(m_phot)}
         except Exception as e:
             logging.debug(f'darkflight: --mag conversion failed: {e}')
     if m_phot and ref is not None and np.isfinite(m_med) and m_med > 0:
@@ -1545,6 +1549,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         'mass_estimates': mass_estimates,
         'entry_estimates': entry_estimates,
         'm_est_ref_kg': m_est,
+        'mag_anchor': mag_anchor,
         'reliability': reliability,
         'issues': issues,
         'n_obs': int(n_obs), 'track_duration_s': float(duration),

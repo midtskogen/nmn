@@ -1438,20 +1438,39 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             eff = np.trapz([_tau(v) * v ** 2 / 2.0 for v in vs], ts_all)
             t_pk = float(ts_all[np.argmax(shape)])
             m_lum = E_rad / eff
-            # ablate the luminous mass forward over the whole track to get
-            # the surviving mass at fade-out
+            # ablate the luminous mass forward to fade-out. If dynamic
+            # pressure at the peak exceeds compressive strength, the body
+            # fragments at peak brightness — post-peak ablation then acts
+            # on the fragment spectrum, which erodes ~n^(1/3) faster
             rho_ref = ref['rho'] if ref else 3500.0
             A_ref = ref['A'] if ref else 1.4
             B = ablation_coeff(rho_ref, A_ref) * A_ref \
                 / (2 * rho_ref ** (2. / 3))
-            m13 = m_lum ** (1. / 3) \
-                - (B / 3) * np.trapz(rhos * vs ** 3, ts_all)
-            m_phot = max(m13, 0.0) ** 3
+            ip = int(np.searchsorted(ts_all, t_pk))
+            pre = np.trapz(rhos[:ip + 1] * vs[:ip + 1] ** 3,
+                           ts_all[:ip + 1]) if ip > 0 else 0.0
+            post = np.trapz(rhos[ip:] * vs[ip:] ** 3, ts_all[ip:])
+            # coherent ablation pre-peak
+            m13_pk = max(m_lum ** (1. / 3) - (B / 3) * pre, 0.0)
+            m_pk = m13_pk ** 3
+            dyn_pk = rhos[ip] * v_of_t(t_pk) ** 2 \
+                * cd_hypersonic(A_ref)
+            frag_note = ''
+            if dyn_pk > compressive_strength(rho_ref):
+                frags = fragmentation_spectrum(m_pk)
+                m13_f = np.maximum(frags ** (1. / 3)
+                                   - (B / 3) * post, 0.0)
+                m_phot = float((m13_f ** 3).sum())
+                frag_note = (f', fragmented into ~{len(frags)} pieces '
+                             f'at peak (dyn press {dyn_pk/1e3:.0f} kPa > '
+                             f'strength {compressive_strength(rho_ref)/1e3:.0f} kPa)')
+            else:
+                m_phot = max(m13_pk - (B / 3) * post, 0.0) ** 3
             logging.info(f'darkflight: peak magnitude {peak_mag} at 100 km '
                          f'(model peak at t={t_pk:.2f}s, '
                          f'v={v_of_t(t_pk)/1000:.1f} km/s) -> '
                          f'luminous mass ~{m_lum:.2f} kg, at fade-out '
-                         f'~{m_phot:.3f} kg after ablation')
+                         f'~{m_phot:.3f} kg after ablation{frag_note}')
         except Exception as e:
             logging.debug(f'darkflight: --mag conversion failed: {e}')
     if m_phot and ref is not None and np.isfinite(m_med) and m_med > 0:

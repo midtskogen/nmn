@@ -637,8 +637,14 @@ def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
                 pos_err=100.0, vel_frac_err=0.05, dir_err_deg=0.1,
                 mass_err=0.3, rho_err=500.0, shape_err=0.15,
                 wind_err=2.0, seed=0, pool=None,
-                lon=None, lat=None, event_dt=None):
-    """Perturbed runs around nominal state. Returns list of impact dicts."""
+                lon=None, lat=None, event_dt=None,
+                mass_samples=None):
+    """Perturbed runs around nominal state. Returns list of impact dicts.
+
+    mass_samples: optional array — draw each run's mass from this
+    distribution (e.g. the breakup fragment spectrum) instead of
+    m0*(1±mass_err), so a fragmented event produces a strewn field
+    rather than a cloud around a single body."""
     rng = np.random.default_rng(seed)
     jobs = []
     for _ in range(n_runs):
@@ -653,7 +659,11 @@ def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
         d2 = rng.normal(0, np.radians(dir_err_deg)) * np.linalg.norm(v0_vec)
         ortho2 = np.cross(v0_vec, ortho); ortho2 /= np.linalg.norm(ortho2)
         v_p = v_p + d1 * ortho + d2 * ortho2
-        m_p = max(5e-3, m0 * rng.uniform(1 - mass_err, 1 + mass_err))
+        if mass_samples is not None and len(mass_samples):
+            m_p = max(5e-3, float(rng.choice(mass_samples))
+                      * rng.uniform(1 - mass_err, 1 + mass_err))
+        else:
+            m_p = max(5e-3, m0 * rng.uniform(1 - mass_err, 1 + mass_err))
         rho_p = max(500.0, rng.normal(rho_m, rho_err))
         A_p = float(np.clip(rng.normal(A, shape_err), 0.9, 3.0))
         jobs.append((r_p, v_p, m_p, rho_p, A_p, csv_path, h_ground, True,
@@ -1563,10 +1573,18 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     # Monte Carlo
     mc_impacts = []
     if mc_runs > 0:
+        # if the S5 breakup scenario fired, the real fall is a fragment
+        # strewn field — draw MC masses from its spectrum instead of
+        # perturbing a single nominal body
+        s5 = next((s for s in scenarios if s['name'] == 'S5_strength'),
+                  None)
+        m_samples = (np.array([r['m'] for r in s5['runs']])
+                     if s5 is not None else None)
         mc_impacts = [i for i in monte_carlo(
             r_end, v0_vec, m_est, 3500.0, 1.4, wind_csv, h_ground,
             n_runs=mc_runs, seed=seed, pool=pool,
-            lon=end_lon, lat=end_lat, event_dt=event_dt)
+            lon=end_lon, lat=end_lat, event_dt=event_dt,
+            mass_samples=m_samples)
             if i.get('landed', True)]
 
     results = {

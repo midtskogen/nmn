@@ -991,6 +991,21 @@ def write_kml(scenarios, end_llh, path):
     Path(path).write_text(''.join(parts), encoding='utf-8')
 
 
+def _mc_hull(mc_impacts):
+    """Convex hull of the MC impact cloud -> (N+1, 2) closed ring of
+    (lon, lat), or None when fewer than 3 points."""
+    if not mc_impacts or len(mc_impacts) < 3:
+        return None
+    pts = np.array([[i['lon'], i['lat']] for i in mc_impacts])
+    try:
+        from scipy.spatial import ConvexHull
+        hull = ConvexHull(pts)
+    except Exception:
+        return None
+    ring = pts[hull.vertices]
+    return np.vstack([ring, ring[0]])
+
+
 def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
               translations=None):
     """Fall-area map: Kartverket basemap, impact markers, MC ellipse."""
@@ -1150,9 +1165,14 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
             break
     if mc_impacts:
         kw = {'transform': pc} if pc else {}
+        ring = _mc_hull(mc_impacts)
+        if ring is not None:
+            ax.fill(ring[:, 0], ring[:, 1], facecolor='red', alpha=0.15,
+                    edgecolor='red', linewidth=1.0, linestyle='--',
+                    **kw)
         ax.scatter([i['lon'] for i in mc_impacts],
-                   [i['lat'] for i in mc_impacts], s=2, c='magenta',
-                   alpha=0.4, **kw)
+                   [i['lat'] for i in mc_impacts], s=2, c='red',
+                   alpha=0.25, **kw)
     # scale bar: ~1/4 of map width, rounded to a nice value
     span_m = (lon_max - lon_min) * 111320 * math.cos(
         math.radians((lat_min + lat_max) / 2))
@@ -1399,8 +1419,26 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                                 [i['lat'] for i in mc_impacts])
         traces.append(go.Scatter3d(
             x=mx, y=my, z=[0.02] * len(mx), mode='markers',
-            marker=dict(size=3, color='magenta', opacity=0.45),
+            marker=dict(size=3, color='red', opacity=0.35),
             name='Monte Carlo'))
+        # shaded hull of the impact cloud on the ground plane
+        ring = _mc_hull(mc_impacts)
+        if ring is not None:
+            hx, hy = project_points(ring[:, 0], ring[:, 1])
+            # fan-triangulate the convex ring for Mesh3d
+            cx, cy = np.mean(hx), np.mean(hy)
+            tri_i, tri_j, tri_k = [], [], []
+            vxs = [cx] + list(hx)
+            vys = [cy] + list(hy)
+            for k in range(len(hx)):
+                tri_i.append(0)
+                tri_j.append(k + 1)
+                tri_k.append(1 + (k + 1) % len(hx))
+            traces.append(go.Mesh3d(
+                x=vxs, y=vys, z=[0.02] * len(vxs),
+                i=tri_i, j=tri_j, k=tri_k,
+                color='red', opacity=0.15, name='Fall area (MC)',
+                showscale=False))
 
     scene_dx = (x_max_m - x_min_m) / 1000.0
     scene_dy = (y_max_m - y_min_m) / 1000.0

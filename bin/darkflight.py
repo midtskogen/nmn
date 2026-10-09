@@ -536,7 +536,7 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
     breakup scenario (Borovicka power-law + grain loss) is added.
     """
     if masses_grid is None:
-        masses_grid = np.logspace(-3, np.log10(5.0), 16)  # 1 g .. 5 kg
+        masses_grid = np.logspace(np.log10(5e-3), np.log10(5.0), 16)  # 5 g .. 5 kg
     sc = []
     sc.append({'name': 'S0_intact', 'label': 'Single body (estimated mass)',
                'runs': [{'m': m_est, 'rho': rho_m, 'A': A}], 'erode': True})
@@ -553,8 +553,8 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
         sc.append({'name': f'S3_equal_{n}', 'label': f'{n} equal fragments',
                    'runs': [{'m': m_est / n, 'rho': rho_m, 'A': A}
                             for _ in range(n)], 'erode': True})
-    # power-law dN/dM ~ M^-2, fragments down to 1 g (inverse-CDF sampling)
-    m_min = 0.001
+    # power-law dN/dM ~ M^-2, fragments down to 5 g (inverse-CDF sampling)
+    m_min = 0.005
     u = np.linspace(0.05, 0.95, 60)
     ms = 1.0 / (1.0 / m_min - u * (1.0 / m_min - 1.0 / m_est))
     sc.append({'name': 'S4_powerlaw', 'label': 'Power-law fragment swarm',
@@ -576,10 +576,10 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
         base = next(s for s in sc if s['name'] == name)
         sc.append({**base, 'name': name + '_noerosion',
                    'label': base['label'] + ' (no ablation)', 'erode': False})
-    # nothing smaller than 1 gram is shown — drop sub-gram runs and
-    # scenarios left empty by the cut
+    # nothing smaller than 5 gram is shown — drop runs below the cut
+    # and scenarios left empty by it
     for s in sc:
-        s['runs'] = [r for r in s['runs'] if r['m'] >= 1e-3]
+        s['runs'] = [r for r in s['runs'] if r['m'] >= 5e-3]
     return [s for s in sc if s['runs']]
 
 
@@ -633,7 +633,7 @@ def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
         d2 = rng.normal(0, np.radians(dir_err_deg)) * np.linalg.norm(v0_vec)
         ortho2 = np.cross(v0_vec, ortho); ortho2 /= np.linalg.norm(ortho2)
         v_p = v_p + d1 * ortho + d2 * ortho2
-        m_p = max(1e-3, m0 * rng.uniform(1 - mass_err, 1 + mass_err))
+        m_p = max(5e-3, m0 * rng.uniform(1 - mass_err, 1 + mass_err))
         rho_p = max(500.0, rng.normal(rho_m, rho_err))
         A_p = float(np.clip(rng.normal(A, shape_err), 0.9, 3.0))
         jobs.append((r_p, v_p, m_p, rho_p, A_p, csv_path, h_ground, True,

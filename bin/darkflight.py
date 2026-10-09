@@ -1167,8 +1167,21 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
         kw = {'transform': pc} if pc else {}
         ring = _mc_hull(mc_impacts)
         if ring is not None:
-            ax.fill(ring[:, 0], ring[:, 1], facecolor='red', alpha=0.75,
-                    edgecolor='red', linewidth=1.0, linestyle='--',
+            # dilate ~10% (floor ~0.01 deg) then spline-smooth the ring
+            cxr, cyr = np.mean(ring[:-1, 0]), np.mean(ring[:-1, 1])
+            dx, dy = ring[:, 0] - cxr, ring[:, 1] - cyr
+            rad = np.sqrt(dx * dx + dy * dy)
+            scale = 1.0 + min(1.0, max(0.10,
+                                       0.01 / max(rad.max(), 1e-6)))
+            rx, ry = cxr + dx * scale, cyr + dy * scale
+            try:
+                from scipy.interpolate import splprep, splev
+                tck, _ = splprep([rx[:-1], ry[:-1]], s=0, per=True)
+                sx, sy = splev(np.linspace(0, 1, 200), tck)
+            except Exception:
+                sx, sy = rx, ry
+            ax.fill(sx, sy, facecolor='red', alpha=0.4,
+                    edgecolor='red', linewidth=1.2, linestyle='-',
                     **kw)
         ax.scatter([i['lon'] for i in mc_impacts],
                    [i['lat'] for i in mc_impacts], s=2, c='red',
@@ -1426,13 +1439,14 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         ring = _mc_hull(mc_impacts)
         if ring is not None:
             hx, hy = project_points(ring[:, 0], ring[:, 1])
-            # dilate the hull outward ~10% (+ floor ~200 m) from its
-            # centroid so the shaded area encloses every MC point even
-            # after spline smoothing cuts corners
+            # dilate the hull outward ~10% (floor 0.2 km, cap 2x) from
+            # its centroid so the shaded area encloses every MC point
+            # even after spline smoothing cuts corners. project_points
+            # returns km.
             cxr, cyr = np.mean(hx[:-1]), np.mean(hy[:-1])
             dx, dy = hx - cxr, hy - cyr
             rad = np.sqrt(dx * dx + dy * dy)
-            scale = 1.0 + max(0.10, 200.0 / rad.max())
+            scale = 1.0 + min(1.0, max(0.10, 0.2 / max(rad.max(), 1e-6)))
             hx, hy = cxr + dx * scale, cyr + dy * scale
             try:
                 from scipy.interpolate import splprep, splev

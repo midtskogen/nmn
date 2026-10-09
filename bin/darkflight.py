@@ -1261,6 +1261,17 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
 
         v_end = v_of_t(t_last)
         a_end = a_of_t(t_last)
+
+        # Exponential speed fits extrapolate through zero for meteors
+        # that decelerate out of the luminous regime before the last
+        # centroid. The last observed position is real; only the speed
+        # extrapolation is unphysical — release at the luminous-fade
+        # speed (~3 km/s) instead of rejecting the event.
+        V_LUM_MIN = 3000.0
+        if v_end < V_LUM_MIN:
+            logging.info(f'darkflight: fitted v_end={v_end/1000:.2f} km/s '
+                         f'below luminous threshold — releasing at 3 km/s')
+            v_end = V_LUM_MIN
     else:
         v_end, a_end, t0_obs, t_last, n_obs = 3000.0, 1e4, 0.0, 1.0, 0
         logging.warning('darkflight: no fbspd fit, using nominal v_end/a_end')

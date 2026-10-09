@@ -1407,15 +1407,28 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         logging.debug(f'darkflight: photometry failed: {e}')
 
     m_phot = photometry.get('m_phot_kg') if photometry else None
-    if m_phot is None and peak_mag is not None:
+    if m_phot is None and peak_mag is not None and have_fit:
         # manually supplied peak magnitude (normalised to 100 km) anchors
-        # the mass when star-calibrated photometry is unavailable; use the
-        # mid-track speed as the peak-brightness speed
+        # the mass when star-calibrated photometry is unavailable. The
+        # magnitude gives the mass *at peak brightness*; ablate it forward
+        # over the post-peak track to get the surviving mass at fade-out
         try:
-            v_pk = v_of_t(t0_obs + 0.6 * (t_last - t0_obs))
-            m_phot = _mag_to_photometric_mass(float(peak_mag), v_pk)
+            t_pk = t0_obs + 0.6 * (t_last - t0_obs)
+            v_pk = v_of_t(t_pk)
+            m_pk = _mag_to_photometric_mass(float(peak_mag), v_pk)
+            # forward ablation: m_fade^(1/3) = m_pk^(1/3) - (B/3)∫ρv³dt
+            rho_ref = ref['rho'] if ref else 3500.0
+            A_ref = ref['A'] if ref else 1.4
+            B = ablation_coeff(rho_ref, A_ref) * A_ref \
+                / (2 * rho_ref ** (2. / 3))
+            ts = np.linspace(t_pk, t_last, 200)
+            vs = np.array([v_of_t(t) for t in ts])
+            rhos = np.array([atm.at(max(h_of_t(t), 0.0))[1] for t in ts])
+            m13 = m_pk ** (1. / 3) - (B / 3) * np.trapz(rhos * vs ** 3, ts)
+            m_phot = max(m13, 0.0) ** 3
             logging.info(f'darkflight: peak magnitude {peak_mag} at 100 km '
-                         f'-> photometric mass ~{m_phot:.2f} kg')
+                         f'-> mass at peak ~{m_pk:.2f} kg, at fade-out '
+                         f'~{m_phot:.2f} kg after post-peak ablation')
         except Exception as e:
             logging.debug(f'darkflight: --mag conversion failed: {e}')
     if m_phot and ref is not None and np.isfinite(m_med) and m_med > 0:

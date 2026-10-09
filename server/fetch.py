@@ -1432,7 +1432,7 @@ def _rewrite_obs_to_inliers(obs_filepath: Path, obs_file_paths: list, inlier_set
         logging.warning(f"Could not rewrite main observation file: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False, peak_mag: float = None):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     if nosplit:
@@ -2275,7 +2275,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         wind_csv if wind_csv.exists() else None,
                         mc_runs=0 if fast else 300,
                         lang_files=lang_files,
-                        peak_mag=args.mag,
+                        peak_mag=peak_mag,
                     )
                     # Convert the fall-area map to jpg per language
                     for lang in SUPPORTED_LANGS:
@@ -2621,7 +2621,7 @@ def main():
             process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all,
                       use_orig_cen=args.origcen, infrasound_only=args.infrasound,
                       verbose=args.verbose, force_plots=args.force_plots, min_speed=args.min_speed,
-                      nosplit=args.nosplit)
+                      nosplit=args.nosplit, peak_mag=args.mag)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -2683,14 +2683,14 @@ def main():
     process_event_with_lock(final_event_dir, processing_date,
                             all_stations=args.all, use_orig_cen=args.origcen,
                             infrasound_only=args.infrasound, verbose=args.verbose,
-                            nosplit=args.nosplit)
+                            nosplit=args.nosplit, peak_mag=args.mag)
     logging.info("--- Script finished. ---")
 
 
 def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
                             all_stations: bool = False, use_orig_cen: bool = False,
                             infrasound_only: bool = False, verbose: bool = False,
-                            nosplit: bool = False):
+                            nosplit: bool = False, peak_mag: float = None):
     # Acquire an exclusive lock on the event directory so that concurrent
     # fetch.py instances (for different stations of the same event) do not
     # run process_event() simultaneously.  The second instance will block
@@ -2731,7 +2731,7 @@ def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
         else:
             logging.info("Lock acquired. Starting process_event().")
 
-        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit)
+        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit, peak_mag=peak_mag)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

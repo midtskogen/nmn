@@ -734,7 +734,14 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                 f'<tr><td>{t.get("df_end_speed", "End speed")}:</td>'
                 f'<td>{end["v_end_ms"]/1000:.1f} km/s</td></tr>',
             ]
-            if results.get('entry_estimates'):
+            ma = results.get('mag_anchor')
+            if results.get('reliability') == 'unreliable' and ma:
+                rows.append(
+                    f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
+                    f'<td>~{_fmt_mass(ma["m_fade_kg"], t)} '
+                    f'({t.get("df_from_mag", "from peak magnitude")}'
+                    f' {ma["peak_mag"]:.0f})</td></tr>')
+            elif results.get('entry_estimates'):
                 est = next((e for e in results['entry_estimates'] if e['rho'] == 3500),
                            results['entry_estimates'][0])
                 if results.get('reliability') == 'unreliable':

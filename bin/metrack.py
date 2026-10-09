@@ -116,6 +116,11 @@ def _min_orbital_speed_for_height_km(height_km: float, speed_margin_km_s: float 
 
 ATM_SCALE_HEIGHT_KM = 7.0
 
+# Station clocks are not perfectly synced — allow several seconds of
+# timestamp offset on top of the duration-based slack before calling an
+# observation a different meteor.
+CLOCK_DRIFT_S = 10.0
+
 
 def _refraction_deg_apparent_minus_true(alt_deg: float, pressure_hpa: float = 1010.0, temp_c: float = 10.0) -> float:
     """Approximate atmospheric refraction in degrees: (apparent altitude) - (true altitude).
@@ -1712,15 +1717,17 @@ def calculate_model_score(fit_results, inlier_obs_data, weights, indices_set, op
 
     # Temporal consistency: every inlier's observation window must be
     # within ~2 s (or 1.5x the median duration) of the consensus event
-    # time. A track seconds earlier/later is a different meteor whose
-    # line of sight only happened to give a plausible-looking fit.
+    # time, plus an allowance for station clock drift. A track far
+    # earlier/later is a different meteor whose line of sight only
+    # happened to give a plausible-looking fit.
     ts = inlier_obs_data.get('timestamps')
     if ts is not None:
         durs = inlier_obs_data['durations']
         valid = [(t, d) for t, d in zip(ts, durs) if t > 0]
         if len(valid) >= 2:
             t0 = float(np.median([t for t, _ in valid]))
-            slack = max(2.0, 1.5 * float(np.median([d for _, d in valid])))
+            slack = (max(2.0, 1.5 * float(np.median([d for _, d in valid])))
+                     + CLOCK_DRIFT_S)
             if any(abs(t - t0) > slack for t, _ in valid):
                 penalty += 1e9
 
@@ -1924,7 +1931,7 @@ def _load_and_prepare_data(filepath):
         t0 = float(np.median(ts))
         med_dur = float(np.median([s['duration'] for s in station_data_list
                                    if s['duration']]))
-        slack = max(2.0, 1.5 * med_dur)
+        slack = max(2.0, 1.5 * med_dur) + CLOCK_DRIFT_S
         kept, dropped = [], []
         for s in station_data_list:
             (kept if not s['timestamp'] or abs(s['timestamp'] - t0) <= slack

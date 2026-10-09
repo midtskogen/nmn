@@ -2275,6 +2275,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         wind_csv if wind_csv.exists() else None,
                         mc_runs=0 if fast else 300,
                         lang_files=lang_files,
+                        peak_mag=args.mag,
                     )
                     # Convert the fall-area map to jpg per language
                     for lang in SUPPORTED_LANGS:
@@ -2561,6 +2562,14 @@ def main():
         default=None,
         help="Override the minimum physically plausible speed (km/s). "
              "If omitted, it is derived from the fitted altitude as circular-orbit speed minus 1 km/s."
+    )
+    parser.add_argument(
+        "--mag",
+        type=float,
+        default=None,
+        help="Peak visual magnitude normalised to 100 km (absolute magnitude). "
+             "Passed to the dark-flight analysis as a photometric mass anchor "
+             "when star-calibrated photometry is unavailable."
     )
     parser.add_argument(
         "--infrasound",

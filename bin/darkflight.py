@@ -1212,9 +1212,25 @@ def _clean_outputs(event_dir):
                 pass
 
 
+def _mag_to_photometric_mass(mag, v_ms):
+    """Peak apparent magnitude normalised to 100 km -> photometric mass [kg].
+
+    Peak luminosity L = 4*pi*r^2*F_VEGA*10^(-0.4*m). For a light curve
+    roughly symmetric about its peak, int(L)dt ~ 0.5*T*L_peak and
+    int(tau*v^2/2)dt ~ 0.5*T*tau*v^2/2, so the duration cancels and
+    m ~ L/(tau*v^2) using the speed at peak brightness. Same
+    speed-dependent tau convention as photometry.photometric_mass.
+    Order-of-magnitude only — used when star calibration is missing.
+    """
+    F_VEGA = 2.5e-6   # W/m^2 for a mag-0 star (broadband)
+    L = 4 * math.pi * (100e3) ** 2 * F_VEGA * 10 ** (-0.4 * mag)
+    tau = min(0.20, max(0.001, 0.0007 * (v_ms / 1000.0)))
+    return L / (tau * v_ms ** 2)
+
+
 def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                    wind_csv=None, mc_runs=300, seed=0, pool=None,
-                   verbose=False, lang_files=None):
+                   verbose=False, lang_files=None, peak_mag=None):
     """Top-level: compute dark flight for an event directory.
 
     resdat: ResData (from fbspd_merge.readres) with track start/end.
@@ -1391,6 +1407,17 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         logging.debug(f'darkflight: photometry failed: {e}')
 
     m_phot = photometry.get('m_phot_kg') if photometry else None
+    if m_phot is None and peak_mag is not None:
+        # manually supplied peak magnitude (normalised to 100 km) anchors
+        # the mass when star-calibrated photometry is unavailable; use the
+        # mid-track speed as the peak-brightness speed
+        try:
+            v_pk = v_of_t(t0_obs + 0.6 * (t_last - t0_obs))
+            m_phot = _mag_to_photometric_mass(float(peak_mag), v_pk)
+            logging.info(f'darkflight: peak magnitude {peak_mag} at 100 km '
+                         f'-> photometric mass ~{m_phot:.2f} kg')
+        except Exception as e:
+            logging.debug(f'darkflight: --mag conversion failed: {e}')
     if m_phot and ref is not None and np.isfinite(m_med) and m_med > 0:
         if m_med / m_phot > 50:
             issues.append(
@@ -1491,6 +1518,10 @@ def main():
     ap.add_argument('event_dir')
     ap.add_argument('--mc', type=int, default=300)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--mag', type=float, default=None,
+                    help='Peak visual magnitude normalised to 100 km '
+                         '(absolute magnitude). Used as photometric mass '
+                         'anchor when star-calibrated photometry fails.')
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
     from fbspd_merge import readres, calculate_speed_profile
@@ -1522,7 +1553,7 @@ def main():
     run_darkflight(event_dir, resdat, results_fb, plot_data,
                    wind_csv if wind_csv.exists() else None,
                    mc_runs=args.mc, seed=args.seed,
-                   lang_files=lang_files)
+                   lang_files=lang_files, peak_mag=args.mag)
 
 
 if __name__ == '__main__':

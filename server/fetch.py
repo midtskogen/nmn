@@ -1432,7 +1432,7 @@ def _rewrite_obs_to_inliers(obs_filepath: Path, obs_file_paths: list, inlier_set
         logging.warning(f"Could not rewrite main observation file: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False, peak_mag: float = None):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False, peak_mag: float = None, density: float = None):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     if nosplit:
@@ -2276,6 +2276,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                         mc_runs=0 if fast else 300,
                         lang_files=lang_files,
                         peak_mag=peak_mag,
+                        rho_ref=density,
                     )
                     # Convert the fall-area map to jpg per language
                     for lang in SUPPORTED_LANGS:
@@ -2572,6 +2573,13 @@ def main():
              "when star-calibrated photometry is unavailable."
     )
     parser.add_argument(
+        "--density",
+        type=float,
+        default=None,
+        help="Reference meteoroid density in kg/m3 for dark-flight "
+             "(e.g. 3500 chondrite, 7000 iron). Passed to darkflight.py."
+    )
+    parser.add_argument(
         "--infrasound",
         action="store_true",
         help="For reprocessing mode: skip pre-processing and only run infrasound fitting (infra_fit.py) for the event."
@@ -2621,7 +2629,7 @@ def main():
             process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all,
                       use_orig_cen=args.origcen, infrasound_only=args.infrasound,
                       verbose=args.verbose, force_plots=args.force_plots, min_speed=args.min_speed,
-                      nosplit=args.nosplit, peak_mag=args.mag)
+                      nosplit=args.nosplit, peak_mag=args.mag, density=args.density)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -2683,14 +2691,16 @@ def main():
     process_event_with_lock(final_event_dir, processing_date,
                             all_stations=args.all, use_orig_cen=args.origcen,
                             infrasound_only=args.infrasound, verbose=args.verbose,
-                            nosplit=args.nosplit, peak_mag=args.mag)
+                            nosplit=args.nosplit, peak_mag=args.mag,
+                            density=args.density)
     logging.info("--- Script finished. ---")
 
 
 def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
                             all_stations: bool = False, use_orig_cen: bool = False,
                             infrasound_only: bool = False, verbose: bool = False,
-                            nosplit: bool = False, peak_mag: float = None):
+                            nosplit: bool = False, peak_mag: float = None,
+                            density: float = None):
     # Acquire an exclusive lock on the event directory so that concurrent
     # fetch.py instances (for different stations of the same event) do not
     # run process_event() simultaneously.  The second instance will block
@@ -2731,7 +2741,7 @@ def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
         else:
             logging.info("Lock acquired. Starting process_event().")
 
-        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit, peak_mag=peak_mag)
+        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit, peak_mag=peak_mag, density=density)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

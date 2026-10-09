@@ -1231,7 +1231,8 @@ def _mag_to_photometric_mass(mag, v_ms):
 
 def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                    wind_csv=None, mc_runs=300, seed=0, pool=None,
-                   verbose=False, lang_files=None, peak_mag=None):
+                   verbose=False, lang_files=None, peak_mag=None,
+                   rho_ref=None):
     """Top-level: compute dark flight for an event directory.
 
     resdat: ResData (from fbspd_merge.readres) with track start/end.
@@ -1347,10 +1348,14 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     # Surviving-mass estimates over the density grid (whole-track fit)
     mass_estimates = []
     if have_fit:
+        rho_grid = DENSITY_GRID
+        if rho_ref is not None and rho_ref not in rho_grid:
+            rho_grid = sorted(rho_grid + [float(rho_ref)])
         mass_estimates = estimate_mass(v_of_t, a_of_t, h_of_t,
-                                       (t0_obs, t_last),
+                                       (t0_obs, t_last), rho_grid=rho_grid,
                                        atm=atm, params=params, pcov=pcov)
-    ref = next((e for e in mass_estimates if e['rho'] == 3500), None)
+    ref = next((e for e in mass_estimates if e['rho'] == (rho_ref or 3500)),
+               None)
 
     # --- Reliability assessment -------------------------------------------------
     # A meteor that fades while still fast (luminous regime ends ~3-4 km/s)
@@ -1442,10 +1447,10 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             # pressure at the peak exceeds compressive strength, the body
             # fragments at peak brightness — post-peak ablation then acts
             # on the fragment spectrum, which erodes ~n^(1/3) faster
-            rho_ref = ref['rho'] if ref else 3500.0
+            rho_r = float(rho_ref) if rho_ref else (ref['rho'] if ref else 3500.0)
             A_ref = ref['A'] if ref else 1.4
-            B = ablation_coeff(rho_ref, A_ref) * A_ref \
-                / (2 * rho_ref ** (2. / 3))
+            B = ablation_coeff(rho_r, A_ref) * A_ref \
+                / (2 * rho_r ** (2. / 3))
             ip = int(np.searchsorted(ts_all, t_pk))
             pre = np.trapz(rhos[:ip + 1] * vs[:ip + 1] ** 3,
                            ts_all[:ip + 1]) if ip > 0 else 0.0
@@ -1456,14 +1461,14 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             dyn_pk = rhos[ip] * v_of_t(t_pk) ** 2 \
                 * cd_hypersonic(A_ref)
             frag_note = ''
-            if dyn_pk > compressive_strength(rho_ref):
+            if dyn_pk > compressive_strength(rho_r):
                 frags = fragmentation_spectrum(m_pk)
                 m13_f = np.maximum(frags ** (1. / 3)
                                    - (B / 3) * post, 0.0)
                 m_phot = float((m13_f ** 3).sum())
                 frag_note = (f', fragmented into ~{len(frags)} pieces '
                              f'at peak (dyn press {dyn_pk/1e3:.0f} kPa > '
-                             f'strength {compressive_strength(rho_ref)/1e3:.0f} kPa)')
+                             f'strength {compressive_strength(rho_r)/1e3:.0f} kPa)')
             else:
                 m_phot = max(m13_pk - (B / 3) * post, 0.0) ** 3
             logging.info(f'darkflight: peak magnitude {peak_mag} at 100 km '
@@ -1509,7 +1514,8 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     v0_vec = track_dir * v_end
     _, rho_end, _ = atm.at(max(end_h, 0.0))
     dyn_press = cd_hypersonic(1.4) * rho_end * v_end ** 2
-    scenarios = build_scenarios(m_est, dyn_press=dyn_press)
+    scenarios = build_scenarios(m_est, rho_m=rho_ref or 3500.0,
+                                dyn_press=dyn_press)
     for sc in scenarios:
         sc['results'] = []
         for run in sc['runs']:
@@ -1577,6 +1583,12 @@ def main():
                     help='Peak visual magnitude normalised to 100 km '
                          '(absolute magnitude). Used as photometric mass '
                          'anchor when star-calibrated photometry fails.')
+    ap.add_argument('--density', type=float, default=None,
+                    help='Reference meteoroid density in kg/m3 '
+                         '(e.g. 3500 chondrite, 7000 iron). Sets the '
+                         'scenario material and photometric anchor '
+                         'density; the dynamic mass grid still spans '
+                         'all densities.')
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
     from fbspd_merge import readres, calculate_speed_profile
@@ -1608,7 +1620,8 @@ def main():
     run_darkflight(event_dir, resdat, results_fb, plot_data,
                    wind_csv if wind_csv.exists() else None,
                    mc_runs=args.mc, seed=args.seed,
-                   lang_files=lang_files, peak_mag=args.mag)
+                   lang_files=lang_files, peak_mag=args.mag,
+                   rho_ref=args.density)
 
 
 if __name__ == '__main__':

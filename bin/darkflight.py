@@ -1167,7 +1167,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
         kw = {'transform': pc} if pc else {}
         ring = _mc_hull(mc_impacts)
         if ring is not None:
-            ax.fill(ring[:, 0], ring[:, 1], facecolor='red', alpha=0.15,
+            ax.fill(ring[:, 0], ring[:, 1], facecolor='red', alpha=0.75,
                     edgecolor='red', linewidth=1.0, linestyle='--',
                     **kw)
         ax.scatter([i['lon'] for i in mc_impacts],
@@ -1437,7 +1437,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             traces.append(go.Mesh3d(
                 x=vxs, y=vys, z=[0.02] * len(vxs),
                 i=tri_i, j=tri_j, k=tri_k,
-                color='red', opacity=0.15, name='Fall area (MC)',
+                color='red', opacity=0.75, name='Fall area (MC)',
                 showscale=False))
 
     scene_dx = (x_max_m - x_min_m) / 1000.0

@@ -962,7 +962,7 @@ def write_geojson(scenarios, path):
         {'type': 'FeatureCollection', 'features': feats}), encoding='utf-8')
 
 
-def write_kml(scenarios, end_llh, path):
+def write_kml(scenarios, end_llh, path, mc_impacts=None):
     parts = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
              f'<name>Dark flight</name>',
@@ -987,6 +987,63 @@ def write_kml(scenarios, end_llh, path):
                 f'<Point><coordinates>{imp["lon"]:.6f},{imp["lat"]:.6f},'
                 f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
     parts.append('</Folder>')
+    # Monte Carlo fall area — translucent red polygon + hatch lines
+    ring = _mc_ring_ll(mc_impacts)
+    if ring is not None:
+        coords = ' '.join(f'{lo:.6f},{la:.6f},0'
+                          for lo, la in ring)
+        parts.append('<Folder><name>Fall area (MC)</name>')
+        parts.append(
+            '<Placemark><name>Fall area (MC)</name>'
+            '<Style><PolyStyle><color>4d0000ff</color></PolyStyle>'
+            '<LineStyle><color>ff0000ff</color><width>2</width>'
+            '</LineStyle></Style>'
+            '<Polygon><altitudeMode>clampToGround</altitudeMode>'
+            '<outerBoundaryIs><LinearRing><coordinates>'
+            f'{coords}</coordinates></LinearRing></outerBoundaryIs>'
+            '</Polygon></Placemark>')
+        # hatch lines at 45 deg clipped to the ring (KML has no
+        # hatch fill — draw them as ground-clamped LineStrings)
+        try:
+            from shapely.geometry import Polygon, LineString, \
+                MultiLineString
+            poly = Polygon(list(zip(ring[:, 0], ring[:, 1])))
+            x0, y0, x1, y1 = poly.bounds
+            diag = math.hypot(x1 - x0, y1 - y0)
+            spacing = max(diag / 15.0, 1e-4)
+            segs = []
+            t = -diag
+            while t < diag:
+                cxx = (x0 + x1) / 2 - t / math.sqrt(2)
+                cyy = (y0 + y1) / 2 + t / math.sqrt(2)
+                ex1 = (cxx - diag / math.sqrt(2),
+                       cyy - diag / math.sqrt(2))
+                ex2 = (cxx + diag / math.sqrt(2),
+                       cyy + diag / math.sqrt(2))
+                cl = poly.intersection(LineString([ex1, ex2]))
+                geoms = ([cl] if isinstance(cl, LineString)
+                         else list(cl.geoms) if isinstance(
+                             cl, MultiLineString) else [])
+                for ls in geoms:
+                    segs.append(list(ls.coords))
+                t += spacing
+            if segs:
+                parts.append(
+                    '<Placemark><name>MC hatch</name>'
+                    '<Style><LineStyle><color>ff0000ff</color>'
+                    '<width>1</width></LineStyle></Style>'
+                    '<MultiGeometry>')
+                for seg in segs:
+                    sc = ' '.join(f'{lo:.6f},{la:.6f},0'
+                                  for lo, la in seg)
+                    parts.append(
+                        '<LineString><altitudeMode>clampToGround'
+                        f'</altitudeMode><coordinates>{sc}'
+                        '</coordinates></LineString>')
+                parts.append('</MultiGeometry></Placemark>')
+        except Exception:
+            pass
+        parts.append('</Folder>')
     parts.append('</Document></kml>')
     Path(path).write_text(''.join(parts), encoding='utf-8')
 
@@ -1991,7 +2048,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     write_json(results, event_dir / 'darkflight.json')
     write_geojson(scenarios, event_dir / 'darkflight.geojson')
     write_kml(scenarios, (end_lon, end_lat, end_h),
-              event_dir / 'darkflight.kml')
+              event_dir / 'darkflight.kml', mc_impacts=mc_impacts)
     for file_prefix, tr in (lang_files or {'': {}}).items():
         try:
             write_map(scenarios, (end_lon, end_lat, end_h), mc_impacts,

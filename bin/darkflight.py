@@ -326,16 +326,23 @@ def compressive_strength(rho_m):
 
 
 def fragmentation_spectrum(m_total, mass_index=2.0,
-                           min_ratio=0.01, max_ratio=0.10,
-                           grain_ratio=0.25):
-    """WMPL-style disruption: `grain_ratio` of the mass turns to dust
-    (ablated, not tracked), the rest breaks into fragments whose masses
-    are `min_ratio`–`max_ratio` of the disrupted mass, drawn from a
-    power-law dN/dm ~ m^-mass_index (inverse-CDF sample, ~10 pieces)."""
+                           min_ratio=0.005, max_ratio=0.10,
+                           grain_ratio=0.25, severity=1.0):
+    """WMPL-style disruption scaled by severity = dyn_press/strength.
+
+    `grain_ratio` of the mass turns to dust (ablated, not tracked), the
+    rest breaks into fragments whose masses are `min_ratio`–`max_ratio`
+    of the disrupted mass, drawn from a power-law dN/dm ~ m^-mass_index.
+    Marginal breakup (severity ~1) gives ~10 pieces; catastrophic
+    disruption (severity >>1) produces hundreds of smaller fragments
+    and loses more mass to grains: n ~ severity^2, grain share ~sqrt."""
+    n = int(np.clip(5 * severity ** 2, 10, 400))
+    grain_ratio = float(np.clip(grain_ratio * np.sqrt(severity),
+                                0.25, 0.75))
     m_frag = m_total * (1.0 - grain_ratio)
     lo, hi = min_ratio * m_frag, max_ratio * m_frag
     # inverse CDF for dN/dm ~ m^-a between lo and hi
-    u = np.linspace(0.05, 0.95, 10)
+    u = np.linspace(0.05, 0.95, n)
     a = mass_index
     inv = lambda x: ((1 - x) * lo ** (1 - a) + x * hi ** (1 - a)) ** (1 / (1 - a))
     ms = inv(u)
@@ -566,7 +573,7 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
     # is lost as grains, the rest breaks into a power-law spectrum
     strength = compressive_strength(rho_m)
     if dyn_press is not None and dyn_press > strength:
-        frags = fragmentation_spectrum(m_est)
+        frags = fragmentation_spectrum(m_est, severity=dyn_press / strength)
         sc.append({'name': 'S5_strength', 'label':
                    'Breakup at fade-out (strength-limited)',
                    'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in frags],
@@ -1463,7 +1470,8 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                 * cd_hypersonic(A_ref)
             frag_note = ''
             if dyn_pk > compressive_strength(rho_r):
-                frags = fragmentation_spectrum(m_pk)
+                frags = fragmentation_spectrum(
+                    m_pk, severity=dyn_pk / compressive_strength(rho_r))
                 m13_f = np.maximum(frags ** (1. / 3)
                                    - (B / 3) * post, 0.0)
                 m_phot = float((m13_f ** 3).sum())

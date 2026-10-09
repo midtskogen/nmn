@@ -1215,15 +1215,16 @@ def _clean_outputs(event_dir):
 def _mag_to_photometric_mass(mag, v_ms):
     """Peak apparent magnitude normalised to 100 km -> photometric mass [kg].
 
-    Peak luminosity L = 4*pi*r^2*F_VEGA*10^(-0.4*m). For a light curve
-    roughly symmetric about its peak, int(L)dt ~ 0.5*T*L_peak and
+    Peak luminous intensity L = 1500*10^(-0.4*m) W — the meteor
+    convention (Ceplecha/Jacchia): a magnitude-0 meteor at 100 km
+    radiates ~1500 W isotropic-equivalent. For a light curve roughly
+    symmetric about its peak, int(L)dt ~ 0.5*T*L_peak and
     int(tau*v^2/2)dt ~ 0.5*T*tau*v^2/2, so the duration cancels and
     m ~ L/(tau*v^2) using the speed at peak brightness. Same
     speed-dependent tau convention as photometry.photometric_mass.
     Order-of-magnitude only — used when star calibration is missing.
     """
-    F_VEGA = 2.5e-6   # W/m^2 for a mag-0 star (broadband)
-    L = 4 * math.pi * (100e3) ** 2 * F_VEGA * 10 ** (-0.4 * mag)
+    L = 1500.0 * 10 ** (-0.4 * mag)
     tau = min(0.20, max(0.001, 0.0007 * (v_ms / 1000.0)))
     return L / (tau * v_ms ** 2)
 
@@ -1428,8 +1429,11 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                              for t in ts_all])
             shape = np.array([_tau(v) * r * v ** 3
                               for v, r in zip(vs, rhos)])
-            L_pk = 4 * math.pi * (100e3) ** 2 * 2.5e-6 \
-                * 10 ** (-0.4 * float(peak_mag))
+            # Meteor luminous-intensity convention (Ceplecha/Jacchia):
+            # a magnitude-0 meteor at 100 km radiates ~1500 W total
+            # (isotropic-equivalent) — not the astronomical Vega flux,
+            # which would overestimate the power ~200x.
+            L_pk = 1500.0 * 10 ** (-0.4 * float(peak_mag))
             E_rad = L_pk / shape.max() * np.trapz(shape, ts_all)
             eff = np.trapz([_tau(v) * v ** 2 / 2.0 for v in vs], ts_all)
             t_pk = float(ts_all[np.argmax(shape)])

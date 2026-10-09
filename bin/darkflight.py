@@ -1264,13 +1264,25 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
 
         # Exponential speed fits extrapolate through zero for meteors
         # that decelerate out of the luminous regime before the last
-        # centroid. The last observed position is real; only the speed
-        # extrapolation is unphysical — release at the luminous-fade
-        # speed (~3 km/s) instead of rejecting the event.
+        # centroid. The luminous track effectively ends where the fit
+        # crosses ~3 km/s — truncate the analysis range there (otherwise
+        # negative v corrupts the ablation integral and mass inversion)
+        # and release the fragment at the luminous-fade speed.
         V_LUM_MIN = 3000.0
         if v_end < V_LUM_MIN:
-            logging.info(f'darkflight: fitted v_end={v_end/1000:.2f} km/s '
-                         f'below luminous threshold — releasing at 3 km/s')
+            ts_scan = np.linspace(t0_obs, t_last, 2000)
+            v_scan = np.array([v_of_t(t) for t in ts_scan])
+            below = np.nonzero(v_scan < V_LUM_MIN)[0]
+            if len(below) and below[0] > 0:
+                t_fade = float(ts_scan[below[0]])
+                logging.info(f'darkflight: fit crosses luminous threshold '
+                             f'at t={t_fade:.2f}s (of {t_last:.2f}s) — '
+                             f'truncating analysis and releasing at 3 km/s')
+                t_last = t_fade
+                a_end = a_of_t(t_fade)
+            else:
+                logging.info(f'darkflight: fitted v_end={v_end/1000:.2f} km/s '
+                             f'below luminous threshold — releasing at 3 km/s')
             v_end = V_LUM_MIN
     else:
         v_end, a_end, t0_obs, t_last, n_obs = 3000.0, 1e4, 0.0, 1.0, 0

@@ -1426,6 +1426,14 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         ring = _mc_hull(mc_impacts)
         if ring is not None:
             hx, hy = project_points(ring[:, 0], ring[:, 1])
+            # dilate the hull outward ~10% (+ floor ~200 m) from its
+            # centroid so the shaded area encloses every MC point even
+            # after spline smoothing cuts corners
+            cxr, cyr = np.mean(hx[:-1]), np.mean(hy[:-1])
+            dx, dy = hx - cxr, hy - cyr
+            rad = np.sqrt(dx * dx + dy * dy)
+            scale = 1.0 + max(0.10, 200.0 / rad.max())
+            hx, hy = cxr + dx * scale, cyr + dy * scale
             try:
                 from scipy.interpolate import splprep, splev
                 tck, _ = splprep([hx[:-1], hy[:-1]], s=0, per=True)
@@ -1443,7 +1451,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             traces.append(go.Mesh3d(
                 x=vxs, y=vys, z=[0.02] * len(vxs),
                 i=tri_i, j=tri_j, k=tri_k,
-                color='red', opacity=0.4, name='Fall area (MC)',
+                color='red', opacity=0.3, name='Fall area (MC)',
                 showscale=False, hoverinfo='skip'))
             traces.append(go.Scatter3d(
                 x=list(sx), y=list(sy), z=[0.02] * len(sx),

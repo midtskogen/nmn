@@ -1420,7 +1420,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         traces.append(go.Scatter3d(
             x=mx, y=my, z=[0.02] * len(mx), mode='markers',
             marker=dict(size=3, color='red', opacity=0.35),
-            name='Monte Carlo'))
+            name='Monte Carlo', hoverinfo='skip'))
         # shaded hull of the impact cloud on the ground plane —
         # spline-smoothed ring, translucent fill + opaque edge
         ring = _mc_hull(mc_impacts)
@@ -1444,7 +1444,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                 x=vxs, y=vys, z=[0.02] * len(vxs),
                 i=tri_i, j=tri_j, k=tri_k,
                 color='red', opacity=0.4, name='Fall area (MC)',
-                showscale=False))
+                showscale=False, hoverinfo='skip'))
             traces.append(go.Scatter3d(
                 x=list(sx), y=list(sy), z=[0.02] * len(sx),
                 mode='lines', line=dict(color='red', width=3),

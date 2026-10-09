@@ -1413,8 +1413,20 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         # magnitude gives the mass *at peak brightness*; ablate it forward
         # over the post-peak track to get the surviving mass at fade-out
         try:
-            t_pk = t0_obs + 0.6 * (t_last - t0_obs)
+            # locate the luminous peak physically: luminosity tracks
+            # tau(v)*rho(h)*v^3 for a given mass — find where it maxes
+            # along the fitted track (typically early and fast, not at
+            # a fixed fraction; a fixed 60% lands on the slow tail where
+            # tau collapses and the inferred mass explodes)
+            def _tau(v):
+                return min(0.20, max(0.001, 0.0007 * (v / 1000.0)))
+            ts_all = np.linspace(t0_obs, t_last, 400)
+            lum_w = np.array([
+                _tau(v_of_t(t)) * atm.at(max(h_of_t(t), 0.0))[1]
+                * max(v_of_t(t), 0.0) ** 3 for t in ts_all])
+            t_pk = float(ts_all[np.argmax(lum_w)])
             v_pk = v_of_t(t_pk)
+            h_pk = h_of_t(t_pk)
             m_pk = _mag_to_photometric_mass(float(peak_mag), v_pk)
             # forward ablation: m_fade^(1/3) = m_pk^(1/3) - (B/3)∫ρv³dt
             rho_ref = ref['rho'] if ref else 3500.0
@@ -1426,8 +1438,15 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             rhos = np.array([atm.at(max(h_of_t(t), 0.0))[1] for t in ts])
             m13 = m_pk ** (1. / 3) - (B / 3) * np.trapz(rhos * vs ** 3, ts)
             m_phot = max(m13, 0.0) ** 3
+            if v_pk < 8000.0:
+                logging.warning('darkflight: --mag anchor is at '
+                                f'v={v_pk/1000:.1f} km/s where luminous '
+                                'efficiency is small — photometric mass '
+                                'is highly uncertain')
             logging.info(f'darkflight: peak magnitude {peak_mag} at 100 km '
-                         f'-> mass at peak ~{m_pk:.2f} kg, at fade-out '
+                         f'-> mass at peak (t={t_pk:.2f}s, '
+                         f'v={v_pk/1000:.1f} km/s, h={h_pk/1000:.1f} km) '
+                         f'~{m_pk:.2f} kg, at fade-out '
                          f'~{m_phot:.2f} kg after post-peak ablation')
         except Exception as e:
             logging.debug(f'darkflight: --mag conversion failed: {e}')

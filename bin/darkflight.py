@@ -1363,24 +1363,11 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         logging.warning(f'darkflight: mass estimate {reliability} '
                         f'({"; ".join(issues)})')
 
-    if 'deceleration non-invertible' in issues:
-        # zero/negative fitted deceleration means the meteor was still
-        # flying ballistically at fade-out — dark-flight propagation is
-        # meaningless, write a stub and skip all maps/scenarios
-        logging.info('darkflight: deceleration ~0 — skipping simulation')
-        results = {
-            'end_state': {'lon': end_lon, 'lat': end_lat, 'h_m': end_h,
-                          'v_end_ms': v_end, 'a_end_ms2': a_end},
-            'mass_estimates': [], 'entry_estimates': [],
-            'm_est_ref_kg': None,
-            'photometric': None,
-            'reliability': 'unreliable', 'issues': issues,
-            'n_obs': int(n_obs), 'track_duration_s': float(duration),
-            'scenarios': [], 'mc': {'n': 0, 'impacts': []},
-        }
-        write_json(results, event_dir / 'darkflight.json')
-        _clean_outputs(event_dir)
-        return results
+    # 'deceleration non-invertible' no longer aborts the simulation:
+    # a constant-velocity fit yields no mass estimate, but the event may
+    # still end low enough to drop meteorites (e.g. a linear fit was
+    # chosen over noisy data). The fall-line/mass-grid scenarios carry
+    # the prediction; m_est falls back to a nominal value below.
 
     # --- Photometric cross-check (star-calibrated light curve) ------------------
     photometry = None

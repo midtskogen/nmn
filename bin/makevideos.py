@@ -737,7 +737,7 @@ def handle_hevc_transcoding(video_path, logo_overlay_path, verbose=False):
 
 # --- Core Script Logic ---
 
-def _trail_endpoint_span(pixels):
+def _trail_endpoint_span(pixels, times=None):
     """
     Returns (first, last) indices of the robust track interval for a pixel trail.
 
@@ -745,7 +745,11 @@ def _trail_endpoint_span(pixels):
     at either end of the trail. These corrupt the start/end direction used for
     gnomonic refinement and fireball rotation. This helper iteratively trims
     end points that BOTH take an unusually large step from their neighbour AND
-    lie far off the line fitted to the remaining points.
+    lie far off the line fitted to the remaining points. When per-point
+    timestamps are given, the step limit is scaled by the candidate's time
+    gap relative to the median gap — a real tail centroid observed seconds
+    after the previous frame legitimately travels much further, while a
+    flash blob appears at the regular frame cadence.
     """
     n = len(pixels)
     if n < 4:
@@ -791,6 +795,14 @@ def _trail_endpoint_span(pixels):
             med_step = sorted(steps_others)[len(steps_others) // 2]
 
             step_limit = max(4.0 * med_step, 12.0)
+            if times is not None:
+                nbr_i = cand_idx + 1 if at_front else cand_idx - 1
+                gap = abs(times[cand_idx] - times[nbr_i])
+                inner_gaps = [abs(times[i + 1] - times[i])
+                              for i in range(lo, hi)]
+                med_gap = sorted(inner_gaps)[len(inner_gaps) // 2]
+                if med_gap > 0:
+                    step_limit *= max(1.0, gap / med_gap)
             res_limit = max(3.0 * med_res, 6.0)
             if step > step_limit and resid > res_limit:
                 if at_front:
@@ -824,7 +836,10 @@ def _apply_robust_trail_endpoints(data):
     if len(pixels) < 4:
         return
 
-    lo, hi = _trail_endpoint_span(pixels)
+    times = data.get('timestamps')
+    if not times or len(times) != len(pixels):
+        times = None
+    lo, hi = _trail_endpoint_span(pixels, times)
     if lo == 0 and hi == len(pixels) - 1:
         return
 
@@ -860,6 +875,11 @@ def get_event_data(event_file):
                         data['positions'] = parts
                     elif key == 'coordinates':
                         data['coordinates'] = parts
+                    elif key == 'timestamps':
+                        try:
+                            data['timestamps'] = [float(p) for p in parts]
+                        except ValueError:
+                            pass
                     elif key == 'frames':
                         data['frames'] = int(value)
                     elif key == 'brightness':

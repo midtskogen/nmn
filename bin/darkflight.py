@@ -820,11 +820,14 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     cmap = plt.cm.viridis
     for si, sc in enumerate(plot_sc):
         col = cmap(si / max(len(plot_sc) - 1, 1))
-        uniq, seen_m = [], set()
+        uniq, seen_m = [], []
         for run in sc['results']:
-            if run['m'] not in seen_m:
-                seen_m.add(run['m'])
-                uniq.append(run)
+            # merge masses within ±10% — no point labelling near-identical
+            # impact points separately
+            if any(abs(run['m'] - m) <= 0.1 * m for m in seen_m):
+                continue
+            seen_m.append(run['m'])
+            uniq.append(run)
         first_landed = next((r for r in uniq
                              if r['impact'].get('landed', True)), None)
         for run in uniq:
@@ -1088,11 +1091,14 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
     for si, sc in enumerate(plot_sc):
         c = cmap(si / max(len(plot_sc) - 1, 1))
         col = f'rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})'
-        uniq, seen_m = [], set()
+        uniq, seen_m = [], []
         for run in sc['results']:
-            if run['m'] not in seen_m:
-                seen_m.add(run['m'])
-                uniq.append(run)
+            # merge masses within ±10% — no point labelling near-identical
+            # impact points separately
+            if any(abs(run['m'] - m) <= 0.1 * m for m in seen_m):
+                continue
+            seen_m.append(run['m'])
+            uniq.append(run)
         for ri, run in enumerate(uniq):
             # decimate the polyline — full res has ~1800 pts/trace
             step = max(1, len(run['lon']) // 300)

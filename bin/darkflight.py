@@ -1150,7 +1150,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
             # always overlap its own marker reservation
             probe = ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
                                 textcoords='offset points', ha=ha,
-                                fontsize=6.5, color=col,
+                                fontsize=6.5, color='black',
                                 transform=pc if pc else ax.transData)
             bb = probe.get_window_extent(renderer).expanded(1.05, 1.2)
             probe.remove()
@@ -1158,8 +1158,8 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                 continue
             ax.annotate(txt, xy=(lon, lat), xytext=(dx, dy),
                         textcoords='offset points', ha=ha,
-                        fontsize=6.5, color=col,
-                        arrowprops=dict(arrow_kw, color=col),
+                        fontsize=6.5, color='black',
+                        arrowprops=dict(arrow_kw, color='black'),
                         transform=pc if pc else ax.transData)
             placed_boxes.append(bb)
             break
@@ -1402,7 +1402,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                     text=[m_txt],
                     textposition=('top center' if label_flip[0] == 0
                                   else 'bottom center'),
-                    textfont=dict(size=9, color=col),
+                    textfont=dict(size=9, color='black'),
                     legendgroup=sc['name'], showlegend=False,
                     hoverinfo='none'))
                 label_flip[0] ^= 1

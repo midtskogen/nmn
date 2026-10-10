@@ -175,5 +175,6 @@
  "df_sc_strength": "Rozpad při zániku (omezeno pevností)",
  "df_sc_noabl": "(bez ablace)",
  "df_end_luminous": "Konec světelné dráhy",
- "df_from_mag": "z maximálního jasu"
+ "df_from_mag": "z maximálního jasu",
+ "df_mc": "Monte Carlo"
 }

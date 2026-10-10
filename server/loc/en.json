@@ -180,5 +180,6 @@
  "df_sc_strength": "Breakup at fade-out (strength-limited)",
  "df_sc_noabl": "(no ablation)",
  "df_end_luminous": "End of luminous path",
- "df_from_mag": "from peak magnitude"
+ "df_from_mag": "from peak magnitude",
+ "df_mc": "Monte Carlo"
 }

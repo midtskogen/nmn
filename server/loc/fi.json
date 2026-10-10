@@ -180,5 +180,6 @@
  "df_sc_strength": "Hajoaminen hehkuvaiheen lopussa (lujuusraja)",
  "df_sc_noabl": "(ei ablaatiota)",
  "df_end_luminous": "Hehkuvan radan loppu",
- "df_from_mag": "huippukirkkaudesta"
+ "df_from_mag": "huippukirkkaudesta",
+ "df_mc": "Monte Carlo"
 }

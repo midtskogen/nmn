@@ -180,5 +180,6 @@
  "df_sc_strength": "Sabrukšana pazūdot (izturības ierobežota)",
  "df_sc_noabl": "(bez ablācijas)",
  "df_end_luminous": "Spīdošās trajektorijas gals",
- "df_from_mag": "no maksimālā spilgtuma"
+ "df_from_mag": "no maksimālā spilgtuma",
+ "df_mc": "Monte Karlo"
 }

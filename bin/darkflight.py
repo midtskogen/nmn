@@ -1312,7 +1312,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     if mc_impacts:
         handles.append(Line2D([], [], marker='.', ls='', color='magenta',
                               ms=7))
-        labels.append('Monte Carlo')
+        labels.append(translations.get('df_mc', 'Monte Carlo'))
     ax.legend(handles, labels, fontsize=7, loc='upper center',
               bbox_to_anchor=(0.5, -0.04), ncol=2, framealpha=0.9)
     if not pc:
@@ -1521,7 +1521,8 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         traces.append(go.Scatter3d(
             x=mx, y=my, z=[0.02] * len(mx), mode='markers',
             marker=dict(size=3, color='red', opacity=0.35),
-            name='Monte Carlo', hoverinfo='skip'))
+            name=translations.get('df_mc', 'Monte Carlo'),
+            hoverinfo='skip'))
         # shaded buffered-hull ring around the MC cloud — translucent
         # fill + opaque edge on the ground plane
         ring = _mc_ring_ll(mc_impacts)
@@ -1538,7 +1539,8 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             traces.append(go.Mesh3d(
                 x=vxs, y=vys, z=[0.02] * len(vxs),
                 i=tri_i, j=tri_j, k=tri_k,
-                color='red', opacity=0.15, name='Fall area (MC)',
+                color='red', opacity=0.15,
+                name=translations.get('df_fall_area', 'Fall area (MC)'),
                 showscale=False, hoverinfo='skip'))
             traces.append(go.Scatter3d(
                 x=list(sx), y=list(sy), z=[0.02] * len(sx),

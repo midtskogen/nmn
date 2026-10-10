@@ -175,5 +175,6 @@
  "df_sc_strength": "Aufbrechen bei Endhelligkeit (festigkeitsbegrenzt)",
  "df_sc_noabl": "(ohne Ablation)",
  "df_end_luminous": "Ende der Leuchtspur",
- "df_from_mag": "aus Maximalhelligkeit"
+ "df_from_mag": "aus Maximalhelligkeit",
+ "df_mc": "Monte Carlo"
 }

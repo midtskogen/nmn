@@ -180,5 +180,6 @@
  "df_sc_strength": "Fragmentering ved fade-out (styrkebegrensa)",
  "df_sc_noabl": "(uten ablasjon)",
  "df_end_luminous": "Slutt på lysende bane",
- "df_from_mag": "fra maks. styrke"
+ "df_from_mag": "fra maks. styrke",
+ "df_mc": "Monte Carlo"
 }

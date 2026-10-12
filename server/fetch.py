@@ -710,15 +710,14 @@ def get_location_from_coords(lat, lon) -> str:
 
 
 def _fmt_mass(m_kg, t=None):
-    if not np.isfinite(m_kg):
+    if m_kg is None or not np.isfinite(m_kg):
         return (t or {}).get('df_unreliable', 'unreliable')
-    if m_kg >= 1000:
-        return f"{m_kg/1000:.2f} t"
-    if m_kg >= 1:
-        return f"{m_kg:.2f} kg"
-    if m_kg >= 0.001:
-        return f"{m_kg*1000:.0f} g"
-    return f"{m_kg*1e6:.0f} mg"
+    if m_kg <= 0:
+        return '0 g'
+    for div, unit in ((1000., 't'), (1., 'kg'), (1e-3, 'g')):
+        if m_kg >= div:
+            return f"{m_kg/div:.3g} {unit}"
+    return f"{m_kg*1e6:.3g} mg"
 
 
 def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang):
@@ -734,57 +733,121 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                 f'<tr><td>{t.get("df_end_speed", "End speed")}:</td>'
                 f'<td>{end["v_end_ms"]/1000:.1f} km/s</td></tr>',
             ]
-            ma = results.get('mag_anchor')
-            if results.get('reliability') == 'unreliable' and ma:
+            unconstrained = (results.get('mass_status') == 'unconstrained'
+                             or results.get('reliability') != 'ok')
+            magnitude = results.get('magnitude_input') or results.get('mag_anchor')
+            anchor = results.get('mag_anchor') or {}
+            anchored = bool(anchor.get('m_fade_est_kg'))
+            panchor = results.get('phot_anchor') or {}
+            panchored = bool(panchor.get('m_fade_est_kg'))
+            if magnitude is not None:
+                rows.append(
+                    f'<tr><td>{t.get("df_peak_mag", "Supplied peak magnitude (100 km)")}:</td>'
+                    f'<td>{magnitude["peak_mag"]:.1f}</td></tr>')
+                if not anchored:
+                    rows.append(
+                        f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">'
+                        f'{t.get("df_peak_mag_note", "Peak brightness alone does not determine total or surviving mass; a measured light curve and fragmentation constraints are needed.")}'
+                        f'</td></tr>')
+            if anchored or panchored:
+                SURV_FLOOR_KG = 0.005   # surviving masses below 5 g are
+                                        # effectively zero; a photometric
+                                        # lower boundary in the combined
+                                        # estimate is clamped to this floor
+                anchors = [a for a in (anchor, panchor) if a.get('m_fade_est_kg')]
+                entry_vals = [a['m_entry_est_kg'] for a in anchors]
+                # when combining bounds the lower boundary is clamped to the
+                # floor so a saturated-clipped ~0 cannot collapse the mean
+                floor = SURV_FLOOR_KG if len(entry_vals) > 1 else 0.0
+                m_entry_est = float(np.exp(np.mean(
+                    np.log([max(v, floor) for v in entry_vals]))))
+                # surviving mass must stay below the entry mass: apply the
+                # geometric-mean survival fraction to the combined entry mass
+                f_mids = []
+                for a in anchors:
+                    fl, fh = (a.get('survival_frac')
+                              or (a['m_surv_lo_kg'] / a['m_entry_est_kg'],
+                                  a['m_surv_hi_kg'] / a['m_entry_est_kg']))
+                    f_mids.append(float(np.sqrt(fl * fh)))
+                m_surv_est = m_entry_est * float(np.exp(np.mean(np.log(f_mids))))
+                if m_surv_est < SURV_FLOOR_KG:
+                    m_surv_est = 0.0
+                est = t.get('df_estimated', 'estimated')
+                rows.append(
+                    f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
+                    f'<td>~{_fmt_mass(m_entry_est, t)} ({est})</td></tr>')
                 rows.append(
                     f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
-                    f'<td>~{_fmt_mass(ma["m_fade_kg"], t)} '
-                    f'({t.get("df_from_mag", "from peak magnitude")}'
-                    f' {ma["peak_mag"]:.0f})</td></tr>')
+                    f'<td>~{_fmt_mass(m_surv_est, t)} ({est})</td></tr>')
+            if unconstrained and not (anchored or panchored):
+                rows.append(
+                    f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
+                    f'<td>{t.get("df_mass_unknown", "Not constrained")}</td></tr>')
             elif results.get('entry_estimates'):
-                est = next((e for e in results['entry_estimates'] if e['rho'] == 3500),
+                est = next((e for e in results['entry_estimates']
+                            if e['rho'] == results.get('density_ref_kg_m3', 3500)),
                            results['entry_estimates'][0])
-                if results.get('reliability') == 'unreliable':
-                    rows.append(
-                        f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
-                        f'<td>{t.get("df_unreliable", "unreliable")}*</td></tr>')
-                else:
-                    lo, hi = est.get('m_fade_lo', 0), est.get('m_fade_hi')
-                    rng_txt = (f'{_fmt_mass(lo, t)}–{_fmt_mass(hi, t)}'
-                               if hi and np.isfinite(hi) and hi / max(lo, 1e-12) <= 20
-                               else t.get('df_poorly_constrained', 'poorly constrained'))
-                    rows.append(
-                        f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
-                        f'<td>~{_fmt_mass(est["m_entry_kg"], t)}'
-                        f' ({t.get("df_estimated", "estimated")})</td></tr>')
-                    rows.append(
-                        f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
-                        f'<td>~{_fmt_mass(est["m_fade_kg"], t)} ({rng_txt})</td></tr>')
+                lo, hi = est.get('m_fade_lo', 0), est.get('m_fade_hi')
+                rng_txt = (f'{_fmt_mass(lo, t)}–{_fmt_mass(hi, t)}'
+                           if hi and np.isfinite(hi) and hi / max(lo, 1e-12) <= 20
+                           else t.get('df_poorly_constrained', 'poorly constrained'))
+                rows.append(
+                    f'<tr><td>{t.get("df_entry_mass", "Estimated entry mass")}:</td>'
+                    f'<td>~{_fmt_mass(est["m_entry_kg"], t)}'
+                    f' ({t.get("df_estimated", "estimated")})</td></tr>')
+                rows.append(
+                    f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
+                    f'<td>~{_fmt_mass(est["m_fade_kg"], t)} ({rng_txt})</td></tr>')
             ph = (results.get('photometric') or {}).get('m_phot_kg')
-            if ph:
+            if ph and not (anchored or panchored):
                 rows.append(
-                    f'<tr><td>{t.get("df_phot_mass", "Photometric mass (light curve)")}:</td>'
-                    f'<td>~{_fmt_mass(ph)}'
-                    f' ({t.get("df_phot_note", "lower bound")})</td></tr>')
-            if results.get('reliability') == 'unreliable':
+                    f'<tr><td>{t.get("df_mass_kind_phot", "Luminous mass-loss proxy (not surviving mass)")}:</td>'
+                    f'<td>~{_fmt_mass(ph, t)}'
+                    f' ({t.get("df_estimated", "estimated")})</td></tr>')
+            if unconstrained and not (anchored or panchored):
                 rows.append(
-                    f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">*'
-                    f'{t.get("df_unreliable_note", "Mass estimate unreliable — luminous track too short or inconsistent; map shows hypothetical fragment paths.")}'
+                    f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">'
+                    f'{t.get("df_mass_unknown_note", "Surviving mass is not constrained. Tracks show hypothetical 5 g–5 kg release masses, not evidence of meteorite survival.")}'
                     f'</td></tr>')
             s0 = next((s for s in results['scenarios'] if s['name'] == 'S0_intact'), None)
-            if s0 and s0['impacts']:
+            if not unconstrained and s0 and s0['impacts'] and s0['impacts'][0].get('landed', True):
                 imp = s0['impacts'][0]
                 rows.append(
                     f'<tr><td>{t.get("df_impact", "Predicted impact")}:</td>'
                     f'<td>{imp["lat"]:.4f}N {imp["lon"]:.4f}E'
                     f' ({_fmt_mass(imp["m"])}, v={imp["v"]:.0f} m/s)</td></tr>')
-            if results['mc']['impacts']:
-                lats = [i['lat'] for i in results['mc']['impacts']]
-                lons = [i['lon'] for i in results['mc']['impacts']]
+            mc = results.get('mc') or {}
+            mc_impacts = mc.get('impacts') or []
+            # older darkflight.json files lack 'anchor': treat an
+            # unconstrained result without it as hypothetical
+            mc_hypothetical = (bool(mc.get('hypothetical'))
+                               or (unconstrained and not mc.get('anchor')))
+            mc_mag_anchored = mc.get('anchor') == 'magnitude'
+            if mc_impacts:
+                lats = [i['lat'] for i in mc_impacts]
+                lons = [i['lon'] for i in mc_impacts]
+                if mc_mag_anchored:
+                    area_label = t.get('df_fall_area_mag',
+                                       'Fall area (MC, magnitude-anchored)')
+                elif mc_hypothetical:
+                    area_label = t.get('df_fall_area_assumed',
+                                       'Conditional fall area (MC)')
+                else:
+                    area_label = t.get('df_fall_area', 'Fall area (MC)')
                 rows.append(
-                    f'<tr><td>{t.get("df_fall_area", "Fall area (MC)")}:</td>'
+                    f'<tr><td>{area_label}:</td>'
                     f'<td>{min(lats):.3f}-{max(lats):.3f}N, '
                     f'{min(lons):.3f}-{max(lons):.3f}E</td></tr>')
+                if mc_hypothetical:
+                    rows.append(
+                        f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">'
+                        f'{t.get("df_mc_assumed_note", "Monte Carlo samples fragment masses evenly across the 5 g–5 kg range (logarithmic scale) at the end of luminous flight.")}'
+                        f'</td></tr>')
+            elif mc_hypothetical and mc.get('attempted'):
+                rows.append(
+                    f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">'
+                    f'{t.get("df_mc_no_impacts", "No sampled fragments reached the ground, so no MC area is drawn. This does not establish zero surviving mass.")}'
+                    f'</td></tr>')
             frag = (f'<div class="text-section">'
                     f'{t.get("dark_flight", "Dark flight")}</div>'
                     f'<table class="dftable">' + ''.join(rows) + '</table>'
@@ -2576,8 +2639,8 @@ def main():
         type=float,
         default=None,
         help="Peak visual magnitude normalised to 100 km (absolute magnitude). "
-             "Passed to the dark-flight analysis as a photometric mass anchor "
-             "when star-calibrated photometry is unavailable."
+             "Recorded as brightness information only; peak magnitude alone "
+             "does not determine total or surviving mass."
     )
     parser.add_argument(
         "--density",

@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.integrate import solve_ivp
+from scipy.integrate import solve_ivp, trapezoid
 from scipy.interpolate import interp1d
 
 # --- Constants (SI) -----------------------------------------------------------
@@ -69,6 +69,10 @@ def llh2ecef(lon_deg, lat_deg, h_m):
 def ecef2llh(r):
     """ECEF [m] -> (lon_deg, lat_deg, h_m) iterative geodetic conversion."""
     p = np.hypot(r[0], r[1])
+    if p < 1e-8:
+        if abs(r[2]) < 1e-8:
+            raise ValueError('Geodetic coordinates are undefined at Earth centre')
+        return 0.0, math.copysign(90.0, r[2]), abs(r[2]) - A_EQ * math.sqrt(1 - E2)
     lon = np.degrees(np.arctan2(r[1], r[0]))
     lat = np.arctan2(r[2], p * (1 - E2))
     for _ in range(15):
@@ -112,6 +116,24 @@ _US76_LAYERS = [  # (h_base_m, T_base_K, lapse_K/m, P_base_Pa)
 _G0 = 9.80665
 _M_AIR = 0.0289644
 _R_UNIV = 8.31432
+
+MAG_FLASH_T_EFF_S = 0.15          # terminal-flash duration (~a few frames);
+                                  # the sustained pre-flare light is added
+                                  # separately from the measured light curve
+V_REF_SURV = 15000.0              # reference speed for the survival fraction
+
+
+def _survival_fraction(v_ms):
+    """Surviving/entry mass fraction range vs characteristic speed.
+
+    Ablated energy per unit mass grows with v**2, so the surviving
+    fraction scales as (v_ref/v)**2 around a ~15 km/s reference bolide
+    (5-30%), clamped to a plausible range. Fast cometary fireballs keep
+    almost nothing; slow asteroidal ones keep the most.
+    """
+    f = (V_REF_SURV / max(v_ms, 1.0)) ** 2
+    return (min(0.30, max(0.001, 0.05 * f)),
+            min(0.60, max(0.005, 0.30 * f)))
 
 
 def us76(h_m):
@@ -185,6 +207,10 @@ class WindAtmosphere:
                     rows.append([float(x) for x in row[:5]])
             if len(rows) >= 4:
                 d = np.asarray(sorted(rows, key=lambda r: r[0]))
+                if (d.ndim != 2 or d.shape[1] != 5 or not np.all(np.isfinite(d))
+                        or np.any(np.diff(d[:, 0]) <= 0) or np.any(d[:, 1:3] <= 0)
+                        or np.any(d[:, 3] < 0)):
+                    raise ValueError('Wind profile requires unique heights, positive temperature/pressure and finite winds')
                 self.h = d[:, 0]
                 self.T = d[:, 1]
                 self.P = d[:, 2]
@@ -337,15 +363,22 @@ def compressive_strength(rho_m):
 def fragmentation_spectrum(m_total, mass_index=2.0,
                            min_ratio=0.005, max_ratio=0.10,
                            grain_ratio=0.25, severity=1.0):
-    """WMPL-style disruption scaled by severity = dyn_press/strength.
+    """Heuristic disruption spectrum with severity = dyn_press/strength.
 
-    `grain_ratio` of the mass turns to dust (ablated, not tracked), the
-    rest breaks into fragments whose masses are `min_ratio`–`max_ratio`
-    of the disrupted mass, drawn from a power-law dN/dm ~ m^-mass_index.
-    Marginal breakup (severity ~1) gives ~10 pieces; catastrophic
-    disruption (severity >>1) produces hundreds of smaller fragments
-    and loses more mass to grains: n ~ severity^2, grain share ~sqrt."""
-    n = int(np.clip(5 * severity ** 2, 10, 400))
+    Grain mass is untracked, not independently proven to be ablated.
+    min_ratio/max_ratio set the relative power-law shape, not bounds
+    on final masses: the spectrum is renormalised to conserve the
+    remaining mass. Count ~severity**2 and grain share ~sqrt(severity)
+    are sensitivity assumptions, not a calibrated fragmentation law.
+    """
+    if (not all(np.isfinite(v) for v in (m_total, mass_index, min_ratio, max_ratio, grain_ratio, severity))
+            or m_total < 0 or not 0 < min_ratio < max_ratio <= 1
+            or not 0 <= grain_ratio < 1 or severity < 1):
+        raise ValueError('Invalid fragmentation parameters')
+    if m_total == 0:
+        return np.empty(0)
+    n = int(5 * min(severity, math.sqrt(80.0)) ** 2)
+    n = max(10, n)
     grain_ratio = float(np.clip(grain_ratio * np.sqrt(severity),
                                 0.25, 0.75))
     m_frag = m_total * (1.0 - grain_ratio)
@@ -354,7 +387,7 @@ def fragmentation_spectrum(m_total, mass_index=2.0,
     u = np.linspace(0.05, 0.95, n)
     a = mass_index
     inv = lambda x: ((1 - x) * lo ** (1 - a) + x * hi ** (1 - a)) ** (1 / (1 - a))
-    ms = inv(u)
+    ms = lo * (hi / lo) ** u if abs(a - 1.0) < 1e-12 else inv(u)
     # renormalise so the fragment masses sum to m_frag
     return ms * (m_frag / ms.sum())
 
@@ -367,6 +400,10 @@ def fragmentation_spectrum(m_total, mass_index=2.0,
 @_njit(cache=True)
 def _ecef2llh_nb(rx, ry, rz):
     p = math.hypot(rx, ry)
+    if p < 1e-8:
+        if abs(rz) < 1e-8:
+            raise ValueError('Geodetic coordinates are undefined at Earth centre')
+        return 0.0, math.copysign(math.pi / 2, rz), abs(rz) - A_EQ * math.sqrt(1 - E2)
     lon = math.atan2(ry, rx)
     lat = math.atan2(rz, p * (1 - E2))
     for _ in range(15):
@@ -532,7 +569,7 @@ def _dragcoeff_nb(vel, temp, rho_a, A):
 @_njit(cache=True)
 def _dynamics_nb(t, X, c_ml, A_sh, rho_m,
                  has_prof, ph, pT, prho, pwe, pwn,
-                 has_msis, mh, mrho, mT, rho_scale):
+                 has_msis, mh, mrho, mT, rho_scale, wind_offset):
     rx, ry, rz = X[0], X[1], X[2]
     vx, vy, vz = X[3], X[4], X[5]
     m = X[6]
@@ -540,6 +577,9 @@ def _dynamics_nb(t, X, c_ml, A_sh, rho_m,
     we, wn, wu, rho_a, T = _atm_at_nb(
         h if h > 0.0 else 0.0, has_prof, ph, pT, prho, pwe, pwn,
         has_msis, mh, mrho, mT, rho_scale)
+    we += wind_offset[0]
+    wn += wind_offset[1]
+    wu += wind_offset[2]
     sl = math.sin(lat); cl = math.cos(lat)
     so = math.sin(lon); co = math.cos(lon)
     # enu2ecef: w_ecef = R @ wind_enu
@@ -577,7 +617,7 @@ def _dynamics_nb(t, X, c_ml, A_sh, rho_m,
 
 # --- Propagator ---------------------------------------------------------------
 def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
-              erode=True, record_dt=0.5):
+              erode=True, record_dt=0.5, wind_offset_enu=None):
     """Integrate a meteoroid to the ground.
 
     r0_ecef, v0_ecef: ECEF state [m], [m/s];  m0 [kg]; rho_m [kg/m3];
@@ -586,6 +626,16 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
 
     Returns dict with time series (lon, lat, h, v, m) + impact dict.
     """
+    r0_ecef = np.asarray(r0_ecef, dtype=float)
+    v0_ecef = np.asarray(v0_ecef, dtype=float)
+    wind_offset = np.zeros(3) if wind_offset_enu is None else np.asarray(wind_offset_enu, dtype=float)
+    if any(v.shape != (3,) or not np.all(np.isfinite(v))
+           for v in (r0_ecef, v0_ecef, wind_offset)):
+        raise ValueError('Position, velocity and wind offset must be finite 3-vectors')
+    if not all(np.isfinite(v) and v > 0 for v in (m0, rho_m, A_shape, record_dt)):
+        raise ValueError('Mass, density, shape and recording interval must be positive and finite')
+    if not np.isfinite(h_ground) or ecef2llh(r0_ecef)[2] <= h_ground:
+        raise ValueError('Release position must be above finite ground height')
     c_ml = ablation_coeff(rho_m, A_shape) if erode else 0.0
 
     # pack the atmosphere once — the jitted dynamics sees only arrays
@@ -603,7 +653,7 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
         has_msis = False
     dyn_args = (c_ml, A_shape, rho_m,
                 atm.has_profile, ph, pT, prho, pwe, pwn,
-                has_msis, mh, mrho, mT, atm._rho_scale)
+                has_msis, mh, mrho, mT, atm._rho_scale, wind_offset)
 
     def dynamics(t, X):
         return _dynamics_nb(t, X, *dyn_args)
@@ -620,19 +670,22 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
     dust.direction = -1
 
     X0 = np.hstack([r0_ecef, v0_ecef, m0])
-    t_eval = np.arange(0, 1800, record_dt)
-    sol = solve_ivp(dynamics, (0, 1800), X0, method='DOP853',
-                    dense_output=True, t_eval=t_eval,
-                    events=[hit_ground, dust],
-                    rtol=1e-7, atol=1e-9)
-
-    t_end = sol.t_events[0][0] if sol.t_events[0].size else \
-        (sol.t_events[1][0] if sol.t_events[1].size else sol.t[-1])
-    X_end = sol.y_events[0][0] if sol.y_events[0].size else sol.y[:, -1]
-
-    n = max(int(t_end / record_dt) + 2, 2)
-    ts = np.linspace(0, t_end, n)
-    Xs = sol.sol(ts)
+    if m0 <= 1e-3:
+        t_end, X_end, termination = 0.0, X0, 'dust'
+        ts, Xs = np.array([0.0]), X0[:, None]
+    else:
+        sol = solve_ivp(dynamics, (0, 1800), X0, method='DOP853',
+                        dense_output=True, events=[hit_ground, dust],
+                        rtol=1e-7, atol=1e-9)
+        if not sol.success:
+            raise RuntimeError(f'Dark-flight integration failed: {sol.message}')
+        event = next((i for i, times in enumerate(sol.t_events) if times.size), None)
+        t_end = float(sol.t_events[event][0] if event is not None else sol.t[-1])
+        X_end = sol.y_events[event][0] if event is not None else sol.y[:, -1]
+        termination = ('ground', 'dust')[event] if event is not None else 'timeout'
+        n = max(int(t_end / record_dt) + 2, 2)
+        ts = np.linspace(0, t_end, n)
+        Xs = sol.sol(ts)
     lon_arr, lat_arr, h_arr = _ecef2llh_arr(Xs[0], Xs[1], Xs[2])
     lon_arr = np.degrees(lon_arr)
     lat_arr = np.degrees(lat_arr)
@@ -645,7 +698,8 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
         'impact': {'lon': lon_i, 'lat': lat_i, 'h': h_i,
                    'v': float(np.linalg.norm(X_end[3:6])),
                    'm': float(X_end[6]), 't': float(t_end),
-                   'landed': bool(sol.t_events[0].size)},
+                   'landed': termination == 'ground',
+                   'termination': termination},
     }
 
 
@@ -697,12 +751,25 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
         if params is not None and pcov is not None:
             try:
                 from fbspd_merge import expfunc_2ndder, expfunc_1stder
+                covariance = np.asarray(pcov, dtype=float)
+                if (covariance.shape != (4, 4) or not np.all(np.isfinite(covariance))
+                        or not np.allclose(covariance, covariance.T)):
+                    raise ValueError('Invalid fit covariance')
                 draws = np.random.default_rng(rng.integers(1 << 30))
-                for p in draws.multivariate_normal(params, pcov, size=200):
-                    a_s = np.abs(expfunc_2ndder(ts, *p))
-                    m13i = np.sum(C * a_s) / np.sum(C * C)
-                    if m13i > 0:
-                        m_samples.append((1.0 / m13i) ** 3)
+                for p in draws.multivariate_normal(params, covariance, size=200, check_valid='raise'):
+                    a_s = -expfunc_2ndder(ts, *p) * 1000.0
+                    v_s = expfunc_1stder(ts, *p) * 1000.0
+                    if not (np.all(np.isfinite(a_s)) and np.all(np.isfinite(v_s))
+                            and np.all(a_s > 0) and np.all(v_s > 0)):
+                        m_samples.append(np.inf)
+                        continue
+                    C_s = np.array([dragcoeff(v, atm.at(max(h, 0.0))[2],
+                                              atm.at(max(h, 0.0))[1], A)
+                                    * A * atm.at(max(h, 0.0))[1] * v ** 2
+                                    / (2.0 * rho_m ** (2. / 3))
+                                    for v, h in zip(v_s, hs)])
+                    m13i = np.sum(C_s * a_s) / np.sum(C_s * C_s)
+                    m_samples.append((1.0 / m13i) ** 3 if m13i > 0 else np.inf)
             except Exception:
                 pass
         if len(m_samples) > 10:
@@ -711,10 +778,10 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
             # so the UI shows 'poorly constrained' instead of '10 t–10 t'.
             cl = np.clip(m_samples, 1e-6, 1e4)
             lo, hi = np.percentile(cl, [16, 84])
-            if np.percentile(m_samples, 84) >= 1e4:
+            if hi >= 1e4:
                 hi = np.inf
         else:
-            lo, hi = m_med * 0.5, m_med * 2.0
+            lo, hi = 0.0, np.inf
 
         # critical entry mass: ablation integral along track — a body of
         # this mass fully ablates by the fade point. Deliberately
@@ -723,11 +790,12 @@ def estimate_mass(v_of_t, a_of_t, h_of_t, t_range, rho_grid=None, A=1.4,
         # matrix (handled as a breakup-scenario grain fraction).
         B = ablation_coeff(rho_m, A) * A / (2 * rho_m ** (2. / 3))
         rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
-        integral = np.trapz(rhos * vs ** 3, ts)
+        integral = trapezoid(rhos * vs ** 3, ts)
         m_crit = (B / 3 * integral) ** 3
 
         out.append({'rho': rho_m, 'A': A, 'm_fade_kg': float(m_med),
                     'm_fade_lo': float(lo), 'm_fade_hi': float(hi),
+                    'uncertainty_source': 'fit_covariance' if len(m_samples) > 10 else 'unavailable',
                     'm_crit_kg': float(m_crit)})
     return out
 
@@ -750,29 +818,39 @@ def entry_mass_estimate(m_fade, rho_m, A, v_of_t, h_of_t, t_range, atm=None):
     vs = np.array([v_of_t(t) for t in ts])
     hs = np.array([h_of_t(t) for t in ts])
     rhos = np.array([atm.at(max(h, 0.0))[1] for h in hs])
-    integral = np.trapz(rhos * vs ** 3, ts)
+    integral = trapezoid(rhos * vs ** 3, ts)
     m13 = m_fade ** (1. / 3) + (B / 3) * integral
     return m13 ** 3
 
 
 # --- Fragmentation scenarios ---------------------------------------------------
 def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
-                    dyn_press=None):
+                    dyn_press=None, fragment_masses=None):
     """Return list of scenario dicts:
     {'name', 'label', 'runs': [{'m':..,'rho':..,'A':..}], 'erode'}
-    m_est: estimated surviving mass [kg] (reference density/shape).
+    m_est: estimated surviving mass [kg], or None for hypothetical grid only.
     dyn_press: dynamic pressure at luminous fade-out [Pa]; when it
     exceeds the material's compressive strength, a strength-limited
     breakup scenario (Borovicka power-law + grain loss) is added.
     """
+    if ((m_est is not None and (not np.isfinite(m_est) or m_est < 0))
+            or not np.isfinite(rho_m) or rho_m <= 0):
+        raise ValueError('Scenario mass must be non-negative or unknown, and density positive')
+    if m_est == 0:
+        return []
     if masses_grid is None:
         masses_grid = np.logspace(np.log10(5e-3), np.log10(5.0), 16)  # 5 g .. 5 kg
+    if m_est is None:
+        return [{'name': 'S1_hypothetical',
+                 'label': 'Hypothetical fall line (5 g–5 kg at release)',
+                 'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in masses_grid],
+                 'erode': True, 'hypothetical': True}]
     sc = []
     sc.append({'name': 'S0_intact', 'label': 'Single body (estimated mass)',
                'runs': [{'m': m_est, 'rho': rho_m, 'A': A}], 'erode': True})
     sc.append({'name': 'S1_fallline', 'label': 'Fall line (mass grid)',
                'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in masses_grid],
-               'erode': True})
+               'erode': True, 'hypothetical': True})
     for fr in (0.9, 0.7, 0.5):
         sc.append({'name': f'S2_split_{int(fr*100)}', 'label':
                    f'Two-piece split {fr:.0%}/{1-fr:.0%}',
@@ -787,6 +865,7 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
     m_min = 0.005
     u = np.linspace(0.05, 0.95, 60)
     ms = 1.0 / (1.0 / m_min - u * (1.0 / m_min - 1.0 / m_est))
+    ms *= m_est / ms.sum()
     sc.append({'name': 'S4_powerlaw', 'label': 'Power-law fragment swarm',
                'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in ms],
                'erode': True})
@@ -795,8 +874,11 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
     # strength means the body was already fragmenting — 25% of the mass
     # is lost as grains, the rest breaks into a power-law spectrum
     strength = compressive_strength(rho_m)
-    if dyn_press is not None and dyn_press > strength:
-        frags = fragmentation_spectrum(m_est, severity=dyn_press / strength)
+    if fragment_masses is not None or (dyn_press is not None and dyn_press > strength):
+        frags = (np.asarray(fragment_masses, dtype=float) if fragment_masses is not None
+                 else fragmentation_spectrum(m_est, severity=dyn_press / strength))
+        if frags.ndim != 1 or not np.all(np.isfinite(frags)) or np.any(frags < 0):
+            raise ValueError('Invalid surviving fragment masses')
         sc.append({'name': 'S5_strength', 'label':
                    'Breakup at fade-out (strength-limited)',
                    'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in frags],
@@ -834,6 +916,7 @@ def sc_label(sc, t):
         base = sc_label({**sc, 'name': name[:-10]}, t)
         return base + ' ' + t.get('df_sc_noabl', '(no ablation)')
     key = {'S0_intact': 'df_sc_intact', 'S1_fallline': 'df_sc_fallline',
+           'S1_hypothetical': 'df_sc_hypothetical',
            'S4_powerlaw': 'df_sc_powerlaw', 'S5_strength': 'df_sc_strength'}.get(name)
     if key:
         return t.get(key, sc['label'])
@@ -856,10 +939,10 @@ def _prop_worker(job):
 
 def _mc_worker(job):
     (r0, v0, m, rho, A, csv_path, h_ground, erode,
-     lon, lat, event_dt) = job
+     lon, lat, event_dt, wind_offset) = job
     atm = WindAtmosphere(csv_path, lon=lon, lat=lat, event_dt=event_dt)
     return propagate(r0, v0, m, rho, A, atm, h_ground, erode=erode,
-                     record_dt=1.0)['impact']
+                     record_dt=1.0, wind_offset_enu=wind_offset)['impact']
 
 
 def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
@@ -867,36 +950,70 @@ def monte_carlo(r0, v0_vec, m0, rho_m, A, csv_path, h_ground, n_runs=300,
                 mass_err=0.3, rho_err=500.0, shape_err=0.15,
                 wind_err=2.0, seed=0, pool=None,
                 lon=None, lat=None, event_dt=None,
-                mass_samples=None):
+                mass_samples=None, mass_bounds=None):
     """Perturbed runs around nominal state. Returns list of impact dicts.
 
     mass_samples: optional array — draw each run's mass from this
     distribution (e.g. the breakup fragment spectrum) instead of
     m0*(1±mass_err), so a fragmented event produces a strewn field
-    rather than a cloud around a single body."""
+    rather than a cloud around a single body. Alternatively mass_bounds
+    gives a (min, max) end-of-luminous fragment mass range sampled
+    stratified log-uniformly — every decade gets equal representation
+    so the largest assumed fragments still appear in the cloud; it is
+    a search-space prior, not a physical fragment number distribution.
+    """
+    r0, v0_vec = np.asarray(r0, dtype=float), np.asarray(v0_vec, dtype=float)
+    if (any(v.shape != (3,) or not np.all(np.isfinite(v)) for v in (r0, v0_vec))
+            or not isinstance(n_runs, (int, np.integer)) or n_runs < 0
+            or not all(np.isfinite(v) and v >= 0 for v in
+                       (pos_err, vel_frac_err, dir_err_deg, mass_err, rho_err, shape_err, wind_err))
+            or mass_err >= 1 or not all(np.isfinite(v) and v > 0 for v in (m0, rho_m, A))):
+        raise ValueError('Invalid Monte Carlo state or uncertainty parameters')
+    if mass_samples is not None:
+        mass_samples = np.asarray(mass_samples, dtype=float)
+        if mass_samples.ndim != 1 or not mass_samples.size or not np.all(np.isfinite(mass_samples)) or np.any(mass_samples <= 0):
+            raise ValueError('Mass samples must be finite positive masses')
+    if mass_bounds is not None:
+        bounds = np.asarray(mass_bounds, dtype=float)
+        if (mass_samples is not None or bounds.shape != (2,) or not np.all(np.isfinite(bounds))
+                or not 0 < bounds[0] < bounds[1]):
+            raise ValueError('Mass bounds must be finite, positive, increasing and exclusive of mass_samples')
+        mass_min, mass_max = bounds
     rng = np.random.default_rng(seed)
+    if mass_bounds is not None:
+        # one draw per stratum over log-mass: guarantees the full
+        # assumed range is covered even for modest n_runs
+        bound_masses = mass_min * (mass_max / mass_min) ** (
+            (np.arange(n_runs) + rng.random(n_runs)) / n_runs)
+        rng.shuffle(bound_masses)
+    else:
+        bound_masses = None
     jobs = []
-    for _ in range(n_runs):
+    speed = np.linalg.norm(v0_vec)
+    direction = v0_vec / speed if speed > 0 else np.array([0., 0., 1.])
+    for i in range(n_runs):
         r_p = r0 + rng.normal(0, pos_err, 3)
-        v_p = v0_vec * rng.normal(1.0, vel_frac_err)
+        v_p = v0_vec * max(0.0, rng.normal(1.0, vel_frac_err))
         # small angular perturbation of direction
-        ortho = np.cross(v0_vec, [1, 0, 0])
+        ortho = np.cross(direction, [1, 0, 0])
         if np.linalg.norm(ortho) < 1e-9:
-            ortho = np.cross(v0_vec, [0, 1, 0])
+            ortho = np.cross(direction, [0, 1, 0])
         ortho /= np.linalg.norm(ortho)
-        d1 = rng.normal(0, np.radians(dir_err_deg)) * np.linalg.norm(v0_vec)
-        d2 = rng.normal(0, np.radians(dir_err_deg)) * np.linalg.norm(v0_vec)
-        ortho2 = np.cross(v0_vec, ortho); ortho2 /= np.linalg.norm(ortho2)
+        d1 = rng.normal(0, np.radians(dir_err_deg)) * speed
+        d2 = rng.normal(0, np.radians(dir_err_deg)) * speed
+        ortho2 = np.cross(direction, ortho); ortho2 /= np.linalg.norm(ortho2)
         v_p = v_p + d1 * ortho + d2 * ortho2
-        if mass_samples is not None and len(mass_samples):
-            m_p = max(5e-3, float(rng.choice(mass_samples))
-                      * rng.uniform(1 - mass_err, 1 + mass_err))
+        if bound_masses is not None:
+            m_p = float(bound_masses[i])
+        elif mass_samples is not None and len(mass_samples):
+            m_p = float(rng.choice(mass_samples)) * rng.uniform(1 - mass_err, 1 + mass_err)
         else:
-            m_p = max(5e-3, m0 * rng.uniform(1 - mass_err, 1 + mass_err))
+            m_p = m0 * rng.uniform(1 - mass_err, 1 + mass_err)
         rho_p = max(500.0, rng.normal(rho_m, rho_err))
         A_p = float(np.clip(rng.normal(A, shape_err), 0.9, 3.0))
+        wind_offset = np.r_[rng.normal(0.0, wind_err, 2), 0.0]
         jobs.append((r_p, v_p, m_p, rho_p, A_p, csv_path, h_ground, True,
-                     lon, lat, event_dt))
+                     lon, lat, event_dt, wind_offset))
     if pool is not None:
         return pool.map(_mc_worker, jobs)
     return [_mc_worker(j) for j in jobs]
@@ -933,15 +1050,18 @@ def ground_elevation(lat, lon):
 # --- Output writers ------------------------------------------------------------
 def write_json(results, path):
     def conv(o):
-        if isinstance(o, (np.floating, np.integer)):
-            v = float(o)
-            return v if np.isfinite(v) else None
-        if isinstance(o, float):
-            return o if math.isfinite(o) else None
+        if isinstance(o, dict):
+            return {k: conv(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [conv(v) for v in o]
         if isinstance(o, np.ndarray):
-            return [conv(x) for x in o.tolist()]
-        raise TypeError
-    Path(path).write_text(json.dumps(results, indent=1, default=conv),
+            return conv(o.tolist())
+        if isinstance(o, np.generic):
+            return conv(o.item())
+        if isinstance(o, float) and not math.isfinite(o):
+            return None
+        return o
+    Path(path).write_text(json.dumps(conv(results), indent=1, allow_nan=False),
                           encoding='utf-8')
 
 
@@ -956,13 +1076,15 @@ def write_geojson(scenarios, path):
                 'type': 'Feature',
                 'geometry': {'type': 'Point',
                              'coordinates': [imp['lon'], imp['lat'], imp['h']]},
-                'properties': {'scenario': sc['name'], 'mass_kg': run['m'],
+                'properties': {'scenario': sc['name'], 'mass_kg': imp['m'],
+                               'release_mass_kg': run['m'],
+                               'hypothetical': sc.get('hypothetical', False),
                                'impact_speed_ms': imp['v']}})
     Path(path).write_text(json.dumps(
         {'type': 'FeatureCollection', 'features': feats}), encoding='utf-8')
 
 
-def write_kml(scenarios, end_llh, path, mc_impacts=None):
+def write_kml(scenarios, end_llh, path, mc_impacts=None, mc_assumed=False):
     parts = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
              f'<name>Dark flight</name>',
@@ -970,12 +1092,15 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None):
     colours = ['ff1400ff', 'ff00a5ff', 'ff00ff00', 'ffaa00ff', 'ffffaa00']
     for si, sc in enumerate(scenarios):
         col = colours[si % len(colours)]
+        description = ('<description>Hypothetical mass-grid trajectory; '
+                       'not evidence of meteorite survival.</description>'
+                       if sc.get('hypothetical', False) else '')
         for run in sc['results']:
             path_pts = ' '.join(
                 f'{lo:.6f},{la:.6f},{hh:.0f}'
                 for lo, la, hh in zip(run['lon'], run['lat'], run['h']))
             parts.append(
-                f'<Placemark><name>{sc["name"]} {run["m"]*1000:.1f}g</name>'
+                f'<Placemark><name>{sc["name"]} {run["m"]*1000:.1f}g</name>{description}'
                 f'<Style><LineStyle><color>{col}</color><width>1.5</width></LineStyle>'
                 f'</Style><LineString><altitudeMode>absolute</altitudeMode>'
                 f'<coordinates>{path_pts}</coordinates></LineString></Placemark>')
@@ -983,25 +1108,42 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None):
             if not imp.get('landed', True):
                 continue
             parts.append(
-                f'<Placemark><name>{run["m"]*1000:.1f} g</name>'
+                f'<Placemark><name>{imp["m"]*1000:.1f} g</name>{description}'
                 f'<Point><coordinates>{imp["lon"]:.6f},{imp["lat"]:.6f},'
                 f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
     parts.append('</Folder>')
     # Monte Carlo fall area — translucent red polygon + hatch lines
     ring = _mc_ring_ll(mc_impacts)
     if ring is not None:
+        area_name = ('Conditional fall area (MC)' if mc_assumed
+                     else 'Fall area (MC)')
+        area_desc = ('<description>Monte Carlo samples fragment masses '
+                     'over 5 g–5 kg at the end of luminous flight; '
+                     'not a measured surviving mass.</description>'
+                     if mc_assumed else '')
         coords = ' '.join(f'{lo:.6f},{la:.6f},0'
                           for lo, la in ring)
-        parts.append('<Folder><name>Fall area (MC)</name>')
+        parts.append(f'<Folder><name>{area_name}</name>')
         parts.append(
-            '<Placemark><name>Fall area (MC)</name>'
+            f'<Placemark><name>{area_name}</name>{area_desc}'
             '<Style><PolyStyle><color>4d0000ff</color></PolyStyle>'
             '<LineStyle><color>ff0000ff</color><width>2</width>'
             '</LineStyle></Style>'
             '<Polygon><altitudeMode>clampToGround</altitudeMode>'
-            '<outerBoundaryIs><LinearRing><coordinates>'
+            '<outerBoundaryIs><LinearRing><tessellate>1</tessellate><coordinates>'
             f'{coords}</coordinates></LinearRing></outerBoundaryIs>'
             '</Polygon></Placemark>')
+        # individual MC impact points — one placemark, terrain-clamped
+        if mc_impacts:
+            pt_geoms = ''.join(
+                f'<Point><coordinates>{i["lon"]:.6f},{i["lat"]:.6f},0'
+                '</coordinates></Point>' for i in mc_impacts)
+            parts.append(
+                f'<Placemark><name>MC impacts (n={len(mc_impacts)})</name>'
+                '<Style><IconStyle><color>ff0000ff</color>'
+                '<scale>0.4</scale></IconStyle>'
+                '<LabelStyle><scale>0</scale></LabelStyle></Style>'
+                f'<MultiGeometry>{pt_geoms}</MultiGeometry></Placemark>')
         # hatch lines at 45 deg clipped to the ring (KML has no
         # hatch fill — draw them as ground-clamped LineStrings)
         try:
@@ -1025,7 +1167,8 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None):
                          else list(cl.geoms) if isinstance(
                              cl, MultiLineString) else [])
                 for ls in geoms:
-                    segs.append(list(ls.coords))
+                    if not ls.is_empty and len(ls.coords) >= 2:
+                        segs.append(list(ls.coords))
                 t += spacing
             if segs:
                 parts.append(
@@ -1037,7 +1180,8 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None):
                     sc = ' '.join(f'{lo:.6f},{la:.6f},0'
                                   for lo, la in seg)
                     parts.append(
-                        '<LineString><altitudeMode>clampToGround'
+                        '<LineString><tessellate>1</tessellate>'
+                        '<altitudeMode>clampToGround'
                         f'</altitudeMode><coordinates>{sc}'
                         '</coordinates></LineString>')
                 parts.append('</MultiGeometry></Placemark>')
@@ -1057,53 +1201,147 @@ def _mc_outline(pts, pad_frac=0.15, pad_min=None):
     pts = np.asarray(pts, dtype=float)
     if len(pts) == 0:
         return None
+    if pts.ndim != 2 or pts.shape[1] != 2 or not np.all(np.isfinite(pts)):
+        raise ValueError('MC outline requires finite 2D points')
+    if not np.isfinite(pad_frac) or pad_frac < 0 or (pad_min is not None and (not np.isfinite(pad_min) or pad_min < 0)):
+        raise ValueError('MC outline padding must be finite and non-negative')
     if len(pts) == 1:
         pts = np.vstack([pts, pts + 1e-9])  # make a tiny segment
     cx, cy = pts.mean(axis=0)
     rad = np.sqrt(((pts - [cx, cy]) ** 2).sum(axis=1)).max()
-    pad = max(pad_frac * rad, pad_min or 0.0)
+    pad = max(pad_frac * rad, pad_min or 0.0, 1e-9)
     try:
         from shapely.geometry import MultiPoint
-        poly = MultiPoint(pts).convex_hull.buffer(
-            pad, resolution=64)
+        poly = MultiPoint(pts).convex_hull.buffer(pad, 64)
         return np.asarray(poly.exterior.coords)
     except Exception:
-        # no shapely: fallback = radially dilated convex hull
-        try:
-            from scipy.spatial import ConvexHull
-            hull = ConvexHull(pts)
-        except Exception:
-            return None
-        ring = pts[hull.vertices]
-        cxr, cyr = ring.mean(axis=0)
-        d = ring - [cxr, cyr]
-        rr = np.sqrt((d ** 2).sum(axis=1))
-        ring = [cxr, cyr] + d * (1 + pad / np.maximum(rr, 1e-9))[:, None]
+        # no shapely: fallback = convex hull of padded point circles
+        from scipy.spatial import ConvexHull
+        angles = np.linspace(0, 2 * math.pi, 128, endpoint=False)
+        offsets = np.column_stack((np.cos(angles), np.sin(angles))) * pad / math.cos(math.pi / 128)
+        expanded = (pts[:, None, :] + offsets).reshape(-1, 2)
+        hull = ConvexHull(expanded)
+        ring = expanded[hull.vertices]
         return np.vstack([ring, ring[0]])
 
 
-def _mc_ring_ll(mc_impacts, pad_frac=0.25, pad_min_km=0.15):
-    """Closed lon/lat ring enclosing all MC impacts: convex hull
-    buffered outward by 25% of cloud radius (>=150 m floor), in
-    metric space. Returns (N+1, 2) array or None."""
+def _points_in_polygon(pts, ring):
+    """Vectorised even-odd ray-casting test. `ring` is a closed
+    (N+1, 2) polygon (last vertex == first). Returns bool array."""
+    px, py = pts[:, 0][:, None], pts[:, 1][:, None]
+    x1, y1 = ring[:-1, 0][None, :], ring[:-1, 1][None, :]
+    x2, y2 = ring[1:, 0][None, :], ring[1:, 1][None, :]
+    dy = y2 - y1
+    slope = np.divide(x2 - x1, dy, out=np.zeros_like(dy), where=dy != 0)
+    crosses = ((y1 > py) != (y2 > py)) & (px < x1 + (py - y1) * slope)
+    return crosses.sum(axis=1) % 2 == 1
+
+
+def _mc_ring_ll(mc_impacts, coverage=0.85, pad_min_km=0.15, n_pts=96):
+    """Curved fall-area outline enclosing at least `coverage` of the
+    MC impacts. Fragment mass sorting lays the cloud out along the
+    (generally curved) fall line, so the outline is a variable-width
+    band around a spine fitted through the inlier cloud — not an
+    ellipse. The spine is the binned median cross-track position along
+    the principal axis; half-widths come from local bin residuals
+    (floored at pad_min_km), with semicircular end caps. Inliers are
+    the central `coverage` fraction in Mahalanobis distance, so true
+    outliers can neither extend nor reshape the band while the
+    elongated ends are preserved. Returns a closed (N+1, 2) lon/lat
+    ring or None."""
     if not mc_impacts:
         return None
+    if not 0 < coverage <= 1:
+        raise ValueError('MC ring coverage must be in (0, 1]')
+    if not np.isfinite(pad_min_km) or pad_min_km < 0:
+        raise ValueError('MC ring padding must be finite and non-negative')
     lats = np.array([i['lat'] for i in mc_impacts])
     lons = np.array([i['lon'] for i in mc_impacts])
+    if not np.all(np.isfinite(lats)) or not np.all(np.isfinite(lons)):
+        raise ValueError('MC outline requires finite impact coordinates')
     lat0 = math.radians(lats.mean())
     c = 111.32
-    xs = lons * c * math.cos(lat0)
-    ys = lats * c
-    ring = _mc_outline(np.vstack([xs, ys]).T, pad_frac=pad_frac,
-                       pad_min=pad_min_km)
-    if ring is None:
-        return None
-    return np.vstack([ring[:, 0] / (c * math.cos(lat0)),
-                      ring[:, 1] / c]).T
+    pts = np.vstack([lons * c * math.cos(lat0), lats * c]).T
+    n = len(pts)
+    centre = np.median(pts, axis=0)
+    keep = max(3, int(math.ceil(coverage * n)))
+    if n > 1:
+        cov0 = np.cov((pts - centre).T)
+        w0, V0 = np.linalg.eigh(np.atleast_2d(cov0))
+        d_sel = np.sqrt(((pts - centre) @ V0) ** 2
+                        @ (1.0 / np.maximum(w0, 1e-12)))
+    else:
+        d_sel = np.zeros(n)
+    sel = np.argsort(d_sel)[:keep] if keep < n else np.arange(n)
+    fit_pts = pts[sel]
+    # principal axis of the inlier cloud = along-track direction
+    if len(fit_pts) > 1:
+        cov = np.cov((fit_pts - fit_pts.mean(axis=0)).T)
+        eigvals, eigvecs = np.linalg.eigh(np.atleast_2d(cov))
+        e1 = eigvecs[:, int(np.argmax(eigvals))]
+    else:
+        e1 = np.array([1.0, 0.0])
+    e1 = e1 / np.linalg.norm(e1)
+    e2 = np.array([-e1[1], e1[0]])
+    uv_all = (pts - centre) @ np.vstack([e1, e2]).T
+    uv = uv_all[sel]
+    u, v = uv[:, 0], uv[:, 1]
+    # spine: median cross-track position in quantile bins of u
+    n_bin = int(np.clip(len(fit_pts) // 8, 3, 12))
+    edges = np.quantile(u, np.linspace(0., 1., n_bin + 1))
+    edges[0] -= 1e-9
+    su, sv, hw = [], [], []
+    for b in range(n_bin):
+        upper = u <= edges[b + 1] if b == n_bin - 1 else u < edges[b + 1]
+        m = (u >= edges[b]) & upper
+        if not m.any():
+            continue
+        mv = float(np.median(v[m]))
+        su.append(float(np.median(u[m])))
+        sv.append(mv)
+        hw.append(max(float(np.abs(v[m] - mv).max()), pad_min_km))
+    if len(su) < 2:
+        # degenerate cloud: a pad_min circle
+        t = np.linspace(0, 2 * math.pi, 33)
+        ring = centre + pad_min_km * np.column_stack([np.cos(t),
+                                                      np.sin(t)])
+        return np.vstack([ring[:, 0] / (c * math.cos(lat0)),
+                          ring[:, 1] / c]).T
+    su, sv, hw = np.asarray(su), np.asarray(sv), np.asarray(hw)
+    if len(su) >= 5:
+        kernel = np.array([0.25, 0.5, 0.25])
+        sv[1:-1] = np.convolve(sv, kernel, 'same')[1:-1]
+        hw[1:-1] = np.convolve(hw, kernel, 'same')[1:-1]
+    need = int(math.ceil(coverage * n))
+    cap_pts = 24
+    for _ in range(5):
+        # chord-sag factor: keeps the discretised caps outside the
+        # true semicircle so boundary points stay covered
+        inflate = hw / math.cos(math.pi / cap_pts)
+        uu = np.linspace(su[0], su[-1], max(len(su) * 4, n_pts // 2))
+        vv = np.interp(uu, su, sv)
+        ww = np.interp(uu, su, inflate)
+        top = np.column_stack([uu, vv + ww])
+        th = np.linspace(math.pi / 2, -math.pi / 2, cap_pts)
+        cap_e = np.column_stack([su[-1] + ww[-1] * np.cos(th),
+                                 vv[-1] + ww[-1] * np.sin(th)])
+        bot = np.column_stack([uu[::-1], vv[::-1] - ww[::-1]])
+        th = np.linspace(-math.pi / 2, -3 * math.pi / 2, cap_pts)
+        cap_s = np.column_stack([su[0] + ww[0] * np.cos(th),
+                                 vv[0] + ww[0] * np.sin(th)])
+        ring_uv = np.vstack([top, cap_e, bot, cap_s])
+        inside = _points_in_polygon(uv_all,
+                                    np.vstack([ring_uv, ring_uv[:1]]))
+        if inside.sum() >= need:
+            break
+        hw = hw * 1.35
+    ring_xy = centre + ring_uv[:, 0:1] * e1 + ring_uv[:, 1:2] * e2
+    return np.vstack([ring_xy[:, 0] / (c * math.cos(lat0)),
+                      ring_xy[:, 1] / c]).T
 
 
 def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
-              translations=None):
+              translations=None, mc_assumed=False):
     """Fall-area map: Kartverket basemap, impact markers, MC ellipse."""
     translations = translations or {}
     import matplotlib
@@ -1162,6 +1400,9 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     except Exception as e:
         logging.debug(f'cartopy/OSM unavailable for darkflight map: {e}')
         pc = None
+        if ax is not None:
+            ax.remove()
+            ax = None
     if ax is None:
         pc = None
         ax = fig.add_subplot()
@@ -1195,7 +1436,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                 trplot([run['impact']['lon']], [run['impact']['lat']],
                        'o', ms=max(3, min(10, np.log10(max(run['m'],1e-6) * 1e6) / 1.5)),
                        color=col)
-                m_kg = run['m']
+                m_kg = run['impact']['m']
                 m_txt = (f'{m_kg:.3g} kg' if m_kg >= 1
                          else f'{m_kg * 1000:.3g} g')
                 dec = translations.get('dec_sep', '.')
@@ -1203,7 +1444,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                     m_txt = m_txt.replace('.', dec)
                 labels2draw.append((run['impact']['lon'],
                                     run['impact']['lat'], m_txt, col,
-                                    run['m']))
+                                    run['impact']['m']))
     # merge labels within ±10% mass across all scenarios — a swarm of
     # near-identical fragments gets one label for the lot
     labels2draw = [(lon, lat, txt, col) for lon, lat, txt, col, m in
@@ -1310,9 +1551,11 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
     handles.append(Line2D([], [], marker='*', ls='', color='red', ms=12))
     labels.append(translations.get('df_end_luminous', 'End of luminous path'))
     if mc_impacts:
-        handles.append(Line2D([], [], marker='.', ls='', color='magenta',
+        handles.append(Line2D([], [], marker='.', ls='', color='red',
                               ms=7))
-        labels.append(translations.get('df_mc', 'Monte Carlo'))
+        labels.append(translations.get(
+            'df_mc_assumed' if mc_assumed else 'df_mc',
+            'Monte Carlo (assumed masses)' if mc_assumed else 'Monte Carlo'))
     ax.legend(handles, labels, fontsize=7, loc='upper center',
               bbox_to_anchor=(0.5, -0.04), ncol=2, framealpha=0.9)
     if not pc:
@@ -1324,7 +1567,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
 
 
 def write_map3d(scenarios, end_llh, mc_impacts, out_html,
-                translations=None):
+                translations=None, mc_assumed=False):
     """Interactive 3D fall-area map (plotly), similar to metrack map.html.
 
     Ground tile image is rendered as a textured z=0 surface; scenario
@@ -1368,9 +1611,10 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
     # Ground image: Kartverket (if POIs covered) else OSM
     poi = [(end_llh[0], end_llh[1])]
     for sc in scenarios:
-        if sc['results']:
-            imp = sc['results'][0]['impact']
-            poi.append((imp['lon'], imp['lat']))
+        for run in sc['results']:
+            imp = run['impact']
+            if imp.get('landed', True):
+                poi.append((imp['lon'], imp['lat']))
     kv = None
     try:
         kv = _fetch_kartverket_topo([lon_min, lon_max], [lat_min, lat_max],
@@ -1491,7 +1735,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             imp = run['impact']
             if imp.get('landed', True):
                 ix, iy = project_points([imp['lon']], [imp['lat']])
-                m_kg = run['m']
+                m_kg = run['impact']['m']
                 m_txt = (f'{m_kg:.3g} kg' if m_kg >= 1
                          else f'{m_kg * 1000:.3g} g')
                 dec = translations.get('dec_sep', '.')
@@ -1521,26 +1765,58 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         traces.append(go.Scatter3d(
             x=mx, y=my, z=[0.02] * len(mx), mode='markers',
             marker=dict(size=3, color='red', opacity=0.35),
-            name=translations.get('df_mc', 'Monte Carlo'),
+            name=translations.get(
+                'df_mc_assumed' if mc_assumed else 'df_mc',
+                'Monte Carlo (assumed masses)' if mc_assumed
+                else 'Monte Carlo'),
             hoverinfo='skip'))
         # shaded buffered-hull ring around the MC cloud — translucent
         # fill + opaque edge on the ground plane
         ring = _mc_ring_ll(mc_impacts)
         if ring is not None:
             sx, sy = project_points(ring[:, 0], ring[:, 1])
-            cx, cy = np.mean(sx), np.mean(sy)
+            vxs, vys = [], []
             tri_i, tri_j, tri_k = [], [], []
-            vxs = [cx] + list(sx)
-            vys = [cy] + list(sy)
-            for k in range(len(sx)):
-                tri_i.append(0)
-                tri_j.append(k + 1)
-                tri_k.append(1 + (k + 1) % len(sx))
+            try:
+                # Delaunay-triangulate the (possibly concave) outline
+                # and keep only triangles inside it — a centroid fan
+                # would paint over the concave side of a curved band
+                from shapely.geometry import Polygon as _Poly
+                from shapely.ops import triangulate as _triangulate
+                poly_xy = _Poly(list(zip(sx, sy)))
+                vmap = {}
+                for tri in _triangulate(poly_xy):
+                    if not poly_xy.covers(tri):
+                        continue
+                    idx = []
+                    for x_, y_ in list(tri.exterior.coords)[:3]:
+                        key = (x_, y_)
+                        if key not in vmap:
+                            vmap[key] = len(vxs)
+                            vxs.append(x_)
+                            vys.append(y_)
+                        idx.append(vmap[key])
+                    tri_i.append(idx[0])
+                    tri_j.append(idx[1])
+                    tri_k.append(idx[2])
+            except Exception:
+                pass
+            if not tri_i:
+                cx, cy = np.mean(sx[:-1]), np.mean(sy[:-1])
+                vxs = [cx] + list(sx[:-1])
+                vys = [cy] + list(sy[:-1])
+                for k in range(len(sx) - 1):
+                    tri_i.append(0)
+                    tri_j.append(k + 1)
+                    tri_k.append(1 + (k + 1) % (len(sx) - 1))
             traces.append(go.Mesh3d(
                 x=vxs, y=vys, z=[0.02] * len(vxs),
                 i=tri_i, j=tri_j, k=tri_k,
                 color='red', opacity=0.15,
-                name=translations.get('df_fall_area', 'Fall area (MC)'),
+                name=translations.get(
+                    'df_fall_area_assumed' if mc_assumed else 'df_fall_area',
+                    'Conditional fall area (MC)' if mc_assumed
+                    else 'Fall area (MC)'),
                 showscale=False, hoverinfo='skip'))
             traces.append(go.Scatter3d(
                 x=list(sx), y=list(sy), z=[0.02] * len(sx),
@@ -1675,21 +1951,18 @@ def _clean_outputs(event_dir):
                 pass
 
 
-def _mag_to_photometric_mass(mag, v_ms):
-    """Peak apparent magnitude normalised to 100 km -> photometric mass [kg].
+def _mag_to_photometric_mass(mag, v_ms, duration_s=1.0):
+    """Mass-loss proxy [kg] for constant magnitude/speed over duration_s.
 
-    Peak luminous intensity L = 1500*10^(-0.4*m) W — the meteor
-    convention (Ceplecha/Jacchia): a magnitude-0 meteor at 100 km
-    radiates ~1500 W isotropic-equivalent. For a light curve roughly
-    symmetric about its peak, int(L)dt ~ 0.5*T*L_peak and
-    int(tau*v^2/2)dt ~ 0.5*T*tau*v^2/2, so the duration cancels and
-    m ~ L/(tau*v^2) using the speed at peak brightness. Same
-    speed-dependent tau convention as photometry.photometric_mass.
-    Order-of-magnitude only — used when star calibration is missing.
+    Uses 1500 W for magnitude zero at 100 km and integrates
+    2*L/(tau*v**2) over time, neglecting deceleration luminosity.
+    Duration does not cancel; this is not the surviving mass.
     """
+    if not all(np.isfinite(v) for v in (mag, v_ms, duration_s)) or v_ms <= 0 or duration_s <= 0:
+        raise ValueError('Magnitude must be finite; speed and duration must be positive')
     L = 1500.0 * 10 ** (-0.4 * mag)
     tau = min(0.20, max(0.001, 0.0007 * (v_ms / 1000.0)))
-    return L / (tau * v_ms ** 2)
+    return 2 * L * duration_s / (tau * v_ms ** 2)
 
 
 def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
@@ -1703,27 +1976,49 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     Returns results dict (also written to darkflight.json).
     """
     event_dir = Path(event_dir)
+    if rho_ref is not None and (not np.isfinite(rho_ref) or rho_ref <= 0):
+        raise ValueError('Reference density must be positive and finite')
+    if peak_mag is not None and (not np.isfinite(peak_mag) or peak_mag >= -1.0):
+        hint = (f' — did you mean {-abs(peak_mag):.1f}?' if peak_mag > 0 else '')
+        raise ValueError(f'Peak magnitude must be finite and brighter '
+                         f'than -1 for a surviving-mass estimate '
+                         f'(got {peak_mag}){hint}')
+    if not isinstance(mc_runs, (int, np.integer)) or mc_runs < 0:
+        raise ValueError('Monte Carlo run count must be a non-negative integer')
     end_lon = float(resdat.long1[1]); end_lat = float(resdat.lat1[1])
     end_h = float(resdat.height[1]) * 1000.0   # km -> m
     start_lon = float(resdat.long1[0]); start_lat = float(resdat.lat1[0])
     start_h = float(resdat.height[0]) * 1000.0
+    if (not all(np.isfinite(v) for v in (start_lon, start_lat, start_h, end_lon, end_lat, end_h))
+            or not all(-90 <= v <= 90 for v in (start_lat, end_lat))
+            or not all(-180 <= v <= 180 for v in (start_lon, end_lon))):
+        raise ValueError('Trajectory coordinates must be finite valid geodetic coordinates')
 
     # Track direction at end point (straight-line assumption)
     r_start = llh2ecef(start_lon, start_lat, start_h)
     r_end = llh2ecef(end_lon, end_lat, end_h)
     track_dir = r_end - r_start
+    if np.linalg.norm(track_dir) < 1.0:
+        raise ValueError('Trajectory endpoints must be distinct')
     track_dir /= np.linalg.norm(track_dir)
 
     # End speed & deceleration from fbspd fit
     have_fit = (fbspd_plot_data is not None
                 and fbspd_plot_data.get('final_params') is not None)
     pcov = None
+    release_truncated = False
     if have_fit:
-        from fbspd_merge import expfunc_1stder, expfunc_2ndder
+        from fbspd_merge import expfunc, expfunc_1stder, expfunc_2ndder
         params = fbspd_plot_data['final_params']
         pcov = fbspd_plot_data.get('pcov')
-        ts_obs = fbspd_plot_data['final_merged_data']['reltime']
-        hs_obs = fbspd_plot_data['final_merged_data']['height']
+        ts_obs = np.asarray(fbspd_plot_data['final_merged_data']['reltime'], dtype=float)
+        hs_obs = np.asarray(fbspd_plot_data['final_merged_data']['height'], dtype=float)
+        params = np.asarray(params, dtype=float)
+        if (params.shape != (4,) or not np.all(np.isfinite(params))
+                or ts_obs.ndim != 1 or hs_obs.shape != ts_obs.shape or len(ts_obs) < 2
+                or not np.all(np.isfinite(ts_obs)) or not np.all(np.isfinite(hs_obs))
+                or np.ptp(ts_obs) <= 0):
+            raise ValueError('Invalid luminous-track fit samples')
         t0_obs = float(np.min(ts_obs)); t_last = float(np.max(ts_obs))
         n_obs = len(ts_obs)
 
@@ -1731,7 +2026,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             return float(expfunc_1stder(t, *params)) * 1000.0   # km/s -> m/s
 
         def a_of_t(t):
-            return float(abs(expfunc_2ndder(t, *params))) * 1000.0
+            return -float(expfunc_2ndder(t, *params)) * 1000.0
 
         hfit = np.polyfit(ts_obs, hs_obs, 1) if len(ts_obs) > 2 else None
 
@@ -1755,16 +2050,25 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             v_scan = np.array([v_of_t(t) for t in ts_scan])
             below = np.nonzero(v_scan < V_LUM_MIN)[0]
             if len(below) and below[0] > 0:
-                t_fade = float(ts_scan[below[0]])
+                from scipy.optimize import brentq
+                t_fade = float(brentq(lambda t: v_of_t(t) - V_LUM_MIN,
+                                     ts_scan[below[0] - 1], ts_scan[below[0]]))
+                pos0, pos1 = expfunc(t0_obs, *params), expfunc(t_last, *params)
+                if pos1 <= pos0:
+                    raise ValueError('Non-increasing fitted trajectory distance')
+                fraction = float(np.clip((expfunc(t_fade, *params) - pos0) / (pos1 - pos0), 0., 1.))
+                r_end = r_start + fraction * (r_end - r_start)
+                end_lon, end_lat, end_h = ecef2llh(r_end)
+                release_truncated = True
                 logging.info(f'darkflight: fit crosses luminous threshold '
                              f'at t={t_fade:.2f}s (of {t_last:.2f}s) — '
                              f'truncating analysis and releasing at 3 km/s')
                 t_last = t_fade
                 a_end = a_of_t(t_fade)
+                v_end = V_LUM_MIN
             else:
-                logging.info(f'darkflight: fitted v_end={v_end/1000:.2f} km/s '
-                             f'below luminous threshold — releasing at 3 km/s')
-            v_end = V_LUM_MIN
+                logging.warning(f'darkflight: fitted v_end={v_end/1000:.2f} km/s '
+                                f'below luminous threshold — retaining fitted speed')
     else:
         v_end, a_end, t0_obs, t_last, n_obs = 3000.0, 1e4, 0.0, 1.0, 0
         logging.warning('darkflight: no fbspd fit, using nominal v_end/a_end')
@@ -1787,11 +2091,15 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                           'v_end_ms': float(v_end), 'a_end_ms2': float(a_end)},
             'wind_used': False, 'h_ground_m': 0.0,
             'mass_estimates': [], 'entry_estimates': [],
-            'm_est_ref_kg': 0.0,
+            'm_est_ref_kg': None, 'mass_source': None, 'mass_status': 'unconstrained',
+            'density_ref_kg_m3': float(rho_ref or 3500.0),
+            'photometric': None, 'mag_anchor': None, 'phot_anchor': None,
+            'magnitude_input': None, 'model_assumptions': [],
             'reliability': 'unreliable', 'issues': issues_pre,
             'n_obs': int(n_obs if have_fit else 0),
             'track_duration_s': float(t_last - t0_obs),
-            'scenarios': [], 'mc': {'n': 0, 'impacts': []},
+            'scenarios': [], 'mc': {'n': 0, 'impacts': [], 'attempted': 0,
+                                   'requested': mc_runs, 'skipped_reason': 'invalid_state'},
         }
         write_json(results, event_dir / 'darkflight.json')
         _clean_outputs(event_dir)
@@ -1821,13 +2129,17 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                None)
 
     # --- Reliability assessment -------------------------------------------------
-    # A meteor that fades while still fast (luminous regime ends ~3-4 km/s)
-    # must have a small surviving mass: it disappeared because it fully
-    # ablated, not because it slowed below the detection threshold.
-    # Deceleration-inferred mass >> critical ablation mass therefore flags
-    # an inconsistent/unreliable input (usually a bad trajectory or a
-    # poorly constrained deceleration fit).
+    # A fast luminous endpoint alone does not establish complete ablation:
+    # fragmentation, sensitivity, cloud or field-of-view loss may explain
+    # the observed disappearance. Treat a deceleration-inferred mass far
+    # above the ablation scale as a model-consistency warning, not proof
+    # of disintegration or of a bad observation. The following thresholds
+    # are screening heuristics rather than survival-probability estimates.
     issues = []
+    if release_truncated:
+        issues.append('release moved to model 3 km/s threshold')
+    if have_fit and v_end < 3000.0:
+        issues.append('speed fit entirely below luminous threshold')
     duration = t_last - t0_obs
     if n_obs < 10:
         issues.append(f'few centroid observations ({n_obs})')
@@ -1853,7 +2165,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         issues.append('no speed/deceleration fit')
     reliability = 'unreliable' if any(
         i in ('inconsistent with fade-out', 'implausibly large surviving mass',
-              'no speed/deceleration fit',
+              'no speed/deceleration fit', 'speed fit entirely below luminous threshold',
               'deceleration non-invertible') for i in issues) else \
         ('marginal' if issues else 'ok')
     if reliability != 'ok':
@@ -1864,7 +2176,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     # a constant-velocity fit yields no mass estimate, but the event may
     # still end low enough to drop meteorites (e.g. a linear fit was
     # chosen over noisy data). The fall-line/mass-grid scenarios carry
-    # the prediction; m_est falls back to a nominal value below.
+    # conditional paths; an unknown mass is not replaced by a nominal body.
 
     # --- Photometric cross-check (star-calibrated light curve) ------------------
     photometry = None
@@ -1875,96 +2187,111 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     except Exception as e:
         logging.debug(f'darkflight: photometry failed: {e}')
 
-    m_phot = photometry.get('m_phot_kg') if photometry else None
+    magnitude_input = None
     mag_anchor = None
-    if m_phot is None and peak_mag is not None and have_fit:
-        # manually supplied peak magnitude (normalised to 100 km) anchors
-        # the mass when star-calibrated photometry is unavailable. The
-        # magnitude gives the mass *at peak brightness*; ablate it forward
-        # over the post-peak track to get the surviving mass at fade-out
-        try:
-            # Reconstruct a model light curve: luminosity follows the
-            # mass-ablation rate, L(t) ~ tau(v)*rho(h)*v^3. Normalise its
-            # peak to the given magnitude and integrate over the whole
-            # luminous track — m = int(L)dt / int(tau*v^2/2)dt, the same
-            # convention as photometry.photometric_mass. This uses the
-            # total radiated energy, not the peak instant, so it is
-            # insensitive to where ablation/fragmentation peaks.
-            def _tau(v):
-                return min(0.20, max(0.001, 0.0007 * (v / 1000.0)))
-            ts_all = np.linspace(t0_obs, t_last, 400)
-            vs = np.array([max(v_of_t(t), 0.0) for t in ts_all])
-            rhos = np.array([atm.at(max(h_of_t(t), 0.0))[1]
-                             for t in ts_all])
-            shape = np.array([_tau(v) * r * v ** 3
-                              for v, r in zip(vs, rhos)])
-            # Meteor luminous-intensity convention (Ceplecha/Jacchia):
-            # a magnitude-0 meteor at 100 km radiates ~1500 W total
-            # (isotropic-equivalent) — not the astronomical Vega flux,
-            # which would overestimate the power ~200x.
-            L_pk = 1500.0 * 10 ** (-0.4 * float(peak_mag))
-            E_rad = L_pk / shape.max() * np.trapz(shape, ts_all)
-            eff = np.trapz([_tau(v) * v ** 2 / 2.0 for v in vs], ts_all)
-            t_pk = float(ts_all[np.argmax(shape)])
-            m_lum = E_rad / eff
-            # ablate the luminous mass forward to fade-out. If dynamic
-            # pressure at the peak exceeds compressive strength, the body
-            # fragments at peak brightness — post-peak ablation then acts
-            # on the fragment spectrum, which erodes ~n^(1/3) faster
-            rho_r = float(rho_ref) if rho_ref else (ref['rho'] if ref else 3500.0)
-            A_ref = ref['A'] if ref else 1.4
-            B = ablation_coeff(rho_r, A_ref) * A_ref \
-                / (2 * rho_r ** (2. / 3))
-            ip = int(np.searchsorted(ts_all, t_pk))
-            pre = np.trapz(rhos[:ip + 1] * vs[:ip + 1] ** 3,
-                           ts_all[:ip + 1]) if ip > 0 else 0.0
-            post = np.trapz(rhos[ip:] * vs[ip:] ** 3, ts_all[ip:])
-            # coherent ablation pre-peak
-            m13_pk = max(m_lum ** (1. / 3) - (B / 3) * pre, 0.0)
-            m_pk = m13_pk ** 3
-            dyn_pk = rhos[ip] * v_of_t(t_pk) ** 2 \
-                * cd_hypersonic(A_ref)
-            frag_note = ''
-            if dyn_pk > compressive_strength(rho_r):
-                frags = fragmentation_spectrum(
-                    m_pk, severity=dyn_pk / compressive_strength(rho_r))
-                m13_f = np.maximum(frags ** (1. / 3)
-                                   - (B / 3) * post, 0.0)
-                m_phot = float((m13_f ** 3).sum())
-                frag_note = (f', fragmented into ~{len(frags)} pieces '
-                             f'at peak (dyn press {dyn_pk/1e3:.0f} kPa > '
-                             f'strength {compressive_strength(rho_r)/1e3:.0f} kPa)')
-            else:
-                m_phot = max(m13_pk - (B / 3) * post, 0.0) ** 3
-            logging.info(f'darkflight: peak magnitude {peak_mag} at 100 km '
-                         f'(model peak at t={t_pk:.2f}s, '
-                         f'v={v_of_t(t_pk)/1000:.1f} km/s) -> '
-                         f'luminous mass ~{m_lum:.2f} kg, at fade-out '
-                         f'~{m_phot:.3f} kg after ablation{frag_note}')
-            mag_anchor = {'peak_mag': float(peak_mag),
-                          'm_luminous_kg': float(m_lum),
-                          'm_fade_kg': float(m_phot)}
-        except Exception as e:
-            logging.debug(f'darkflight: --mag conversion failed: {e}')
-    if m_phot and ref is not None and np.isfinite(m_med) and m_med > 0:
-        if m_med / m_phot > 50:
-            issues.append(
-                f'dynamic mass {m_med:.3g} kg >> photometric '
-                f'{m_phot:.3g} kg — likely bad track/fit')
-            if reliability == 'ok':
-                reliability = 'unreliable'
+    # characteristic speed for the survival fraction: the fitted start
+    # speed sets the total ablation budget; fall back to end speed
+    v_char = v_end
+    if have_fit:
+        v0 = float(v_of_t(t0_obs))
+        if np.isfinite(v0) and v0 > 0:
+            v_char = v0
+    if peak_mag is not None:
+        magnitude_input = {'peak_mag': float(peak_mag), 'distance_km': 100.0,
+                           'source': 'manual_peak_magnitude'}
+        # Order-of-magnitude mass anchor: a brief flash term (peak
+        # magnitude held only ~MAG_FLASH_T_EFF_S seconds) plus the
+        # sustained-phase mass loss from the measured light curve when a
+        # calibrated photometric integral exists; an assumed survival
+        # fraction then gives what reached dark flight.
+        m_flash = _mag_to_photometric_mass(
+            peak_mag, v_end, MAG_FLASH_T_EFF_S)
+        m_sustained = ((photometry or {}).get('m_phot_kg') or 0.0)
+        m_entry_est = m_flash + m_sustained
+        f_lo, f_hi = _survival_fraction(v_char)
+        mag_anchor = {
+            'peak_mag': float(peak_mag),
+            'm_entry_est_kg': m_entry_est,
+            'm_flash_kg': m_flash,
+            'm_sustained_kg': m_sustained,
+            'm_surv_lo_kg': m_entry_est * f_lo,
+            'm_surv_hi_kg': m_entry_est * f_hi,
+            'm_fade_est_kg': math.sqrt(f_lo * f_hi) * m_entry_est,
+            'survival_frac': [f_lo, f_hi],
+            'v_char_ms': v_char,
+            't_eff_s': MAG_FLASH_T_EFF_S,
+            'method': 'peak_luminous_energy',
+            'source': 'peak_magnitude',
+            'order_of_magnitude': True}
+        logging.info(f'darkflight: magnitude anchor peak={peak_mag:.1f} -> '
+                     f'flash {m_flash:.3g} kg + sustained {m_sustained:.3g} kg'
+                     f' = entry ~{m_entry_est:.3g} kg, surviving '
+                     f'{m_entry_est*f_lo:.2g}-{m_entry_est*f_hi:.2g} kg '
+                     f'(order-of-magnitude, not a dynamical constraint)')
 
-    # Nominal scenario mass: photometric or fade-consistent mass when the
-    # deceleration fit is unreliable, else the deceleration-inferred estimate
-    if reliability == 'unreliable':
-        m_est = float(np.clip(m_phot or (m_crit if m_crit > 0 else 1.0),
-                              1e-4, 100.0))
+    # Without a supplied peak magnitude the measured luminous-mass
+    # integral still provides an order-of-magnitude mass scale; apply the
+    # same survival fraction so the report can show a surviving-mass
+    # estimate rather than only the ablated-mass proxy.
+    phot_anchor = None
+    m_phot = (photometry or {}).get('m_phot_kg')
+    if m_phot and np.isfinite(m_phot) and m_phot > 0:
+        f_lo, f_hi = _survival_fraction(v_char)
+        phot_anchor = {
+            'm_entry_est_kg': float(m_phot),
+            'm_surv_lo_kg': float(m_phot) * f_lo,
+            'm_surv_hi_kg': float(m_phot) * f_hi,
+            'm_fade_est_kg': math.sqrt(f_lo * f_hi) * float(m_phot),
+            'survival_frac': [f_lo, f_hi],
+            'v_char_ms': v_char,
+            'method': 'measured_luminous_integral',
+            'source': 'photometric_light_curve',
+            'order_of_magnitude': True}
+
+    # Nominal scenario mass: only a constrained dynamical fit supplies mass;
+    # otherwise retain hypothetical mass-grid paths without a mass estimate.
+    m_est = float(m_med) if reliability == 'ok' and ref is not None and m_med > 0 else None
+    mass_source = 'dynamic_constant_mass_fit' if m_est is not None else None
+    mass_status = 'constrained' if m_est is not None else 'unconstrained'
+    if m_est is not None:
+        mc_mass_bounds = None
+        mc_reference_mass = m_est
+        mc_anchor = 'dynamic'
+        mc_mass_prior = None
+    elif mag_anchor is not None:
+        mc_mass_bounds = None
+        mc_reference_mass = mag_anchor['m_fade_est_kg']
+        mc_anchor = 'magnitude'
+        mc_mass_prior = {'source': 'magnitude_anchor',
+                         'peak_mag': mag_anchor['peak_mag'],
+                         'median_kg': mc_reference_mass,
+                         'lo_kg': mag_anchor['m_surv_lo_kg'],
+                         'hi_kg': mag_anchor['m_surv_hi_kg'],
+                         'stage': 'end_of_luminous_flight'}
+        logging.info('darkflight: MC anchored on magnitude-derived '
+                     f'surviving-mass estimate ~{mc_reference_mass:.3g} kg '
+                     '(order-of-magnitude)')
     else:
-        m_est = float(np.clip(m_med if ref else 1.0, 1e-4, 100.0))
+        mc_mass_bounds = (0.005, 5.0)
+        mc_reference_mass = math.sqrt(mc_mass_bounds[0] * mc_mass_bounds[1])
+        mc_anchor = 'hypothetical'
+        mc_mass_prior = {'source': 'conservative_assumption',
+                         'distribution': 'stratified_log_uniform',
+                         'min_kg': mc_mass_bounds[0],
+                         'max_kg': mc_mass_bounds[1],
+                         'median_kg': mc_reference_mass,
+                         'stage': 'end_of_luminous_flight'}
+    if m_est is None and mag_anchor is None:
+        logging.warning('darkflight: surviving mass is not constrained; '
+                        'showing hypothetical 5 g–5 kg release-mass tracks')
+        if mc_runs > 0:
+            logging.info('darkflight: conditional MC samples fragment masses '
+                         'log-uniformly over 5 g–5 kg at end of luminous flight; '
+                         'this is not a measured total surviving mass')
 
     # Entry-mass back-projection (needs height vs time along track)
     entry_estimates = []
-    if have_fit:
+    if have_fit and m_est is not None:
         for e in mass_estimates:
             m_ent = entry_mass_estimate(e['m_fade_kg'], e['rho'], e['A'],
                                         v_of_t, h_of_t, (t0_obs, t_last),
@@ -2010,19 +2337,25 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
 
         # Monte Carlo
         mc_impacts = []
-        if mc_runs > 0:
+        mc_attempted = 0
+        if mc_runs > 0 and mc_reference_mass > 0:
             # if the S5 breakup scenario fired, the real fall is a
             # fragment strewn field — draw MC masses from its spectrum
             # instead of perturbing a single nominal body
-            s5 = next((s for s in scenarios if s['name'] == 'S5_strength'),
-                      None)
-            m_samples = (np.array([r['m'] for r in s5['runs']])
-                         if s5 is not None else None)
+            m_samples = None
+            if (mc_anchor in ('dynamic', 'magnitude')
+                    and dyn_press > compressive_strength(rho_ref or 3500.0)):
+                m_samples = fragmentation_spectrum(
+                    mc_reference_mass,
+                    severity=dyn_press / compressive_strength(rho_ref or 3500.0))
+            if m_samples is not None:
+                m_samples = m_samples[m_samples > 0]
+            mc_attempted = mc_runs
             mc_impacts = [i for i in monte_carlo(
-                r_end, v0_vec, m_est, 3500.0, 1.4, wind_csv, h_ground,
+                r_end, v0_vec, mc_reference_mass, rho_ref or 3500.0, 1.4, wind_csv, h_ground,
                 n_runs=mc_runs, seed=seed, pool=pool,
                 lon=end_lon, lat=end_lat, event_dt=event_dt,
-                mass_samples=m_samples)
+                mass_samples=m_samples, mass_bounds=mc_mass_bounds)
                 if i.get('landed', True)]
     finally:
         if own_pool:
@@ -2037,31 +2370,57 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         'mass_estimates': mass_estimates,
         'entry_estimates': entry_estimates,
         'm_est_ref_kg': m_est,
+        'mass_source': mass_source,
+        'mass_status': mass_status,
+        'density_ref_kg_m3': float(rho_ref or 3500.0),
+        'photometric': photometry,
         'mag_anchor': mag_anchor,
+        'phot_anchor': phot_anchor,
+        'magnitude_input': magnitude_input,
+        'model_assumptions': ['flat ground at release-site elevation',
+                              'heuristic strength and fragmentation distribution',
+                              'MC samples independent fragments, not complete falls',
+                              'buffered MC outline is not a confidence contour'] + (
+            ['conditional MC samples fragment masses log-uniformly over '
+             '5 g–5 kg at end of luminous flight']
+            if mc_anchor == 'hypothetical' else
+            [f'entry/surviving mass scale anchored on supplied peak magnitude '
+             f'{peak_mag:.1f} (flash {MAG_FLASH_T_EFF_S} s plus measured '
+             f'luminous-mass integral, survival fraction '
+             f'{mag_anchor["survival_frac"][0]:.2f}–'
+             f'{mag_anchor["survival_frac"][1]:.2f} at '
+             f'{v_char/1000:.1f} km/s); order-of-magnitude only']
+            if mc_anchor == 'magnitude' else []),
         'reliability': reliability,
         'issues': issues,
         'n_obs': int(n_obs), 'track_duration_s': float(duration),
         'scenarios': [{'name': s['name'], 'label': s['label'],
+                       'hypothetical': s.get('hypothetical', False),
                        'impacts': [{'m': r['m'], **r['impact']}
                                    for r in s['results']]}
                       for s in scenarios],
-        'mc': {'n': len(mc_impacts), 'impacts': mc_impacts},
+        'mc': {'n': len(mc_impacts), 'attempted': mc_attempted,
+               'requested': mc_runs, 'impacts': mc_impacts,
+               'hypothetical': mc_anchor == 'hypothetical',
+               'anchor': mc_anchor, 'mass_prior': mc_mass_prior,
+               'skipped_reason': 'disabled' if mc_runs == 0 else None},
     }
     write_json(results, event_dir / 'darkflight.json')
     write_geojson(scenarios, event_dir / 'darkflight.geojson')
     write_kml(scenarios, (end_lon, end_lat, end_h),
-              event_dir / 'darkflight.kml', mc_impacts=mc_impacts)
+              event_dir / 'darkflight.kml', mc_impacts=mc_impacts,
+              mc_assumed=m_est is None)
     for file_prefix, tr in (lang_files or {'': {}}).items():
         try:
             write_map(scenarios, (end_lon, end_lat, end_h), mc_impacts,
                       event_dir / f'{file_prefix}map_darkflight.svg',
-                      translations=tr)
+                      translations=tr, mc_assumed=m_est is None)
         except Exception as e:
             logging.warning(f'darkflight map failed: {e}')
         try:
             write_map3d(scenarios, (end_lon, end_lat, end_h), mc_impacts,
                         event_dir / f'{file_prefix}darkflight_map3d.html',
-                        translations=tr)
+                        translations=tr, mc_assumed=m_est is None)
         except Exception as e:
             logging.warning(f'darkflight 3d map failed: {e}')
     return results
@@ -2074,13 +2433,13 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--mag', type=float, default=None,
                     help='Peak visual magnitude normalised to 100 km '
-                         '(absolute magnitude). Used as photometric mass '
-                         'anchor when star-calibrated photometry fails.')
+                         '(absolute magnitude). Recorded as brightness only; '
+                         'does not determine total or surviving mass.')
     ap.add_argument('--density', type=float, default=None,
                     help='Reference meteoroid density in kg/m3 '
                          '(e.g. 3500 chondrite, 7000 iron). Sets the '
-                         'scenario material and photometric anchor '
-                         'density; the dynamic mass grid still spans '
+                         'scenario material density; the dynamic mass '
+                         'grid still spans '
                          'all densities.')
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO)

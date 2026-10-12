@@ -326,3 +326,88 @@
   `python3 -B -m unittest discover -s bin -p test_meteorcrop.py`.
   Verify real events in temporary directories with read-only source inputs;
   do not rerun the full live fetch pipeline merely to test crop orientation.
+
+## Photometry (learned 2026-10, meteor/20210724/230849)
+
+- `event.txt` `trail/brightness` is NOT a universal quantity. It is the
+  filtered 3x3-average luma of the *stacked gnomonic image* plus a
+  saturation-area estimate, written by `refinetrack.py --frames`. When a
+  trail is marked `manual = 1` (manual/merged tracks), refinement is
+  skipped and `brightness`, `size` and `frame_brightness` stay all-zero
+  even though the meteor is plainly visible in `*-orig.mp4`. Other
+  producers write different units entirely (`ams2event.py` writes
+  `(w*h)^2`, `centroid2event.py` writes zeros). Always check whether the
+  field has signal before trusting `m_phot_kg`.
+- `photometry.py` now falls back to aperture photometry (r=6, annulus
+  11-16) in the `*-orig.mp4` frames at the `positions` pixels, matched by
+  nearest blob centroid; the zero point is transferred from the gnomonic
+  star calibration via stars measurable in both domains (`zp_source
+  'transfer'`) or fitted directly on the video mean frame (`'direct'`).
+  Cameras still cannot contribute a mass without any star calibration.
+- `positions` are *raw video-frame* pixels (verified by mapping through
+  `gnomonic.pto` -> `gnomonic_corr_grid.pto` -> az/alt). `coordinates`
+  are az,alt; `gnomonic` are the gnomonic-plane coords used for merging.
+- Peak-pixel star zp vs integrated meteor flux are inherently
+  inconsistent; the video aperture path measures stars and meteor the
+  same way. Saturated points (peak >= 250) are flagged; a meteor that
+  saturates yields a lower-bound luminosity.
+- Bright bolides near the horizon (e.g. Trondheim at ~380 km, el 6-9 deg)
+  record mostly scattered light on haze/train, not direct flux; treat
+  such m_app as very approximate. Extinction at el < 10 deg is several
+  magnitudes and poorly modeled.
+- `range_to_track` clamps to the finite segment: a line-of-sight whose
+  closest approach extrapolates beyond the track (`track_frac` outside
+  [0,1]) now reports the distance to the nearest endpoint, not the
+  meaningless infinite-line intersection.
+
+## Dark-flight verification and interpretation
+
+- Run `python3 -m pytest bin/test_darkflight.py bin/test_photometry.py -q`;
+  repeat with `NUMBA_DISABLE_JIT=1` to verify the Python fallback.
+- Rendering regression tests use synthetic basemaps and temporary output
+  directories; Plotly, Cartopy and Shapely are optional test dependencies.
+  They check MC polygon containment, mesh triangles and KML hatch segments
+  without contacting map servers or overwriting live event reports.
+- MC draws represent independent fragments, not mass-conserving complete
+  falls. `mc.n` counts landed draws; `mc.attempted` records propagated draws.
+  The buffered outline is a display envelope, not a confidence contour.
+- Photometric mass is a luminous mass-loss proxy, not a surviving mass.
+  `--mag` records peak brightness only; it does not infer a light curve,
+  initial mass or survivors. `magnitude_input` retains the input and
+  `mag_anchor` stays null. Only a fit with reliability `ok` supplies a
+  nominal mass. Otherwise `m_est_ref_kg` is null (unknown, not zero),
+  `mass_status` is `unconstrained`, and only explicitly hypothetical
+  release-mass-grid tracks are drawn; no nominal impact or mass-based MC
+  area is inferred. `mc.skipped_reason` distinguishes this from `--mc 0`.
+- Impact `m` / GeoJSON `mass_kg` are landed masses; scenario run `m` and
+  GeoJSON `release_mass_kg` are release masses. A dust/timeout termination
+  must not be reported as a ground impact.
+
+## Mailu resolver / DNSSEC root anchor (oskoreia)
+
+- `mailu-resolver-1` (unbound) validates DNSSEC with
+  `auto-trust-anchor-file: trusted-key.key`. The 2026-10-11 ICANN root KSK
+  rollover to KSK-2024 (keytag 38696) caused total SERVFAIL -> admin auth
+  down -> IMAP `UNAVAILABLE Temporary authentication failure` + webmail 500.
+- Fix applied 2026-10-12: `/mailu/resolver/` is bind-mounted over
+  `/etc/unbound` in the resolver container (docker-compose.yml), seeded with
+  `root.hints` and `trusted-key.key` containing BOTH root KSKs as DNSKEY
+  records (verified vs https://data.iana.org/root-anchors/root-anchors.xml).
+  DNSKEY format restores RFC 5011 autotrust so future rollovers self-track;
+  the mount survives the weekly `docker compose pull && up -d` cron
+  (Sun 03:15) that recreates containers.
+- unbound needs dir write access for autotrust temp+rename:
+  `setfacl -m u:101:rwx /mailu/resolver` (container unbound uid=101);
+  trusted-key.key is mode 0666.
+- Watchdog `/mailu/mailu-dns-watchdog.sh` (steinar crontab, every
+  5 min): first repairs `/mailu/resolver` (recreates dir, restores
+  root.hints from the image, regenerates trusted-key.key as DNSKEY anchors
+  from host BIND AD-validated answers / unbound-anchor / embedded IANA
+  keys, fixes uid-101 writability via chmod or a throwaway root container),
+  then queries `nic.cz` via the resolver for the AD bit; on failure
+  refreshes the anchor and restarts the container; starts it if stopped.
+  Logs to syslog tag `mailu-dns-watchdog`.
+- If the whole stack must survive resolver death outright, adding host BIND
+  (192.168.203.1) as a secondary `dns:` entry per service in
+  docker-compose.yml is an option — BIND also validates, so DANE semantics
+  are preserved; not implemented.

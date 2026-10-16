@@ -10,11 +10,14 @@ The resulting centre, roll and FOV are then scaled back to the full image and wr
 as a single-image .pto file in the same style as nmn/bin/amscalib2lens.py and lens.pto.
 
 Usage:
-    autocalib.py <image> <output.pto> [options]
+    autocalib.py <image|video> <output.pto> [options]
 
 Example:
     autocalib.py ~/OSL_cam2.jpg ~/OSL_cam2.pto \
         -T 1756172400 -y 59.97056 -x 10.649639 -e 348
+
+A video file (e.g. .mp4) is also accepted: the first --stack frames
+(default 10) are max-stacked into a still image which is then solved.
 """
 
 import argparse
@@ -48,6 +51,11 @@ except ImportError as exc:
     Tetra3 = None
     get_centroids_from_image = None
     TETRA3_ERR = exc
+
+# Video containers accepted as input; the first --stack frames are
+# max-stacked (via stack.py) into a still before solving.
+VIDEO_EXTENSIONS = ('.mp4', '.m4v', '.avi', '.mov', '.mkv', '.mpg', '.mpeg',
+                    '.ts', '.webm')
 
 # Initial lens-model guesses: median values from 84 lens.pto files across
 # ams123, ams135, ams171-180 (cam1-7). Yaw/pitch/roll and centre RA/Dec are
@@ -1328,14 +1336,49 @@ def _run_all_cameras(args):
     sys.exit(0 if n_ok == 7 else 1)
 
 
+def _stack_video_to_image(video_path, n_frames, verbose=False):
+    """Max-stack the first `n_frames` frames of `video_path` into a still
+    JPEG using stack.py's ffmpeg pipeline. Returns the temp image path."""
+    import atexit
+    import stack as stack_mod
+    props = stack_mod.get_video_properties_ffprobe(video_path)
+    if props is None:
+        print(f'Error: could not probe video: {video_path}', file=sys.stderr)
+        sys.exit(1)
+    fps = props.get('fps', 0.0)
+    # -t (N - 0.5)/fps decodes exactly frames 0..N-1 at constant frame rate;
+    # fall back to the whole clip when the frame rate is unknown.
+    duration = (n_frames - 0.5) / fps if fps > 0 else None
+    tmp = tempfile.NamedTemporaryFile(prefix='autocalib_stack_',
+                                      suffix='.jpg', delete=False)
+    tmp.close()
+    if verbose:
+        print(f'Stacking first {n_frames} frames of {video_path} '
+              f'-> {tmp.name}')
+    try:
+        stack_mod.stack_video_frames(
+            [video_path], tmp.name, 0.0, duration,
+            denoise=False, denoise_strength=10.0, quality=95,
+            num_threads=1, individual=False, enhance=False,
+            progress=False, resize_factor=1.0, use_hw_accel=False)
+    except stack_mod.StackingError as exc:
+        os.unlink(tmp.name)
+        print(f'Error stacking video: {exc}', file=sys.stderr)
+        sys.exit(1)
+    atexit.register(os.unlink, tmp.name)
+    return tmp.name
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Create a Hugin .pto file from a star-field image using tetra3.',
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument('image', nargs='?',
-                        help='Input image (e.g. JPEG). With --all: optional '
-                             'date YYYYMMDD or YYYY-MM-DD (default: yesterday).')
+                        help='Input image (e.g. JPEG) or video (e.g. .mp4; '
+                             'the first --stack frames are max-stacked into a '
+                             'still first). With --all: optional date YYYYMMDD '
+                             'or YYYY-MM-DD (default: yesterday).')
     parser.add_argument('ptofile', nargs='?', help='Output .pto file')
     parser.add_argument('overlay', nargs='?', default=None,
                         help='Optional output image: draw az/alt grid + star '
@@ -1353,6 +1396,10 @@ def main():
     parser.add_argument('-x', '--longitude', type=float, help='Observer longitude')
     parser.add_argument('-e', '--elevation', type=float, help='Observer elevation (m)')
     parser.add_argument('-T', '--timestamp', type=float, help='Unix timestamp of the image')
+    parser.add_argument('--stack', type=int, default=10, metavar='N',
+                        help='When the input is a video: number of leading '
+                             'frames to max-stack into the calibration image '
+                             '(default: 10).')
     parser.add_argument('--match-tolerance', type=float, default=0.15,
                         help='Maximum angular distance (deg) for accepting a catalogue match '
                              'in full-field matching (default: 0.15).')
@@ -1409,11 +1456,22 @@ def main():
         print(f'Error: image not found: {args.image}', file=sys.stderr)
         sys.exit(1)
 
+    if args.stack < 1:
+        parser.error('--stack must be >= 1')
+
+    # Video input: stack the first --stack frames into a still image and
+    # calibrate on that. The mask lookup and timestamp still key on the
+    # video path itself (/meteor/camN/... layout applies either way).
+    source_image = args.image
+    if os.path.splitext(args.image)[1].lower() in VIDEO_EXTENSIONS:
+        source_image = _stack_video_to_image(args.image, args.stack,
+                                             verbose=args.verbose)
+
     config = _load_config(args)
     observer, timestamp = _setup_observer(args, config)
 
     # Open image and convert to luminance for solving.
-    raw_image = Image.open(args.image).convert('L')
+    raw_image = Image.open(source_image).convert('L')
     full_image = raw_image
     mask_img = None
     mask_src = 'none'
@@ -1490,10 +1548,10 @@ def main():
     print(f'Wrote .pto with {len(control_points)} control points: {args.ptofile}')
 
     if args.overlay:
-        _write_grid_overlay(args, timestamp, observer)
+        _write_grid_overlay(args, timestamp, observer, source_image)
 
 
-def _write_grid_overlay(args, timestamp, observer):
+def _write_grid_overlay(args, timestamp, observer, base_path):
     """Draw the az/alt grid and star annotations over the input image using
     drawgrid.py and save the composite to args.overlay."""
     import subprocess
@@ -1509,7 +1567,7 @@ def _write_grid_overlay(args, timestamp, observer):
         print(f'Warning: drawgrid.py failed ({r.stderr.strip()[-200:]}); '
               'overlay not written.', file=sys.stderr)
         return
-    base = Image.open(args.image).convert('RGBA')
+    base = Image.open(base_path).convert('RGBA')
     grid = Image.open(grid_png)
     if grid.size != base.size:
         grid = grid.resize(base.size)

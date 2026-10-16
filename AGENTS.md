@@ -278,6 +278,15 @@
   images are magic-byte validated, submissions are per-IP rate limited,
   and the script writes a protective `.htaccess` into `reports/` that
   disables script handlers and MIME sniffing.
+- TWO different `report.php` files exist — do not confuse them:
+  `server/report.php` is the PUBLIC sighting-form handler that
+  `obs.html` POSTs to (`/var/www/html/report.php` symlinks to it);
+  `/var/www/html/ssh/report.php` is the station pull-trigger (signature
+  verified, NOT in the repo). Commit `5aff442` accidentally overwrote
+  the public handler with a copy of the trigger, breaking obs.html
+  submissions with 403 until restored in `ee2852e`. If the deployed
+  trigger is ever synced into the repo, use a different filename
+  (e.g. `server/ssh/report.php`).
 - `server/fetch_foreign.sh` piped remote HTTP data into awk `system()`
   with `curl -k` — remote/MITM command injection. Fixed: TLS verified,
   fields regex-validated, `print > file` instead of `echo` in system().

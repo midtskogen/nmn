@@ -1913,10 +1913,14 @@ class AS7Diagnostic:
     def backup_nmn_camera_files(self):
         """Backs up NMN camera calibration/config files to /home/meteor/backup.
 
-        Copies files matching /meteor/cam?/lens*pto, /meteor/cam?/grid*png, and
-        /meteor/cam?/metdetect.conf. Symlinks are preserved as symlinks and the
-        directory structure under /meteor is retained. The old backup is only
-        overwritten when the new backup contains at least one file.
+        Copies files matching /meteor/cam?/lens*pto, /meteor/cam?/grid*png,
+        /meteor/cam?/metdetect.conf and /meteor/cam?/mask.png. Symlinks are
+        preserved as symlinks, except links whose target lives under /mnt
+        (the removable data disk, e.g. mask.png -> meteor_archive) — those are
+        dereferenced and copied as real files so the backup survives a disk
+        loss. The directory structure under /meteor is retained. The old
+        backup is only overwritten when the new backup contains at least one
+        file.
         """
         print("\n--- Backing up NMN Camera Files ---")
         backup_root = "/home/meteor/backup"
@@ -1924,6 +1928,7 @@ class AS7Diagnostic:
             "/meteor/cam?/lens*pto",
             "/meteor/cam?/grid*png",
             "/meteor/cam?/metdetect.conf",
+            "/meteor/cam?/mask.png",
         ]
 
         try:
@@ -1948,9 +1953,22 @@ class AS7Diagnostic:
 
                     if os.path.islink(src):
                         link_target = os.readlink(src)
-                        if os.path.lexists(dst):
-                            os.remove(dst)
-                        os.symlink(link_target, dst)
+                        resolved = os.path.realpath(src)
+                        if os.path.isabs(link_target) and \
+                                link_target.startswith('/mnt/'):
+                            # Target lives on the removable data disk; store
+                            # the resolved file so the backup survives a loss.
+                            if os.path.isfile(resolved):
+                                shutil.copy2(resolved, dst)
+                            else:
+                                self.log_issue("NMN_CAM_FILE_MISSING",
+                                               {'path': f"{src} -> {link_target} "
+                                                        f"(backup target missing)"})
+                                continue
+                        else:
+                            if os.path.lexists(dst):
+                                os.remove(dst)
+                            os.symlink(link_target, dst)
                     else:
                         shutil.copy2(src, dst)
                     files_copied += 1

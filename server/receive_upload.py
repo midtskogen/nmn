@@ -91,7 +91,7 @@ def main():
     try:
         parts = [p for p in remote_cleaned.split('/') if p]
         if parts[0] != 'meteor' or not re.fullmatch(r'cam\d+', parts[1]) \
-                or parts[2] != 'amsevents' \
+                or parts[2] not in ('amsevents', 'events') \
                 or not re.fullmatch(r'\d{8}', parts[3]) \
                 or not re.fullmatch(r'\d{6}(_\d+)?', parts[4]):
             raise IndexError

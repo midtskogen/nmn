@@ -62,6 +62,7 @@ parser.add_argument('-d', '--delay', dest='videodelay', help='video delay in ms 
 parser.add_argument('-L', '--link', dest='link', help='create link instead of copy', action="store_true")
 parser.add_argument('-r', '--remotedir', dest='remotedir', help='destination directory', default='/meteor')
 parser.add_argument('-e', '--execute', dest='exefile', help=f'program to pass event file to (default: "{AMS2EVENT_PY_DEFAULT}")', default=AMS2EVENT_PY_DEFAULT)
+parser.add_argument('-s', '--stack-lag', dest='stacklag', help='skip jpg stacking for clips older than this many seconds (default=600)', type=int, default=600)
 parser.add_argument(action='store', dest='recdir', help='directory to be monitored recursively (for detections)')
 parser.add_argument(nargs='*', action='store', dest='dirs', help='additional directories to be monitored non-recursively (for video files)')
 args = parser.parse_args()
@@ -96,6 +97,9 @@ else:
 
 # --- Global State ---
 processed_video_files = deque(maxlen=1000)
+# Rate limiter for "skipping stack" log lines: value is the lag_seconds at
+# last log; a new line is emitted when lag grows by >=60 s since then.
+last_stack_skip_log = 0.0
 processed_detection_files = OrderedDict()
 FILENAME_PATTERN = re.compile(r"(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\w+)_(\w+)\.mp4")
 
@@ -172,6 +176,7 @@ def stack_wrapper(*args, **kwargs):
 # --- Core Watcher Functions ---
 async def watch_videos():
     """Monitors directories for new video files, processes, and moves them."""
+    global last_stack_skip_log
     logging.info('Video watcher started.')
     i = inotify.adapters.Inotify()
     for d in args.dirs:
@@ -254,7 +259,13 @@ async def watch_videos():
                 shutil.copy2(filepath, remotefile)
             
             # --- JPG Stacking ---
-            if eventdir.endswith('HD') or eventdir.endswith('SD'):
+            lag_seconds = (datetime.datetime.now() - dt_for_path).total_seconds()
+            if lag_seconds > args.stacklag:
+                if lag_seconds - last_stack_skip_log > 60:
+                    logging.info(f"Skipping jpg stack for {filepath}: "
+                                 f"{lag_seconds/60:.0f} min behind (limit {args.stacklag} s)")
+                    last_stack_skip_log = lag_seconds
+            elif eventdir.endswith('HD') or eventdir.endswith('SD'):
                 jpgfile = os.path.join(remotedir, f"{file_prefix}{dt_for_path.strftime('%M')}.jpg")
                 stack_duration = 0.2  # if eventdir.endswith('HD') else None
 

@@ -33,7 +33,7 @@ if [ -d "$hd_dir" ]; then
         usage=$(df --output=pcent "$hd_dir" 2>/dev/null | tail -1 | tr -dc '0-9')
         [ "${usage:-0}" -ge 95 ] || break
         mapfile -t oldest < <(find "$hd_dir" -maxdepth 1 -name '*.mp4' -type f \
-            -printf '%T@ %p\n' 2>/dev/null | sort -n | head -200 | cut -d' ' -f2-)
+            -printf '%T@ %p\n' 2>/dev/null | sort -n | head -50 | cut -d' ' -f2-)
         [ ${#oldest[@]} -eq 0 ] && break
         printf '%s\n' "${oldest[@]}" | xargs -r rm -f --
         echo "cleanup.sh: ${usage}% full, deleted ${#oldest[@]} oldest HD clips"

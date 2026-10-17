@@ -433,6 +433,15 @@ async def main():
     )
 
 if __name__ == '__main__':
+    # Single-instance guard: an exclusive flock dies with the process (and
+    # survives the os.execv self-restart below), so a duplicate launch —
+    # e.g. a manual start racing a systemd restart — exits immediately.
+    import fcntl
+    _lock_f = open(os.path.expanduser('~/.mirror.lock'), 'w')
+    try:
+        fcntl.flock(_lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("Another mirror.py instance is already running.")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

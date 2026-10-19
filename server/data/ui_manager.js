@@ -2060,7 +2060,13 @@ export function showVideoPreview(videoUrl, title, mediaList = null, mediaIndex =
                 mod = Math.round(mod);
                 const hasVideoFrame = video.readyState >= 2 && video.videoWidth && video.videoHeight;
                 for (const dx of [mod, mod - w]) {
-                    if (hasVideoFrame) ctx.drawImage(video, dx, 0, w, h);
+                    // The source <video> is hidden; carry its CSS filter over to
+                    // the canvas repaint so brightness/contrast/saturation work.
+                    if (hasVideoFrame) {
+                        ctx.filter = video.style.filter || 'none';
+                        ctx.drawImage(video, dx, 0, w, h);
+                        ctx.filter = 'none';
+                    }
                     drawLayer(dx, gridOverlay, w, h);
                     drawLayer(dx, maskOverlay, w, h);
                     drawLayer(dx, boundsOverlay, w, h);
@@ -2543,6 +2549,9 @@ export function showImagePreview(imageUrl, title, mediaList = null, mediaIndex =
 
     function updateFilters() {
         img.style.filter = `brightness(${brightnessSlider.value}) contrast(${contrastSlider.value}) saturate(${saturationSlider.value})`;
+        // Equirect panoramas hide img and display rollBase (background-image
+        // mirror) instead - the filter must be applied to that layer too.
+        if (rollBase) rollBase.style.filter = img.style.filter;
     }
     brightnessSlider.addEventListener('input', updateFilters);
     contrastSlider.addEventListener('input', updateFilters);

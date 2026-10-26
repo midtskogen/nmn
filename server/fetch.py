@@ -1502,7 +1502,79 @@ def _rewrite_obs_to_inliers(obs_filepath: Path, obs_file_paths: list, inlier_set
         logging.warning(f"Could not rewrite main observation file: {e}")
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False, peak_mag: float = None, density: float = None):
+def _meteorite_darkflight_options(event_dir, darkflight_options=None, fast=False):
+    """Apply forward-fragmentation defaults for a meteorite candidate.
+
+    Explicit model/density choices still win. A scalar density is retained when
+    an unusual manual options object carries one prior weight, so alignment
+    with --density-priors remains valid.
+    """
+    if darkflight_options is None:
+        return darkflight.parse_args(
+            [str(event_dir), '--fragmentation-model', 'all',
+             '--density', '3500,7400'],
+            default_mc=0 if fast else 300)
+    options = argparse.Namespace(**vars(darkflight_options))
+    if not getattr(options, 'fragmentation_model', None):
+        options.fragmentation_model = ['all']
+    elif isinstance(options.fragmentation_model, str):
+        options.fragmentation_model = [options.fragmentation_model]
+    if getattr(options, 'density', None) is None:
+        priors = getattr(options, 'density_priors', None)
+        options.density = ([3500., 7400.]
+                           if priors is None or len(priors) == 2
+                           else [3500.] * len(priors))
+    return options
+
+
+def _run_darkflight(event_dir, darkflight_options=None, analysis_results=None, fast=False):
+    """Use the standalone parser/dispatcher and refresh only dark-flight report products."""
+    if not DARKFLIGHT_AVAILABLE:
+        raise RuntimeError('darkflight.py is unavailable')
+    event_dir = Path(event_dir).resolve()
+    options = darkflight_options
+    if options is None:
+        options = darkflight.parse_args([str(event_dir)], default_mc=0 if fast else 300)
+    options = argparse.Namespace(**{**vars(options), 'event_dir': str(event_dir)})
+    lang_files = {}
+    for lang in SUPPORTED_LANGS:
+        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+        lt = dict(load_translations(lang))
+        lt['dec_sep'] = ',' if lang != 'en' else '.'
+        lt['plotly_locale'] = 'no' if lang == 'nb' else lang
+        lang_files[file_prefix] = lt
+    df_results = darkflight.run_from_args(options, analysis_results=analysis_results,
+                                         lang_files=lang_files)
+    if options.fragmentation_model and options.fragmentation_output is not None:
+        return df_results
+    # Convert the fall-area map to jpg per language
+    for lang in SUPPORTED_LANGS:
+        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
+        svg_path = event_dir / f'{file_prefix}map_darkflight.svg'
+        if svg_path.exists():
+            svg_to_jpg(svg_path, event_dir / f'{file_prefix}map_darkflight.jpg',
+                       Config.SVG_DARKFLIGHT_DPI)
+    if (not options.fragmentation_model and df_results
+            and df_results.get('scenarios')):
+        _append_darkflight_table(event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)
+    return df_results
+
+
+def _run_darkflight_only(event_dir, darkflight_options):
+    """Read existing fit products under the normal event lock, without reprocessing."""
+    event_dir = Path(event_dir).resolve()
+    with (event_dir / '.process_event.lock').open('a') as lock:
+        logging.info('Waiting for event lock before dark-flight-only simulation...')
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if (event_dir / '.no_trajectory').exists():
+            raise ValueError('Event is marked .no_trajectory; cannot run dark flight')
+        if not any(event_dir.glob('obs_*.res')) or not (event_dir / '_fbspd_plot_data.pkl').is_file():
+            raise FileNotFoundError('Dark-flight-only mode requires obs_*.res and '
+                                    '_fbspd_plot_data.pkl; reprocess the event first')
+        return _run_darkflight(event_dir, darkflight_options)
+
+
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False, darkflight_options=None):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     if nosplit:
@@ -2329,37 +2401,24 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
             try:
                 end_height_km = analysis_results['resdat'].height[1]
                 if end_height_km <= 40:
-                    wind_csv = event_dir / "wind_profile.csv"
+                    darkflight_options = _meteorite_darkflight_options(
+                        event_dir, darkflight_options, fast=fast)
+                    densities = (darkflight_options.density
+                                 if isinstance(darkflight_options.density, list)
+                                 else [darkflight_options.density])
+                    logging.info(
+                        "Running meteorite-candidate forward fragmentation "
+                        f"(end height {end_height_km:.1f} km, models "
+                        f"{','.join(darkflight_options.fragmentation_model)}, "
+                        f"densities {','.join(map(str, densities))} kg/m3)...")
+                    _run_darkflight(event_dir, darkflight_options,
+                                    analysis_results, fast=fast)
+                elif (darkflight_options is not None
+                      and darkflight_options.fragmentation_model):
                     logging.info(f"Running dark flight simulation (end height {end_height_km:.1f} km)...")
-                    lang_files = {}
-                    for lang in SUPPORTED_LANGS:
-                        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-                        lt = dict(load_translations(lang))
-                        lt['dec_sep'] = ',' if lang != 'en' else '.'
-                        lang_files[file_prefix] = lt
-                    df_results = darkflight.run_darkflight(
-                        event_dir,
-                        analysis_results['resdat'],
-                        analysis_results.get('fbspd_results'),
-                        analysis_results.get('fbspd_plot_data'),
-                        wind_csv if wind_csv.exists() else None,
-                        mc_runs=0 if fast else 300,
-                        lang_files=lang_files,
-                        peak_mag=peak_mag,
-                        rho_ref=density,
-                    )
-                    # Convert the fall-area map to jpg per language
-                    for lang in SUPPORTED_LANGS:
-                        file_prefix = '' if lang == DEFAULT_LANG else f'{lang}_'
-                        svg_path = event_dir / f'{file_prefix}map_darkflight.svg'
-                        if svg_path.exists():
-                            svg_to_jpg(svg_path, event_dir / f"{file_prefix}map_darkflight.jpg",
-                                       Config.SVG_DARKFLIGHT_DPI)
-                        if df_results and df_results.get('scenarios'):
-                            _append_darkflight_table(
-                                event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)
+                    _run_darkflight(event_dir, darkflight_options, analysis_results, fast=fast)
                 else:
-                    logging.info(f"End altitude {end_height_km:.1f} km above 40 km — assuming full disintegration, skipping dark flight.")
+                    logging.info(f"End altitude {end_height_km:.1f} km above 40 km — skipping automatic dark flight.")
                     darkflight._clean_outputs(event_dir)
             except Exception as e:
                 logging.error(f"Dark flight simulation failed: {e}", exc_info=True)
@@ -2595,8 +2654,11 @@ def main():
         usage="""
     To fetch:     python3 fetch.py <station> <port> <remote_dir> [--nosplit]
     To reprocess: python3 fetch.py <local_event_directory> [--fast] [--all] [--origcen] [--force-plots] [--min-speed SPEED] [--nosplit]
+    Dark flight:  python3 fetch.py <local_event_directory> --darkflight-only [--darkflight-args <darkflight.py options...>]
         """
     )
+    if hasattr(parser, 'color'):
+        parser.color = False
     parser.add_argument("arg1", help="Station name OR path to local event directory for reprocessing.")
     parser.add_argument("port", nargs='?', help="SSH port (if fetching).")
     parser.add_argument("remote_dir", nargs='?', help="Remote directory path (if fetching).")
@@ -2635,19 +2697,24 @@ def main():
              "If omitted, it is derived from the fitted altitude as circular-orbit speed minus 1 km/s."
     )
     parser.add_argument(
-        "--mag",
-        type=float,
-        default=None,
-        help="Peak visual magnitude normalised to 100 km (absolute magnitude). "
-             "Recorded as brightness information only; peak magnitude alone "
-             "does not determine total or surviving mass."
+        "--darkflight-args",
+        nargs=argparse.REMAINDER,
+        metavar="OPTION",
+        help="Pass all remaining arguments to darkflight.py (put this last), "
+             "e.g. --darkflight-args --mag -18 --mc 100 --density 2500,7000."
     )
     parser.add_argument(
         "--density",
-        type=float,
+        type=str,
         default=None,
-        help="Reference meteoroid density in kg/m3 for dark-flight "
-             "(e.g. 3500 chondrite, 7000 iron). Passed to darkflight.py."
+        help="Reference meteoroid density in kg/m3 for dark-flight; accepts "
+             "a comma-separated list for forward models. Prefer --darkflight-args --density VALUE."
+    )
+    parser.add_argument(
+        "--darkflight-only",
+        action="store_true",
+        help="Run only darkflight for an existing event using saved .res/speed-fit inputs; "
+             "skip fetching, trajectory processing, wind downloads and unrelated reports."
     )
     parser.add_argument(
         "--infrasound",
@@ -2664,6 +2731,30 @@ def main():
     args = parser.parse_args()
 
     is_reprocessing = args.port is None and args.remote_dir is None
+    if args.darkflight_only and not is_reprocessing:
+        parser.error('--darkflight-only requires an existing local event directory, not a remote fetch')
+    if args.darkflight_only and (args.infrasound or args.all or args.origcen or args.force_plots
+                                or args.min_speed is not None or args.nosplit):
+        parser.error('--darkflight-only cannot be combined with trajectory or infrasound processing options')
+    darkflight_options = None
+    if args.darkflight_args is not None or args.density is not None or args.darkflight_only:
+        if not DARKFLIGHT_AVAILABLE:
+            parser.error('darkflight.py is unavailable')
+        forwarded = ['--density', str(args.density)] if args.density is not None else []
+        darkflight_options = darkflight.parse_args(
+            [args.arg1, *forwarded, *(args.darkflight_args or [])],
+            default_mc=0 if args.fast and is_reprocessing else 300)
+    if args.darkflight_only:
+        event_dir = Path(args.arg1).resolve()
+        if not event_dir.is_dir():
+            parser.error(f'Directory not found: {event_dir}')
+        setup_logging(event_dir / 'darkflight_only.log')
+        try:
+            _run_darkflight_only(event_dir, darkflight_options)
+        except Exception as e:
+            logging.error(f'Dark-flight-only simulation failed: {e}', exc_info=True)
+            sys.exit(1)
+        return
 
     if is_reprocessing:
         # --- Reprocessing Mode ---
@@ -2699,7 +2790,7 @@ def main():
             process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all,
                       use_orig_cen=args.origcen, infrasound_only=args.infrasound,
                       verbose=args.verbose, force_plots=args.force_plots, min_speed=args.min_speed,
-                      nosplit=args.nosplit, peak_mag=args.mag, density=args.density)
+                      nosplit=args.nosplit, darkflight_options=darkflight_options)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -2761,16 +2852,14 @@ def main():
     process_event_with_lock(final_event_dir, processing_date,
                             all_stations=args.all, use_orig_cen=args.origcen,
                             infrasound_only=args.infrasound, verbose=args.verbose,
-                            nosplit=args.nosplit, peak_mag=args.mag,
-                            density=args.density)
+                            nosplit=args.nosplit, darkflight_options=darkflight_options)
     logging.info("--- Script finished. ---")
 
 
 def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
                             all_stations: bool = False, use_orig_cen: bool = False,
                             infrasound_only: bool = False, verbose: bool = False,
-                            nosplit: bool = False, peak_mag: float = None,
-                            density: float = None):
+                            nosplit: bool = False, darkflight_options=None):
     # Acquire an exclusive lock on the event directory so that concurrent
     # fetch.py instances (for different stations of the same event) do not
     # run process_event() simultaneously.  The second instance will block
@@ -2811,7 +2900,7 @@ def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
         else:
             logging.info("Lock acquired. Starting process_event().")
 
-        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit, peak_mag=peak_mag, density=density)
+        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit, darkflight_options=darkflight_options)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

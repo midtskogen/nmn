@@ -609,18 +609,81 @@ def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.nda
 
     # A converged exponential can still be unphysical: if its fitted speed
     # crosses zero within the observed window the meteor would have to
-    # reverse direction. Reject such solutions and let the quadratic
-    # (constant-deceleration) fallback take over.
+    # reverse direction. Retry with the terminal speed as a bounded fit
+    # parameter before falling back to constant deceleration.
+    exp_params = exp_pcov = None
+    exp_cost = np.inf
+    exp_success = False
     if res_exp and res_exp.success:
         v_check = expfunc_1stder(np.linspace(reltime.min(), reltime.max(), 100), *res_exp.x)
-        if np.any(v_check <= 0):
+        if np.all(v_check > 0):
+            exp_params = res_exp.x
+            exp_pcov = get_pcov(res_exp, n_pts, len(res_exp.x))
+            exp_cost = res_exp.cost
+            exp_success = True
+        else:
             if debug: print("Rejected exponential: fitted speed crosses zero within the data.")
-            res_exp.success = False
 
-    if res_exp and res_exp.success and (res_quad is None or not res_quad.success or res_exp.cost < res_quad.cost):
+    if not exp_success:
+        t_end = float(reltime.max())
+        if res_exp is not None:
+            q_guess = np.array([
+                max(float(expfunc_1stder(t_end, *res_exp.x)), 0.0),
+                min(float(expfunc_2ndder(t_end, *res_exp.x)), -1e-3),
+                float(np.clip(res_exp.x[2], 1e-6, 10.0)),
+                float(res_exp.x[3])])
+        elif res_quad is not None and res_quad.success:
+            q_guess = np.array([
+                max(float(res_quad.x[0] + res_quad.x[1] * t_end), 0.0),
+                min(float(res_quad.x[1]), -1e-3), 1.0, float(res_quad.x[2])])
+        else:
+            q_guess = np.array([0.0, -10.0, 1.0, p0_guess])
+
+        def terminal_params(q):
+            v_end, a_end, k, p0 = q
+            accel0 = a_end * np.exp(-k * t_end)
+            v0 = v_end - accel0 / k * (np.exp(k * t_end) - 1.0)
+            return np.array([v0, accel0, k, p0])
+
+        try:
+            res_terminal = least_squares(
+                lambda q: residual_func(terminal_params(q), reltime, pos, sig, expfunc),
+                q_guess, bounds=([0.0, -500.0, 1e-6, -np.inf],
+                                 [73.0, -1e-9, 10.0, np.inf]),
+                loss='soft_l1', f_scale=fscale, max_nfev=5000)
+        except (ValueError, FloatingPointError):
+            res_terminal = None
+        if res_terminal is not None and res_terminal.success:
+            q = res_terminal.x
+            params_t = terminal_params(q)
+            v_terminal = expfunc_1stder(
+                np.linspace(reltime.min(), t_end, 100), *params_t)
+            if (np.all(np.isfinite(params_t))
+                    and min_speed <= params_t[0] <= 73.0
+                    and np.all(v_terminal >= -1e-9)):
+                exp_params = params_t
+                exp_cost = res_terminal.cost
+                exp_success = True
+                pcov_q = get_pcov(res_terminal, n_pts, len(q))
+                if pcov_q is not None:
+                    _, a_end, k, _ = q
+                    E = np.exp(k * t_end)
+                    E_inv = np.exp(-k * t_end)
+                    jac = np.zeros((4, 4))
+                    jac[0, 0] = 1.0
+                    jac[0, 1] = -E_inv * (E - 1.0) / k
+                    jac[0, 2] = (a_end * ((1.0 - E_inv)
+                                 - k * t_end * E_inv)) / k**2
+                    jac[1, 1] = E_inv
+                    jac[1, 2] = -t_end * a_end * E_inv
+                    jac[2, 2] = jac[3, 3] = 1.0
+                    exp_pcov = jac @ pcov_q @ jac.T
+                if debug:
+                    print("Selected terminal-speed-constrained exponential model.")
+
+    if exp_success and (res_quad is None or not res_quad.success or exp_cost < res_quad.cost):
         if debug: print("Selected robust exponential model.")
-        params, pcov, cost = res_exp.x, get_pcov(res_exp, n_pts, len(res_exp.x)), res_exp.cost
-        return params, n_pts, pcov, cost
+        return exp_params, n_pts, exp_pcov, exp_cost
     if res_quad and res_quad.success:
         if debug: print("Selected robust quadratic model as fallback.")
         v0_q, a_q, p0_q = res_quad.x

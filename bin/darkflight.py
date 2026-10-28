@@ -391,10 +391,16 @@ def dragcoeff(vel, temp, rho_a, A):
 
 def ablation_coeff(rho_m, A):
     """Mass-loss coefficient c_ml [s2/m2] by meteoroid density class
-    (Sansom 2019 / DFN)."""
+    (Sansom 2019 / DFN; iron revised using the 2020 Ådalen fall)."""
     cd_hyp = cd_hypersonic(A)
+    high_density_coeff = 0.07e-6 * cd_hyp
+    if rho_m >= 7400:
+        return 5.50e-8
+    if rho_m > 6500:
+        blend = (float(rho_m) - 6500.) / 900.
+        return high_density_coeff + blend * (5.50e-8 - high_density_coeff)
     if rho_m > 5000:
-        return 0.07e-6 * cd_hyp
+        return high_density_coeff
     if rho_m > 2500:
         return 0.014e-6 * cd_hyp
     if rho_m > 1500:
@@ -673,12 +679,14 @@ def _dynamics_nb(t, X, c_ml, A_sh, rho_m,
 
 # --- Propagator ---------------------------------------------------------------
 def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
-              erode=True, record_dt=0.5, wind_offset_enu=None):
+              erode=True, record_dt=0.5, wind_offset_enu=None,
+              ablation_scale=1.0):
     """Integrate a meteoroid to the ground.
 
     r0_ecef, v0_ecef: ECEF state [m], [m/s];  m0 [kg]; rho_m [kg/m3];
     A_shape: shape parameter (sphere 1.21 / cylinder 1.6 / brick 2.7);
-    atm: WindAtmosphere; h_ground [m]; erode: enable ablation.
+    atm: WindAtmosphere; h_ground [m]; erode: enable ablation;
+    ablation_scale: diagnostic multiplier on the material ablation coefficient.
 
     Returns dict with time series (lon, lat, h, v, m) + impact dict.
     """
@@ -690,9 +698,11 @@ def propagate(r0_ecef, v0_ecef, m0, rho_m, A_shape, atm, h_ground,
         raise ValueError('Position, velocity and wind offset must be finite 3-vectors')
     if not all(np.isfinite(v) and v > 0 for v in (m0, rho_m, A_shape, record_dt)):
         raise ValueError('Mass, density, shape and recording interval must be positive and finite')
+    if not np.isfinite(ablation_scale) or ablation_scale < 0.0:
+        raise ValueError('Ablation scale must be finite and nonnegative')
     if not np.isfinite(h_ground) or ecef2llh(r0_ecef)[2] <= h_ground:
         raise ValueError('Release position must be above finite ground height')
-    c_ml = ablation_coeff(rho_m, A_shape) if erode else 0.0
+    c_ml = ablation_scale * ablation_coeff(rho_m, A_shape) if erode else 0.0
 
     # pack/cache the atmosphere once — the jitted dynamics sees only arrays
     (has_profile, ph, pT, prho, pwe, pwn,
@@ -1429,7 +1439,7 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
                  'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in masses_grid],
                  'erode': True, 'hypothetical': True}]
     sc = []
-    sc.append({'name': 'S0_intact', 'label': 'Single body (estimated mass)',
+    sc.append({'name': 'S0_intact', 'label': 'Single object (estimated mass)',
                'runs': [{'m': m_est, 'rho': rho_m, 'A': A}], 'erode': True})
     sc.append({'name': 'S1_fallline', 'label': 'Fall line (mass grid)',
                'runs': [{'m': m, 'rho': rho_m, 'A': A} for m in masses_grid],
@@ -1505,7 +1515,7 @@ def sc_label(sc, t):
         model = t.get(f'df_frag_model_{sc["model"]}', sc['model'])
         mass = _localized_number(sc.get('initial_mass_kg', 0.), '.4g', t)
         label = t.get('df_frag_scenario',
-                      '{model}, {mass} kg at first observation (conditional)').format(
+                      '{model}, {mass} kg at first observation (modelled)').format(
                           model=model, mass=mass)
         density = sc.get('density_kg_m3')
         return (label + f' ({_localized_number(density, ".0f", t)} kg/m³)'
@@ -1853,9 +1863,9 @@ def _forward_mc_impacts(experiments, wind_csv, h_ground, n_runs, seed,
             'mass_sampling': ('legacy-style disruption spectrum per landed cohort'
                               if use_fragment_spectrum else
                               'mass perturbation around the intact release mass'),
-            'method': ('conditional dark-flight realizations from each '
+            'method': ('modelled dark-flight realizations from each '
                        'deterministic landed cohort release state'),
-            'caveat': ('MC outcomes are conditional what-if realizations, not '
+            'caveat': ('MC outcomes are modelled what-if realizations, not '
                        'measured fragment masses or calibrated probabilities')}
         all_impacts.extend(impacts)
     return all_impacts
@@ -1997,7 +2007,7 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None, mc_assumed=False):
     for si, sc in enumerate(scenarios):
         col = colours[si % len(colours)]
         if sc.get('conditional', False):
-            description = ('<description>Conditional fragmentation-model trajectory; '
+            description = ('<description>Modelled fragmentation-model trajectory; '
                            'not a fitted result or evidence of meteorite survival.</description>')
         elif sc.get('hypothetical', False):
             description = ('<description>Hypothetical mass-grid trajectory; '
@@ -2024,11 +2034,10 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None, mc_assumed=False):
     # Monte Carlo fall area — translucent red polygon + hatch lines
     ring = _mc_ring_ll(mc_impacts)
     if ring is not None:
-        area_name = ('Conditional fall area (MC)' if mc_assumed
+        area_name = ('Modelled fall area (MC)' if mc_assumed
                      else 'Fall area (MC)')
-        area_desc = ('<description>Conditional Monte Carlo samples from '
-                     'conditional model release states; not a measured '
-                     'surviving mass.</description>'
+        area_desc = ('<description>Monte Carlo samples from modelled release '
+                     'states; not a measured surviving mass.</description>'
                      if mc_assumed else '')
         coords = ' '.join(f'{lo:.6f},{la:.6f},0'
                           for lo, la in ring)
@@ -2731,6 +2740,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
             hoverinfo='name'))
 
     if start_llh is not None:
+        disintegration_legend = True
         for sc in scenarios:
             burst = _disintegration_burst_points(sc, start_llh, end_llh)
             if burst is None:
@@ -2755,7 +2765,10 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                                         width=3),
                 name=translations.get('df_frag_disintegration',
                                       'Disintegration (illustrative)'),
+                legendgroup='disintegration',
+                showlegend=disintegration_legend,
                 hoverinfo='skip'))
+            disintegration_legend = False
             traces.append(go.Scatter3d(
                 x=np.column_stack([midpoint_xy[:, 0], endpoint_xy[:, 0],
                                    np.full(len(origins), np.nan)]).ravel(),
@@ -2765,6 +2778,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                                    np.full(len(origins), np.nan)]).ravel(),
                 mode='lines', line=dict(color='rgba(210,105,30,0.22)',
                                         width=1.5),
+                legendgroup='disintegration',
                 showlegend=False, hoverinfo='skip'))
             traces.append(go.Scatter3d(
                 x=endpoint_xy[:, 0], y=endpoint_xy[:, 1], z=ez,
@@ -2772,6 +2786,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                                             opacity=0.18),
                 name=translations.get('df_frag_disintegration',
                                       'Disintegration (illustrative)'),
+                legendgroup='disintegration',
                 showlegend=False, hoverinfo='name'))
             ex0, ey0 = project_points([end_llh[0]], [end_llh[1]])
             traces.append(go.Scatter3d(
@@ -2780,6 +2795,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                                             symbol='diamond'),
                 name=translations.get('df_frag_disintegration',
                                       'Disintegration (illustrative)'),
+                legendgroup='disintegration',
                 showlegend=False, hoverinfo='name'))
 
     plot_sc = [s for s in scenarios
@@ -2907,7 +2923,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
                 color='red', opacity=0.15,
                 name=translations.get(
                     'df_fall_area_assumed' if mc_assumed else 'df_fall_area',
-                    'Conditional fall area (MC)' if mc_assumed
+                    'Modelled fall area (MC)' if mc_assumed
                     else 'Fall area (MC)'),
                 showscale=False, hoverinfo='skip'))
             traces.append(go.Scatter3d(
@@ -3405,7 +3421,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         logging.warning('darkflight: surviving mass is not constrained; '
                         'showing hypothetical 5 g–5 kg release-mass tracks')
         if mc_runs > 0:
-            logging.info('darkflight: conditional MC samples fragment masses '
+            logging.info('darkflight: modelled MC samples fragment masses '
                          'log-uniformly over 5 g–5 kg at end of luminous flight; '
                          'this is not a measured total surviving mass')
 
@@ -3497,7 +3513,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                               'heuristic strength and fragmentation distribution',
                               'MC samples independent fragments, not complete falls',
                               'buffered MC outline is not a confidence contour'] + (
-            ['conditional MC samples fragment masses log-uniformly over '
+            ['modelled MC samples fragment masses log-uniformly over '
              '5 g–5 kg at end of luminous flight']
             if mc_anchor == 'hypothetical' else
             [f'entry/surviving mass scale anchored on supplied peak magnitude '
@@ -4038,7 +4054,7 @@ def _solve_fragmentation_mass_for_magnitude(model, propagate_one, target_mag,
             if lower_residual >= 0.0:
                 break
         else:
-            raise ValueError(f'Even a 1e-9 kg {model} body is brighter than magnitude {target_mag}')
+            raise ValueError(f'Even a 1e-9 kg {model} object is brighter than magnitude {target_mag}')
     else:
         lower_log = upper_log = mid_log
         lower_residual = upper_residual = 0.0
@@ -4386,8 +4402,8 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
         comparison['model_preference'] = {
             'available': False,
             'unavailable_reason': preference_unavailable_reason,
-            'interpretation': ('shape diagnostics remain conditional on the '
-                               'uncertain entry-mass estimate')}
+            'interpretation': ('shape diagnostics depend on the uncertain '
+                               'entry-mass estimate')}
     finite_scores = [s for s in shape_scores
                      if math.isfinite(s['log_likelihood'])]
     if finite_scores:
@@ -4452,9 +4468,9 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                                           for e in experiments)),
                'impacts': mc_impacts, 'conditional': True,
                'method': 'legacy-style disruption mass spectra at landed cohort release states',
-               'interpretation': ('Conditional what-if mass spectra for each model; '
+               'interpretation': ('Modelled what-if mass spectra for each model; '
                                   'not stochastic fragmentation draws or model probabilities')},
-        'interpretation': 'Conditional forward sensitivity models, not a fit or survival probability. '
+        'interpretation': 'Modelled forward sensitivity models, not a fit or survival probability. '
                           'Mass before the first observed point is not reconstructed. '
                           + (('Entry masses are solved independently for each model to reproduce the '
                               'supplied absolute peak magnitude. '
@@ -4464,7 +4480,7 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                               'light curves. ') if invert_mass else '')
                           + ('Entry masses are inferred by least-squares drag fitting to the '
                              'observed deceleration-versus-altitude curve, then back-projected '
-                             'with ablation to the first observed point; they are conditional '
+                             'with ablation to the first observed point; they are modelled '
                              'estimates, not reconstructed pre-atmospheric masses. '
                              if estimate_entry_mass else '')
                           + ('Light-curve shape weights are relative diagnostics, not probabilities '
@@ -4477,7 +4493,7 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                              'only; they do not change propagation, mass inference or '
                              'light-curve shape likelihoods. '
                              if density_priors is not None else '')
-                          + ('Monte Carlo points are legacy-style conditional mass-spectrum '
+                          + ('Monte Carlo points are legacy-style modelled mass-spectrum '
                              'realizations for each model, not stochastic fragmentation draws. '
                              if mc_impacts else '')
                           + 'Absolute magnitude refers to distance 100 km, not altitude.',
@@ -4602,7 +4618,7 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
         mass_text = 'unresolved mass' if mass is None else f'{mass:g} kg'
         scenarios.append({'name': f'F{index}_{experiment["model"]}',
                           'label': f'{experiment["model"]}, {mass_text} at first observation'
-                                   f'{density_text} (conditional)',
+                                   f'{density_text} (modelled)',
                           'model': experiment['model'],
                           'experiment_index': experiment.get('experiment_index', index),
                           'density_kg_m3': experiment.get('density_kg_m3'),
@@ -4662,8 +4678,8 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
     for prefix, translations in (lang_files or load_language_files()).items():
         title = translations.get(
             'df_frag_map_title' if has_impacts else 'df_frag_map_no_impacts',
-            'Conditional fragmentation impacts' if has_impacts else
-            'Conditional fragmentation: no modelled ground impacts')
+            'Modelled fragmentation impacts' if has_impacts else
+            'Modelled fragmentation: no ground impacts')
         plot_translations = {**translations, 'dark_flight': title}
         svg = output_dir / f'{prefix}map_darkflight.svg'
         try:
@@ -4724,7 +4740,7 @@ def _write_fragmentation_table(report, path, translations):
     def number(value, spec='.4g'):
         return '—' if value is None else _localized_number(value, spec, translations)
 
-    def mass_number(value):
+    def mass_number(value, outcome_scale=0):
         if value is None:
             return '—'
         if value == 0 or abs(value) < 0.005:
@@ -4733,6 +4749,7 @@ def _write_fragmentation_table(report, path, translations):
             text = f'{float(value):.3f}'
         else:
             precision = 2 - int(math.floor(math.log10(abs(value))))
+            precision = max(precision, int(outcome_scale))
             rounded = round(float(value), precision)
             text = (f'{rounded:.{precision}f}' if precision > 0
                     else f'{rounded:.0f}')
@@ -4790,9 +4807,13 @@ def _write_fragmentation_table(report, path, translations):
         budget = experiment['mass_budget']
         parameters = experiment.get('parameters', {})
         model = tr(f'df_frag_model_{experiment["model"]}', experiment['model'])
-        values = [model] + [mass_number(budget[k]) for k in
+        outcome_mass = max(float(budget.get('landed_kg') or 0.),
+                           float(budget.get('unresolved_kg') or 0.))
+        outcome_scale = (max(0, -int(math.floor(math.log10(outcome_mass))))
+                         if outcome_mass > 0 else 0)
+        values = [model] + [mass_number(budget[k], outcome_scale) for k in
             ('initial_kg', 'ablated_kg', 'landed_kg', 'unresolved_kg')]
-        values += [mass_number(experiment['largest_landed_kg']),
+        values += [mass_number(experiment['largest_landed_kg'], outcome_scale),
                    number(experiment['peak_absolute_magnitude'], '.1f'),
                    number(parameters.get('rho_m'), '.0f')]
         if include_shape:
@@ -4828,7 +4849,7 @@ def _write_fragmentation_table(report, path, translations):
         warnings.append(tr(
             'df_frag_pref_unavailable',
             'No reliable model preference: the automatic entry-mass estimate is '
-            'poorly constrained. Supply --mag or --entry-mass for a conditioned comparison.'))
+            'poorly constrained. Supply --mag or --entry-mass for a modelled comparison.'))
     text = ('<div class="text-section">'
             + html.escape(tr('dark_flight', 'Dark flight'))
             + ' / ' + html.escape(tr('df_frag_section', 'fragmentation'))
@@ -4885,13 +4906,13 @@ def parse_args(argv=None, default_mc=300):
         description='Dark-flight propagator',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Forward fragmentation models:
-  single      intact-body control; no fragmentation or erosion release
+  single      intact-object control; no fragmentation or erosion release
   discrete    equal-mass daughter cascade; daughter strength scales with mass
   disruption  one-shot release into a power-law grain spectrum
   erosion     continuous grain release; grains propagate independently
   all         run all four models
 
-Mass inputs are conditional assumptions in kilograms. If --entry-mass is
+Mass inputs are modelled assumptions in kilograms. If --entry-mass is
 omitted and --mag is supplied, an entry mass is solved independently for each
 selected model to reproduce that absolute peak magnitude. If neither is
 supplied, a reliable unsaturated calibrated camera peak is used when at least
@@ -4903,7 +4924,7 @@ they affect model preference only, not propagation or mass inference.''')
         ap.color = False
     ap.add_argument('event_dir')
     ap.add_argument('--mc', type=int, default=default_mc,
-                    help='Monte Carlo dark-flight realizations per conditional model; 0 disables')
+                    help='Monte Carlo dark-flight realizations per modelled scenario; 0 disables')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--mag', type=float, default=None,
                     help='Peak visual magnitude normalised to 100 km '
@@ -4916,7 +4937,7 @@ they affect model preference only, not propagation or mass inference.''')
     ap.add_argument('--density', type=_density_list, default=None,
                     help='Reference meteoroid density in kg/m3; accepts a '
                          'comma-separated list for forward models (e.g. '
-                         '3500,7000). Sets the conditional material density; '
+                         '3500,7000). Sets the modelled material density; '
                          'the legacy dynamic mass grid still spans all densities.')
     ap.add_argument('--density-priors', type=_density_prior_list, default=None,
                     help='Optional nonnegative model-preference prior weights '

@@ -828,7 +828,7 @@
                     const name = cameras[id]?.station?.name;
                     if (!name) continue;
                     const displayName = cameras[id]?.station?.display_name || name.charAt(0).toUpperCase() + name.slice(1);
-                    const baseUrl = `/cam/${encodeURIComponent(name)}`;
+                    const baseUrl = `/status/panoramas/${encodeURIComponent(name)}`;
                     const sdUrl = `${baseUrl}/equirect.jpg`;
                     const hdUrl = `${baseUrl}/equirect_hd.jpg`;
                     const item = document.createElement('div');

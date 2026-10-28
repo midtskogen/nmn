@@ -46,6 +46,9 @@ if _PROJECT_DIR is not None:
             if _ps not in sys.path:
                 sys.path.insert(0, _ps)
 
+from refraction import (delta_z_m,
+                        refraction_deg_apparent_minus_true)
+
 EARTH_RADIUS = 6371.0  # Mean radius in km
 FLATTENING = 1.0 / 298.257223563  # Earth flattening factor (WGS-84)
 E_SQUARED = 2 * FLATTENING - FLATTENING**2  # Eccentricity squared
@@ -242,6 +245,26 @@ def altaz2xyz(alt_deg: float, az_deg: float, obs_lon: float, obs_lat: float) -> 
     sin_lat, cos_lat, sin_lon, cos_lon = np.sin(lat_rad), np.cos(lat_rad), np.sin(lon_rad), np.cos(lon_rad)
     R = np.array([[-sin_lon, -cos_lon * sin_lat, cos_lon * cos_lat], [cos_lon, -sin_lon * sin_lat, sin_lon * cos_lat], [0, cos_lat, sin_lat]])
     return R @ v_enu
+
+
+
+def _los_track_projection(los_vecs: np.ndarray, site_pos: np.ndarray,
+                          track_p1: np.ndarray, track_vec_norm: np.ndarray):
+    """Project observer lines of sight onto the straight reference track."""
+    p21 = track_p1 - site_pos
+    m = np.cross(track_vec_norm, los_vecs)
+    m2 = np.einsum('ij,ij->i', m, m)
+    m2[m2 < PARALLEL_LINES_TOLERANCE] = PARALLEL_LINES_TOLERANCE
+    r = np.cross(p21, m / m2[:, np.newaxis])
+    t1 = np.einsum('ij,j->i', r, track_vec_norm)
+    t2 = np.einsum('ij,ij->i', r, los_vecs)
+    los_points = site_pos + t1[:, np.newaxis] * los_vecs
+    track_points = track_p1 + t2[:, np.newaxis] * track_vec_norm
+    midpoint = (los_points + track_points) / 2.0
+    pos = np.einsum('ij,j->i', midpoint - track_p1, track_vec_norm)
+    height = np.array([xyz2lonlat(point)[2] for point in midpoint])
+    sitedist = np.linalg.norm(midpoint - site_pos, axis=1)
+    return los_points, pos, height, sitedist
 
 # --- Fitting Functions ---
 
@@ -520,14 +543,14 @@ def _align_fragments_to_anchor_method(station_obs: List[Dict], debug: bool = Fal
 def _merge_and_sort_station_data(station_obs: List[Dict], time_offsets: Optional[np.ndarray] = None) -> Tuple[Dict, np.ndarray, List[str]]:
     if not station_obs: return {}, np.array([]), []
     if time_offsets is None: time_offsets = np.zeros(len(station_obs))
-    all_reltime, all_colortime, all_pos, all_height, all_sig, all_station_ids = [], [], [], [], [], []
+    all_reltime, all_colortime, all_pos, all_height, all_sig, all_refraction, all_station_ids = [], [], [], [], [], [], []
     station_names = [obs['site_info']['name'] for obs in station_obs]
     for i, (obs, offset) in enumerate(zip(station_obs, time_offsets)):
         num_pts = len(obs.get('reltime', []))
         if num_pts == 0: continue
-        all_reltime.append(obs['reltime'] + offset); all_colortime.append(obs['reltime']); all_pos.append(obs['pos']); all_height.append(obs['height']); all_sig.append(obs['sig']); all_station_ids.append(np.full(num_pts, i, dtype=int))
-    if not all_reltime: return {k: np.array([]) for k in ['reltime', 'color_time', 'pos', 'height', 'sig']}, np.array([]), station_names
-    merged_data = {'reltime': np.concatenate(all_reltime), 'color_time': np.concatenate(all_colortime), 'pos': np.concatenate(all_pos), 'height': np.concatenate(all_height), 'sig': np.concatenate(all_sig)}
+        all_reltime.append(obs['reltime'] + offset); all_colortime.append(obs['reltime']); all_pos.append(obs['pos']); all_height.append(obs['height']); all_sig.append(obs['sig']); all_refraction.append(obs.get('refraction_deg', np.zeros(num_pts))); all_station_ids.append(np.full(num_pts, i, dtype=int))
+    if not all_reltime: return {k: np.array([]) for k in ['reltime', 'color_time', 'pos', 'height', 'sig', 'refraction_deg']}, np.array([]), station_names
+    merged_data = {'reltime': np.concatenate(all_reltime), 'color_time': np.concatenate(all_colortime), 'pos': np.concatenate(all_pos), 'height': np.concatenate(all_height), 'sig': np.concatenate(all_sig), 'refraction_deg': np.concatenate(all_refraction)}
     station_id_arr = np.concatenate(all_station_ids)
     if merged_data['reltime'].size == 0: return merged_data, station_id_arr, station_names
     sort_idx = np.argsort(merged_data['reltime'])
@@ -537,26 +560,35 @@ def _merge_and_sort_station_data(station_obs: List[Dict], time_offsets: Optional
 
 # --- Main Logic and Plotting ---
 
-def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray, track_vec_norm: np.ndarray) -> dict:
+def _process_station(cendat: CenData, site_pos: np.ndarray, track_p1: np.ndarray,
+                     track_vec_norm: np.ndarray, refraction: bool = True) -> dict:
     site_lon, site_lat = cendat.site_info['lon'], cendat.site_info['lat']
-    los_vecs = np.array([altaz2xyz(alt, az, site_lon, site_lat) for alt, az in zip(cendat.cenalt, cendat.cenaz)])
-    p21 = track_p1 - site_pos
-    m = np.cross(track_vec_norm, los_vecs)
-    m2 = np.einsum('ij,ij->i', m, m)
-    m2[m2 < PARALLEL_LINES_TOLERANCE] = PARALLEL_LINES_TOLERANCE
-    R = np.cross(p21, m / m2[:, np.newaxis])
-    t1 = np.einsum('ij,j->i', R, track_vec_norm)
-    t2 = np.einsum('ij,ij->i', R, los_vecs)
-    cross_points1 = site_pos + t1[:, np.newaxis] * los_vecs
-    cross_points2 = track_p1 + t2[:, np.newaxis] * track_vec_norm
-    intersec_on_track = (cross_points1 + cross_points2) / 2.0
-    pos = np.einsum('ij,j->i', intersec_on_track - track_p1, track_vec_norm)
-    height = np.array([xyz2lonlat(v)[2] for v in intersec_on_track])
-    sitedist = np.linalg.norm(intersec_on_track - site_pos, axis=1)
+    site_height_km = cendat.site_info.get('height', 0.0)
+    refraction_deg = np.zeros(len(cendat.cenalt))
+    delta_z = np.zeros(len(cendat.cenalt))
+    corrected_alt = np.asarray(cendat.cenalt, dtype=float)
+    if refraction and len(corrected_alt):
+        refraction_deg = np.array([
+            refraction_deg_apparent_minus_true(alt)
+            for alt in cendat.cenalt])
+        delta_z = np.array([
+            delta_z_m(alt, site_height_km * 1000.0)
+            for alt in cendat.cenalt])
+        corrected_alt -= refraction_deg
+    los_vecs = np.array([altaz2xyz(alt, az, site_lon, site_lat)
+                         for alt, az in zip(corrected_alt, cendat.cenaz)])
+    site_positions = np.array([
+        lonlat2xyz(site_lon, site_lat, site_height_km + dz_m / 1000.0)
+        for dz_m in delta_z]) if refraction else np.tile(
+            site_pos, (len(cendat.cenalt), 1))
+    _, pos, height, sitedist = _los_track_projection(
+        los_vecs, site_positions, track_p1, track_vec_norm)
     ang_err = np.radians(CAMERA_DEGREES_PER_PIXEL * cendat.censig)
     sig = sitedist * np.tan(ang_err)
     sig[ang_err <= 0] = MIN_POSITIONAL_SIGMA
-    return {"pos": pos, "height": height, "sig": sig, "site_info": cendat.site_info}
+    return {"pos": pos, "height": height, "sig": sig,
+            "refraction_deg": refraction_deg,
+            "site_info": cendat.site_info}
 
 def _fit_merged_data_with_cost(reltime: np.ndarray, pos: np.ndarray, sig: np.ndarray, debug: bool, fscale: float, min_speed: float = 7.0) -> Tuple[Optional[np.ndarray], int, Optional[np.ndarray], float]:
     n_pts = len(reltime)
@@ -793,7 +825,8 @@ def generate_speed_plots(plot_data: Dict[str, Any], translations: Optional[dict]
 
 def calculate_speed_profile(resname: str, cennames: List[str], datname: str, debug: bool = False,
                             fscale: float = 0.1, sigma_level: float = 1.0, seed: Optional[int] = None,
-                            num_simulations: int = 1000, min_speed: Optional[float] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+                            num_simulations: int = 1000, min_speed: Optional[float] = None,
+                            refraction: bool = True) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     if seed is not None: np.random.seed(seed)
     resdat = readres(resname)
 
@@ -833,7 +866,9 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
         if debug: print(f"  -> MATCH SUCCESSFUL. Found coordinates for '{station_name_from_cen}'.")
         name, lon, lat, height = site_info
         cendat.site_info = {'name': name, 'lon': lon, 'lat': lat, 'height': height}
-        processed_data = _process_station(cendat, lonlat2xyz(lon, lat, height), path_p1, path_vec_norm)
+        processed_data = _process_station(cendat, lonlat2xyz(lon, lat, height),
+                                          path_p1, path_vec_norm,
+                                          refraction=refraction)
         processed_data['reltime'] = cendat.reltime
         processed_data['source_index'] = source_index
         processed_data['source_name'] = name
@@ -896,6 +931,7 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
 
     results = {'success': True, 'n_ok': n_ok, 'initial_speed': initial_speed, 'initial_speed_uncertainty': initial_speed_uncertainty}
     plot_data = {'final_merged_data': final_merged_data, 'final_params': final_params, 'pcov': pcov, 'lower_bound_params': lower_bound_params, 'upper_bound_params': upper_bound_params, 'n_ok': n_ok, 'sigma_level': sigma_level, 'station_id_array': station_id_array, 'worst_station_idx': worst_station_idx,
+                 'refraction_enabled': bool(refraction),
                  'worst_station_code': worst_station_code,
                  'worst_source_index': worst_source_index,
                  'station_error_details': station_errors}
@@ -904,11 +940,11 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
 
 def fbspd(resname: str, cennames: List[str], datname: str, doplot: str = '', posdata: bool = False, debug: bool = False, 
           fscale: float = 0.1, sigma_level: float = 1.0, seed: Optional[int] = None, num_simulations: int = 1000,
-          translations: Optional[dict] = None, output_prefix: str = '') -> Tuple[bool, float]:
+          refraction: bool = True, translations: Optional[dict] = None, output_prefix: str = '') -> Tuple[bool, float]:
     
     if doplot and matplotlib.get_backend() != 'agg' and 'show' not in doplot: matplotlib.use('agg')
 
-    results, plot_data = calculate_speed_profile(resname=resname, cennames=cennames, datname=datname, debug=debug, fscale=fscale, sigma_level=sigma_level, seed=seed, num_simulations=num_simulations)
+    results, plot_data = calculate_speed_profile(resname=resname, cennames=cennames, datname=datname, debug=debug, fscale=fscale, sigma_level=sigma_level, seed=seed, num_simulations=num_simulations, refraction=refraction)
 
     if not (results and plot_data):
         return False, 0.0
@@ -949,8 +985,9 @@ if __name__ == "__main__":
     parser.add_argument('--uncertainty-sigma', dest='sigma_level', type=float, default=1.0, help='Sigma level for uncertainty reporting (e.g., 1.0, 3.0). Default: 1.0')
     parser.add_argument('--seed', dest='seed', type=int, default=None, help='Random seed for reproducibility of uncertainty calculations. Default: None')
     parser.add_argument('--sims', dest='num_simulations', type=int, default=1000, help='Number of Monte Carlo simulations for uncertainty calculation. Default: 1000')
+    parser.add_argument('--no-refraction', dest='refraction', action='store_false', default=True, help='Disable atmospheric delta-z refraction correction of centroid observations.')
     args = parser.parse_args()
     if args.cennames and not args.cennames[0]: args.cennames.pop(0)
     if not args.resname or not args.cennames: parser.print_help(), sys.exit(1)
     
-    fbspd(resname=args.resname, cennames=args.cennames, datname=args.datname, doplot=args.doplot, posdata=args.posdata, debug=args.debug, fscale=args.fscale, sigma_level=args.sigma_level, seed=args.seed, num_simulations=args.num_simulations)
+    fbspd(resname=args.resname, cennames=args.cennames, datname=args.datname, doplot=args.doplot, posdata=args.posdata, debug=args.debug, fscale=args.fscale, sigma_level=args.sigma_level, seed=args.seed, num_simulations=args.num_simulations, refraction=args.refraction)

@@ -130,6 +130,7 @@ def test_fetch_forward_options_use_shared_parser_and_absolute_paths(fetch_cli, t
 @pytest.mark.parametrize('extra', [
     ['--mag', '-18'], ['--darkflight-args', '--unknown-darkflight-option'],
     ['--darkflight-only', '--infrasound'], ['--darkflight-only', '--all'],
+    ['--darkflight-only', '--no-refraction'],
     ['10109', '/meteor/cam1/events/20260423/021525', '--darkflight-only'],
 ])
 def test_fetch_invalid_options_fail_before_processing(fetch_cli, tmp_path, monkeypatch, extra):
@@ -215,11 +216,13 @@ def test_fetch_full_reprocess_and_lock_forward_options(fetch_cli, tmp_path, monk
     event = tmp_path / '20260423' / '021525'
     event.mkdir(parents=True)
     monkeypatch.setattr(sys, 'argv', ['fetch.py', str(event), '--fast', '--density', '3500',
+                                    '--no-refraction',
                                     '--darkflight-args', '--mag', '-18', '--density', '2500'])
     with pytest.raises(SystemExit) as exited:
         fetch_cli['main']()
     assert exited.value.code == 0
     options = fetch_cli['process_event'].call_args.kwargs['darkflight_options']
+    assert fetch_cli['process_event'].call_args.kwargs['refraction'] is False
     assert options.mc == 0 and options.mag == -18 and options.density == [2500.]
     fetch_cli['process_event'].reset_mock()
     fetch_cli['process_event_with_lock'](event, datetime.datetime(2026, 4, 23), darkflight_options=options)
@@ -1026,6 +1029,8 @@ def test_failed_magnitude_inversion_keeps_other_experiments(tmp_path, monkeypatc
                 {'solved_entry_mass_kg': 20.})
 
     monkeypatch.setattr(df, '_solve_fragmentation_mass_for_magnitude', solve)
+    monkeypatch.setattr(df, '_parallel_map', lambda worker, jobs, **kwargs:
+                        [worker(job) for job in jobs])
     report = df.run_fragmentation_models(
         event, resdat, plot, tmp_path / 'partial-inversion', None,
         ['single', 'erosion'], peak_mag=-18., h_ground=0.)
@@ -1125,7 +1130,7 @@ def test_forward_default_output_publishes_event_products(tmp_path):
                 'warnings': []}
 
     def fake_map(scenarios, end_llh, mc_impacts, path, **kwargs):
-        Path(path).write_text('<svg>conditional fragmentation</svg>')
+        Path(path).write_text('<svg>modelled fragmentation</svg>')
 
     with patch.object(df, 'propagate_fragmentation', side_effect=fake), \
             patch.object(df, '_msis_profile', return_value=None), \
@@ -1135,7 +1140,7 @@ def test_forward_default_output_publishes_event_products(tmp_path):
         report = df.run_fragmentation_models(event, resdat, plot, None, [100.],
             ['single'], peak_mag=-18., h_ground=0.,
             lang_files={'': {'dec_sep': '.'}})
-        assert 'conditional fragmentation' in (event / 'map_darkflight.svg').read_text()
+        assert 'modelled fragmentation' in (event / 'map_darkflight.svg').read_text()
         map_writer.side_effect = RuntimeError('map renderer unavailable')
         report = df.run_fragmentation_models(event, resdat, plot, None, [100.],
             ['single'], peak_mag=-18., h_ground=0.,
@@ -1147,7 +1152,7 @@ def test_forward_default_output_publishes_event_products(tmp_path):
     assert json.loads((event / 'fragmentation.json').read_text())['publication_mode'] == 'event'
     assert json.loads((event / 'darkflight.geojson').read_text())['features']
     assert '<svg xmlns=' in (event / 'map_darkflight.svg').read_text()
-    assert 'conditional fragmentation' not in (event / 'map_darkflight.svg').read_text()
+    assert 'modelled fragmentation' not in (event / 'map_darkflight.svg').read_text()
     assert '3D renderer unavailable' in (event / 'darkflight_map3d.html').read_text()
     table = (event / 'darkflight_table.html').read_text()
     assert '<table' in table and table.count('<th') == 12
@@ -1285,7 +1290,9 @@ def test_fragmentation_products_localize_all_languages(tmp_path):
             assert all(word in table for word in
                        translations[f'df_frag_h_{header_key}'].split())
         table_markup = table.split('<script', 1)[0]
-        assert '1230' in table and '9880' in table and 'e+' not in table_markup
+        expected_ablated = '1234,0' if translations['dec_sep'] == ',' else '1234.0'
+        expected_initial = '9876,0' if translations['dec_sep'] == ',' else '9876.0'
+        assert expected_ablated in table and expected_initial in table and 'e+' not in table_markup
         assert '.0049' not in table and ',0049' not in table
         expected_grams = '0,030' if translations['dec_sep'] == ',' else '0.030'
         assert expected_grams in table
@@ -1309,7 +1316,7 @@ def test_fragmentation_products_localize_all_languages(tmp_path):
         warning = translations['df_frag_warn_generation'].format(cohort=7, limit=12)
         assert warning in table
         expected_shape = '73,0%' if translations['dec_sep'] == ',' else '73.0%'
-        assert '9880' in table and expected_shape in table
+        assert expected_initial in table and expected_shape in table
         fallback3d = (tmp_path / f'{prefix}darkflight_map3d.html').read_text()
         assert translations['df_frag_3d_unavailable'] in fallback3d
     stored = json.loads((tmp_path / 'darkflight.json').read_text())
@@ -1341,6 +1348,26 @@ def test_fragmentation_table_explains_unavailable_light_curve(tmp_path):
             'light curve.') in table
 
 
+def test_fragmentation_table_scales_budget_to_outcome_mass(tmp_path):
+    import darkflight as df
+    experiment = {'model': 'single', 'parameters': {'rho_m': 7400.},
+        'mass_budget': {'initial_kg': 8502.683119375732,
+            'ablated_kg': 8502.161415551303,
+            'landed_kg': 0.5217038244286959,
+            'unresolved_kg': 0., 'timeout_kg': 0.},
+        'largest_landed_kg': 0.5217038244286959,
+        'peak_absolute_magnitude': -18.5,
+        'warnings': [],
+        'light_curve_comparison': {'shape_weight': None,
+            'model_preference_weight': None}}
+    report = {'experiments': [experiment], 'light_curve_comparison': {}}
+    path = tmp_path / 'table.html'
+    df._write_fragmentation_table(report, path,
+                                  df.load_language_files()['en_'])
+    cells = re.findall(r'<td[^>]*>(.*?)</td>', path.read_text())
+    assert cells[1:4] == ['8502.7', '8502.2', '0.522']
+
+
 def test_fbspd_terminal_bounded_exponential_beats_constant_deceleration():
     import fbspd_merge as fb
     t = np.linspace(0.0, 5.4, 90)
@@ -1355,6 +1382,62 @@ def test_fbspd_terminal_bounded_exponential_beats_constant_deceleration():
     quad_pos = np.polyval(np.polyfit(t, pos, 2), t)
     assert abs(pos[-1] - fb.expfunc(t[-1], *params)) < abs(pos[-1] - quad_pos[-1])
     assert pcov is not None and pcov.shape == (4, 4)
+
+
+def test_fbspd_refraction_correction_uses_delta_z_observer_height():
+    import fbspd_merge as fb
+    cendat = fb.CenData()
+    cendat.ndata = 1
+    cendat.cenalt = np.array([45.0])
+    cendat.cenaz = np.array([0.0])
+    cendat.censig = np.array([1.0])
+    cendat.site_info = {'name': 'TEST', 'lon': 0., 'lat': 0., 'height': 0.}
+    site_pos = fb.lonlat2xyz(0., 0., 0.)
+    track_p1 = fb.lonlat2xyz(0., 0.1, 10.)
+    track_p2 = fb.lonlat2xyz(0., 0.1, 30.)
+    track_vec = (track_p2 - track_p1) / np.linalg.norm(track_p2 - track_p1)
+    raw = fb._process_station(cendat, site_pos, track_p1, track_vec,
+                              refraction=False)
+    corrected = fb._process_station(cendat, site_pos, track_p1, track_vec,
+                                    refraction=True)
+    assert raw['refraction_deg'] == pytest.approx([0.])
+    assert corrected['refraction_deg'][0] == pytest.approx(
+        1.02 / np.tan(np.radians(45 + 10.3 / 50.11)) / 60)
+    assert corrected['height'][0] < raw['height'][0]
+    assert not np.allclose(raw['pos'], corrected['pos'])
+
+
+def test_delta_z_matches_published_ray_tracing_examples():
+    import refraction as refr
+    assert refr.delta_z_m(0.) == pytest.approx(2040., abs=3.)
+    assert refr.delta_z_m(1.) == pytest.approx(1153., abs=2.)
+    assert refr.delta_z_m(10.) == pytest.approx(71., abs=2.)
+    assert refr.delta_z_m(20.) == pytest.approx(20., abs=2.)
+    assert refr.delta_z_m(0., 1000.) == pytest.approx(1831., abs=2.)
+    assert refr.delta_z_m(-0.5, 1000.) == pytest.approx(2530., abs=2.)
+    assert refr.refraction_deg_apparent_minus_true(-0.5) == pytest.approx(
+        0.5980, abs=1e-4)
+
+
+def test_metrack_delta_z_offsets_preserve_reported_site_height():
+    import metrack as mt
+    obs = {'altitudes': np.array([10.]), 'heights_m': np.array([0.04])}
+    corrected = mt._refraction_correct_obs_data(obs)
+    assert corrected['altitudes'][0] == pytest.approx(
+        10. - mt.refraction_deg_apparent_minus_true(10.))
+    assert corrected['site_height_offsets_km'][0] == pytest.approx(
+        mt.delta_z_m(10., 40.) / 1000.)
+    assert corrected['heights_m'][0] == pytest.approx(0.04)
+    assert mt._effective_site_heights_km(corrected)[0] == pytest.approx(
+        0.04 + corrected['site_height_offsets_km'][0])
+
+
+def test_metrack_ecliptic_angles_are_pickleable_numbers():
+    import metrack as mt
+    import pickle
+    lon, lat = mt.radec_to_ecliptic('4:00:00', '-63:00:00')
+    assert isinstance(lon, float) and isinstance(lat, float)
+    assert pickle.loads(pickle.dumps((lon, lat))) == pytest.approx((lon, lat))
 
 
 def test_luminous_track_sampling_covers_entire_segment():
@@ -1407,6 +1490,17 @@ def test_vertical_drop_terminal_velocity():
     assert abs(imp['lon'] - 10.0) < 0.02 and abs(imp['lat'] - 60.0) < 0.02
 
 
+def test_ablation_coeff_iron_density_ramp():
+    import darkflight as df
+    cd = df.cd_hypersonic(1.4)
+    old_coeff = 0.07e-6 * cd
+    assert ablation_coeff(7400., 1.4) == pytest.approx(5.50e-8)
+    assert ablation_coeff(6950., 1.4) == pytest.approx(
+        old_coeff + 0.5 * (5.50e-8 - old_coeff))
+    assert ablation_coeff(6500., 1.4) == pytest.approx(old_coeff)
+    assert ablation_coeff(6000., 1.4) == pytest.approx(old_coeff)
+
+
 def test_mass_inversion():
     """Synthetic body: compute its deceleration, then recover mass."""
     atm = WindAtmosphere()
@@ -1447,6 +1541,31 @@ def test_ablation_reduces_mass():
     res_e = propagate(r0, v0, 0.5, 1500.0, 1.4, atm, 0.0, erode=True)
     res_n = propagate(r0, v0, 0.5, 1500.0, 1.4, atm, 0.0, erode=False)
     assert res_e['impact']['m'] <= res_n['impact']['m'] + 1e-9
+
+
+def test_propagate_accepts_ablation_scale():
+    atm = WindAtmosphere()
+    r0 = llh2ecef(10.0, 60.0, 30000.0)
+    v0 = np.array([500.0, 0.0, -3500.0])
+    res = propagate(r0, v0, 0.5, 1500.0, 1.4, atm, 0.0,
+                    erode=True, ablation_scale=0.0)
+    assert np.ptp(res['m']) == pytest.approx(0.0)
+
+
+def test_fit_ablation_score_helpers():
+    import fit_ablation as fa
+    args = fa.parse_args([
+        'event', '--density', '7400', '--recovered-mass', '13.8',
+        '--entry-mass', '100'])
+    options = fa.model_options_from_args(args, 5.5e-8, 1.1e-7)
+    assert options['ablation_scale'] == pytest.approx(0.5)
+    exact = fa.mass_score({'largest_landed_kg': 13.8}, args)
+    assert exact['chi2'] == pytest.approx(0.0)
+    missing = fa.mass_score({'largest_landed_kg': 0.0}, args)
+    assert missing['chi2'] == pytest.approx(100.0)
+    assert fa._boundary_hit(8e-8, 1e-9, 8e-8) == 'upper'
+    assert fa._boundary_hit(1e-9, 1e-9, 8e-8) == 'lower'
+    assert fa._boundary_hit(5e-8, 1e-9, 8e-8) is None
 
 
 def test_ablation_endpoint_is_exact():
@@ -1779,8 +1898,10 @@ def test_rendered_map_geometry_offline():
                 patch('cartopy.io.img_tiles.OSM', side_effect=RuntimeError('offline')):
             df.write_map(scenarios, (10.1, 60.1, 30000.), clouds, Path(td) / 'fallback.svg')
             ET.parse(Path(td) / 'fallback.svg')
+        burst_scenarios = scenarios + [
+            {**scenarios[0], 'name': 'S1_fallline', 'label': 'Other'}]
         with patch.object(go.Figure, 'write_html', capture):
-            assert df.write_map3d(scenarios, (10.1, 60.1, 30000.), clouds,
+            assert df.write_map3d(burst_scenarios, (10.1, 60.1, 30000.), clouds,
                                   Path(td) / 'map.html',
                                   start_llh=(10.0, 60.2, 90000.))
         df.write_kml(scenarios, (10.1, 60.1, 30000.), Path(td) / 'map.kml', clouds)
@@ -1796,6 +1917,9 @@ def test_rendered_map_geometry_offline():
         assert root.find('.//k:MultiGeometry/k:LineString/k:tessellate', ns) is not None
         assert root.find('.//k:Polygon//k:LinearRing/k:tessellate', ns) is not None
     traces = figures[0].data
+    legend_names = [t.name for t in traces
+                    if t.name and t.showlegend is not False]
+    assert len(legend_names) == len(set(legend_names))
     luminous = next(t for t in traces if t.name == 'Luminous trajectory')
     assert luminous.z[0] == pytest.approx(40.)
     assert luminous.z[-1] == pytest.approx(30.)

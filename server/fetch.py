@@ -831,7 +831,7 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                                        'Fall area (MC, magnitude-anchored)')
                 elif mc_hypothetical:
                     area_label = t.get('df_fall_area_assumed',
-                                       'Conditional fall area (MC)')
+                                       'Modelled fall area (MC)')
                 else:
                     area_label = t.get('df_fall_area', 'Fall area (MC)')
                 rows.append(
@@ -1291,6 +1291,7 @@ def _maybe_split_event_outliers(
     verbose: bool,
     min_speed: float = None,
     spatial_only: bool = False,
+    refraction: bool = True,
 ):
     """
     Split the observations rejected as trajectory outliers into sibling event
@@ -1455,7 +1456,7 @@ def _maybe_split_event_outliers(
             process_event(
                 secondary_dir, date, fast=False, all_stations=all_stations,
                 use_orig_cen=use_orig_cen, infrasound_only=infrasound_only,
-                verbose=verbose, min_speed=min_speed,
+                verbose=verbose, min_speed=min_speed, refraction=refraction,
             )
         except Exception as e:
             logging.error(f"Secondary event processing failed for {secondary_dir}: {e}. Excluding outliers from main report instead.")
@@ -1574,7 +1575,7 @@ def _run_darkflight_only(event_dir, darkflight_options):
         return _run_darkflight(event_dir, darkflight_options)
 
 
-def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False, darkflight_options=None):
+def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, all_stations: bool = False, use_orig_cen: bool = False, infrasound_only: bool = False, verbose: bool = False, force_plots: bool = False, min_speed: float = None, nosplit: bool = False, darkflight_options=None, refraction: bool = True):
     """Main processing logic for a meteor event."""
     logging.info(f"Processing event in directory: {event_dir}")
     if nosplit:
@@ -1986,8 +1987,10 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                 'debug_ransac': False,
                 'all_in_tolerance': 1.0,
                 'min_speed': min_speed,
+                'refraction': refraction,
             }
-            fbspd_opts = {'debug': True, 'seed': 0, 'min_speed': min_speed}
+            fbspd_opts = {'debug': True, 'seed': 0, 'min_speed': min_speed,
+                          'refraction': refraction}
             
             metrack_info, metrack_plot_data = calculate_trajectory(str(obs_filepath), **metrack_opts)
             if not metrack_plot_data: raise ValueError("Metrack calculation returned no plot data.")
@@ -2006,6 +2009,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                     metrack_info, metrack_plot_data, station_name_to_code,
                     metrack_opts, all_stations, use_orig_cen,
                     infrasound_only, verbose, min_speed, spatial_only=True,
+                    refraction=refraction,
                 )
 
             inlier_codes = set(metrack_info.inlier_stations)
@@ -2092,6 +2096,7 @@ def process_event(event_dir: Path, date: datetime.datetime, fast: bool = False, 
                             metrack_info, {'inlier_indices': forced_inlier},
                             station_name_to_code, metrack_opts, all_stations,
                             use_orig_cen, infrasound_only, verbose, min_speed,
+                            refraction=refraction,
                         )
                         ti, tp = calculate_trajectory(str(obs_filepath), **metrack_opts)
                         metrack_info, metrack_plot_data = ti, tp
@@ -2697,6 +2702,12 @@ def main():
              "If omitted, it is derived from the fitted altitude as circular-orbit speed minus 1 km/s."
     )
     parser.add_argument(
+        "--no-refraction",
+        action="store_true",
+        help="Disable atmospheric delta-z refraction correction in "
+             "trajectory and speed-profile fitting."
+    )
+    parser.add_argument(
         "--darkflight-args",
         nargs=argparse.REMAINDER,
         metavar="OPTION",
@@ -2734,7 +2745,7 @@ def main():
     if args.darkflight_only and not is_reprocessing:
         parser.error('--darkflight-only requires an existing local event directory, not a remote fetch')
     if args.darkflight_only and (args.infrasound or args.all or args.origcen or args.force_plots
-                                or args.min_speed is not None or args.nosplit):
+                                or args.min_speed is not None or args.nosplit or args.no_refraction):
         parser.error('--darkflight-only cannot be combined with trajectory or infrasound processing options')
     darkflight_options = None
     if args.darkflight_args is not None or args.density is not None or args.darkflight_only:
@@ -2790,7 +2801,8 @@ def main():
             process_event(final_event_dir, processing_date, fast=args.fast, all_stations=args.all,
                       use_orig_cen=args.origcen, infrasound_only=args.infrasound,
                       verbose=args.verbose, force_plots=args.force_plots, min_speed=args.min_speed,
-                      nosplit=args.nosplit, darkflight_options=darkflight_options)
+                      nosplit=args.nosplit, darkflight_options=darkflight_options,
+                      refraction=not args.no_refraction)
         except Exception as e:
             logging.critical(f"A critical error occurred during reprocessing: {e}", exc_info=True)
         finally:
@@ -2852,14 +2864,16 @@ def main():
     process_event_with_lock(final_event_dir, processing_date,
                             all_stations=args.all, use_orig_cen=args.origcen,
                             infrasound_only=args.infrasound, verbose=args.verbose,
-                            nosplit=args.nosplit, darkflight_options=darkflight_options)
+                            nosplit=args.nosplit, darkflight_options=darkflight_options,
+                            refraction=not args.no_refraction)
     logging.info("--- Script finished. ---")
 
 
 def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
                             all_stations: bool = False, use_orig_cen: bool = False,
                             infrasound_only: bool = False, verbose: bool = False,
-                            nosplit: bool = False, darkflight_options=None):
+                            nosplit: bool = False, darkflight_options=None,
+                            refraction: bool = True):
     # Acquire an exclusive lock on the event directory so that concurrent
     # fetch.py instances (for different stations of the same event) do not
     # run process_event() simultaneously.  The second instance will block
@@ -2900,7 +2914,7 @@ def process_event_with_lock(event_dir: Path, processing_date: datetime.datetime,
         else:
             logging.info("Lock acquired. Starting process_event().")
 
-        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit, darkflight_options=darkflight_options)
+        process_event(event_dir, processing_date, fast=False, all_stations=all_stations, use_orig_cen=use_orig_cen, infrasound_only=infrasound_only, verbose=verbose, nosplit=nosplit, darkflight_options=darkflight_options, refraction=refraction)
     except Exception as e:
         logging.critical(f"A critical error occurred during event processing: {e}", exc_info=True)
     finally:

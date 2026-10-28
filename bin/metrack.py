@@ -50,6 +50,9 @@ if _PROJECT_DIR is not None:
             if _ps not in sys.path:
                 sys.path.insert(0, _ps)
 
+from refraction import (delta_z_m,
+                        refraction_deg_apparent_minus_true)
+
 def _check_and_import_dependencies():
     """
     Checks for optional libraries, imports them, and provides clear feedback.
@@ -114,77 +117,33 @@ def _min_orbital_speed_for_height_km(height_km: float, speed_margin_km_s: float 
     """
     return max(1.0, math.sqrt(EARTH_STD_GRAV_KM3S2 / (EARTH_RADIUS_KM + height_km)) - speed_margin_km_s)
 
-ATM_SCALE_HEIGHT_KM = 7.0
-
 # Station clocks are not perfectly synced — allow several seconds of
 # timestamp offset on top of the duration-based slack before calling an
 # observation a different meteor.
 CLOCK_DRIFT_S = 10.0
 
 
-def _refraction_deg_apparent_minus_true(alt_deg: float, pressure_hpa: float = 1010.0, temp_c: float = 10.0) -> float:
-    """Approximate atmospheric refraction in degrees: (apparent altitude) - (true altitude).
-
-    Uses Bennett's formula (1982) with standard pressure/temperature scaling.
-    Returns 0 for very low/negative altitudes.
-    """
-    try:
-        alt = float(alt_deg)
-    except Exception:
-        return 0.0
-
-    if not math.isfinite(alt):
-        return 0.0
-    if alt < -1.0:
-        return 0.0
-
-    alt_eff = max(0.1, min(89.9, alt))
-    # Bennett (1982): R[arcmin] = 1.02 / tan((alt + 10.3/(alt+5.11)) deg)
-    r_arcmin = 1.02 / math.tan(math.radians(alt_eff + 10.3 / (alt_eff + 5.11)))
-    # Simple scaling to local P,T.
-    r_arcmin *= (pressure_hpa / 1010.0) * (283.0 / (273.0 + temp_c))
-    return float(r_arcmin / 60.0)
+def _effective_site_heights_km(obs_data):
+    """Observer heights after optional delta-z virtual-height offsets."""
+    heights = np.asarray(obs_data['heights_m'], dtype=float)
+    offsets = obs_data.get('site_height_offsets_km')
+    if offsets is None:
+        return heights
+    return heights + np.asarray(offsets, dtype=float)
 
 
-def _finite_distance_refraction_scale(height_km: float) -> float:
-    """Scale refraction for a source at finite height inside the atmosphere.
+def _refraction_correct_obs_data(obs_data):
+    """Return observation data with full refraction and delta-z site offsets."""
+    corrected = dict(obs_data)
+    corrected['altitudes'] = np.asarray([
+        alt_app - refraction_deg_apparent_minus_true(alt_app)
+        for alt_app in obs_data['altitudes']], dtype=float)
+    corrected['site_height_offsets_km'] = np.asarray([
+        delta_z_m(alt_app, site_height_km * 1000.0) / 1000.0
+        for alt_app, site_height_km in zip(
+            obs_data['altitudes'], obs_data['heights_m'])], dtype=float)
+    return corrected
 
-    For a source at height h, only the atmosphere below h contributes.
-    Approximate by fraction of atmospheric mass below h for an exponential
-    atmosphere: f = 1 - exp(-h/H).
-    """
-    try:
-        h = float(height_km)
-    except Exception:
-        return 1.0
-    if not math.isfinite(h):
-        return 1.0
-    h = max(0.0, h)
-    return float(1.0 - math.exp(-h / ATM_SCALE_HEIGHT_KM))
-
-
-def _estimate_cross_heights_km(track_start, track_end, obs_data) -> List[float]:
-    """Estimate height (km) of the meteor along each line of sight using current geometry."""
-    n = len(obs_data['longitudes'])
-    if track_start is None or track_end is None or n == 0:
-        return [float('nan')] * n
-    track_vec = (track_end - track_start)
-    norm = float(np.linalg.norm(track_vec))
-    if norm < 1e-9:
-        return [float('nan')] * n
-    track_vec /= norm
-
-    pos_vectors = np.asarray([lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])])
-    los_vectors = np.asarray([altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])])
-    los_pos, _ = _closest_points_batch(np.asarray(track_start), np.asarray(track_vec),
-                                        pos_vectors, los_vectors, return_points=True)
-    heights_km = []
-    for pos in los_pos:
-        try:
-            heights_km.append(float(xyz2lonlat(pos)[2]))
-        except Exception:
-            heights_km.append(float('nan'))
-    return heights_km
 
 class MetrackInfo:
     """Structure for storing information about a fitted meteor track."""
@@ -344,7 +303,7 @@ def radec_to_ecliptic(ra, dec):
     ephem = AVAILABLE_LIBS['ephem']
     equ = ephem.Equatorial(ra, dec, epoch=ephem.J2000)
     ecl = ephem.Ecliptic(equ)
-    return ecl.lon, ecl.lat
+    return np.degrees(float(ecl.lon)), np.degrees(float(ecl.lat))
 
 # --- Core Logic, I/O, and Plotting ---
 def clean_svg(svg_path):
@@ -1607,7 +1566,7 @@ def fit_track(obs_data, optimize=True, pos_vectors=None, los_vectors=None):
         n_obs = len(obs_data['longitudes']) // 2
         if n_obs < 2 or len(set(zip(obs_data['latitudes'][:n_obs], obs_data['longitudes'][:n_obs]))) < 2:
             return None, None, [], float('inf'), 0
-        pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
+        pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], _effective_site_heights_km(obs_data))]
         los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
     else:
         n_obs = len(pos_vectors) // 2
@@ -1766,7 +1725,7 @@ def robust_fit_with_ransac(obs_data, raw_data, options):
         if options.get('debug_ransac', False): print("Not enough stations for robust fit (< 3), using simple fit.")
         return fit_track(obs_data, optimize=options.get('optimize', True)), obs_data, list(range(num_stations))
 
-    pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], obs_data['heights_m'])]
+    pos_vectors = [lonlat2xyz(lon, lat, h) for lon, lat, h in zip(obs_data['longitudes'], obs_data['latitudes'], _effective_site_heights_km(obs_data))]
     los_vectors = [altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(obs_data['altitudes'], obs_data['azimuths'], obs_data['longitudes'], obs_data['latitudes'])]
 
     def _fit_subset(indices, optimize=False):
@@ -2109,21 +2068,8 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
     options.setdefault('refraction', True)
     full_obs_data_fit = full_obs_data
 
-    # Always use a cheap standard fit to estimate refraction corrections.
     if options.get('refraction', True):
-        fit_initial, inlier_obs_initial, inlier_idx_initial = _run_fit(full_obs_data, False)
-        if fit_initial[0] is not None:
-            heights_km = _estimate_cross_heights_km(fit_initial[0], fit_initial[1], full_obs_data)
-            alt_corr = []
-            for alt_app, h_km in zip(full_obs_data['altitudes'], heights_km):
-                r_inf = _refraction_deg_apparent_minus_true(float(alt_app))
-                scale = _finite_distance_refraction_scale(float(h_km))
-                alt_corr.append(float(alt_app) - float(r_inf) * float(scale))
-            try:
-                full_obs_data_fit = dict(full_obs_data)
-                full_obs_data_fit['altitudes'] = np.asarray(alt_corr, dtype=float)
-            except Exception:
-                full_obs_data_fit = full_obs_data
+        full_obs_data_fit = _refraction_correct_obs_data(full_obs_data)
 
     # Try a cheap standard fit on the refraction-corrected data.
     fit_results, inlier_obs_data, inlier_indices = _run_fit(full_obs_data_fit, False)
@@ -2165,7 +2111,7 @@ def calculate_trajectory(inname: str, **kwargs) -> Tuple[Optional[MetrackInfo], 
 
     # Prepare data for plotting functions
     final_track_vec = (track_end - track_start); final_track_vec /= np.linalg.norm(final_track_vec)
-    all_pos_vectors = np.asarray([lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'], full_obs_data_fit['heights_m'])])
+    all_pos_vectors = np.asarray([lonlat2xyz(lon, lat, h) for lon, lat, h in zip(full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'], _effective_site_heights_km(full_obs_data_fit))])
     all_los_vectors = np.asarray([altaz2xyz(alt, az, lon, lat) for alt, az, lon, lat in zip(full_obs_data_fit['altitudes'], full_obs_data_fit['azimuths'], full_obs_data_fit['longitudes'], full_obs_data_fit['latitudes'])])
     cross_pos_all, _ = _closest_points_batch(track_start, final_track_vec, all_pos_vectors, all_los_vectors, return_points=True)
     cross_pos_all = list(cross_pos_all)

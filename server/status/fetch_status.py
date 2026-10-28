@@ -260,7 +260,7 @@ def check_backup_pc(station_id):
     try:
         cmd = [
             "ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
+            "-o", "StrictHostKeyChecking=accept-new",
             f"{SSH_USER}@{backup_host}", "echo ok"
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=SSH_TIMEOUT_BACKUP)

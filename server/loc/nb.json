@@ -240,7 +240,7 @@
  "df_frag_preference_note": "Modellpreferanseprosentene er terminaldominerte heuristiske vekter og kan inkludere en tetthetsprior; de er ikke kalibrerte fysiske sannsynligheter.",
  "df_frag_mc_note": "Monte Carlo-punktene trekker modellerte fragmentmassefordelinger ved hver models landingsfase; de er tenkte realisasjoner, ikke modelsannsynligheter.",
  "df_frag_best_row": "Høyeste terminaldominerte modellpreferanse",
- "df_frag_pref_unavailable": "Ingen pålitelig modellpreferanse: det automatiske masseestimatet fra retardasjon er dårlig begrensa. Oppgi --mag eller --entry-mass for en modellert sammenligning.",
+ "df_frag_pref_unavailable": "Ingen pålitelig modellpreferanse: det automatiske masseestimatet fra retardasjon er dårlig begrensa. Oppgi --mag eller --entry-mass for en modellert sammenlikning.",
  "df_frag_light_unavailable": "Modellsammenlikning utilgjengelig: ingen brukbar observert kamera-lyskurve.",
  "df_frag_warn_inversion": "Masseinversjonen for toppmagnitude feila for dette eksperimentet; det vises som utilgjengelig i stedet for å få en erstatningsmasse.",
  "df_frag_disintegration": "Desintegrasjon (illustrativ)"

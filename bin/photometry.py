@@ -454,13 +454,15 @@ def _video_photometry(cam_dir, positions, timestamps, lat, lon, elev,
                 flux[i], _, peak[i] = a
     # a blooming detection clips its aperture and swallows the head
     # in halo — the detection's whole-bloom excess is the closer
-    # analogue to the reducer's flood-area brightness and keeps the
-    # per-point curve shape correct (some lingering afterglow is
-    # inherent: it is real light still falling on the sensor)
+    # analogue to the reducer's flood-area brightness.  Blend it in
+    # as the bloom shrinks (npix < threshold) so the observable does
+    # not switch discontinuously to the bare aperture
     for i, md in enumerate(matched_det):
-        if md is not None and (md[2] or 0) >= VIDEO_BLOOM_NPIX \
-                and (flux[i] is None or (md[3] or 0) > flux[i]):
-            flux[i] = md[3]
+        if md is not None and (md[3] or 0) > 0:
+            w = min(1.0, (md[2] or 0) / VIDEO_BLOOM_NPIX)
+            cand = md[3] * w
+            if flux[i] is None or cand > flux[i]:
+                flux[i] = cand
     sat = [bool(md is not None and
                 ((peak[i] is not None and peak[i] >= VIDEO_SAT_LUMA)
                  or (md[2] or 0) >= VIDEO_BLOOM_NPIX))

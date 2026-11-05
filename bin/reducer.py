@@ -962,7 +962,7 @@ class Zoom_Advanced(ttk.Frame):
             self._save_state_for_undo()
             for p in self.positions:
                 p['current'] = p['original']
-                self._update_centroid_entry(p['frame'], p['original'])
+                self._create_or_update_centroid(p['frame'], p['original'])
             self.update_curve_fit()
             self.update_prediction()
         elif key_char == 't': self._temporally_respace_points()
@@ -1148,17 +1148,6 @@ class Zoom_Advanced(ttk.Frame):
                 self.show_image()
             self.master.after_idle(_update_gui_finish)
 
-    def _update_centroid_entry(self, frame_num, xy_coords):
-        if self.centroid[frame_num] is None: return
-        x, y = xy_coords
-        celestial = self._image_coords_to_celestial(x, y)
-        if celestial is None: return
-        az_deg, alt_deg = celestial
-        parts = self.centroid[frame_num].split(' ')
-        parts[2] = f"{alt_deg:.2f}"
-        parts[3] = f"{az_deg % 360:.2f}"
-        self.centroid[frame_num] = ' '.join(parts)
-        
     def _estimate_photometry(self, image, center_xy, aperture_r=5, annulus_r_inner=7, annulus_r_outer=10):
         try:
             # max-channel intensity: 'L' weights blue at ~0.11, so a
@@ -1248,6 +1237,14 @@ class Zoom_Advanced(ttk.Frame):
         x, y = xy_coords
         celestial = self._image_coords_to_celestial(x, y)
         if celestial is None:
+            # unmappable point — still refresh the brightness in place
+            # so a drag outside the calibrated footprint does not leave
+            # the stale value behind
+            if self.centroid[frame_num] is None:
+                return
+            parts = self.centroid[frame_num].split(' ')
+            parts[4] = f'{brightness:.2f}'
+            self.centroid[frame_num] = ' '.join(parts)
             return
         az_deg, alt_deg = celestial
         ts_val = self.timestamps[frame_num] if frame_num < len(self.timestamps) else None

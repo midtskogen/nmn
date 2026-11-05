@@ -1161,8 +1161,11 @@ class Zoom_Advanced(ttk.Frame):
         
     def _estimate_photometry(self, image, center_xy, aperture_r=5, annulus_r_inner=7, annulus_r_outer=10):
         try:
-            img_gray = image.convert('L')
-            img_array = np.array(img_gray)
+            # max-channel intensity: 'L' weights blue at ~0.11, so a
+            # saturated blue fireball reads far below its true flux and
+            # never crosses the saturation threshold
+            img_rgb = np.array(image.convert('RGB'))
+            img_array = np.max(img_rgb, axis=2)
             # aperture radii are tuned for 1080p — scale them with the
             # frame's linear resolution so the same sky patch is covered
             scale = math.sqrt((img_array.shape[0] * img_array.shape[1])
@@ -1172,7 +1175,18 @@ class Zoom_Advanced(ttk.Frame):
             annulus_r_outer *= scale
             y_coords, x_coords = np.ogrid[:img_array.shape[0], :img_array.shape[1]]
             center_x, center_y = center_xy
+            # refine the aperture centre to the brightest pixel within
+            # ~12 px (1080p-equivalent) — manual points often sit on the
+            # glow edge rather than the thin bright core, so an
+            # unrecentred aperture samples sky instead of the source
             dist_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
+            refine_r = max(aperture_r, 12.0 * scale)
+            window = np.where(dist_from_center <= refine_r, img_array, -1)
+            peak_y, peak_x = np.unravel_index(np.argmax(window), window.shape)
+            if img_array[peak_y, peak_x] > img_array[int(np.clip(center_y, 0, img_array.shape[0] - 1)),
+                                                   int(np.clip(center_x, 0, img_array.shape[1] - 1))]:
+                center_x, center_y = float(peak_x), float(peak_y)
+                dist_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
             aperture_mask = dist_from_center <= aperture_r
             annulus_mask = (dist_from_center > annulus_r_inner) & (dist_from_center <= annulus_r_outer)
             background_pixels = img_array[annulus_mask]
@@ -1189,8 +1203,8 @@ class Zoom_Advanced(ttk.Frame):
 
     def _estimate_saturation_brightness(self, image, center_xy, tolerance_percent=0.05):
         try:
-            img_gray = image.convert('L')
-            img_array = np.array(img_gray)
+            img_rgb = np.array(image.convert('RGB'))
+            img_array = np.max(img_rgb, axis=2)
             height, width = img_array.shape
             # report the blob area in 1080p-equivalent pixels so the
             # saturation add-on is resolution-independent
@@ -1218,8 +1232,8 @@ class Zoom_Advanced(ttk.Frame):
 
     def _create_or_update_centroid(self, frame_num, xy_coords):
         image_to_analyze = Image.open(self.files[frame_num])
-        img_gray = image_to_analyze.convert('L')
-        img_array = np.array(img_gray)
+        img_array = np.max(np.array(image_to_analyze.convert('RGB')),
+                           axis=2)
         center_x, center_y = int(round(xy_coords[0])), int(round(xy_coords[1]))
         brightness = 0.0
         

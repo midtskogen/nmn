@@ -150,6 +150,8 @@ _M_AIR = 0.0289644
 _R_UNIV = 8.31432
 
 MAG_FLASH_T_EFF_S = 0.15          # terminal-flash duration (~a few frames);
+IMPACT_MIN_KG = 0.005             # fragments below ~5 g are not meteorites —
+                                  # they are dropped from impact outputs
                                   # the sustained pre-flare light is added
                                   # separately from the measured light curve
 V_REF_SURV = 15000.0              # reference speed for the survival fraction
@@ -3471,6 +3473,9 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
             _prop_worker, jobs, pool=pool,
             allow_processes=allow_processes)
         for si, run, res in results_list:
+            if (res['impact'].get('landed', True)
+                    and res['impact'].get('m', 0.0) < IMPACT_MIN_KG):
+                continue
             scenarios[si].setdefault('results', []).append(
                 {'m': run['m'], 'rho': run['rho'],
                  'impact': res['impact'],
@@ -3499,7 +3504,8 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                 n_runs=mc_runs, seed=seed, pool=pool,
                 lon=end_lon, lat=end_lat, event_dt=event_dt,
                 mass_samples=m_samples, mass_bounds=mc_mass_bounds)
-                if i.get('landed', True)]
+                if i.get('landed', True)
+                and i.get('m', 0.0) >= IMPACT_MIN_KG]
     finally:
         if own_pool:
             pool.shutdown()

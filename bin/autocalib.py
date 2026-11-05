@@ -17,7 +17,9 @@ Example:
         -T 1756172400 -y 59.97056 -x 10.649639 -e 348
 
 For a circular all-sky image whose visible disk spans the frame width, pass
---input-fov 180 so the solve crops stay within the tetra3 database range.
+--input-fov 180 so the solve crops stay within the tetra3 database range. If
+the lens' edge FOV is known, also pass --fix-fov to hold the fitted PTO at
+that FOV while refining its distortion and orientation.
 
 A video file (e.g. .mp4) is also accepted: the first --stack frames
 (default 10) are max-stacked into a still image which is then solved.
@@ -874,6 +876,129 @@ def _match_to_expected(expected, found, radius_px):
     return matches
 
 
+def _control_point_residuals(pto_data, control_points):
+    """Pixel distances between observed and model-projected control points."""
+    image = pto_data[1][0]
+    projection = int(image.get('f', 3))
+    params = np.array([float(image[name]) for name in
+                       ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e')])
+    observed = np.asarray([(point[0], point[1]) for point in control_points],
+                          dtype=float).reshape(-1, 2)
+    azimuths = np.asarray([point[2] for point in control_points])
+    altitudes = np.asarray([point[3] for point in control_points])
+    predicted = _project_stars_numba(
+        azimuths, altitudes, params, float(image['w']), float(image['h']), projection)
+    return np.linalg.norm(predicted - observed, axis=1)
+
+
+def _radial_star_candidates(pto_data, observer, star_table, found, found_tree,
+                            max_dist_px, max_angle_deg, objects=1200):
+    """Match catalogue stars along nearly the same lens-centre ray.
+
+    A wrong all-sky radial law mostly moves projected stars inward/outward.
+    Searching a narrow wedge permits large radial corrections while rejecting
+    cloud streaks, labels and foreground lights that merely lie near a star's
+    expected pixel."""
+    image = pto_data[1][0]
+    centre_x = float(image['w']) / 2.0 + float(image['d'])
+    centre_y = float(image['h']) / 2.0 + float(image['e'])
+    max_angle = math.radians(max_angle_deg)
+    matches = {}
+    for x_exp, y_exp, az, alt in _project_catalog(
+            pto_data, observer, star_table, objects=objects):
+        expected_angle = math.atan2(y_exp - centre_y, x_exp - centre_x)
+        best = None
+        for idx in found_tree.query_ball_point((x_exp, y_exp), max_dist_px):
+            x_obs, y_obs = found[idx]
+            observed_angle = math.atan2(y_obs - centre_y, x_obs - centre_x)
+            angle_error = abs(math.atan2(math.sin(observed_angle - expected_angle),
+                                         math.cos(observed_angle - expected_angle)))
+            if angle_error > max_angle:
+                continue
+            dist = math.hypot(x_obs - x_exp, y_obs - y_exp)
+            score = dist + 30.0 * angle_error
+            if best is None or score < best[0]:
+                best = (score, x_obs, y_obs)
+        if best is not None:
+            key = (round(float(best[1]), 4), round(float(best[2]), 4))
+            matches[key] = (best[1], best[2], az, alt, None)
+    return list(matches.values())
+
+
+def _refine_radial_calibration(pto_data, full_image, observer, star_table,
+                               verbose=False, fixed_fov=None):
+    """Progressively recover the radial model of a circular all-sky lens.
+
+    The normal masked-star refinement has a small fixed search radius and can
+    lock onto a centre-only solution when the assumed full-frame FOV is far
+    off. Here we instead iterate from broad to narrow searches, constrain the
+    angular direction of each candidate, and then retain only sub-threshold
+    residuals for a second robust fit."""
+    from scipy.spatial import cKDTree
+
+    width, height = full_image.size
+    scale = min(width, height) / 2160.0
+    strict_px = max(4.0, 8.0 * scale)
+    free_stages = ((80, 1.5), (60, 1.0), (40, 0.8), (30, 0.6))
+    fixed_stages = ((60, 1.0), (40, 0.8), (30, 0.6), (20, 0.4))
+    stages = free_stages + (fixed_stages if fixed_fov is not None else ())
+    centroids = get_centroids_from_image(
+        full_image, sigma=1.0, image_th=None, crop=None, downsample=None,
+        filtsize=15, max_area=500, min_area=3, max_returned=4000)
+    found = np.asarray([(float(pt[1]), float(pt[0])) for pt in centroids])
+    if len(found) < 20:
+        return pto_data, [], float('inf'), 0
+    found_tree = cKDTree(found)
+    current = pto_data
+    best_data = pto_data
+    best_points = []
+    best_matched = 0
+    best_rmse = float('inf')
+    best_score = float('inf')
+    free_parameters = ('v', 'y', 'p', 'r', 'a', 'b', 'c', 'd', 'e')
+    fixed_parameters = ('y', 'p', 'r', 'a', 'b', 'c', 'd', 'e')
+    for iteration, (radius_px, angle_deg) in enumerate(stages):
+        if fixed_fov is not None and iteration == len(free_stages):
+            current = copy.deepcopy(current)
+            current[1][0]['v'] = float(fixed_fov)
+            best_data = pto_data
+            best_points = []
+            best_matched = 0
+            best_rmse = float('inf')
+            best_score = float('inf')
+        parameters = (fixed_parameters
+                      if fixed_fov is not None and iteration >= len(free_stages)
+                      else free_parameters)
+        radius_px = max(12.0, radius_px * scale)
+        candidates = _radial_star_candidates(
+            current, observer, star_table, found, found_tree,
+            radius_px, angle_deg)
+        if len(candidates) < 15:
+            if verbose:
+                print(f'  Radial iter {iteration + 1}: only {len(candidates)} '
+                      'angularly consistent candidates, stopping.')
+            break
+        current, inliers, rmse_px, _ok = _optimise_pto(
+            current, candidates, parameters)
+        residuals = _control_point_residuals(current, candidates)
+        strict = [point for point, residual in zip(candidates, residuals)
+                  if residual < strict_px]
+        if len(strict) >= 15:
+            current, inliers, rmse_px, _ok = _optimise_pto(
+                current, strict, parameters)
+        if verbose:
+            print(f'  Radial iter {iteration + 1}: {len(inliers)}/{len(candidates)} '
+                  f'inliers, {rmse_px:.3f} px RMSE.')
+        score = rmse_px * len(candidates) / max(1, len(inliers))
+        if score < best_score:
+            best_data = copy.deepcopy(current)
+            best_points = inliers
+            best_matched = len(candidates)
+            best_rmse = rmse_px
+            best_score = score
+    return best_data, best_points, best_rmse, best_matched
+
+
 def _refine_calibration(pto_data, full_image, observer, star_table, iterations=3,
                         radius_deg=1.0, objects=500, verbose=False):
     """
@@ -1021,7 +1146,7 @@ def _optimise_pto(pto_data, control_points, parameters):
     x0 = base_params[parameter_indices]
     scales = {'v': 10, 'y': 10, 'p': 10, 'r': 10,
               'a': 0.01, 'b': 0.01, 'c': 0.01, 'd': 50, 'e': 50}
-    limits = {'v': (5, 150), 'y': (-720, 720), 'p': (-90, 90), 'r': (-180, 180),
+    limits = {'v': (5, 220), 'y': (-720, 720), 'p': (-90, 90), 'r': (-180, 180),
               'a': (-0.5, 0.5), 'b': (-0.5, 0.5), 'c': (-0.5, 0.5),
               'd': (-500, 500), 'e': (-500, 500)}
 
@@ -1075,7 +1200,8 @@ def _optimise_pto(pto_data, control_points, parameters):
 
 
 def _build_and_evaluate(args, result, seed_pairs, t3, full_image, observer,
-                        width, height, mask_img, est_fov=None, est_proj=None):
+                        width, height, mask_img, est_fov=None, est_proj=None,
+                        raw_image=None):
     """Build the PTO model from a solve, collect/refine control points and
     evaluate the confidence gate. Returns (refined_pto_data, control_points,
     stats)."""
@@ -1199,6 +1325,21 @@ def _build_and_evaluate(args, result, seed_pairs, t3, full_image, observer,
             control_points = refine_cps
             rmse_px = refine_rmse
             matched_candidates = refine_matched
+        if ((args.input_fov >= 150 or args.fix_fov) and
+                int(refined_pto_data[1][0].get('f', 3)) == 3):
+            if args.verbose:
+                print('Refining all-sky radial model...')
+            radial_pto_data, radial_cps, radial_rmse, radial_matched = (
+                _refine_radial_calibration(
+                    refined_pto_data,
+                    raw_image if raw_image is not None else full_image,
+                    observer, t3.star_table, verbose=args.verbose,
+                    fixed_fov=(args.input_fov if args.fix_fov else None)))
+            if radial_cps and radial_rmse < rmse_px:
+                refined_pto_data = radial_pto_data
+                control_points = radial_cps
+                rmse_px = radial_rmse
+                matched_candidates = radial_matched
     if not control_points and collected:
         # Refinement found nothing; inlier-filter the collected set instead.
         refined_pto_data, control_points, rmse_px, _ok = _optimise_pto(
@@ -1266,6 +1407,8 @@ def _run_all_cameras(args):
             cmd.append('--nomask')
         if args.rectilinear:
             cmd.append('--rectilinear')
+        if args.fix_fov:
+            cmd.append('--fix-fov')
         if args.force:
             cmd.append('--force')
         for name in ('input_fov', 'accept_prob', 'accept_matches', 'accept_rmse',
@@ -1411,6 +1554,10 @@ def main():
                         help='Full-frame input FOV in degrees used to scale '
                              f'the solve crops (default: {INITIAL_FOV:.1f}; '
                              'use about 180 for circular all-sky images).')
+    parser.add_argument('--fix-fov', action='store_true',
+                        help='After the free radial fit, hold the output lens '
+                             'FOV at --input-fov while refining distortion '
+                             'and orientation (for known ~180° all-sky lenses).')
     parser.add_argument('--match-tolerance', type=float, default=0.15,
                         help='Maximum angular distance (deg) for accepting a catalogue match '
                              'in full-field matching (default: 0.15).')
@@ -1522,7 +1669,7 @@ def main():
             refined_pto_data, control_points, stats = _build_and_evaluate(
                 args, result, seed_pairs, t3, full_image,
                 observer, width, height, mask_img,
-                est_fov=est_fov, est_proj=est_proj)
+                est_fov=est_fov, est_proj=est_proj, raw_image=raw_image)
         if result is not None and stats is not None and not stats['failures']:
             break
         if attempt == 0 and mask_src == 'file':

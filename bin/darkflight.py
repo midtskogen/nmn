@@ -3868,7 +3868,13 @@ def _observed_light_curve_samples(photometry, plot_data, resdat=None):
                         'source_index': source_index,
                         'warnings': camera.get('warnings') or [],
                         't': t, 'flux': flux, 'sat': saturated,
-                        'ranges_km': ranges_km})
+                        'ranges_km': ranges_km,
+                        # whole-frame excess bound (saturated sources):
+                        # counts every incident photon in the brightest
+                        # frame, not just the aperture slice near the
+                        # trail point
+                        'video_m_app_peak_bound':
+                            video.get('m_app_peak_bound')})
     if not samples:
         return [], 'no camera light curve with three usable points'
     return samples, None
@@ -3948,9 +3954,25 @@ def _observed_peak_magnitude_bound(observed):
             sat_flags = (np.asarray(sat_raw, dtype=bool)
                          if sat_raw is not None
                          else np.array([], dtype=bool))
-            peaks.append((camera.get('cam'), float(fluxes[peak_i]),
-                          bool(peak_i < sat_flags.size
-                               and sat_flags[peak_i]),
+            peak_flux = float(fluxes[peak_i])
+            peak_sat = bool(peak_i < sat_flags.size and sat_flags[peak_i])
+            # whole-frame excess bound is a stronger lower bound for
+            # saturated blobs: per-point apertures sample only a slice
+            # of the glow, while the frame excess counts it all
+            vb = camera.get('video_m_app_peak_bound')
+            if vb is not None:
+                finite_ranges = ranges[np.isfinite(ranges)
+                                       & (ranges > 0)]
+                vb_range = (float(np.median(finite_ranges))
+                            if finite_ranges.size else np.nan)
+                if np.isfinite(vb_range):
+                    vb_flux = (1500.0 * (vb_range / 100.0) ** 2
+                               * 10.0 ** (-0.4 * float(vb)))
+                    if vb_flux > peak_flux:
+                        peak_flux = vb_flux
+                        peak_range = vb_range
+                        peak_sat = True   # clipped — a lower bound
+            peaks.append((camera.get('cam'), peak_flux, peak_sat,
                           peak_range))
     if not peaks:
         return None, [], False

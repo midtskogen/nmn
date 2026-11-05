@@ -1163,6 +1163,13 @@ class Zoom_Advanced(ttk.Frame):
         try:
             img_gray = image.convert('L')
             img_array = np.array(img_gray)
+            # aperture radii are tuned for 1080p — scale them with the
+            # frame's linear resolution so the same sky patch is covered
+            scale = math.sqrt((img_array.shape[0] * img_array.shape[1])
+                              / (1920.0 * 1080.0))
+            aperture_r *= scale
+            annulus_r_inner *= scale
+            annulus_r_outer *= scale
             y_coords, x_coords = np.ogrid[:img_array.shape[0], :img_array.shape[1]]
             center_x, center_y = center_xy
             dist_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
@@ -1185,6 +1192,9 @@ class Zoom_Advanced(ttk.Frame):
             img_gray = image.convert('L')
             img_array = np.array(img_gray)
             height, width = img_array.shape
+            # report the blob area in 1080p-equivalent pixels so the
+            # saturation add-on is resolution-independent
+            scale = math.sqrt((height * width) / (1920.0 * 1080.0))
             center_x, center_y = int(round(center_xy[0])), int(round(center_xy[1]))
             if not (0 <= center_x < width and 0 <= center_y < height): return 0.0
             start_value = float(img_array[center_y, center_x])
@@ -1203,7 +1213,7 @@ class Zoom_Advanced(ttk.Frame):
                         visited.add((nx, ny))
                         if (0 <= nx < width and 0 <= ny < height and min_val <= img_array[ny, nx] <= max_val):
                             q.append((nx, ny))
-            return float(area)
+            return float(area) / (scale * scale)
         except Exception: return 0.0
 
     def _create_or_update_centroid(self, frame_num, xy_coords):

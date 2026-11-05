@@ -312,7 +312,11 @@ class LauncherDialog:
                     raise Exception("Failed to fetch any video files.")
 
                 def _finish():
-                    _set_status("Success! Launching...")
+                    # Already on the Tk thread — update the label directly.
+                    # Going through _set_status() would queue an after()
+                    # callback that fires after main_tk is destroyed.
+                    try: self.status_label.config(text="Success! Launching...")
+                    except Exception: pass
                     self.fetched_files = {
                         'config': local_cfg,
                         'pto': local_pto,

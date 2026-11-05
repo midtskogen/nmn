@@ -292,12 +292,17 @@ def _video_detections(frames_iter, xymin, xymax, thresh=VIDEO_DET_THRESH):
                     # so this stays a lower bound
                     seed = np.zeros(diff.shape, dtype=bool)
                     seed[gy0:gy1, gx0:gx1] = (lab == k)
-                    low = diff > max(3.0, thresh * 0.2)
+                    # dilated seed bridges the <thresh valleys between
+                    # halo fragments: a dimming bloom splits into small
+                    # kernels at the detection threshold while the glow
+                    # between them still carries most of the light
+                    seed_d = ndimage.binary_dilation(seed, iterations=25)
+                    low = diff > max(2.0, thresh * 0.1)
                     lab2, _ = ndimage.label(low)
-                    overlap = np.unique(lab2[seed])
+                    overlap = np.unique(lab2[seed_d])
                     overlap = overlap[overlap > 0]
                     blob = (np.isin(lab2, overlap)
-                            if overlap.size else seed)
+                            if overlap.size else seed_d)
                     blob = ndimage.binary_dilation(blob, iterations=4)
                     excess = float(np.clip(diff[blob], 0, None).sum())
                     det.append((i, cx, cy, a[0], a[2],

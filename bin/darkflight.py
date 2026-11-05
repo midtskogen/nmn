@@ -3997,7 +3997,7 @@ def _observed_peak_magnitude_bound(observed):
     bound = float(-2.5 * math.log10(
         float(np.median(bound_flux)) / 1500.0))
     detail = []
-    for cam, f, sat, peak_range in peaks:
+    for idx, (cam, f, sat, peak_range) in enumerate(peaks):
         m_norm = -2.5 * math.log10(f / 1500.0)
         # implied apparent magnitude at the recorded peak range
         m_app = (m_norm + 5.0 * math.log10(peak_range / 100.0)
@@ -4006,7 +4006,8 @@ def _observed_peak_magnitude_bound(observed):
         detail.append(
             f'{cam}{"≤" if sat else "="}{m_norm:.1f}'
             f'@{peak_range:.0f}km'
-            f'{"" if m_app is None else f"(app {"≤" if sat else ""}{m_app:.1f})"}')
+            f'{"" if m_app is None else f"(app {"≤" if sat else ""}{m_app:.1f})"}'
+            f'{"" if inlier[idx] else " [outlier: excluded]"}')
     return bound, detail, consistent
 
 

@@ -3292,6 +3292,7 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
                 r_end = r_start + fraction * (r_end - r_start)
                 end_lon, end_lat, end_h = ecef2llh(r_end)
                 release_truncated = True
+                t_fitted_end = t_last
                 logging.info(f'darkflight: fit crosses luminous threshold '
                              f'at t={t_fade:.2f}s (of {t_last:.2f}s) — '
                              f'truncating analysis and releasing at 3 km/s')
@@ -3369,7 +3370,17 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     # are screening heuristics rather than survival-probability estimates.
     issues = []
     if release_truncated:
-        issues.append('release moved to model 3 km/s threshold')
+        # A crossing in the noisy tail of the speed fit barely moves the
+        # release point — individual station centroids are easily off by
+        # ~1 km — so a tail-only trim (<0.5 s and <10% of the fitted
+        # track) should not by itself demote the mass estimate.
+        trimmed = t_fitted_end - t_last
+        if trimmed > max(0.5, 0.10 * (t_fitted_end - t0_obs)):
+            issues.append('release moved to model 3 km/s threshold')
+        else:
+            logging.info(f'darkflight: luminous-threshold trim of '
+                         f'{trimmed:.2f}s is within tail noise — '
+                         'not counted as a reliability issue')
     if have_fit and v_end < 3000.0:
         issues.append('speed fit entirely below luminous threshold')
     duration = t_last - t0_obs
@@ -3436,8 +3447,11 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
         # sustained-phase mass loss from the measured light curve when a
         # calibrated photometric integral exists; an assumed survival
         # fraction then gives what reached dark flight.
+        # the flash's light was produced at flight speed (v_char), not
+        # at v_end — mass scales ~1/v^3, so evaluating at the truncated
+        # 3 km/s release speed would inflate it by ~two orders
         m_flash = _mag_to_photometric_mass(
-            peak_mag, v_end, MAG_FLASH_T_EFF_S)
+            peak_mag, v_char, MAG_FLASH_T_EFF_S)
         m_sustained = ((photometry or {}).get('m_phot_kg') or 0.0)
         m_entry_est = m_flash + m_sustained
         f_lo, f_hi = _survival_fraction(v_char)

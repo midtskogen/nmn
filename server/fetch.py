@@ -1524,7 +1524,7 @@ def _meteorite_darkflight_options(event_dir, darkflight_options=None, fast=False
         return darkflight.parse_args(
             [str(event_dir), '--fragmentation-model', 'all',
              '--density', '3500,7400'],
-            default_mc=0 if fast else 300)
+            default_mc=0 if fast else 150)
     options = argparse.Namespace(**vars(darkflight_options))
     if not getattr(options, 'fragmentation_model', None):
         options.fragmentation_model = ['all']
@@ -1545,7 +1545,7 @@ def _run_darkflight(event_dir, darkflight_options=None, analysis_results=None, f
     event_dir = Path(event_dir).resolve()
     options = darkflight_options
     if options is None:
-        options = darkflight.parse_args([str(event_dir)], default_mc=0 if fast else 300)
+        options = darkflight.parse_args([str(event_dir)], default_mc=0 if fast else 150)
     options = argparse.Namespace(**{**vars(options), 'event_dir': str(event_dir)})
     lang_files = {}
     for lang in SUPPORTED_LANGS:
@@ -2764,7 +2764,7 @@ def main():
         forwarded = ['--density', str(args.density)] if args.density is not None else []
         darkflight_options = darkflight.parse_args(
             [args.arg1, *forwarded, *(args.darkflight_args or [])],
-            default_mc=0 if args.fast and is_reprocessing else 300)
+            default_mc=0 if args.fast and is_reprocessing else 150)
     if args.darkflight_only:
         event_dir = Path(args.arg1).resolve()
         if not event_dir.is_dir():

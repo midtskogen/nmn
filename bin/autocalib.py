@@ -16,6 +16,9 @@ Example:
     autocalib.py ~/OSL_cam2.jpg ~/OSL_cam2.pto \
         -T 1756172400 -y 59.97056 -x 10.649639 -e 348
 
+For a circular all-sky image whose visible disk spans the frame width, pass
+--input-fov 180 so the solve crops stay within the tetra3 database range.
+
 A video file (e.g. .mp4) is also accepted: the first --stack frames
 (default 10) are max-stacked into a still image which is then solved.
 """
@@ -516,7 +519,8 @@ def _centroid_density_centers(image, w, h, cols=8, rows=5, top_n=4, mask=None):
     return centers
 
 
-def _solve_image(t3, image, verbose=False, mask=None):
+def _solve_image(t3, image, verbose=False, mask=None,
+                 input_fov=INITIAL_FOV):
     """Blind-solve the sky in `image`.
 
     Strategy:
@@ -535,16 +539,17 @@ def _solve_image(t3, image, verbose=False, mask=None):
     extract = {'sigma': 3, 'filtsize': 15, 'max_area': 500, 'min_area': 3, 'max_returned': 100}
     central = []
     for fov in (60, 50, 40, 30, 25, 20):
-        cw = min(w, int(round(w * fov / INITIAL_FOV)))
+        cw = min(w, int(round(w * fov / input_fov)))
         central.append((cw, cw, 'equidistant', float(fov), w / 2, h / 2))
     for size, fov in ((int(round(w * 0.3)), 25.0),
                       (640, 20.0), (768, 30.0), (480, 15.0)):
         central.append((size, size, 'rectilinear', fov, w / 2, h / 2))
-    candidates = _try_solve_crops(t3, image, central, extract, verbose)
+    candidates = _try_solve_crops(t3, image, central, extract, verbose,
+                                  input_fov=input_fov)
     best = min(candidates, key=lambda x: x[0]) if candidates else None
     if best is not None and best[0] < 1e-12:
         _report_solve(best, verbose)
-        return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
+        return best[1], _seed_pairs(best), *_estimate_full_fov(best, w, input_fov)
 
     # Central crops failed or produced a weak solve: place raw crops on the
     # densest star regions (terrain/obstructions may cover the centre).
@@ -556,14 +561,15 @@ def _solve_image(t3, image, verbose=False, mask=None):
     off_center = []
     if centers:
         for cx, cy in centers:
-            for size, fov in ((min(w, int(round(w * 30 / INITIAL_FOV))), 30.0),
-                              (min(w, int(round(w * 40 / INITIAL_FOV))), 40.0)):
+            for size, fov in ((min(w, int(round(w * 30 / input_fov))), 30.0),
+                              (min(w, int(round(w * 40 / input_fov))), 40.0)):
                 off_center.append((size, size, 'equidistant', fov, cx, cy))
-        candidates += _try_solve_crops(t3, image, off_center, extract, verbose)
+        candidates += _try_solve_crops(t3, image, off_center, extract, verbose,
+                                       input_fov=input_fov)
     best = min(candidates, key=lambda x: x[0]) if candidates else None
     if best is not None and best[0] < 1e-12:
         _report_solve(best, verbose)
-        return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
+        return best[1], _seed_pairs(best), *_estimate_full_fov(best, w, input_fov)
 
     # Raw crops still failed: reproject to centred equidistant views pointed
     # at the sky — the largest unmasked disk first, then the density peaks —
@@ -576,7 +582,7 @@ def _solve_image(t3, image, verbose=False, mask=None):
                   if not any(math.hypot(c[0] - a[0], c[1] - a[1]) < w / 16
                              for a in warp_axes)]
     if warp_axes:
-        f_px = w / math.radians(INITIAL_FOV)
+        f_px = w / math.radians(input_fov)
         warp_candidates = []
         for cx, cy in warp_axes[:4]:
             for out_fov, out_size in ((50.0, 768), (70.0, 960)):
@@ -618,22 +624,22 @@ def _solve_image(t3, image, verbose=False, mask=None):
                       for f, v in ((0.5, 15.0), (0.7, 20.0), (0.9, 25.0))]
         candidates += _try_solve_crops(
             t3, image, central + off_center[:8] + rect_extra,
-            dedupe_extract, verbose, dedupe_sep=16)
+            dedupe_extract, verbose, dedupe_sep=16, input_fov=input_fov)
     if not candidates:
         return None, None, None, None
     best = min(candidates, key=lambda x: x[0])
     _report_solve(best, verbose)
-    return best[1], _seed_pairs(best), *_estimate_full_fov(best, w)
+    return best[1], _seed_pairs(best), *_estimate_full_fov(best, w, input_fov)
 
 
-def _estimate_full_fov(best, image_w):
+def _estimate_full_fov(best, image_w, input_fov):
     """Full-frame FOV and projection implied by the winning attempt. A raw
     crop of width cw covers res['FOV'] degrees, so the frame is about
     FOV * w / cw. Warped views already render the whole frame (fixed
     equidistant model)."""
     _prob, res, _to_src, size, tag = best[:5]
     if tag == 'warp' or not res.get('FOV'):
-        return INITIAL_FOV, 'equidistant'
+        return input_fov, 'equidistant'
     return res['FOV'] * image_w / size[0], best[5]
 
 
@@ -675,7 +681,8 @@ def _dedupe_centroids(centroids, min_sep):
     return np.array([a[ix].mean(axis=0) for ix in groups])
 
 
-def _try_solve_crops(t3, image, attempts, extract, verbose=False, dedupe_sep=None):
+def _try_solve_crops(t3, image, attempts, extract, verbose=False,
+                     dedupe_sep=None, input_fov=INITIAL_FOV):
     """Solve each (crop_w, crop_h, projection, fov, cx, cy) attempt; return
     (prob, res, to_src, size, 'crop') candidates."""
     w, h = image.size
@@ -684,7 +691,7 @@ def _try_solve_crops(t3, image, attempts, extract, verbose=False, dedupe_sep=Non
         crop_w = min(crop_w, w)
         crop_h = min(crop_h, h)
         if projection == 'equidistant':
-            fov_estimate = INITIAL_FOV * crop_w / w
+            fov_estimate = input_fov * crop_w / w
         left = int(min(max(cx - crop_w / 2, 0), w - crop_w))
         top = int(min(max(cy - crop_h / 2, 0), h - crop_h))
         crop = image.crop((left, top, left + crop_w, top + crop_h))
@@ -1261,7 +1268,7 @@ def _run_all_cameras(args):
             cmd.append('--rectilinear')
         if args.force:
             cmd.append('--force')
-        for name in ('accept_prob', 'accept_matches', 'accept_rmse',
+        for name in ('input_fov', 'accept_prob', 'accept_matches', 'accept_rmse',
                      'accept_inliers', 'accept_inlier_frac', 'accept_coverage',
                      'match_tolerance', 'refine_iterations', 'refine_radius'):
             cmd += ['--' + name.replace('_', '-'), str(getattr(args, name))]
@@ -1400,6 +1407,10 @@ def main():
                         help='When the input is a video: number of leading '
                              'frames to max-stack into the calibration image '
                              '(default: 10).')
+    parser.add_argument('--input-fov', type=float, default=INITIAL_FOV,
+                        help='Full-frame input FOV in degrees used to scale '
+                             f'the solve crops (default: {INITIAL_FOV:.1f}; '
+                             'use about 180 for circular all-sky images).')
     parser.add_argument('--match-tolerance', type=float, default=0.15,
                         help='Maximum angular distance (deg) for accepting a catalogue match '
                              'in full-field matching (default: 0.15).')
@@ -1458,6 +1469,8 @@ def main():
 
     if args.stack < 1:
         parser.error('--stack must be >= 1')
+    if not 0 < args.input_fov <= 220:
+        parser.error('--input-fov must be in the range (0, 220] degrees')
 
     # Video input: stack the first --stack frames into a still image and
     # calibrate on that. The mask lookup and timestamp still key on the
@@ -1503,7 +1516,8 @@ def main():
     result = None
     for attempt in range(2):
         result, seed_pairs, est_fov, est_proj = _solve_image(
-            t3, full_image, verbose=args.verbose, mask=mask_img)
+            t3, full_image, verbose=args.verbose, mask=mask_img,
+            input_fov=args.input_fov)
         if result is not None:
             refined_pto_data, control_points, stats = _build_and_evaluate(
                 args, result, seed_pairs, t3, full_image,

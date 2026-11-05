@@ -685,6 +685,7 @@ class Zoom_Advanced(ttk.Frame):
         self.offsety = 0
         self.undo_stack = []
         self.redo_stack = []
+        self._pre_adjust_brightness = None
         self.dragged_point_index = None
         self.background_removal_active = False
         self.background_image = None
@@ -952,6 +953,12 @@ class Zoom_Advanced(ttk.Frame):
         elif key_char == 'x': 
             self._save_state_for_undo()
             if self.curve_coeffs is not None:
+                # back up the per-frame brightness measured at the
+                # pre-snap positions so X/T can restore it
+                self._pre_adjust_brightness = {
+                    p['frame']: self.centroid[p['frame']].split(' ')[4]
+                    for p in self.positions
+                    if self.centroid[p['frame']] is not None}
                 for p in self.positions:
                     snapped_pos = self._project_point_on_curve(p['current'])
                     p['current'] = snapped_pos
@@ -963,6 +970,13 @@ class Zoom_Advanced(ttk.Frame):
             for p in self.positions:
                 p['current'] = p['original']
                 self._create_or_update_centroid(p['frame'], p['original'])
+                # restore the brightness measured before the 'x'/'t'
+                # adjustment rather than re-measuring at 'original'
+                old = (self._pre_adjust_brightness or {}).get(p['frame'])
+                if old is not None and self.centroid[p['frame']] is not None:
+                    parts = self.centroid[p['frame']].split(' ')
+                    parts[4] = old
+                    self.centroid[p['frame']] = ' '.join(parts)
             self.update_curve_fit()
             self.update_prediction()
         elif key_char == 't': self._temporally_respace_points()
@@ -1771,6 +1785,11 @@ class Zoom_Advanced(ttk.Frame):
     def _temporally_respace_points(self):
         if self.curve_coeffs is None or len(self.positions) < 3: return
         print("Applying local temporal respacing...")
+        # back up pre-respace brightness for the X/T restore path
+        self._pre_adjust_brightness = {
+            p['frame']: self.centroid[p['frame']].split(' ')[4]
+            for p in self.positions
+            if self.centroid[p['frame']] is not None}
         N_POINTS = 2000
         p_curve = np.poly1d(self.curve_coeffs)
         start_coords, end_coords = self.positions[0]['current'], self.positions[-1]['current']

@@ -3984,12 +3984,18 @@ def _observed_peak_magnitude_bound(observed):
         return None, [], False
     peak_mags = np.asarray([-2.5 * math.log10(p[1] / 1500.0)
                             for p in peaks])
+    # consistency via a majority inlier test: a single miscalibrated
+    # camera must not veto a cluster that actually agrees — the bound
+    # is consistent when at least half the cameras sit within ±1.25
+    # mag of the median, and the bound itself is the inlier median
+    med = float(np.median(peak_mags))
+    inlier = np.abs(peak_mags - med) <= 1.25
+    consistent = len(peaks) >= 2 and int(inlier.sum()) >= max(
+        2, len(peaks) // 2)
+    bound_flux = ([p[1] for p, ok in zip(peaks, inlier) if ok]
+                  if inlier.any() else [p[1] for p in peaks])
     bound = float(-2.5 * math.log10(
-        float(np.median([p[1] for p in peaks])) / 1500.0))
-    # absolute scales are only comparable when the cameras actually
-    # agree — a spread >1.5 mag means inconsistent calibrations and
-    # the bound must not constrain anything
-    consistent = len(peaks) >= 2 and float(np.ptp(peak_mags)) <= 1.5
+        float(np.median(bound_flux)) / 1500.0))
     detail = []
     for cam, f, sat, peak_range in peaks:
         m_norm = -2.5 * math.log10(f / 1500.0)

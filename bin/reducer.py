@@ -548,6 +548,8 @@ def parse_start_time_arg(s):
     st = str(s).strip()
     if st.upper().endswith('UTC'):
         st = st[:-3].strip()
+    if re.fullmatch(r'\d{10,}', st):
+        return datetime.fromtimestamp(float(st), tz=timezone.utc).timestamp()
     for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
         try:
             return datetime.strptime(st, fmt).replace(tzinfo=timezone.utc).timestamp()

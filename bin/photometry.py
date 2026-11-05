@@ -407,31 +407,54 @@ def _video_photometry(cam_dir, positions, timestamps, lat, lon, elev,
     if not det or mean_img is None:
         return None
 
-    # match each trail point to the nearest detection in any frame
-    flux, peak, sat, matched = [], [], [], 0
+    # match each trail point to the nearest detection in any frame —
+    # that frame is where the head was actually at the point — then
+    # measure the aperture AT the trail point in that frame, not at
+    # the blob centroid: for a large bloom the centroid drifts off
+    # the trail and its aperture no longer represents the point
+    matched_det = []
+    matched = 0
     max_excess = max((d[6] for d in det), default=None)
     for x, y in positions:
         best = None
         for f, cx, cy, fl, pk, npix, ex in det:
             d = math.hypot(cx - x, cy - y)
             if d <= VIDEO_MATCH_PX and (best is None or d < best[0]):
-                best = (d, fl, pk, npix)
+                best = (d, f, npix, ex)
         if best is None:
-            flux.append(None)
-            peak.append(None)
-            sat.append(False)
+            matched_det.append(None)
         else:
             matched += 1
-            flux.append(best[1])
-            peak.append(best[2])
-            # saturated by clip level OR by bloom: a core that bled into
-            # a large bright blob was saturated regardless of the peak
-            # luma reaching 8-bit white
-            sat.append(bool(
-                (best[2] is not None and best[2] >= VIDEO_SAT_LUMA)
-                or (best[3] or 0) >= VIDEO_BLOOM_NPIX))
+            matched_det.append(best)
     if matched < max(2, len(positions) // 5):
         return None      # positions do not live in this video's frame
+
+    # second pass: aperture flux at each trail point in its matched
+    # frame — direct measurement on the marked trail
+    need = {}
+    for i, md in enumerate(matched_det):
+        if md is not None:
+            need.setdefault(md[1], []).append(i)
+    flux = [None] * len(positions)
+    peak = [None] * len(positions)
+    for f_i, g in enumerate(_read_gray_frames(vid)):
+        if f_i not in need:
+            continue
+        for i in need[f_i]:
+            a = _aperture_flux(g, positions[i][0], positions[i][1])
+            if a:
+                flux[i], _, peak[i] = a
+    # a blooming detection clips its own aperture flux: the bloom's
+    # total excess is the closer analogue to the reducer's flood-area
+    # brightness and keeps the per-point curve shape correct
+    for i, md in enumerate(matched_det):
+        if md is not None and (md[2] or 0) >= VIDEO_BLOOM_NPIX \
+                and (flux[i] is None or (md[3] or 0) > flux[i]):
+            flux[i] = md[3]
+    sat = [bool(md is not None and
+                ((peak[i] is not None and peak[i] >= VIDEO_SAT_LUMA)
+                 or (md[2] or 0) >= VIDEO_BLOOM_NPIX))
+           for i, md in enumerate(matched_det)]
 
     zp, nzp, zp_src = _video_zeropoint(cam_dir, mean_img, stars, zp_gnom)
     res = {'flux': flux, 'peak': peak, 'sat': sat, 'n_matched': matched,

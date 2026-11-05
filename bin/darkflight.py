@@ -4320,7 +4320,8 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                              entry_masses, models, rho_m=3500.0,
                              peak_mag=None, density_priors=None,
                              h_ground=None, lang_files=None,
-                             mc_runs=0, seed=0, pool=None, **model_options):
+                             mc_runs=0, seed=0, pool=None, sweep_only=False,
+                             **model_options):
     """Forward-model assumed masses at the FIRST observed point, not at fade-out.
 
     These are sensitivity experiments, not fitted mass or survival estimates.
@@ -4435,6 +4436,187 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                          peak_mag, observed_peak_estimate['n_cameras'])
         else:
             observed_peak_estimate = None
+    # No supplied or inferred magnitude but calibrated light curves exist:
+    # sweep a coarse magnitude grid (-8..-16), centre on the pooled best
+    # fit, then let the fine +-1 marginalization below run around it.
+    # Grid points where a model cannot invert are heavily penalized.
+    # deceleration consistency: the drag-inverted entry mass per density.
+    # Deceleration measures m/(Cd*A); coupled with the fitted speed it is
+    # an independent brightness constraint — a magnitude-inverted model
+    # mass that contradicts the measured deceleration is penalized below.
+    dyn_entry_by_density = {}
+    if not dyn_entry_by_density:
+        try:
+            heights = np.asarray(
+                plot_data['final_merged_data']['height'], dtype=float)
+            height_fit = (np.polyfit(times, heights, 1)
+                          if len(heights) > 2 else None)
+
+            def v_auto(t):
+                return float(expfunc_1stder(t, *params)) * 1000.0
+
+            def a_auto(t):
+                return -float(expfunc_2ndder(t, *params)) * 1000.0
+
+            def h_auto(t):
+                if height_fit is not None:
+                    return float(np.polyval(height_fit, t)) * 1000.0
+                return endpoints[1, 2]
+
+            for estimate in estimate_mass(
+                    v_auto, a_auto, h_auto,
+                    (float(times.min()), float(times.max())),
+                    rho_grid=densities, A=1.4, atm=atm, params=params,
+                    pcov=plot_data.get('pcov')):
+                m_fade = float(estimate.get('m_fade_kg', np.inf))
+                if not np.isfinite(m_fade) or m_fade <= 0:
+                    continue
+                m_entry = float(entry_mass_estimate(
+                    m_fade, float(estimate['rho']), 1.4, v_auto, h_auto,
+                    (float(times.min()), float(times.max())), atm=atm))
+                if np.isfinite(m_entry) and m_entry > 0:
+                    dyn_entry_by_density[float(estimate['rho'])] = m_entry
+        except Exception as e:
+            logging.info('Forward entry: deceleration-consistency mass '
+                         'unavailable: %s', e)
+    pair_best_mag = {}
+    if (entry_masses is None and not invert_mass and observed
+            and observed_peak_estimate is None):
+        duration = float(np.ptp(times))
+        # brightest flux any camera recorded (saturated = lower bound):
+        # the true peak was at least that bright, so the sweep must
+        # reach at least the bound and the centre cannot exceed it
+        bound_mag, bound_detail, bound_consistent = (
+            _observed_peak_magnitude_bound(observed))
+        logging.info('Forward entry: observed peak-magnitude bound '
+                     '(median of per-camera brightest recorded flux): %s '
+                     '[%s]%s',
+                     'unavailable' if bound_mag is None
+                     else f'{bound_mag:.2f} mag',
+                     '  '.join(bound_detail) or 'none',
+                     '' if bound_consistent else
+                     ' — camera scales disagree, informational only')
+        if not bound_consistent:
+            bound_mag = None
+        # dynamical brightness anchor first: propagate each model at the
+        # deceleration-consistent entry mass and read the PREDICTED peak
+        # magnitude — dynamics, not photometry, sets the sweep centre
+        best_mag = None
+        if dyn_entry_by_density:
+            dyn_jobs = [
+                (i, dyn_entry_by_density[float(density)], model, density,
+                 r_start, direction, speed, atm, float(h_ground),
+                 model_options, None, duration)
+                for i, (model, density) in enumerate(
+                    (m, d) for m in models for d in densities
+                    if float(d) in dyn_entry_by_density)]
+            allow_processes = getattr(
+                propagate_fragmentation, '__module__', None) == __name__
+            dyn_mags = []
+            for job, (_, exp, _inv, err) in zip(
+                    dyn_jobs,
+                    _parallel_map(_forward_experiment_worker, dyn_jobs,
+                                  pool=pool,
+                                  allow_processes=allow_processes)):
+                pm = (exp.get('peak_absolute_magnitude')
+                      if err is None and exp else None)
+                if pm is not None and np.isfinite(pm):
+                    dyn_mags.append(float(pm))
+                    logging.info('  %s/rho%.4g predicts peak %.1f mag at '
+                                 'dyn-consistent entry mass %.3g kg',
+                                 job[2], job[3], pm, job[1])
+            if dyn_mags:
+                best_mag = float(np.median(dyn_mags))
+                logging.info('Forward entry: dynamical brightness anchor '
+                             '— median predicted peak %.1f mag from %d '
+                             'model/density propagations at '
+                             'deceleration-consistent masses',
+                             best_mag, len(dyn_mags))
+        # photometric sweep only when dynamics cannot anchor
+        sweep_mags = np.array([])
+        if best_mag is None:
+            # extend the sweep brightward when the observed bound demands it
+            sweep_lo = (-16.0 if bound_mag is None or bound_mag > -16.0
+                        else bound_mag)
+            sweep_mags = np.arange(-8.0, sweep_lo - 0.01, -0.5)
+        if sweep_mags.size:
+            sweep_jobs = []
+            for model in models:
+                for density in densities:
+                    for m_sweep in sweep_mags:
+                        sweep_jobs.append(
+                            (len(sweep_jobs), None, model, density,
+                             r_start, direction, speed, atm,
+                             float(h_ground), model_options,
+                             float(m_sweep), duration))
+            allow_processes = getattr(
+                propagate_fragmentation, '__module__', None) == __name__
+            sweep_results = _parallel_map(
+                _forward_experiment_worker, sweep_jobs, pool=pool,
+                allow_processes=allow_processes)
+            groups = {float(m): [] for m in sweep_mags}
+            group_labels = {float(m): [] for m in sweep_mags}
+            for job, (_, exp, _inv, err) in zip(sweep_jobs, sweep_results):
+                groups[float(job[10])].append(exp if err is None else {})
+                group_labels[float(job[10])].append(
+                    f'{job[2]}/rho{job[3]:g}')
+            per_model = {}
+            for m_sweep, group in groups.items():
+                scores = _light_curve_shape_scores(group, observed)
+                per_model[m_sweep] = {
+                    label: s['log_likelihood']
+                    for label, s in zip(group_labels[m_sweep], scores)}
+            # model-averaged likelihood per magnitude: sum_i exp(LL_i), so
+            # the centre is dominated by well-fitting models — not a median
+            # compromise that satisfies none, and not a joint product that
+            # penalizes a magnitude for models that could never reach it
+            labels = sorted({l for m in per_model.values() for l in m})
+            marginal = {}
+            for m_sweep in sweep_mags:
+                m_f = float(m_sweep)
+                lls = [per_model[m_f][l] for l in labels
+                       if math.isfinite(per_model[m_f].get(l, -math.inf))]
+                if lls:
+                    mx = max(lls)
+                    marginal[m_f] = mx + math.log(
+                        math.fsum(math.exp(ll - mx) for ll in lls)
+                        / len(labels))
+            logging.info('Forward entry: magnitude sweep model fits '
+                         '(marginal = model-averaged likelihood):')
+            for m_sweep in sweep_mags:
+                m_f = float(m_sweep)
+                detail = '  '.join(
+                    f'{label}={"-" if not math.isfinite(ll) else f"{ll:.1f}"}'
+                    for label, ll in sorted(per_model[m_f].items()))
+                logging.info('  mag %5.1f: marginal %8.1f   %s',
+                             m_f, marginal.get(m_f, -math.inf), detail)
+            best_mag = (max(marginal, key=marginal.get)
+                        if marginal else None)
+        if (bound_mag is not None and best_mag is not None
+                and best_mag > bound_mag):
+            logging.info('Forward entry: sweep centre %.1f is fainter than '
+                         'the observed saturated-peak bound %.1f — '
+                         'the object was brighter; centring on the bound',
+                         best_mag, bound_mag)
+            best_mag = bound_mag
+        if best_mag is not None:
+            peak_mag = best_mag
+            invert_mass = True
+            estimate_entry_mass = False
+            peak_mag_source = ('deceleration_dynamics'
+                               if not sweep_mags.size
+                               else 'magnitude_sweep')
+            logging.info('Forward entry: peak magnitude centre %.1f (%s)',
+                         peak_mag, 'dynamical anchor'
+                         if not sweep_mags.size
+                         else 'model-averaged photometric sweep')
+        else:
+            logging.info('Forward entry: magnitude sweep found no model '
+                         'fit; falling back to deceleration masses')
+    if sweep_only:
+        logging.info('--sweep-only: stopping after centre diagnostics '
+                     '(peak_mag=%s, source=%s)', peak_mag, peak_mag_source)
+        raise SystemExit(0)
     estimated_masses = {}
     mass_estimates = []
     if estimate_entry_mass:
@@ -4517,33 +4699,55 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
     experiment_jobs = []
     job_inputs = []
     duration = float(np.ptp(times))
+    # Magnitude marginalization: the preference weights are fragile when
+    # the supplied/observed peak magnitude is uncertain — a 0.5 mag shift
+    # can flip the ranking. Solve each model at a small magnitude grid
+    # and average the per-offset normalized preference. Offset-0
+    # experiments are the report products; the rest only feed the
+    # marginalization, so runtime stays parallel-batch sized.
+    MAG_UNCERT_SIGMA = 0.5
+    mag_offsets = (tuple(round(-0.5 + 0.1 * i, 2) for i in range(11))
+                   if invert_mass else (0.0,))
+    mag_prior = np.exp(-0.5 * (np.asarray(mag_offsets)
+                               / MAG_UNCERT_SIGMA) ** 2)
+    mag_prior = (mag_prior / mag_prior.sum()).tolist()
+    if len(mag_offsets) > 1:
+        logging.info('Forward entry: marginalizing model preference over '
+                     'peak-magnitude offsets %s mag (sigma %.2f)',
+                     ' '.join(f'{o:+.2f}' for o in mag_offsets),
+                     MAG_UNCERT_SIGMA)
     if invert_mass:
         for model in models:
             for density in densities:
-                job_inputs.append((None, model, density))
+                for off in mag_offsets:
+                    job_inputs.append((None, model, density, off))
     elif estimate_entry_mass:
         for model in models:
             for density in densities:
                 job_inputs.append((estimated_masses[float(density)],
-                                   model, density))
+                                   model, density, 0.0))
     else:
         for mass in masses:
             for model in models:
                 for density in densities:
-                    job_inputs.append((float(mass), model, density))
-    for index, (mass, model, density) in enumerate(job_inputs):
+                    job_inputs.append((float(mass), model, density, 0.0))
+    for index, (mass, model, density, off) in enumerate(job_inputs):
         experiment_jobs.append(
             (index, mass, model, density, r_start, direction, speed, atm,
              float(h_ground), model_options,
-             peak_mag if invert_mass else None, duration))
+             (peak_mag + off) if invert_mass else None, duration))
     allow_processes = getattr(
         propagate_fragmentation, '__module__', None) == __name__
     experiment_results = _parallel_map(
         _forward_experiment_worker, experiment_jobs, pool=pool,
         allow_processes=allow_processes)
 
-    experiments = []
-    for job_index, (mass, model, density) in enumerate(job_inputs):
+    # collect every magnitude-offset variant per (model,density) pair;
+    # the best-fitting variant becomes the report experiment after scoring
+    variants = []
+    variant_index = {}
+    offset_groups = {off: [] for off in mag_offsets}
+    for job_index, (mass, model, density, off) in enumerate(job_inputs):
         index, experiment, inversion, error = experiment_results[job_index]
         if error is not None:
             if not invert_mass:
@@ -4574,12 +4778,25 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                     'peak_magnitude_source': peak_mag_source,
                     'model_minus_observed_mag': None,
                     'used_to_fit_parameters': False}}
-            add_experiment(experiment, density)
+            experiment['mag_offset'] = off
+            experiment['density_prior_weight'] = density_prior_by_density[
+                float(density)]
+            offset_groups[off].append(experiment)
+            _vidx = variant_index.setdefault(
+                (model, density, mass), len(variants))
+            if _vidx == len(variants):
+                variants.append({})
+            variants[_vidx][off] = experiment
             continue
         if invert_mass:
-            logging.info('Forward entry: solved %s entry mass for peak '
-                         'magnitude %.2f at density %.4g kg/m3',
-                         model, peak_mag, density)
+            if off == 0.0:
+                logging.info('Forward entry: solved %s entry mass for peak '
+                             'magnitude %.2f at density %.4g kg/m3',
+                             model, peak_mag, density)
+            else:
+                logging.debug('Forward entry: solved %s entry mass for peak '
+                              'magnitude %.2f at density %.4g kg/m3',
+                              model, peak_mag + off, density)
             experiment['entry_mass_inversion'] = inversion
             predicted = experiment.get('peak_absolute_magnitude')
             experiment['observed_peak_comparison'] = {
@@ -4613,8 +4830,113 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                 'model_minus_observed_mag': (predicted - peak_mag
                     if predicted is not None and peak_mag is not None else None),
                 'used_to_fit_parameters': False}
-        add_experiment(experiment, density)
-    shape_scores = _light_curve_shape_scores(experiments, observed)
+        experiment['mag_offset'] = off
+        experiment['density_prior_weight'] = density_prior_by_density[
+            float(density)]
+        offset_groups[off].append(experiment)
+        _vidx = variant_index.setdefault((model, density, mass),
+                                         len(variants))
+        if _vidx == len(variants):
+            variants.append({})
+        variants[_vidx][off] = experiment
+    # score every magnitude-offset group, then keep each pair's best-fit
+    # variant as the report experiment — the displayed mass/magnitude is
+    # the model's own best fit, while the preference weight is
+    # marginalized over the whole grid
+    group_scores = {off: _light_curve_shape_scores(offset_groups[off],
+                                                 observed)
+                    for off in mag_offsets}
+    idx_to_key = {v: k for k, v in variant_index.items()}
+    def _decel_factor(experiment):
+        """Likelihood factor from deceleration consistency: the solved
+        entry mass vs the drag-inverted mass at this density.  sigma in
+        log-mass tolerates the dynamical estimate's own uncertainty."""
+        m_dyn = dyn_entry_by_density.get(
+            float(experiment.get('density_kg_m3', 0.0)))
+        m_in = (experiment.get('mass_budget') or {}).get('initial_kg')
+        if (m_dyn is None or m_in is None or m_dyn <= 0 or m_in <= 0
+                or not np.isfinite(m_in)):
+            return 1.0
+        return math.exp(-0.5 * (math.log(m_in / m_dyn) / 0.75) ** 2)
+
+    experiments = []
+    chosen_score = []
+    for vidx, vmap in enumerate(variants):
+        _model, v_density, _v_mass = idx_to_key[vidx]
+        best_off = 0.0 if 0.0 in vmap else min(vmap, key=abs)
+        best_ll = -math.inf
+        for off in vmap:
+            scores = group_scores.get(off) or []
+            if vidx >= len(scores):
+                continue
+            ll = scores[vidx].get('log_likelihood')
+            if ll is not None and math.isfinite(ll) and ll > best_ll:
+                best_off, best_ll = off, ll
+        experiment = vmap[best_off]
+        add_experiment(experiment, v_density)
+        chosen_score.append(group_scores[best_off][vidx]
+                            if best_off in group_scores
+                            and vidx < len(group_scores[best_off])
+                            else {'log_likelihood': -math.inf})
+    shape_scores = chosen_score
+    dyn_factors = [_decel_factor(e) for e in experiments]
+    # marginalized preference over the magnitude prior: normalize within
+    # each magnitude offset, then average across offsets.  Models that
+    # are co-plausible across the range converge toward even weights
+    # instead of flipping on a sub-magnitude shift of the input.
+    if len(mag_offsets) > 1 and observed:
+        marginalized = [0.0] * len(experiments)
+        best_offset_ll = [None] * len(experiments)
+        for off, prior in zip(mag_offsets, mag_prior):
+            for i, s in enumerate(group_scores[off]):
+                if i >= len(marginalized):
+                    continue
+                if s.get('model_preference_weight') is not None:
+                    marginalized[i] += (prior
+                                        * s['model_preference_weight']
+                                        * dyn_factors[i])
+                # diagnostic: the magnitude offset where each model
+                # fits best — not a probability, just "can it fit at all"
+                ll = s.get('log_likelihood')
+                if ll is not None and math.isfinite(ll):
+                    prev = best_offset_ll[i]
+                    if prev is None or ll > prev[1]:
+                        best_offset_ll[i] = (off, ll)
+        total = math.fsum(marginalized)
+        if total > 0:
+            ranks = sorted((i for i, w in enumerate(marginalized) if w > 0),
+                           key=lambda i: (-marginalized[i], i))
+            for rank, index in enumerate(ranks, 1):
+                shape_scores[index]['preference_rank'] = rank
+            for i, (s, w) in enumerate(zip(shape_scores, marginalized)):
+                if s.get('model_preference_weight') is not None:
+                    s['model_preference_weight_central'] = (
+                        s['model_preference_weight'])
+                    s['model_preference_weight'] = w / total
+                    s['decel_consistency_factor'] = dyn_factors[i]
+                    s['preference_marginalized_over_mag'] = {
+                        'offsets': list(mag_offsets),
+                        'sigma': MAG_UNCERT_SIGMA}
+                if best_offset_ll[i] is not None:
+                    s['best_mag_offset'] = {
+                        'offset': best_offset_ll[i][0],
+                        'note': ('best-fit magnitude offset for this model; '
+                                 'diagnostic only, not a probability')}
+    elif observed:
+        # no magnitude grid: still apply the deceleration-consistency
+        # factor and renormalize
+        adjusted = [(s.get('model_preference_weight') or 0.0) * f
+                    for s, f in zip(shape_scores, dyn_factors)]
+        total = math.fsum(adjusted)
+        if total > 0:
+            ranks = sorted((i for i, w in enumerate(adjusted) if w > 0),
+                           key=lambda i: (-adjusted[i], i))
+            for rank, index in enumerate(ranks, 1):
+                shape_scores[index]['preference_rank'] = rank
+            for i, (s, w) in enumerate(zip(shape_scores, adjusted)):
+                if s.get('model_preference_weight') is not None:
+                    s['model_preference_weight'] = w / total
+                    s['decel_consistency_factor'] = dyn_factors[i]
     preference_unavailable_reason = None
     if estimate_entry_mass and any(
             estimate.get('warnings') for estimate in mass_estimates):
@@ -5213,6 +5535,10 @@ they affect model preference only, not propagation or mass inference.''')
                     help='Explicit per-model rate-evaluation work limit; increase for convergence studies')
     ap.add_argument('--max-generations', type=int, default=12, help='Discrete cascade generation cap (reported when reached)')
     ap.add_argument('--ground-height', type=float, help='Flat ground height in m for forward models; otherwise query elevation')
+    ap.add_argument('--sweep-only', action='store_true',
+                    help='Stop after the magnitude-centre diagnostics '
+                         '(bound, dynamical anchor, photometric sweep) '
+                         'without running the slow experiment jobs')
     args = ap.parse_args(argv)
     if not args.fragmentation_model and (args.entry_mass is not None or args.fragmentation_output is not None):
         ap.error('--entry-mass/--fragmentation-output require --fragmentation-model')
@@ -5264,7 +5590,7 @@ def run_from_args(args, analysis_results=None, lang_files=None):
             max_step=args.entry_max_step, record_dt=args.entry_record_dt,
             max_generations=args.max_generations, erosion_release_dt=args.erosion_release_dt,
             max_evaluations=args.entry_max_evaluations, lang_files=lang_files,
-            mc_runs=args.mc, seed=args.seed)
+            mc_runs=args.mc, seed=args.seed, sweep_only=args.sweep_only)
     wind_csv = event_dir / 'wind_profile.csv'
     if lang_files is None:
         lang_files = load_language_files()

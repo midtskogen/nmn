@@ -270,7 +270,8 @@ def _video_detections(frames_iter, xymin, xymax, thresh=VIDEO_DET_THRESH):
             run_bg = acc / n_acc
         gx0, gx1 = max(0, x0), min(g.shape[1], x1)
         gy0, gy1 = max(0, y0), min(g.shape[0], y1)
-        sub = (g - run_bg)[gy0:gy1, gx0:gx1]
+        diff = g - run_bg
+        sub = diff[gy0:gy1, gx0:gx1]
         m = sub > thresh
         found = False
         if m.any():
@@ -282,10 +283,23 @@ def _video_detections(frames_iter, xymin, xymax, thresh=VIDEO_DET_THRESH):
                 cx, cy = gx0 + float(xs.mean()), gy0 + float(ys.mean())
                 a = _aperture_flux(g, cx, cy)
                 if a:
-                    # excess = all positive excess counts in the corridor;
-                    # saturated pixels only contribute their clipped value,
-                    # so this is a hard lower bound on the incident light
-                    excess = float(np.clip(sub, 0, None).sum())
+                    # excess = all positive excess counts over the whole
+                    # connected bloom, not just the corridor: flood the
+                    # glow at a low threshold (th/5) seeded from the
+                    # detected blob so a blooming fireball spilling far
+                    # outside the corridor is fully counted.  Saturated
+                    # pixels still contribute only their clipped value,
+                    # so this stays a lower bound
+                    seed = np.zeros(diff.shape, dtype=bool)
+                    seed[gy0:gy1, gx0:gx1] = (lab == k)
+                    low = diff > max(3.0, thresh * 0.2)
+                    lab2, _ = ndimage.label(low)
+                    overlap = np.unique(lab2[seed])
+                    overlap = overlap[overlap > 0]
+                    blob = (np.isin(lab2, overlap)
+                            if overlap.size else seed)
+                    blob = ndimage.binary_dilation(blob, iterations=4)
+                    excess = float(np.clip(diff[blob], 0, None).sum())
                     det.append((i, cx, cy, a[0], a[2],
                                 int(sizes[k - 1]), excess))
                     found = True

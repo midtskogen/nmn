@@ -3996,7 +3996,6 @@ def _observed_peak_magnitude_bound(observed):
                   if inlier.any() else [p[1] for p in peaks])
     bound = float(-2.5 * math.log10(
         float(np.median(bound_flux)) / 1500.0))
-    detail = []
     rows = []
     for idx, (cam, f, sat, peak_range) in enumerate(peaks):
         m_norm = -2.5 * math.log10(f / 1500.0)
@@ -4006,11 +4005,12 @@ def _observed_peak_magnitude_bound(observed):
                  else None)
         rows.append((cam, m_norm, m_app, sat, peak_range,
                      bool(inlier[idx])))
-        detail.append(
-            f'{cam}{"≤" if sat else "="}{m_norm:.1f}'
-            f'@{peak_range:.0f}km'
-            f'{"" if m_app is None else f"(app {"≤" if sat else ""}{m_app:.1f})"}'
-            f'{"" if inlier[idx] else " [outlier: excluded]"}')
+    detail = [
+        f'{cam:<20}{"≤" if sat else " "} {m_norm:>5.1f}'
+        f'  {peak_range:>4.0f} km'
+        f'  {"" if m_app is None else f"app {"≤" if sat else "="}{m_app:>5.1f}"}'
+        f'{"" if ok else "   [outlier: excluded]"}'
+        for cam, m_norm, m_app, sat, peak_range, ok in rows]
     return bound, detail, consistent, rows
 
 
@@ -4666,11 +4666,11 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                     adj_app = (m_app + offset
                                if m_app is not None else None)
                     logging.info(
-                        'Forward entry:   %s%s%.1f@%.0fkm%s%s',
-                        cam, '≤' if sat else '=', adj, rng,
+                        'Forward entry:   %s%s %5.1f  %4.0f km  %s%s',
+                        f'{cam:<20}', '≤' if sat else ' ', adj, rng,
                         '' if adj_app is None else
-                        f'(app {"≤" if sat else ""}{adj_app:.1f})',
-                        '' if ok else ' [outlier: excluded]')
+                        f'app {"≤" if sat else "="}{adj_app:>5.1f}',
+                        '' if ok else '   [outlier: excluded]')
         else:
             logging.info('Forward entry: magnitude sweep found no model '
                          'fit; falling back to deceleration masses')

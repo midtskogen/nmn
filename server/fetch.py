@@ -733,8 +733,14 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                 f'<tr><td>{t.get("df_end_speed", "End speed")}:</td>'
                 f'<td>{end["v_end_ms"]/1000:.1f} km/s</td></tr>',
             ]
-            unconstrained = (results.get('mass_status') == 'unconstrained'
-                             or results.get('reliability') != 'ok')
+            # 'assumed' = magnitude-anchored scenarios; only a fully
+            # unconstrained run has no scenario mass at all.  Older
+            # results without mass_status fall back to the reliability
+            # check as before.
+            mass_status = results.get('mass_status')
+            unconstrained = (mass_status == 'unconstrained' or
+                             (mass_status is None
+                              and results.get('reliability') != 'ok'))
             magnitude = results.get('magnitude_input') or results.get('mag_anchor')
             anchor = results.get('mag_anchor') or {}
             anchored = bool(anchor.get('m_fade_est_kg'))
@@ -749,7 +755,11 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                         f'<tr><td colspan="2" style="font-size:smaller;font-style:italic">'
                         f'{t.get("df_peak_mag_note", "Peak brightness alone does not determine total or surviving mass; a measured light curve and fragmentation constraints are needed.")}'
                         f'</td></tr>')
-            if anchored or panchored:
+            # a constrained dynamical estimate supersedes the coarser
+            # magnitude/photometric anchors — show only one mass estimate
+            dynamical_ok = (not unconstrained
+                            and bool(results.get('entry_estimates')))
+            if (anchored or panchored) and not dynamical_ok:
                 SURV_FLOOR_KG = 0.005   # surviving masses below 5 g are
                                         # effectively zero; a photometric
                                         # lower boundary in the combined
@@ -783,7 +793,7 @@ def _append_darkflight_table(event_dir: Path, results: dict, langs, default_lang
                 rows.append(
                     f'<tr><td>{t.get("df_surviving_mass", "Estimated surviving mass")}:</td>'
                     f'<td>{t.get("df_mass_unknown", "Not constrained")}</td></tr>')
-            elif results.get('entry_estimates'):
+            elif not unconstrained and results.get('entry_estimates'):
                 est = next((e for e in results['entry_estimates']
                             if e['rho'] == results.get('density_ref_kg_m3', 3500)),
                            results['entry_estimates'][0])

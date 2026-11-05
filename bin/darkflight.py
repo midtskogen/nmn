@@ -1490,6 +1490,58 @@ def build_scenarios(m_est, rho_m=3500.0, A=1.4, masses_grid=None,
     return [s for s in sc if s['runs']]
 
 
+def _fall_line_llh(scenarios, mc_impacts=None):
+    """Centre line through landed impact points: the most likely ground
+    path for fragments of different sizes.  Combines the mass-grid
+    scenario impacts (deduped) with every landed Monte Carlo impact —
+    the MC cloud marks where falls are most probable, so the line
+    should bend through it.  Sorted by mass, resampled along arc length
+    and smoothed into a smooth corridor.  Returns [(lon, lat), ...] or
+    None when fewer than two distinct points landed."""
+    grid = next((s for s in scenarios
+                 if s['name'].startswith('S1_')), None)
+    pool = grid['results'] if grid is not None else [
+        r for s in scenarios for r in s['results']]
+    seen = []
+    pts = []          # (mass, lon, lat)
+    for run in pool:
+        imp = run.get('impact') or {}
+        if not imp.get('landed', True):
+            continue
+        m = run['m']
+        if any(abs(m - m0) <= 0.1 * m0 for m0 in seen):
+            continue
+        seen.append(m)
+        pts.append((m, imp['lon'], imp['lat']))
+    for imp in (mc_impacts or []):
+        if not imp.get('landed', True):
+            continue
+        pts.append((imp.get('m', 0.0), imp['lon'], imp['lat']))
+    if len(pts) < 2:
+        return None
+    pts.sort(key=lambda p: p[0])
+    pts = np.asarray([[p[1], p[2]] for p in pts])
+    # resample uniformly along arc length, then apply strong Gaussian
+    # smoothing — the fall line should be a smooth corridor, not a
+    # mass-ordered zigzag through every point
+    cos_lat = math.cos(math.radians(pts[:, 1].mean()))
+    seg = np.diff(pts, axis=0)
+    arc = np.r_[0.0, np.cumsum(np.hypot(seg[:, 0] * cos_lat, seg[:, 1]))]
+    if arc[-1] <= 0:
+        return None
+    t = arc / arc[-1]
+    grid = np.linspace(0.0, 1.0, 64)
+    lon = np.interp(grid, t, pts[:, 0])
+    lat = np.interp(grid, t, pts[:, 1])
+    try:
+        from scipy.ndimage import gaussian_filter1d
+        lon = gaussian_filter1d(lon, 8.0, mode='nearest')
+        lat = gaussian_filter1d(lat, 8.0, mode='nearest')
+    except Exception:
+        pass
+    return [tuple(p) for p in zip(lon, lat)]
+
+
 def _merge_label_masses(labels, tol=0.1):
     """labels: [(lon, lat, txt, col, mass)]. Drop entries whose mass is
     within ±tol of an already-kept one (keeps the first in track order,
@@ -1949,6 +2001,15 @@ def write_json(results, path):
 
 def write_geojson(scenarios, path, mc_impacts=None):
     feats = []
+    fall_line = _fall_line_llh(scenarios)
+    if fall_line is not None:
+        feats.append({
+            'type': 'Feature',
+            'geometry': {'type': 'LineString',
+                         'coordinates': [[lo, la, 0] for lo, la in fall_line]},
+            'properties': {'scenario': 'fall_line',
+                           'feature_kind': 'fall_line',
+                           'name': 'Fall line (mass-sorted)'}})
     for sc in scenarios:
         for run in sc['results']:
             imp = run['impact']
@@ -2033,6 +2094,19 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None, mc_assumed=False):
                 f'<Point><coordinates>{imp["lon"]:.6f},{imp["lat"]:.6f},'
                 f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
     parts.append('</Folder>')
+    # centre line — the mass-sorted fall line (most likely ground path)
+    fall_line = _fall_line_llh(scenarios)
+    if fall_line is not None:
+        coords = ' '.join(f'{lo:.6f},{la:.6f},0' for lo, la in fall_line)
+        parts.append(
+            '<Folder><name>Fall line</name>'
+            '<Placemark><name>Fall line (mass-sorted)</name>'
+            '<description>Most likely ground path for fragments of '
+            'different sizes.</description>'
+            '<Style><LineStyle><color>ff00ffff</color><width>3</width>'
+            '</LineStyle></Style><LineString><tessellate>1</tessellate>'
+            '<altitudeMode>clampToGround</altitudeMode><coordinates>'
+            f'{coords}</coordinates></LineString></Placemark></Folder>')
     # Monte Carlo fall area — translucent red polygon + hatch lines
     ring = _mc_ring_ll(mc_impacts)
     if ring is not None:
@@ -2446,6 +2520,11 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
         trplot(luminous_track[0], luminous_track[1], '-', color='red',
                lw=1.8, alpha=0.85)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14)
+    # centre line — fall line through the landed impacts
+    fall_line = _fall_line_llh(scenarios)
+    if fall_line is not None:
+        trplot([p[0] for p in fall_line], [p[1] for p in fall_line],
+               '--', color='yellow', lw=1.6, alpha=0.9)
     for sc, origins, endpoints in disintegration_clouds:
         for origin, endpoint in zip(origins, endpoints):
             midpoint = origin + 0.58 * (endpoint - origin)
@@ -2558,6 +2637,10 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                                        'Luminous trajectory'))
     handles.append(Line2D([], [], marker='*', ls='', color='red', ms=12))
     labels.append(translations.get('df_end_luminous', 'End of luminous path'))
+    if fall_line is not None:
+        handles.append(Line2D([], [], color='yellow', lw=1.6, ls='--'))
+        labels.append(translations.get('df_fall_line',
+                                       'Fall line (mass-sorted)'))
     if mc_impacts:
         handles.append(Line2D([], [], marker='.', ls='', color='red',
                               ms=7))
@@ -2855,6 +2938,17 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         x=ex, y=ey, z=[end_llh[2] / 1000.0], mode='markers',
         marker=dict(size=9, color='red', symbol='diamond'),
         name=translations.get('df_end_luminous', 'End of luminous path')))
+    # centre line — fall line along the ground plane
+    fall_line = _fall_line_llh(scenarios)
+    if fall_line is not None:
+        fx, fy = project_points([p[0] for p in fall_line],
+                                [p[1] for p in fall_line])
+        traces.append(go.Scatter3d(
+            x=fx, y=fy, z=np.full(len(fx), 0.02), mode='lines',
+            line=dict(color='yellow', width=5, dash='dash'),
+            name=translations.get('df_fall_line',
+                                  'Fall line (mass-sorted)'),
+            hoverinfo='name'))
     # MC impacts — lifted slightly above the ground plane so they
     # don't z-fight with the textured surface
     if mc_impacts:

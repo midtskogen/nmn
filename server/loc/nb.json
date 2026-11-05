@@ -182,6 +182,7 @@
  "df_peak_mag": "Oppgitt maksimal lysstyrke (100 km)",
  "df_peak_mag_note": "Maksimal lysstyrke alene bestemmer ikke total eller overlevende masse; det trengs en målt lyskurve og begrensninger på fragmenteringen.",
  "df_fall_area_mag": "Nedfallsområde (MC, magnitudeforankret)",
+  "df_fall_line": "Nedfallslinje (masse-sortert)",
  "df_mass_unknown_note": "Overlevende masse er ikke avgrensa. Banene viser hypotetiske masser på 5 g–5 kg ved frigjøring, ikke bevis for at meteoritter overlever.",
  "df_sc_hypothetical": "Hypotetisk falllinje (5 g–5 kg ved frigjøring)",
  "df_mass_kind_phot": "Lysbasert indikator for massetap (ikke overlevende masse)",

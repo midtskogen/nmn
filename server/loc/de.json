@@ -177,6 +177,7 @@
  "df_peak_mag": "Angegebene Maximalhelligkeit (100 km)",
  "df_peak_mag_note": "Die Maximalhelligkeit allein bestimmt weder die Gesamtmasse noch die verbleibende Masse; eine gemessene Lichtkurve und Randbedingungen zur Fragmentierung sind erforderlich.",
  "df_fall_area_mag": "Fallgebiet (MC, magnitudenverankert)",
+  "df_fall_line": "Falllinie (massensortiert)",
  "df_mass_unknown_note": "Die verbleibende Masse ist nicht eingegrenzt. Die Bahnen zeigen hypothetische Massen von 5 g–5 kg bei der Freisetzung, keinen Nachweis dafür, dass Meteoriten überleben.",
  "df_sc_hypothetical": "Hypothetische Falllinie (5 g–5 kg bei der Freisetzung)",
  "df_mass_kind_phot": "Lichtbasierter Indikator für Massenverlust (keine verbleibende Masse)",

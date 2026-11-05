@@ -182,6 +182,7 @@
  "df_peak_mag": "Supplied peak magnitude (100 km)",
  "df_peak_mag_note": "Peak brightness alone does not determine total or surviving mass; a measured light curve and fragmentation constraints are needed.",
  "df_fall_area_mag": "Fall area (MC, magnitude-anchored)",
+  "df_fall_line": "Fall line (mass-sorted)",
  "df_mass_unknown_note": "Surviving mass is not constrained. Tracks show hypothetical 5 g–5 kg release masses, not evidence of meteorite survival.",
  "df_sc_hypothetical": "Hypothetical fall line (5 g–5 kg at release)",
  "df_mass_kind_phot": "Luminous mass-loss proxy (not surviving mass)",

@@ -182,6 +182,7 @@
  "df_peak_mag": "Norādītais zvaigžņlielums maksimālā spožuma brīdī (100 km)",
  "df_peak_mag_note": "Maksimālais spožums vien nenosaka kopējo vai atlikušo masu; nepieciešama izmērīta gaismas līkne un dati, kas ierobežo iespējamos fragmentācijas scenārijus.",
  "df_fall_area_mag": "Krišanas zona (MC, enkurta pie magnitūdas)",
+  "df_fall_line": "Krišanas līnija (sakārtota pēc masas)",
  "df_mass_unknown_note": "Atlikušās masas robežas nav noteiktas. Trajektorijas attēlo hipotētiskas masas 5 g–5 kg atdalīšanās brīdī, nevis pierādījumus tam, ka meteorīti ir saglabājušies.",
  "df_sc_hypothetical": "Hipotētiska kritiena līnija (5 g–5 kg atdalīšanās brīdī)",
  "df_mass_kind_phot": "No starojuma iegūts masas zuduma novērtējums (nevis atlikusī masa)",

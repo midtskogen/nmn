@@ -177,6 +177,7 @@
  "df_peak_mag": "Zadaná maximální jasnost (100 km)",
  "df_peak_mag_note": "Samotná maximální jasnost neurčuje celkovou ani zbývající hmotnost; je zapotřebí změřená světelná křivka a údaje omezující možné scénáře fragmentace.",
  "df_fall_area_mag": "Dopadová oblast (MC, kotvená magnitudou)",
+  "df_fall_line": "Dopadová linie (seřazená podle hmotnosti)",
  "df_mass_unknown_note": "Zbývající hmotnost nelze vymezit. Dráhy znázorňují hypotetické hmotnosti 5 g–5 kg při uvolnění, nikoli důkaz, že meteority přežily průlet atmosférou.",
  "df_sc_hypothetical": "Hypotetická linie dopadu (5 g–5 kg při uvolnění)",
  "df_mass_kind_phot": "Ukazatel úbytku hmotnosti ze záření (nikoli zbývající hmotnost)",

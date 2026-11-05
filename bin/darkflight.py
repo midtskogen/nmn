@@ -2351,8 +2351,9 @@ def _mc_ring_ll(mc_impacts, coverage=0.85, pad_min_km=0.15, n_pts=96):
 
 def _disintegration_burst_points(sc, start_llh, end_llh, n_rays=48):
     """Deterministic dark-orange fan centered on the luminous-path endpoint."""
-    if (start_llh is None
-            or sc.get('mass_budget', {}).get('landed_kg', 0.0) > 0):
+    mass_budget = sc.get('mass_budget')
+    if (start_llh is None or mass_budget is None
+            or mass_budget.get('landed_kg', 0.0) > 0):
         return None
     start = np.asarray(start_llh, dtype=float)
     end = np.asarray(end_llh, dtype=float)
@@ -5212,14 +5213,24 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
                  'shape_rank') == 1), None)
     preferred_experiment = (report['experiments'][preferred_index]
                             if preferred_index is not None else None)
-    interactive_scenarios = ([s for s in scenarios
-                              if s['experiment_index'] == preferred_index]
-                             if preferred_index is not None else scenarios)
-    interactive_mc = ([impact for impact in mc_impacts
-                       if impact.get('experiment_index') == preferred_index or
-                       ('experiment_index' not in impact and
-                        impact.get('model') == preferred_experiment['model'])]
-                      if preferred_index is not None else mc_impacts)
+    # maps show every model with at least 5% normalized model preference
+    # (not just the top-ranked one); without preference data keep all
+    pref_weights = {
+        index: (experiment.get('light_curve_comparison') or {}).get(
+            'model_preference_weight')
+        for index, experiment in enumerate(report['experiments'])}
+    if any(w is not None for w in pref_weights.values()):
+        accepted = {index for index, w in pref_weights.items()
+                    if w is not None and w >= 0.05}
+    else:
+        accepted = set(range(len(report['experiments'])))
+    accepted_models = {report['experiments'][i]['model'] for i in accepted}
+    interactive_scenarios = [s for s in scenarios
+                             if s['experiment_index'] in accepted]
+    interactive_mc = [impact for impact in mc_impacts
+                      if impact.get('experiment_index') in accepted or
+                      ('experiment_index' not in impact and
+                       impact.get('model') in accepted_models)]
     report['interactive_model'] = (
         preferred_experiment['model'] if preferred_experiment else None)
     report['interactive_density_kg_m3'] = (
@@ -5229,8 +5240,8 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
                       if report.get('event_dir') else None)
     write_geojson(scenarios, output_dir / 'darkflight.geojson',
                   mc_impacts=mc_impacts)
-    write_kml(scenarios, end_llh, output_dir / 'darkflight.kml',
-              mc_impacts=mc_impacts, mc_assumed=True)
+    write_kml(interactive_scenarios, end_llh, output_dir / 'darkflight.kml',
+              mc_impacts=interactive_mc, mc_assumed=True)
     has_impacts = any(s['results'] for s in interactive_scenarios)
     for prefix, translations in (lang_files or load_language_files()).items():
         title = translations.get(

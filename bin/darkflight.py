@@ -3387,8 +3387,11 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     # Nominal scenario mass: only a constrained dynamical fit supplies mass;
     # otherwise retain hypothetical mass-grid paths without a mass estimate.
     m_est = float(m_med) if reliability == 'ok' and ref is not None and m_med > 0 else None
-    mass_source = 'dynamic_constant_mass_fit' if m_est is not None else None
-    mass_status = 'constrained' if m_est is not None else 'unconstrained'
+    mass_source = ('dynamic_constant_mass_fit' if m_est is not None
+                   else 'magnitude_anchor' if mag_anchor is not None else None)
+    mass_status = ('constrained' if m_est is not None
+                   else 'assumed' if mag_anchor is not None
+                   else 'unconstrained')
     if m_est is not None:
         mc_mass_bounds = None
         mc_reference_mass = m_est
@@ -3445,7 +3448,15 @@ def run_darkflight(event_dir, resdat, fbspd_results=None, fbspd_plot_data=None,
     v0_vec = track_dir * v_end
     _, rho_end, _ = atm.at(max(end_h, 0.0))
     dyn_press = cd_hypersonic(1.4) * rho_end * v_end ** 2
-    scenarios = build_scenarios(m_est, rho_m=rho_ref or 3500.0,
+    # Without a dynamical mass estimate, anchor the scenario table on the
+    # magnitude-derived mass when one was supplied — the MC block already
+    # does, so the table otherwise shows a hypothetical mass grid next to
+    # a mass-anchored MC (inconsistent). mc_anchor=='magnitude' marks the
+    # scenario mass as order-of-magnitude, not a dynamical constraint.
+    scenario_mass = (m_est if m_est is not None
+                     else (mc_reference_mass if mc_anchor == 'magnitude'
+                           else None))
+    scenarios = build_scenarios(scenario_mass, rho_m=rho_ref or 3500.0,
                                 dyn_press=dyn_press)
 
     # Parallel propagation: each run is independent and CPU-bound.

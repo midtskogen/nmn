@@ -213,6 +213,9 @@ def extinction_mag(alt_deg):
 VIDEO_DET_THRESH = 30.0    # detection threshold above mean background (luma)
 VIDEO_MATCH_PX = 40.0      # max distance for matching a detection to a point
 VIDEO_SAT_LUMA = 250.0     # aperture peak at/above this = saturated
+VIDEO_BLOOM_NPIX = 100     # a blob this large above background is
+                           # blooming: the core saturated even when its
+                           # peak is below 8-bit white (colour, codec)
 
 
 def _find_event_video(cam_dir):
@@ -398,7 +401,7 @@ def _video_photometry(cam_dir, positions, timestamps, lat, lon, elev,
         for f, cx, cy, fl, pk, npix, ex in det:
             d = math.hypot(cx - x, cy - y)
             if d <= VIDEO_MATCH_PX and (best is None or d < best[0]):
-                best = (d, fl, pk)
+                best = (d, fl, pk, npix)
         if best is None:
             flux.append(None)
             peak.append(None)
@@ -407,7 +410,12 @@ def _video_photometry(cam_dir, positions, timestamps, lat, lon, elev,
             matched += 1
             flux.append(best[1])
             peak.append(best[2])
-            sat.append(bool(best[2] is not None and best[2] >= VIDEO_SAT_LUMA))
+            # saturated by clip level OR by bloom: a core that bled into
+            # a large bright blob was saturated regardless of the peak
+            # luma reaching 8-bit white
+            sat.append(bool(
+                (best[2] is not None and best[2] >= VIDEO_SAT_LUMA)
+                or (best[3] or 0) >= VIDEO_BLOOM_NPIX))
     if matched < max(2, len(positions) // 5):
         return None      # positions do not live in this video's frame
 

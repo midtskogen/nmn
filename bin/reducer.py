@@ -869,10 +869,11 @@ class Zoom_Advanced(ttk.Frame):
             proc = subprocess.run(['scp', local_pto_path, remote_full_path], check=True, capture_output=True, text=True, errors='ignore')
             if proc.stdout: log_message(f"    - SCP STDOUT: {proc.stdout.strip()}")
 
+            remote_dir = f"/meteor/cam{self.cam_num}"
             remote_command = (f"{drawgrid_script} {remote_pto_dated} {remote_grid_dated} && "
-                              f"rm -f {remote_pto_link} {remote_grid_link} && "
-                              f"ln -s {remote_pto_dated} {remote_pto_link} && "
-                              f"ln -s {remote_grid_dated} {remote_grid_link}")
+                              f"cd {remote_dir} && "
+                              f"ln -sfn $(ls -1 lens-*.pto | tail -n1) {remote_pto_link} && "
+                              f"ln -sfn $(ls -1 grid-*.png | tail -n1) {remote_grid_link}")
             log_message("  - Running remote commands to update grid and links...")
             proc = subprocess.run(['ssh', self.hostname, remote_command], check=True, capture_output=True, text=True, errors='ignore')
             log_message("  - Remote deployment successful.")
@@ -1348,8 +1349,10 @@ class Zoom_Advanced(ttk.Frame):
                 messagebox.showwarning("Upload Error", "First marked frame has no timestamp. Nothing to upload.")
                 return
         else:
-            # Use current time for calibration-only upload
-            first_timestamp = datetime.now(timezone.utc).timestamp()
+            # Calibration-only upload: name dated files after the loaded video,
+            # not today's date (fall back to now() if timestamps are missing)
+            first_timestamp = (self.timestamps[0] if self.timestamps
+                               else datetime.now(timezone.utc).timestamp())
 
         temp_event_path = ""
         temp_centroid_path = ""
@@ -2011,10 +2014,11 @@ def run_upload_worker(args):
                     remote_full_path = f"{args.upload_hostname}:{remote_pto_dated}"
                     log_to_window(f"  - Copying {local_pto_path} to {remote_full_path}...")
                     subprocess.run(['scp', local_pto_path, remote_full_path], check=True, capture_output=True, text=True, errors='ignore')
+                    remote_dir = f"/meteor/cam{cam_num}"
                     remote_command = (f"{drawgrid_script} {remote_pto_dated} {remote_grid_dated} && "
-                                      f"rm -f {remote_pto_link} {remote_grid_link} && "
-                                      f"ln -s {remote_pto_dated} {remote_pto_link} && "
-                                      f"ln -s {remote_grid_dated} {remote_grid_link}")
+                                      f"cd {remote_dir} && "
+                                      f"ln -sfn $(ls -1 lens-*.pto | tail -n1) {remote_pto_link} && "
+                                      f"ln -sfn $(ls -1 grid-*.png | tail -n1) {remote_grid_link}")
                     log_to_window("  - Running remote commands to update grid and links...")
                     subprocess.run(['ssh', args.upload_hostname, remote_command], check=True, capture_output=True, text=True, errors='ignore')
                     log_to_window("  - Remote deployment successful.")

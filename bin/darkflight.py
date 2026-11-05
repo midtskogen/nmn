@@ -3820,7 +3820,8 @@ def _observed_light_curve_samples(photometry, plot_data, resdat=None):
                 else:
                     flux = float(value) * (distance / 100.0) ** 2
                 if np.isfinite(flux) and flux > 0:
-                    rows.append((float(point_times[index]), float(flux), bool(sat)))
+                    rows.append((float(point_times[index]), float(flux),
+                                 bool(sat), float(distance)))
             rows = sorted(rows, key=lambda row: (row[0], row[1], row[2]))
             return rows if len(rows) >= 3 and rows[-1][0] > rows[0][0] else []
 
@@ -3853,6 +3854,7 @@ def _observed_light_curve_samples(photometry, plot_data, resdat=None):
         t = np.asarray([row[0] for row in rows], dtype=float)
         flux = np.asarray([row[1] for row in rows], dtype=float)
         saturated = np.asarray([row[2] for row in rows], dtype=bool)
+        ranges_km = np.asarray([row[3] for row in rows], dtype=float)
         coverage = min(1.0, float(np.ptp(t) / model_time[-1]))
         coverage_weight = 0.2 + 0.8 * coverage
         samples.append({'cam': camera.get('cam'), 'source': source,
@@ -3864,7 +3866,8 @@ def _observed_light_curve_samples(photometry, plot_data, resdat=None):
                         'time_source': time_source,
                         'source_index': source_index,
                         'warnings': camera.get('warnings') or [],
-                        't': t, 'flux': flux, 'sat': saturated})
+                        't': t, 'flux': flux, 'sat': saturated,
+                        'ranges_km': ranges_km})
     if not samples:
         return [], 'no camera light curve with three usable points'
     return samples, None
@@ -3913,6 +3916,112 @@ def _observed_peak_magnitude_estimate(observed):
             'n_cameras': len(peaks), 'cameras': cameras,
             'peak_magnitude_spread': float(np.ptp(peak_mags)),
             'method': 'median of independent camera peak fluxes at 100 km'}
+
+
+def _observed_peak_magnitude_bound(observed):
+    """Lower bound on peak brightness: the brightest range-corrected
+    flux recorded by each camera, saturated samples included — a
+    saturated peak means the true peak was AT LEAST that bright.
+    Uses the median of per-camera maxima so a single miscalibrated
+    camera cannot dominate.  Returns an absolute magnitude (100 km)
+    bound or None."""
+    peaks = []
+    for camera in observed or []:
+        # magnitude-derived curves only ('video'/'event_txt' used the
+        # calibrated m_app fields); *_flux/*_brightness proxies carry
+        # arbitrary units and would inject a spurious bound
+        if camera.get('source') not in ('video', 'event_txt'):
+            continue
+        flux_raw = camera.get('flux')
+        fluxes = (np.asarray(flux_raw, dtype=float)
+                  if flux_raw is not None else np.array([]))
+        good = np.isfinite(fluxes) & (fluxes > 0)
+        if int(good.sum()) >= 3:
+            peak_i = int(np.argmax(np.where(good, fluxes, -np.inf)))
+            ranges_raw = camera.get('ranges_km')
+            ranges = (np.asarray(ranges_raw, dtype=float)
+                      if ranges_raw is not None else np.array([]))
+            peak_range = (float(ranges[peak_i])
+                          if peak_i < ranges.size else np.nan)
+            sat_raw = camera.get('sat')
+            sat_flags = (np.asarray(sat_raw, dtype=bool)
+                         if sat_raw is not None
+                         else np.array([], dtype=bool))
+            peaks.append((camera.get('cam'), float(fluxes[peak_i]),
+                          bool(peak_i < sat_flags.size
+                               and sat_flags[peak_i]),
+                          peak_range))
+    if not peaks:
+        return None, [], False
+    peak_mags = np.asarray([-2.5 * math.log10(p[1] / 1500.0)
+                            for p in peaks])
+    bound = float(-2.5 * math.log10(
+        float(np.median([p[1] for p in peaks])) / 1500.0))
+    # absolute scales are only comparable when the cameras actually
+    # agree — a spread >1.5 mag means inconsistent calibrations and
+    # the bound must not constrain anything
+    consistent = len(peaks) >= 2 and float(np.ptp(peak_mags)) <= 1.5
+    detail = []
+    for cam, f, sat, peak_range in peaks:
+        m_norm = -2.5 * math.log10(f / 1500.0)
+        # implied apparent magnitude at the recorded peak range
+        m_app = (m_norm + 5.0 * math.log10(peak_range / 100.0)
+                 if np.isfinite(peak_range) and peak_range > 0
+                 else None)
+        detail.append(
+            f'{cam}={m_norm:.1f}{"(sat)" if sat else ""}'
+            f'@{peak_range:.0f}km'
+            f'{"" if m_app is None else f"(app {m_app:.1f})"}')
+    return bound, detail, consistent
+
+
+def _downweight_outlier_cameras(observed, threshold_dex=0.7):
+    """Cross-camera shape-consistency check.  Absolute flux scales are
+    NOT comparable between stations, but a camera's normalized log-flux
+    *shape* should track the ensemble consensus at shared times.  A
+    camera grossly disagreeing with the consensus (median |residual|
+    above threshold_dex) is unreliable and is downweighted so it cannot
+    dominate the shape scores.  Returns the number downweighted."""
+    curves = []
+    for camera in observed or []:
+        t_raw, f_raw = camera.get('t'), camera.get('flux')
+        t = np.asarray(t_raw, dtype=float) if t_raw is not None else np.array([])
+        f = np.asarray(f_raw, dtype=float) if f_raw is not None else np.array([])
+        ok = np.isfinite(t) & np.isfinite(f) & (f > 0)
+        if int(ok.sum()) < 3:
+            curves.append(None)
+            continue
+        logf = np.log10(f[ok]) - np.median(np.log10(f[ok]))
+        curves.append((t[ok], logf))
+    usable = [i for i, c in enumerate(curves) if c is not None]
+    if len(usable) < 3:
+        return 0
+    downweighted = 0
+    for i in usable:
+        t_i, logf_i = curves[i]
+        residuals = []
+        others = [curves[j] for j in usable if j != i]
+        for tt, lf in zip(t_i, logf_i):
+            votes = [np.interp(tt, t_j, logf_j)
+                     for t_j, logf_j in others
+                     if t_j[0] <= tt <= t_j[-1]]
+            if votes:
+                residuals.append(lf - float(np.median(votes)))
+        if not residuals:
+            continue
+        med = float(np.median(np.abs(residuals)))
+        if med > threshold_dex:
+            observed[i]['confidence_weight'] *= 0.05
+            observed[i]['weight'] = (observed[i].get('weight', 1.0)
+                                     * 0.05)
+            observed[i].setdefault('warnings', []).append(
+                'shape_outlier')
+            downweighted += 1
+            logging.info('Forward photometry: camera %s light-curve '
+                         'shape disagrees with ensemble consensus '
+                         '(median residual %.2f dex) — downweighted',
+                         observed[i].get('cam'), med)
+    return downweighted
 
 
 def _post_observed_luminous_penalty(model_t, model_power, observed_end):
@@ -4312,6 +4421,7 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
     else:
         observed, observed_reason = _observed_light_curve_samples(
             observed_photometry, plot_data, resdat)
+    _downweight_outlier_cameras(observed)
     observed_peak_estimate = _observed_peak_magnitude_estimate(observed)
     peak_mag_source = 'supplied' if peak_mag is not None else None
     if estimate_entry_mass and observed_peak_estimate is not None:

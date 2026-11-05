@@ -3998,9 +3998,9 @@ def _observed_peak_magnitude_bound(observed):
                  if np.isfinite(peak_range) and peak_range > 0
                  else None)
         detail.append(
-            f'{cam}={m_norm:.1f}{"(sat)" if sat else ""}'
+            f'{cam}{"≤" if sat else "="}{m_norm:.1f}'
             f'@{peak_range:.0f}km'
-            f'{"" if m_app is None else f"(app {m_app:.1f})"}')
+            f'{"" if m_app is None else f"(app {"≤" if sat else ""}{m_app:.1f})"}')
     return bound, detail, consistent
 
 

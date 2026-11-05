@@ -4525,13 +4525,14 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
         bound_mag, bound_detail, bound_consistent = (
             _observed_peak_magnitude_bound(observed))
         logging.info('Forward entry: observed peak-magnitude bound '
-                     '(median of per-camera brightest recorded flux): %s '
-                     '[%s]%s',
+                     '(inlier median of per-camera brightest recorded '
+                     'flux): %s%s',
                      'unavailable' if bound_mag is None
                      else f'{bound_mag:.2f} mag',
-                     '  '.join(bound_detail) or 'none',
                      '' if bound_consistent else
                      ' — camera scales disagree, informational only')
+        for d in bound_detail:
+            logging.info('Forward entry:   %s', d)
         if not bound_consistent:
             bound_mag = None
         # dynamical brightness anchor first: propagate each model at the
@@ -4562,10 +4563,13 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                                  'dyn-consistent entry mass %.3g kg',
                                  job[2], job[3], pm, job[1])
             if dyn_mags:
-                best_mag = float(np.median(dyn_mags))
+                # min(median, mean): the brighter of the two — the
+                # centre is a prior, not an upper bound
+                best_mag = float(min(np.median(dyn_mags),
+                                     np.mean(dyn_mags)))
                 logging.info('Forward entry: dynamical brightness anchor '
-                             '— median predicted peak %.1f mag from %d '
-                             'model/density propagations at '
+                             '— min(median,mean) predicted peak %.1f mag '
+                             'from %d model/density propagations at '
                              'deceleration-consistent masses',
                              best_mag, len(dyn_mags))
         # photometric sweep only when dynamics cannot anchor

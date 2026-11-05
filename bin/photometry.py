@@ -430,7 +430,10 @@ def _video_photometry(cam_dir, positions, timestamps, lat, lon, elev,
         return None      # positions do not live in this video's frame
 
     # second pass: aperture flux at each trail point in its matched
-    # frame — direct measurement on the marked trail
+    # frame — direct measurement on the marked trail; when the point
+    # itself saturated (peak >= clip), the clipped aperture is
+    # replaced by the detection's whole-bloom excess — the same
+    # flood-area semantics the reducer's brightness column carries
     need = {}
     for i, md in enumerate(matched_det):
         if md is not None:
@@ -444,13 +447,20 @@ def _video_photometry(cam_dir, positions, timestamps, lat, lon, elev,
             a = _aperture_flux(g, positions[i][0], positions[i][1])
             if a:
                 flux[i], _, peak[i] = a
-    # a blooming detection clips its own aperture flux: the bloom's
-    # total excess is the closer analogue to the reducer's flood-area
-    # brightness and keeps the per-point curve shape correct
+    # a blooming detection clips its aperture and swallows the head
+    # in halo — use the bloom's excess GROWTH at the matched frame
+    # (ex[t] - ex[t-5]): instantaneous emission, excluding the
+    # lingering afterglow that inflates the tail
+    excess_at = {f: ex for f, cx, cy, fl, pk, npix, ex in det}
+    frames_sorted = sorted(excess_at)
     for i, md in enumerate(matched_det):
-        if md is not None and (md[2] or 0) >= VIDEO_BLOOM_NPIX \
-                and (flux[i] is None or (md[3] or 0) > flux[i]):
-            flux[i] = md[3]
+        if md is not None and (md[2] or 0) >= VIDEO_BLOOM_NPIX:
+            f = md[1]
+            prev = [ff for ff in frames_sorted if ff <= f - 5]
+            inc = excess_at[f] - (excess_at[prev[-1]]
+                                  if prev else 0.0)
+            if inc > 0 and (flux[i] is None or inc > flux[i]):
+                flux[i] = inc
     sat = [bool(md is not None and
                 ((peak[i] is not None and peak[i] >= VIDEO_SAT_LUMA)
                  or (md[2] or 0) >= VIDEO_BLOOM_NPIX))

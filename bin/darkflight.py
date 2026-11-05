@@ -3869,12 +3869,13 @@ def _observed_light_curve_samples(photometry, plot_data, resdat=None):
                         'warnings': camera.get('warnings') or [],
                         't': t, 'flux': flux, 'sat': saturated,
                         'ranges_km': ranges_km,
-                        # whole-frame excess bound (saturated sources):
-                        # counts every incident photon in the brightest
-                        # frame, not just the aperture slice near the
-                        # trail point
+                        # whole-frame excess bound: counts every photon
+                        # in the brightest frame, not just the aperture
+                        # slice near the trail point; clipped only when
+                        # the video actually saturated
                         'video_m_app_peak_bound':
-                            video.get('m_app_peak_bound')})
+                            video.get('m_app_peak_bound'),
+                        'video_sat': list(video.get('sat') or [])})
     if not samples:
         return [], 'no camera light curve with three usable points'
     return samples, None
@@ -3971,7 +3972,12 @@ def _observed_peak_magnitude_bound(observed):
                     if vb_flux > peak_flux:
                         peak_flux = vb_flux
                         peak_range = vb_range
-                        peak_sat = True   # clipped — a lower bound
+                        # clipped only when the video itself saturated —
+                        # otherwise the whole-frame excess is a real
+                        # measurement, just an aperture-independent one
+                        vsat = camera.get('video_sat') or []
+                        peak_sat = bool(
+                            sum(1 for s in vsat if s) > len(vsat) // 3)
             peaks.append((camera.get('cam'), peak_flux, peak_sat,
                           peak_range))
     if not peaks:

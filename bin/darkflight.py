@@ -1521,24 +1521,48 @@ def _fall_line_llh(scenarios, mc_impacts=None):
         return None
     pts.sort(key=lambda p: p[0])
     pts = np.asarray([[p[1], p[2]] for p in pts])
-    # resample uniformly along arc length, then apply strong Gaussian
-    # smoothing — the fall line should be a smooth corridor, not a
-    # mass-ordered zigzag through every point
-    cos_lat = math.cos(math.radians(pts[:, 1].mean()))
-    seg = np.diff(pts, axis=0)
-    arc = np.r_[0.0, np.cumsum(np.hypot(seg[:, 0] * cos_lat, seg[:, 1]))]
-    if arc[-1] <= 0:
+    # smoothed middle line: project onto the principal drift axis,
+    # take the median position within along-track bins (robust to
+    # the mass-sorted zigzag and to the MC scatter), then smooth
+    pts = np.asarray(pts, dtype=float)
+    lat0 = math.radians(pts[:, 1].mean())
+    xy = np.column_stack([
+        (pts[:, 0] - pts[:, 0].mean()) * math.cos(lat0) * 111.32,
+        (pts[:, 1] - pts[:, 1].mean()) * 110.57])
+    cen = xy - xy.mean(axis=0)
+    if not np.isfinite(cen).all():
         return None
-    t = arc / arc[-1]
-    grid = np.linspace(0.0, 1.0, 64)
-    lon = np.interp(grid, t, pts[:, 0])
-    lat = np.interp(grid, t, pts[:, 1])
+    u, s, vt = np.linalg.svd(cen, full_matrices=False)
+    axis = vt[0]
+    if float(np.ptp(cen @ axis)) <= 0:
+        return None
+    s_coord = cen @ axis
+    n_bin = min(24, max(4, len(pts) // 4))
+    edges = np.quantile(s_coord, np.linspace(0.0, 1.0, n_bin + 1))
+    mids, meds = [], []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        sel = (s_coord >= lo) & (s_coord <= hi)
+        if not sel.any():
+            continue
+        meds.append(np.median(cen[sel], axis=0))
+        mids.append(float(np.median(s_coord[sel])))
+    if len(meds) < 2:
+        return None
+    meds = np.asarray(meds)
+    order = np.argsort(mids)
+    meds = meds[order]
     try:
         from scipy.ndimage import gaussian_filter1d
-        lon = gaussian_filter1d(lon, 8.0, mode='nearest')
-        lat = gaussian_filter1d(lat, 8.0, mode='nearest')
+        meds = gaussian_filter1d(meds, 1.5, axis=0, mode='nearest')
     except Exception:
         pass
+    # resample the smoothed centre points to a 64-point polyline
+    t = np.linspace(0.0, 1.0, len(meds))
+    grid = np.linspace(0.0, 1.0, 64)
+    x = np.interp(grid, t, meds[:, 0]) + xy.mean(axis=0)[0]
+    y = np.interp(grid, t, meds[:, 1]) + xy.mean(axis=0)[1]
+    lon = x / (math.cos(lat0) * 111.32) + pts[:, 0].mean()
+    lat = y / 110.57 + pts[:, 1].mean()
     return [tuple(p) for p in zip(lon, lat)]
 
 
@@ -2001,7 +2025,7 @@ def write_json(results, path):
 
 def write_geojson(scenarios, path, mc_impacts=None):
     feats = []
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         feats.append({
             'type': 'Feature',
@@ -2095,7 +2119,7 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None, mc_assumed=False):
                 f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
     parts.append('</Folder>')
     # centre line — the mass-sorted fall line (most likely ground path)
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         coords = ' '.join(f'{lo:.6f},{la:.6f},0' for lo, la in fall_line)
         parts.append(
@@ -2522,7 +2546,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                lw=1.8, alpha=0.85)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14)
     # centre line — fall line through the landed impacts
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         trplot([p[0] for p in fall_line], [p[1] for p in fall_line],
                '--', color='yellow', lw=1.6, alpha=0.9)
@@ -2940,7 +2964,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         marker=dict(size=9, color='red', symbol='diamond'),
         name=translations.get('df_end_luminous', 'End of luminous path')))
     # centre line — fall line along the ground plane
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         fx, fy = project_points([p[0] for p in fall_line],
                                 [p[1] for p in fall_line])

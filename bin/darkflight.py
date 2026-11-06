@@ -4012,16 +4012,23 @@ def _write_brightness_plot(report, out_svg, translations=None):
                  else np.zeros(stack.shape, dtype=bool))
     valid = np.isfinite(stack) & ~sat_stack
     masked = np.where(valid, stack, np.nan)
+    floors = np.where(sat_stack, stack, np.nan)
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         med = np.nanmedian(masked, axis=0)
-        sat_med = np.nanmedian(
-            np.where(sat_stack, stack, np.nan), axis=0)
+        floor_min = np.nanmin(floors, axis=0)
         spread = (np.nanmax(masked, axis=0)
                   - np.nanmin(masked, axis=0))
-    floor = ~np.isfinite(med) & np.isfinite(sat_med)
-    med = np.where(floor, sat_med, med)
+    # every clipped value is a bound m_true <= m_floor: the tightest
+    # bound is the BRIGHTEST floor, and it wins over any dimmer
+    # estimate — this is what lets a fully-clipped flash still spike
+    # instead of drawing a flat plateau
+    n_sat = (sat_stack & np.isfinite(stack)).sum(axis=0)
+    for i in range(med.size):
+        if np.isfinite(floor_min[i]) and (
+                not np.isfinite(med[i]) or med[i] > floor_min[i]):
+            med[i] = floor_min[i]
     support = valid.sum(axis=0)
     spread = np.where(support > 0, spread, np.inf)
     agreed = (support >= min(3, len(curves))) & (spread <= 2.0)
@@ -4048,6 +4055,12 @@ def _write_brightness_plot(report, out_svg, translations=None):
             med[i] = float(np.median(col[col >= col.max() - 1.5]))
         else:
             med[i] = float(np.median(col))
+        # a lone stuck floor must not hold the tail bright — a bound
+        # overriding the fading measurements post-peak needs a second
+        # corroborating floor
+        if (np.isfinite(floor_min[i]) and n_sat[i] >= 2
+                and med[i] > floor_min[i]):
+            med[i] = floor_min[i]
     ok = np.isfinite(med)
     if ok.sum() < 5:
         return False
@@ -4064,8 +4077,17 @@ def _write_brightness_plot(report, out_svg, translations=None):
     # chosen centre magnitude — the curve carries the observed shape,
     # the anchor carries the absolute level
     centre_mag = lc.get('centre_mag')
-    offset = (centre_mag - float(np.nanmin(med_s))
-              if centre_mag is not None else 0.0)
+    # a calibrated observed bound overrides the model prior: truth
+    # cannot be dimmer than the brightest corroborated floor
+    sup = floor_min[n_sat >= 2]
+    floor_peak = (float(np.nanmin(sup)) if sup.size
+                  else np.nan)
+    anchor_mag = centre_mag
+    if np.isfinite(floor_peak) and (
+            anchor_mag is None or floor_peak < anchor_mag):
+        anchor_mag = floor_peak
+    offset = (anchor_mag - float(np.nanmin(med_s))
+              if anchor_mag is not None else 0.0)
     med_s = med_s + offset
     i = int(np.nanargmin(med_s))
     peak_t, peak_m = float(grid[i]), float(med_s[i])

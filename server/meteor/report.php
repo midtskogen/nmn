@@ -539,6 +539,12 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
       <?php endif; ?>
     </div>
     <?php endif; ?>
+    <?php if ($df_bright): ?>
+    <div class="row row-single">
+      <div class="col"><img class="plot" src="<?php echo $df_bright;?>" alt="meteor brightness">
+        <p class="caption"><?php echo htmlspecialchars($t['df_bright_caption'] ?? 'Unified brightness estimate (absolute magnitude)'); ?></p></div>
+    </div>
+    <?php endif; ?>
 
     <?php $merge_orbit_block = $height_jpg && !$wind_jpg && ($orbit_jpg || $orbit_html); ?>
 
@@ -595,12 +601,6 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
       <?php endif; ?>
       <?php if ($df_jpg): ?><div class="col"><img class="plot" src="<?php echo $df_jpg;?>" alt="dark flight prediction">
         <p class="caption"><?php echo htmlspecialchars($t['df_caption'] ?? 'Predicted fall area'); ?></p></div><?php endif; ?>
-    </div>
-    <?php endif; ?>
-    <?php if ($df_bright): ?>
-    <div class="row row-single">
-      <div class="col"><img class="plot" src="<?php echo $df_bright;?>" alt="meteor brightness">
-        <p class="caption"><?php echo htmlspecialchars($t['df_bright_caption'] ?? 'Unified brightness estimate (absolute magnitude)'); ?></p></div>
     </div>
     <?php endif; ?>
 

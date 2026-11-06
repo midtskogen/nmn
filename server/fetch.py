@@ -1565,12 +1565,11 @@ def _run_darkflight(event_dir, darkflight_options=None, analysis_results=None, f
         if svg_path.exists():
             svg_to_jpg(svg_path, event_dir / f'{file_prefix}map_darkflight.jpg',
                        Config.SVG_DARKFLIGHT_DPI)
-    # the brightness light curve is language-independent — one file
-    bright_svg = event_dir / 'map_darkflight_bright.svg'
-    if bright_svg.exists():
-        svg_to_jpg(bright_svg,
-                   event_dir / 'map_darkflight_bright.jpg',
-                   Config.SVG_DARKFLIGHT_DPI)
+        bright_svg = event_dir / f'{file_prefix}map_darkflight_bright.svg'
+        if bright_svg.exists():
+            svg_to_jpg(bright_svg,
+                       event_dir / f'{file_prefix}map_darkflight_bright.jpg',
+                       Config.SVG_DARKFLIGHT_DPI)
     if (not options.fragmentation_model and df_results
             and df_results.get('scenarios')):
         _append_darkflight_table(event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)

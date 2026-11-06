@@ -3950,11 +3950,13 @@ def _observed_peak_magnitude_estimate(observed):
             'method': 'median of independent camera peak fluxes at 100 km'}
 
 
-def _write_brightness_plot(report, out_svg):
+def _write_brightness_plot(report, out_svg, translations=None):
     """Unified absolute light curve: per-time median of the inlier
-    cameras' 100-km magnitudes, with the peak magnitude and altitude
+    cameras' 100-km magnitudes, shifted so its peak sits on the
+    dynamical brightness anchor, with the peak magnitude and altitude
     annotated.  Writes `out_svg`; returns False when there is too
     little usable data."""
+    t = translations or {}
     lc = (report or {}).get('light_curve') or {}
     curves = lc.get('curves') or []
     if len(curves) < 1:
@@ -3983,6 +3985,13 @@ def _write_brightness_plot(report, out_svg):
                          np.nan)
     except Exception:
         pass
+    # anchor the unified curve: shift it so its own peak matches the
+    # chosen centre magnitude — the curve carries the observed shape,
+    # the anchor carries the absolute level
+    centre_mag = lc.get('centre_mag')
+    offset = (centre_mag - float(np.nanmin(med_s))
+              if centre_mag is not None else 0.0)
+    med_s = med_s + offset
     i = int(np.nanargmin(med_s))
     peak_t, peak_m = float(grid[i]), float(med_s[i])
     h_peak = np.nan
@@ -3992,21 +4001,28 @@ def _write_brightness_plot(report, out_svg):
         h_peak = float(np.interp(peak_t, times, heights))
     fig, ax = plt.subplots(figsize=(8, 4.6))
     for c in curves:
-        ax.plot(c['t'], c['m'], '.', ms=3, alpha=.35)
+        ax.plot(c['t'], np.asarray(c['m']) + offset, '.', ms=3,
+                alpha=.35)
     ax.plot(grid[ok], med_s[ok], lw=2.2, color='black',
-            label='unified (inlier median)')
+            label=t.get('df_bright_legend', 'unified estimate'))
     ax.scatter([peak_t], [peak_m], marker='*', s=140, color='crimson',
                zorder=5)
-    label = f'peak {peak_m:.2f} mag'
     if np.isfinite(h_peak):
-        label += f' at {h_peak:.1f} km altitude'
-    ax.annotate(label, (peak_t, peak_m), xytext=(8, -18),
+        label = t.get(
+            'df_bright_peak',
+            'peak {mag:.2f} mag at {alt:.1f} km altitude').format(
+                mag=peak_m, alt=h_peak)
+    else:
+        label = t.get('df_bright_peak_noalt',
+                      'peak {mag:.2f} mag').format(mag=peak_m)
+    ax.annotate(label, (peak_t, peak_m), xytext=(-8, 10),
                 textcoords='offset points', fontsize=9,
-                fontweight='bold')
+                fontweight='bold', ha='right')
     ax.invert_yaxis()
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Absolute magnitude (100 km)')
-    ax.legend(loc='upper right', fontsize=8, framealpha=.8)
+    ax.set_xlabel(t.get('df_bright_xlabel', 'Time (s)'))
+    ax.set_ylabel(t.get('df_bright_ylabel',
+                        'Absolute magnitude (100 km)'))
+    ax.legend(loc='lower right', fontsize=8, framealpha=.8)
     ax.grid(alpha=.3)
     fig.tight_layout()
     fig.savefig(out_svg)
@@ -4792,7 +4808,8 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                 lc_heights = []
             light_curve = {'curves': lc_curves,
                            'times': np.asarray(times, dtype=float).tolist(),
-                           'heights': lc_heights}
+                           'heights': lc_heights,
+                           'centre_mag': peak_mag}
         else:
             logging.info('Forward entry: magnitude sweep found no model '
                          'fit; falling back to deceleration masses')

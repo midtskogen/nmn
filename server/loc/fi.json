@@ -182,7 +182,7 @@
  "df_peak_mag": "Annettu huippumagnitudi (100 km)",
  "df_peak_mag_note": "Pelkkä huippukirkkaus ei määritä kokonaismassaa tai jäljelle jäävää massaa; tarvitaan mitattu valokäyrä ja pirstoutumista rajoittavia tietoja.",
  "df_fall_area_mag": "Putoamisalue (MC, magnitudiin ankkuroitu)",
-  "df_fall_line": "Putoamislinja (massajärjestyksessä)",
+ "df_fall_line": "Putoamislinja (massajärjestyksessä)",
  "df_mass_unknown_note": "Jäljelle jäävää massaa ei voida rajata. Radat kuvaavat hypoteettisia 5 g–5 kg:n massoja irtoamishetkellä, eivätkä ne ole todiste meteoriittien säilymisestä.",
  "df_sc_hypothetical": "Hypoteettinen putoamislinja (5 g–5 kg irtoamishetkellä)",
  "df_mass_kind_phot": "Kirkkauteen perustuva massahävikin arvio (ei jäljelle jäävä massa)",
@@ -244,5 +244,11 @@
  "df_frag_pref_unavailable": "Luotettavaa mallin preferenssiä ei ole: automaattinen hidastuvuudesta johdettu alkumassa on huonosti rajoitettu. Anna --mag tai --entry-mass mallinnettua vertailua varten.",
  "df_frag_light_unavailable": "Mallien vertailu ei ole käytettävissä: käyttökelpoista havaittua kameran valokäyrää ei ole.",
  "df_frag_warn_inversion": "Huippumagnitudin massainversio epäonnistui tässä kokeessa; se näytetään käyttämättömänä eikä sille anneta korvaavaa massaa.",
- "df_frag_disintegration": "Hajoaminen (kuvitteellinen)"
+ "df_frag_disintegration": "Hajoaminen (kuvitteellinen)",
+ "df_bright_caption": "Yhtenäinen kirkkausarvio (absoluuttinen magnitudi)",
+ "df_bright_legend": "yhtenäinen arvio",
+ "df_bright_xlabel": "Aika (s)",
+ "df_bright_ylabel": "Absoluuttinen magnitudi (100 km)",
+ "df_bright_peak": "huippu {mag:.2f} mag korkeudessa {alt:.1f} km",
+ "df_bright_peak_noalt": "huippu {mag:.2f} mag"
 }

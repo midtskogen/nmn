@@ -182,7 +182,7 @@
  "df_peak_mag": "Norādītais zvaigžņlielums maksimālā spožuma brīdī (100 km)",
  "df_peak_mag_note": "Maksimālais spožums vien nenosaka kopējo vai atlikušo masu; nepieciešama izmērīta gaismas līkne un dati, kas ierobežo iespējamos fragmentācijas scenārijus.",
  "df_fall_area_mag": "Krišanas zona (MC, enkurta pie magnitūdas)",
-  "df_fall_line": "Krišanas līnija (sakārtota pēc masas)",
+ "df_fall_line": "Krišanas līnija (sakārtota pēc masas)",
  "df_mass_unknown_note": "Atlikušās masas robežas nav noteiktas. Trajektorijas attēlo hipotētiskas masas 5 g–5 kg atdalīšanās brīdī, nevis pierādījumus tam, ka meteorīti ir saglabājušies.",
  "df_sc_hypothetical": "Hipotētiska kritiena līnija (5 g–5 kg atdalīšanās brīdī)",
  "df_mass_kind_phot": "No starojuma iegūts masas zuduma novērtējums (nevis atlikusī masa)",
@@ -244,5 +244,11 @@
  "df_frag_pref_unavailable": "Nav uzticamas modeļa preferences: automātiskais ieejas masas novērtējums no palēninājuma ir vāji ierobežots. Norādiet --mag vai --entry-mass modelētai salīdzināšanai.",
  "df_frag_light_unavailable": "Modeļu salīdzināšana nav pieejama: nav izmantojamas novērotās kameras gaismas līknes.",
  "df_frag_warn_inversion": "Maksimālās magnitūdes masas inversija šim eksperimentam neizdevās; tas tiek parādīts kā nepieejams, nevis piešķirot aizstājēju masu.",
- "df_frag_disintegration": "Dezintegrācija (ilustratīva)"
+ "df_frag_disintegration": "Dezintegrācija (ilustratīva)",
+ "df_bright_caption": "Apvienotais spožuma novērtējums (absolūtā zvaigžņu lieluma)",
+ "df_bright_legend": "apvienotais novērtējums",
+ "df_bright_xlabel": "Laiks (s)",
+ "df_bright_ylabel": "Absolūtā zvaigžņu lieluma (100 km)",
+ "df_bright_peak": "maksimums {mag:.2f} mag {alt:.1f} km augstumā",
+ "df_bright_peak_noalt": "maksimums {mag:.2f} mag"
 }

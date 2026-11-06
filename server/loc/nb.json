@@ -182,7 +182,7 @@
  "df_peak_mag": "Oppgitt maksimal lysstyrke (100 km)",
  "df_peak_mag_note": "Maksimal lysstyrke alene bestemmer ikke total eller overlevende masse; det trengs en målt lyskurve og begrensninger på fragmenteringen.",
  "df_fall_area_mag": "Nedfallsområde (MC, magnitudeforankret)",
-  "df_fall_line": "Nedfallslinje (masse-sortert)",
+ "df_fall_line": "Nedfallslinje (masse-sortert)",
  "df_mass_unknown_note": "Overlevende masse er ikke avgrensa. Banene viser hypotetiske masser på 5 g–5 kg ved frigjøring, ikke bevis for at meteoritter overlever.",
  "df_sc_hypothetical": "Hypotetisk falllinje (5 g–5 kg ved frigjøring)",
  "df_mass_kind_phot": "Lysbasert indikator for massetap (ikke overlevende masse)",
@@ -244,5 +244,11 @@
  "df_frag_pref_unavailable": "Ingen pålitelig modellpreferanse: det automatiske masseestimatet fra retardasjon er dårlig begrensa. Oppgi --mag eller --entry-mass for en modellert sammenlikning.",
  "df_frag_light_unavailable": "Modellsammenlikning utilgjengelig: ingen brukbar observert kamera-lyskurve.",
  "df_frag_warn_inversion": "Masseinversjonen for toppmagnitude feila for dette eksperimentet; det vises som utilgjengelig i stedet for å få en erstatningsmasse.",
- "df_frag_disintegration": "Desintegrasjon (illustrativ)"
+ "df_frag_disintegration": "Desintegrasjon (illustrativ)",
+ "df_bright_caption": "Samlet lysstyrkeestimat (absolutt størrelsesklasse)",
+ "df_bright_legend": "samlet estimat",
+ "df_bright_xlabel": "Tid (s)",
+ "df_bright_ylabel": "Absolutt størrelsesklasse (100 km)",
+ "df_bright_peak": "topp {mag:.2f} mag ved {alt:.1f} km høyde",
+ "df_bright_peak_noalt": "topp {mag:.2f} mag"
 }

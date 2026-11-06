@@ -182,7 +182,7 @@
  "df_peak_mag": "Supplied peak magnitude (100 km)",
  "df_peak_mag_note": "Peak brightness alone does not determine total or surviving mass; a measured light curve and fragmentation constraints are needed.",
  "df_fall_area_mag": "Fall area (MC, magnitude-anchored)",
-  "df_fall_line": "Fall line (mass-sorted)",
+ "df_fall_line": "Fall line (mass-sorted)",
  "df_mass_unknown_note": "Surviving mass is not constrained. Tracks show hypothetical 5 g–5 kg release masses, not evidence of meteorite survival.",
  "df_sc_hypothetical": "Hypothetical fall line (5 g–5 kg at release)",
  "df_mass_kind_phot": "Luminous mass-loss proxy (not surviving mass)",
@@ -244,5 +244,11 @@
  "df_frag_pref_unavailable": "No reliable model preference: the automatic deceleration-derived entry-mass estimate is poorly constrained. Supply --mag or --entry-mass for a modelled comparison.",
  "df_frag_light_unavailable": "Model comparison unavailable: no usable observed camera light curve.",
  "df_frag_warn_inversion": "Peak-magnitude mass inversion failed for this experiment; it is shown as unavailable rather than assigned a fallback mass.",
- "df_frag_disintegration": "Disintegration (illustrative)"
+ "df_frag_disintegration": "Disintegration (illustrative)",
+ "df_bright_caption": "Unified brightness estimate (absolute magnitude)",
+ "df_bright_legend": "unified estimate",
+ "df_bright_xlabel": "Time (s)",
+ "df_bright_ylabel": "Absolute magnitude (100 km)",
+ "df_bright_peak": "peak {mag:.2f} mag at {alt:.1f} km altitude",
+ "df_bright_peak_noalt": "peak {mag:.2f} mag"
 }

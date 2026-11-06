@@ -177,7 +177,7 @@
  "df_peak_mag": "Zadaná maximální jasnost (100 km)",
  "df_peak_mag_note": "Samotná maximální jasnost neurčuje celkovou ani zbývající hmotnost; je zapotřebí změřená světelná křivka a údaje omezující možné scénáře fragmentace.",
  "df_fall_area_mag": "Dopadová oblast (MC, kotvená magnitudou)",
-  "df_fall_line": "Dopadová linie (seřazená podle hmotnosti)",
+ "df_fall_line": "Dopadová linie (seřazená podle hmotnosti)",
  "df_mass_unknown_note": "Zbývající hmotnost nelze vymezit. Dráhy znázorňují hypotetické hmotnosti 5 g–5 kg při uvolnění, nikoli důkaz, že meteority přežily průlet atmosférou.",
  "df_sc_hypothetical": "Hypotetická linie dopadu (5 g–5 kg při uvolnění)",
  "df_mass_kind_phot": "Ukazatel úbytku hmotnosti ze záření (nikoli zbývající hmotnost)",
@@ -239,5 +239,11 @@
  "df_frag_pref_unavailable": "Není k dispozici spolehlivá preference modelu: automatický odhad vstupní hmotnosti ze zpomalení je špatně omezený. Pro modelované srovnání zadejte --mag nebo --entry-mass.",
  "df_frag_light_unavailable": "Porovnání modelů není k dispozici: není k dispozici použitelná pozorovaná světelná křivka kamery.",
  "df_frag_warn_inversion": "Inverze hmotnosti pro maximální magnitudu selhala u tohoto experimentu; zobrazuje se jako nedostupný místo přiřazení náhradní hmotnosti.",
- "df_frag_disintegration": "Desintegrace (ilustrativní)"
+ "df_frag_disintegration": "Desintegrace (ilustrativní)",
+ "df_bright_caption": "Sjednocený odhad jasnosti (absolutní magnituda)",
+ "df_bright_legend": "sjednocený odhad",
+ "df_bright_xlabel": "Čas (s)",
+ "df_bright_ylabel": "Absolutní magnituda (100 km)",
+ "df_bright_peak": "maximum {mag:.2f} mag ve výšce {alt:.1f} km",
+ "df_bright_peak_noalt": "maximum {mag:.2f} mag"
 }

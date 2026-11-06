@@ -177,7 +177,7 @@
  "df_peak_mag": "Angegebene Maximalhelligkeit (100 km)",
  "df_peak_mag_note": "Die Maximalhelligkeit allein bestimmt weder die Gesamtmasse noch die verbleibende Masse; eine gemessene Lichtkurve und Randbedingungen zur Fragmentierung sind erforderlich.",
  "df_fall_area_mag": "Fallgebiet (MC, magnitudenverankert)",
-  "df_fall_line": "Falllinie (massensortiert)",
+ "df_fall_line": "Falllinie (massensortiert)",
  "df_mass_unknown_note": "Die verbleibende Masse ist nicht eingegrenzt. Die Bahnen zeigen hypothetische Massen von 5 g–5 kg bei der Freisetzung, keinen Nachweis dafür, dass Meteoriten überleben.",
  "df_sc_hypothetical": "Hypothetische Falllinie (5 g–5 kg bei der Freisetzung)",
  "df_mass_kind_phot": "Lichtbasierter Indikator für Massenverlust (keine verbleibende Masse)",
@@ -239,5 +239,11 @@
  "df_frag_pref_unavailable": "Keine zuverlässige Modellpräferenz: Die automatisch aus der Verzögerung abgeleitete Eintrittsmasse ist schlecht eingeschränkt. Geben Sie --mag oder --entry-mass für einen modellierten Vergleich an.",
  "df_frag_light_unavailable": "Modellvergleich nicht verfügbar: keine verwertbare beobachtete Kamera-Lichtkurve.",
  "df_frag_warn_inversion": "Die Masseninversion für die Spitzenmagnitude ist für dieses Experiment fehlgeschlagen; es wird als nicht verfügbar angezeigt statt mit einer Ersatzmasse gefüllt zu werden.",
- "df_frag_disintegration": "Desintegration (illustrativ)"
+ "df_frag_disintegration": "Desintegration (illustrativ)",
+ "df_bright_caption": "Vereinigte Helligkeitsschätzung (absolute Magnitude)",
+ "df_bright_legend": "vereinigte Schätzung",
+ "df_bright_xlabel": "Zeit (s)",
+ "df_bright_ylabel": "Absolute Magnitude (100 km)",
+ "df_bright_peak": "Maximum {mag:.2f} mag in {alt:.1f} km Höhe",
+ "df_bright_peak_noalt": "Maximum {mag:.2f} mag"
 }

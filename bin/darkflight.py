@@ -4012,7 +4012,9 @@ def _write_brightness_plot(report, out_svg, translations=None):
                  else np.zeros(stack.shape, dtype=bool))
     valid = np.isfinite(stack) & ~sat_stack
     masked = np.where(valid, stack, np.nan)
-    with np.errstate(all='ignore'):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
         med = np.nanmedian(masked, axis=0)
         sat_med = np.nanmedian(
             np.where(sat_stack, stack, np.nan), axis=0)
@@ -4976,14 +4978,21 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                     if cam.get('t') is not None else np.array([])
                 _f = np.asarray(cam.get('flux'), dtype=float) \
                     if cam.get('flux') is not None else np.array([])
+                _s = np.asarray(cam.get('sat'), dtype=bool) \
+                    if cam.get('sat') is not None else np.array([])
                 _n = min(_t.size, _f.size)
                 _m = ((_f > 0) & np.isfinite(_f)
                       & np.isfinite(_t))[:_n]
+                _sat = np.zeros(_n, dtype=bool)
+                _k = min(_s.size, _n)
+                _sat[:_k] = _s[:_k]  # sat may lag flux by a point
+                _sat = _sat[_m]
                 if _m.sum() >= 3:
                     lc_curves.append({
                         'cam': cam.get('cam'), 't': _t[:_n][_m].tolist(),
                         'm': (-2.5 * np.log10(
-                            _f[:_n][_m] / 1500.0)).tolist()})
+                            _f[:_n][_m] / 1500.0)).tolist(),
+                        'sat': _sat.tolist()})
             try:
                 lc_heights = np.asarray(
                     plot_data['final_merged_data']['height'],

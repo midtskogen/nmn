@@ -4772,13 +4772,18 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                     continue
                 if cam.get('source') not in ('video', 'event_txt'):
                     continue
-                _t = np.asarray(cam.get('t') or [], dtype=float)
-                _f = np.asarray(cam.get('flux') or [], dtype=float)
-                _m = (_f > 0) & np.isfinite(_f)
+                _t = np.asarray(cam.get('t'), dtype=float) \
+                    if cam.get('t') is not None else np.array([])
+                _f = np.asarray(cam.get('flux'), dtype=float) \
+                    if cam.get('flux') is not None else np.array([])
+                _n = min(_t.size, _f.size)
+                _m = ((_f > 0) & np.isfinite(_f)
+                      & np.isfinite(_t))[:_n]
                 if _m.sum() >= 3:
                     lc_curves.append({
-                        'cam': cam.get('cam'), 't': _t[_m].tolist(),
-                        'm': (-2.5 * np.log10(_f[_m] / 1500.0)).tolist()})
+                        'cam': cam.get('cam'), 't': _t[:_n][_m].tolist(),
+                        'm': (-2.5 * np.log10(
+                            _f[:_n][_m] / 1500.0)).tolist()})
             try:
                 lc_heights = np.asarray(
                     plot_data['final_merged_data']['height'],

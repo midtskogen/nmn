@@ -4015,7 +4015,7 @@ def _write_brightness_plot(report, out_svg, translations=None):
     for i in range(peak_i + 1, med.size):
         col = stack[:, i]
         col = col[np.isfinite(col)]
-        if col.size < 2:
+        if col.size < 1:
             med[i] = np.nan
             continue
         if col.max() - col.min() > 2.0:
@@ -4922,6 +4922,15 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
             # trajectory height table for the peak annotation
             inlier_cams = ({cam for cam, *_, ok in bound_rows if ok}
                            if bound_rows else None)
+            # dim-side outliers are attenuation suspects for the peak
+            # bound, but their time series still carries the fade —
+            # often the only cameras still tracking at the end.
+            # Include them in the curve unless grossly occluded
+            # (>2.5 mag below the bound — e.g. a camera behind a tree)
+            if bound_rows and bound_mag is not None:
+                inlier_cams = (inlier_cams or set()) | {
+                    cam for cam, m_norm, _app, _sat, _r, ok in bound_rows
+                    if not ok and bound_mag < m_norm <= bound_mag + 2.5}
             lc_curves = []
             for cam in observed or []:
                 if (inlier_cams is not None

@@ -3996,9 +3996,32 @@ def _write_brightness_plot(report, out_svg, translations=None):
     stack = np.vstack([
         np.interp(grid, c['t'], c['m'], left=np.nan, right=np.nan)
         for c in curves])
-    med = np.nanmedian(stack, axis=0)
-    support = np.isfinite(stack).sum(axis=0)
-    spread = np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)
+    # saturated points read DIMMER than truth (clipped wells
+    # under-count): they are lower bounds, not measurements.  A
+    # close camera flooded by a flash must not drag the estimate
+    # down — the distant unsaturated cameras carry the peak.
+    # Mask them out of the median; a fully-saturated grid point
+    # still draws its clipped floor rather than a hole.
+    has_sat = any(c.get('sat') for c in curves)
+    sat_stack = (np.vstack([
+        np.interp(grid, c['t'],
+                  np.asarray(c.get('sat') or [False] * len(c['t']),
+                             dtype=float),
+                  left=0.0, right=0.0) > 0.0
+        for c in curves]) if has_sat
+                 else np.zeros(stack.shape, dtype=bool))
+    valid = np.isfinite(stack) & ~sat_stack
+    masked = np.where(valid, stack, np.nan)
+    with np.errstate(all='ignore'):
+        med = np.nanmedian(masked, axis=0)
+        sat_med = np.nanmedian(
+            np.where(sat_stack, stack, np.nan), axis=0)
+        spread = (np.nanmax(masked, axis=0)
+                  - np.nanmin(masked, axis=0))
+    floor = ~np.isfinite(med) & np.isfinite(sat_med)
+    med = np.where(floor, sat_med, med)
+    support = valid.sum(axis=0)
+    spread = np.where(support > 0, spread, np.inf)
     agreed = (support >= min(3, len(curves))) & (spread <= 2.0)
     # locate the peak over the agreeing part only — a divergent tail
     # must not decide where the maximum lies
@@ -4013,13 +4036,16 @@ def _write_brightness_plot(report, out_svg, translations=None):
     # on the fading (dimmest) side; below two contributors there is
     # nothing to draw
     for i in range(peak_i + 1, med.size):
-        col = stack[:, i]
-        col = col[np.isfinite(col)]
+        col = stack[valid[:, i], i]
+        if col.size < 1:
+            col = stack[sat_stack[:, i], i]  # floors when nothing else
         if col.size < 1:
             med[i] = np.nan
             continue
         if col.max() - col.min() > 2.0:
             med[i] = float(np.median(col[col >= col.max() - 1.5]))
+        else:
+            med[i] = float(np.median(col))
     ok = np.isfinite(med)
     if ok.sum() < 5:
         return False
@@ -4048,8 +4074,16 @@ def _write_brightness_plot(report, out_svg, translations=None):
         h_peak = float(np.interp(peak_t, times, heights))
     fig, ax = plt.subplots(figsize=(8, 4.6))
     for c in curves:
-        ax.plot(c['t'], np.asarray(c['m']) + offset, '.', ms=3,
-                alpha=.35)
+        _cm = np.asarray(c['m']) + offset
+        _ct = np.asarray(c['t'])
+        _cs = (np.asarray(c['sat'], dtype=bool)
+               if c.get('sat') is not None and len(c['sat']) == _ct.size
+               else np.zeros(_ct.size, dtype=bool))
+        ax.plot(_ct[~_cs], _cm[~_cs], '.', ms=3, alpha=.35)
+        if _cs.any():  # saturated floors drawn as triangles
+            ax.plot(_ct[_cs], _cm[_cs], 'v', ms=2.5, alpha=.4,
+                    color='gray')
+
     ax.plot(grid[ok], med_s[ok], lw=2.2, color='black',
             label=t.get('df_bright_legend', 'unified estimate'))
     ax.scatter([peak_t], [peak_m], marker='*', s=140, color='crimson',

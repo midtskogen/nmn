@@ -2661,12 +2661,15 @@ def main():
     """Main script execution flow."""
 
     # Very early debug logging - write to /tmp before any setup
-    with open('/tmp/fetch_py_start.log', 'a') as _f:
-        _f.write(f"fetch.py main() started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        _f.write(f"  sys.argv: {sys.argv}\n")
-        _f.write(f"  __file__: {__file__}\n")
-        _f.write(f"  os.getcwd(): {os.getcwd()}\n")
-        _f.write(f"  getuid: {os.getuid()}\n")
+    try:
+        with open('/tmp/fetch_py_start.log', 'a') as _f:
+            _f.write(f"fetch.py main() started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            _f.write(f"  sys.argv: {sys.argv}\n")
+            _f.write(f"  __file__: {__file__}\n")
+            _f.write(f"  os.getcwd(): {os.getcwd()}\n")
+            _f.write(f"  getuid: {os.getuid()}\n")
+    except OSError:
+        pass  # log file may be owned by another user in sticky /tmp
 
     # --- Register cleanup to fix terminal echo on exit ---
     atexit.register(restore_terminal_state)

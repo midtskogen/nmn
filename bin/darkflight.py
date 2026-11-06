@@ -5515,9 +5515,14 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
             impact = fragment.get('impact')
             if not impact or not impact.get('landed'):
                 continue
+            m_shown = fragment.get('plot_release_mass_kg', impact['m'])
+            if m_shown < 5e-3:
+                # nothing smaller than 5 gram is shown — same cut as
+                # the scenario runs and the MC cloud
+                continue
             trajectory = fragment.get('trajectory') or {
                 key: [impact[key]] for key in ('lon', 'lat', 'h')}
-            runs.append({'m': fragment.get('plot_release_mass_kg', impact['m']),
+            runs.append({'m': m_shown,
                          'rho': experiment.get('parameters', {}).get('rho_m'),
                          'multiplicity': fragment['multiplicity'], 'impact': impact,
                          **trajectory})
@@ -5582,6 +5587,11 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
                       if impact.get('experiment_index') in accepted or
                       ('experiment_index' not in impact and
                        impact.get('model') in accepted_models)]
+    # nothing smaller than 5 gram is shown — apply the same display
+    # cut to the MC cloud; when the cut empties it the map falls back
+    # to the disintegration drawing
+    interactive_mc = [impact for impact in interactive_mc
+                      if impact.get('m', 0.0) >= 5e-3]
     report['interactive_model'] = (
         preferred_experiment['model'] if preferred_experiment else None)
     report['interactive_density_kg_m3'] = (
@@ -5593,7 +5603,8 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
                   mc_impacts=mc_impacts)
     write_kml(interactive_scenarios, end_llh, output_dir / 'darkflight.kml',
               mc_impacts=interactive_mc, mc_assumed=True)
-    has_impacts = any(s['results'] for s in interactive_scenarios)
+    has_impacts = (any(s['results'] for s in interactive_scenarios)
+                   or bool(interactive_mc))
     for prefix, translations in (lang_files or load_language_files()).items():
         try:
             _write_brightness_plot(

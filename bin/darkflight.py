@@ -2025,7 +2025,7 @@ def write_json(results, path):
 
 def write_geojson(scenarios, path, mc_impacts=None):
     feats = []
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         feats.append({
             'type': 'Feature',
@@ -2119,7 +2119,7 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None, mc_assumed=False):
                 f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
     parts.append('</Folder>')
     # centre line — the mass-sorted fall line (most likely ground path)
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         coords = ' '.join(f'{lo:.6f},{la:.6f},0' for lo, la in fall_line)
         parts.append(
@@ -2546,7 +2546,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                lw=1.8, alpha=0.85)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14)
     # centre line — fall line through the landed impacts
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         trplot([p[0] for p in fall_line], [p[1] for p in fall_line],
                '--', color='yellow', lw=1.6, alpha=0.9)
@@ -2964,7 +2964,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         marker=dict(size=9, color='red', symbol='diamond'),
         name=translations.get('df_end_luminous', 'End of luminous path')))
     # centre line — fall line along the ground plane
-    fall_line = _fall_line_llh(scenarios)
+    fall_line = _fall_line_llh(scenarios, mc_impacts)
     if fall_line is not None:
         fx, fy = project_points([p[0] for p in fall_line],
                                 [p[1] for p in fall_line])

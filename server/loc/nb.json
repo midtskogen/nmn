@@ -250,5 +250,6 @@
  "df_bright_xlabel": "Tid (s)",
  "df_bright_ylabel": "Absolutt størrelse (100 km)",
  "df_bright_peak": "maksimum {mag:.2f} mag ved {alt:.1f} km høgde",
- "df_bright_peak_noalt": "maksimum {mag:.2f} mag"
+ "df_bright_peak_noalt": "maksimum {mag:.2f} mag",
+ "df_bright_phot": "fotometrisk masse ≈ {mass:.1f} kg · utstrålt energi ≈ {energy}"
 }

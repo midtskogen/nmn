@@ -250,5 +250,6 @@
  "df_bright_xlabel": "Aika (s)",
  "df_bright_ylabel": "Absoluuttinen magnitudi (100 km)",
  "df_bright_peak": "huippu {mag:.2f} mag korkeudessa {alt:.1f} km",
- "df_bright_peak_noalt": "huippu {mag:.2f} mag"
+ "df_bright_peak_noalt": "huippu {mag:.2f} mag",
+ "df_bright_phot": "fotometrinen massa ≈ {mass:.1f} kg · säteilyenergia ≈ {energy}"
 }

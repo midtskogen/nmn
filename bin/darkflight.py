@@ -4097,6 +4097,21 @@ def _write_brightness_plot(report, out_svg, translations=None):
         ax.yaxis.set_major_formatter(fmt)
     ax.legend(loc='lower right', fontsize=8, framealpha=.8)
     ax.grid(alpha=.3)
+    # photometric entry mass + total radiated energy at the bottom
+    phot = lc.get('photometric_entry_mass_kg')
+    e_j = lc.get('radiated_energy_j')
+    if phot and e_j:
+        e_str = (f'{e_j / 1e9:.2f} GJ' if e_j >= 1e9
+                 else f'{e_j / 1e6:.0f} MJ')
+        phot_txt = t.get(
+            'df_bright_phot',
+            'photometric mass ≈ {mass:.1f} kg · '
+            'radiated energy ≈ {energy}').format(
+                mass=phot, energy=e_str)
+        if dec != '.':
+            phot_txt = phot_txt.replace('.', dec)
+        ax.text(0.01, 0.012, phot_txt, transform=ax.transAxes,
+                fontsize=7.5, color='0.35', ha='left', va='bottom')
     fig.tight_layout()
     fig.savefig(out_svg)
     plt.close(fig)

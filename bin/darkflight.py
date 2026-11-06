@@ -4029,6 +4029,15 @@ def _write_brightness_plot(report, out_svg, translations=None):
     if times.size > 1 and heights.size == times.size:
         order = np.argsort(times)
         tt, hh = times[order], heights[order]
+        # smooth out fit wobble so the descent is monotonic — a
+        # meteor cannot speed up; raw merged heights have kinks that
+        # would place the crossings at misleading times
+        try:
+            from scipy.ndimage import gaussian_filter1d
+            hh = gaussian_filter1d(hh, 2.0)
+        except Exception:
+            pass
+        hh = np.minimum.accumulate(hh)
         hi_level = math.floor(float(np.nanmax(hh)) / 5.0) * 5.0
         levels = np.arange(hi_level, float(np.nanmin(hh)), -5.0)
         marks = []
@@ -4036,15 +4045,20 @@ def _write_brightness_plot(report, out_svg, translations=None):
             below = np.nonzero(hh <= level)[0]
             if not len(below):
                 continue
-            t_lvl = float(tt[below[0]])
+            i = below[0]
+            # linear-interpolate the exact crossing time between the
+            # bracketing samples
+            if i > 0 and hh[i - 1] > level:
+                frac = (hh[i - 1] - level) / (hh[i - 1] - hh[i])
+                t_lvl = float(tt[i - 1] + frac * (tt[i] - tt[i - 1]))
+            else:
+                t_lvl = float(tt[i])
             if not lo < t_lvl < hi:
                 continue
             m_lvl = float(np.interp(t_lvl, grid, med_s))
             ax.plot([t_lvl], [m_lvl], marker='+', ms=7,
                     color='crimson', mew=1.4, zorder=6)
-            alt_txt = f'{level:.1f} km'
-            if dec != '.':
-                alt_txt = alt_txt.replace('.', dec)
+            alt_txt = f'{level:.0f} km'
             marks.append((t_lvl, m_lvl, alt_txt))
         if marks:
             # vertical label column at the dim end of the axis;

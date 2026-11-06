@@ -3997,14 +3997,29 @@ def _write_brightness_plot(report, out_svg, translations=None):
         np.interp(grid, c['t'], c['m'], left=np.nan, right=np.nan)
         for c in curves])
     med = np.nanmedian(stack, axis=0)
-    # the unified estimate needs support and agreement: at least
-    # three cameras reporting AND every contributor within ±2 mag
-    # of the median — when cameras diverge (a stuck-bright frame or
-    # an early-faded sensor) there is no consensus to draw, so mask
-    # the region rather than let outliers become "the estimate"
     support = np.isfinite(stack).sum(axis=0)
-    dev = np.nanmax(np.abs(stack - med), axis=0)
-    med[(support < min(3, len(curves))) | (dev > 2.0)] = np.nan
+    spread = np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)
+    agreed = (support >= min(3, len(curves))) & (spread <= 2.0)
+    # locate the peak over the agreeing part only — a divergent tail
+    # must not decide where the maximum lies
+    if agreed.any():
+        peak_i = int(np.nanargmin(np.where(agreed, med, np.inf)))
+    else:
+        peak_i = int(np.nanargmin(med))
+    # post-peak disagreement: a meteor in the dimming phase cannot
+    # be brightened by haze, and a held/stuck-bright camera (glow
+    # flooding, bound values) is the usual cause of a non-fading
+    # tail — so when contributors split >2 mag, follow the cluster
+    # on the fading (dimmest) side; below two contributors there is
+    # nothing to draw
+    for i in range(peak_i + 1, med.size):
+        col = stack[:, i]
+        col = col[np.isfinite(col)]
+        if col.size < 2:
+            med[i] = np.nan
+            continue
+        if col.max() - col.min() > 2.0:
+            med[i] = float(np.median(col[col >= col.max() - 1.5]))
     ok = np.isfinite(med)
     if ok.sum() < 5:
         return False

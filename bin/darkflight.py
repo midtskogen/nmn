@@ -1860,7 +1860,13 @@ def _forward_mc_impacts(experiments, wind_csv, h_ground, n_runs, seed,
     for experiment_index, experiment in enumerate(experiments):
         releases = [fragment for fragment in experiment['fragments']
                     if fragment.get('dark_release') is not None
-                    and (fragment.get('impact') or {}).get('landed')]
+                    and (fragment.get('impact') or {}).get('landed')
+                    # a landed cohort under the display cut can only
+                    # scatter sub-5 g members — skip the draw entirely
+                    and float(fragment.get(
+                        'total_final_mass_kg',
+                        (fragment.get('impact') or {}).get('m', 0.0))
+                        or 0.0) >= IMPACT_MIN_KG]
         allocations = _forward_mc_allocations(releases, int(n_runs))
         parameters = experiment.get('parameters', {})
         use_fragment_spectrum = experiment['model'] != 'single'
@@ -5689,6 +5695,17 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
     # to the disintegration drawing
     interactive_mc = [impact for impact in interactive_mc
                       if impact.get('m', 0.0) >= 5e-3]
+    # an MC cloud only belongs where the experiment itself lands a
+    # meteorite — perturbed members that scrape over the 5 g line are
+    # scatter, not an impact area, when the run lands nothing
+    landed_idx = {s['experiment_index'] for s in interactive_scenarios
+                  if s['results']}
+    landed_models = {report['experiments'][i]['model']
+                     for i in landed_idx}
+    interactive_mc = [impact for impact in interactive_mc
+                      if impact.get('experiment_index') in landed_idx or
+                      ('experiment_index' not in impact and
+                       impact.get('model') in landed_models)]
     report['interactive_model'] = (
         preferred_experiment['model'] if preferred_experiment else None)
     report['interactive_density_kg_m3'] = (

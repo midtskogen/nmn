@@ -3997,6 +3997,14 @@ def _write_brightness_plot(report, out_svg, translations=None):
         np.interp(grid, c['t'], c['m'], left=np.nan, right=np.nan)
         for c in curves])
     med = np.nanmedian(stack, axis=0)
+    # the unified estimate needs support and agreement: at least
+    # three cameras reporting AND every contributor within ±2 mag
+    # of the median — when cameras diverge (a stuck-bright frame or
+    # an early-faded sensor) there is no consensus to draw, so mask
+    # the region rather than let outliers become "the estimate"
+    support = np.isfinite(stack).sum(axis=0)
+    dev = np.nanmax(np.abs(stack - med), axis=0)
+    med[(support < min(3, len(curves))) | (dev > 2.0)] = np.nan
     ok = np.isfinite(med)
     if ok.sum() < 5:
         return False

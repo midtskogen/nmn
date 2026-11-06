@@ -111,6 +111,7 @@ $posvstime_jpg = s4_ap("{$fp}posvstime.jpg","posvstime.jpg");
 $spd_acc_jpg   = s4_ap("{$fp}spd_acc.jpg",  "spd_acc.jpg");
 $wind_jpg      = s4_ap("{$fp}wind_profile.jpg","wind_profile.jpg");
 $df_jpg        = s4_ap("{$fp}map_darkflight.jpg","map_darkflight.jpg");
+$df_bright     = s4_ap("{$fp}map_darkflight_bright.jpg","map_darkflight_bright.jpg");
 $df_table      = s4_ap("{$fp}darkflight_table.html","darkflight_table.html");
 $df_3d         = s4_ap("{$fp}darkflight_map3d.html","darkflight_map3d.html");
 $og_image      = s4_ap("{$fp}image.jpg","image.jpg");
@@ -594,6 +595,12 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
       <?php endif; ?>
       <?php if ($df_jpg): ?><div class="col"><img class="plot" src="<?php echo $df_jpg;?>" alt="dark flight prediction">
         <p class="caption"><?php echo htmlspecialchars($t['df_caption'] ?? 'Predicted fall area'); ?></p></div><?php endif; ?>
+    </div>
+    <?php endif; ?>
+    <?php if ($df_bright): ?>
+    <div class="row row-single">
+      <div class="col"><img class="plot" src="<?php echo $df_bright;?>" alt="meteor brightness">
+        <p class="caption"><?php echo htmlspecialchars($t['df_bright_caption'] ?? 'Unified brightness estimate (absolute magnitude)'); ?></p></div>
     </div>
     <?php endif; ?>
 

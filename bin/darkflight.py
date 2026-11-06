@@ -2025,7 +2025,7 @@ def write_json(results, path):
 
 def write_geojson(scenarios, path, mc_impacts=None):
     feats = []
-    fall_line = _fall_line_llh(scenarios, mc_impacts)
+    fall_line = _fall_line_llh(scenarios)
     if fall_line is not None:
         feats.append({
             'type': 'Feature',
@@ -2119,7 +2119,7 @@ def write_kml(scenarios, end_llh, path, mc_impacts=None, mc_assumed=False):
                 f'{imp["h"]:.0f}</coordinates></Point></Placemark>')
     parts.append('</Folder>')
     # centre line — the mass-sorted fall line (most likely ground path)
-    fall_line = _fall_line_llh(scenarios, mc_impacts)
+    fall_line = _fall_line_llh(scenarios)
     if fall_line is not None:
         coords = ' '.join(f'{lo:.6f},{la:.6f},0' for lo, la in fall_line)
         parts.append(
@@ -2546,7 +2546,7 @@ def write_map(scenarios, end_llh, mc_impacts, out_svg, title='',
                lw=1.8, alpha=0.85)
     trplot([end_llh[0]], [end_llh[1]], 'r*', ms=14)
     # centre line — fall line through the landed impacts
-    fall_line = _fall_line_llh(scenarios, mc_impacts)
+    fall_line = _fall_line_llh(scenarios)
     if fall_line is not None:
         trplot([p[0] for p in fall_line], [p[1] for p in fall_line],
                '--', color='yellow', lw=1.6, alpha=0.9)
@@ -2964,7 +2964,7 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
         marker=dict(size=9, color='red', symbol='diamond'),
         name=translations.get('df_end_luminous', 'End of luminous path')))
     # centre line — fall line along the ground plane
-    fall_line = _fall_line_llh(scenarios, mc_impacts)
+    fall_line = _fall_line_llh(scenarios)
     if fall_line is not None:
         fx, fy = project_points([p[0] for p in fall_line],
                                 [p[1] for p in fall_line])
@@ -3950,6 +3950,70 @@ def _observed_peak_magnitude_estimate(observed):
             'method': 'median of independent camera peak fluxes at 100 km'}
 
 
+def _write_brightness_plot(report, out_svg):
+    """Unified absolute light curve: per-time median of the inlier
+    cameras' 100-km magnitudes, with the peak magnitude and altitude
+    annotated.  Writes `out_svg`; returns False when there is too
+    little usable data."""
+    lc = (report or {}).get('light_curve') or {}
+    curves = lc.get('curves') or []
+    if len(curves) < 1:
+        return False
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    lo = min(min(c['t']) for c in curves)
+    hi = max(max(c['t']) for c in curves)
+    if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+        return False
+    grid = np.linspace(lo, hi, 300)
+    stack = np.vstack([
+        np.interp(grid, c['t'], c['m'], left=np.nan, right=np.nan)
+        for c in curves])
+    med = np.nanmedian(stack, axis=0)
+    ok = np.isfinite(med)
+    if ok.sum() < 5:
+        return False
+    med_s = med.copy()
+    try:
+        from scipy.ndimage import gaussian_filter1d
+        fill = np.where(ok, med, np.nanmedian(med))
+        med_s = np.where(ok, gaussian_filter1d(fill, 3.0,
+                                               mode='nearest'),
+                         np.nan)
+    except Exception:
+        pass
+    i = int(np.nanargmin(med_s))
+    peak_t, peak_m = float(grid[i]), float(med_s[i])
+    h_peak = np.nan
+    times = np.asarray(lc.get('times') or [], dtype=float)
+    heights = np.asarray(lc.get('heights') or [], dtype=float)
+    if times.size > 1 and heights.size == times.size:
+        h_peak = float(np.interp(peak_t, times, heights))
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    for c in curves:
+        ax.plot(c['t'], c['m'], '.', ms=3, alpha=.35)
+    ax.plot(grid[ok], med_s[ok], lw=2.2, color='black',
+            label='unified (inlier median)')
+    ax.scatter([peak_t], [peak_m], marker='*', s=140, color='crimson',
+               zorder=5)
+    label = f'peak {peak_m:.2f} mag'
+    if np.isfinite(h_peak):
+        label += f' at {h_peak:.1f} km altitude'
+    ax.annotate(label, (peak_t, peak_m), xytext=(8, -18),
+                textcoords='offset points', fontsize=9,
+                fontweight='bold')
+    ax.invert_yaxis()
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Absolute magnitude (100 km)')
+    ax.legend(loc='upper right', fontsize=8, framealpha=.8)
+    ax.grid(alpha=.3)
+    fig.tight_layout()
+    fig.savefig(out_svg)
+    plt.close(fig)
+    return True
+
+
 def _observed_peak_magnitude_bound(observed):
     """Lower bound on peak brightness: the brightest range-corrected
     flux recorded by each camera, saturated samples included — a
@@ -4562,6 +4626,7 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
             logging.info('Forward entry:   %s', d)
         if not bound_consistent:
             bound_mag = None
+        light_curve = None
         # dynamical brightness anchor first: propagate each model at the
         # deceleration-consistent entry mass and read the PREDICTED peak
         # magnitude — dynamics, not photometry, sets the sweep centre
@@ -4695,6 +4760,34 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                         '' if adj_app is None else
                         f'app {"≤" if sat else "="}{adj_app:>5.1f}',
                         '' if ok else '   [outlier: excluded]')
+            # unified brightness plot inputs: calibrated inlier
+            # cameras' per-point 100-km magnitudes vs time, plus the
+            # trajectory height table for the peak annotation
+            inlier_cams = ({cam for cam, *_, ok in bound_rows if ok}
+                           if bound_rows else None)
+            lc_curves = []
+            for cam in observed or []:
+                if (inlier_cams is not None
+                        and cam.get('cam') not in inlier_cams):
+                    continue
+                if cam.get('source') not in ('video', 'event_txt'):
+                    continue
+                _t = np.asarray(cam.get('t') or [], dtype=float)
+                _f = np.asarray(cam.get('flux') or [], dtype=float)
+                _m = (_f > 0) & np.isfinite(_f)
+                if _m.sum() >= 3:
+                    lc_curves.append({
+                        'cam': cam.get('cam'), 't': _t[_m].tolist(),
+                        'm': (-2.5 * np.log10(_f[_m] / 1500.0)).tolist()})
+            try:
+                lc_heights = np.asarray(
+                    plot_data['final_merged_data']['height'],
+                    dtype=float).tolist()
+            except (KeyError, TypeError, ValueError):
+                lc_heights = []
+            light_curve = {'curves': lc_curves,
+                           'times': np.asarray(times, dtype=float).tolist(),
+                           'heights': lc_heights}
         else:
             logging.info('Forward entry: magnitude sweep found no model '
                          'fit; falling back to deceleration masses')
@@ -5140,6 +5233,8 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                              if mc_impacts else '')
                           + 'Absolute magnitude refers to distance 100 km, not altitude.',
         'experiments': experiments}
+    if locals().get('light_curve'):
+        report['light_curve'] = light_curve
     if publish:
         import tempfile
         with tempfile.TemporaryDirectory(prefix='.darkflight-', dir=event_dir) as temporary:
@@ -5322,6 +5417,11 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
         if preferred_experiment else None)
     event_wind_csv = (Path(report['event_dir']) / 'wind_profile.csv'
                       if report.get('event_dir') else None)
+    try:
+        _write_brightness_plot(
+            report, output_dir / 'map_darkflight_bright.svg')
+    except Exception as e:
+        logging.warning(f'brightness light-curve plot failed: {e}')
     write_geojson(scenarios, output_dir / 'darkflight.geojson',
                   mc_impacts=mc_impacts)
     write_kml(interactive_scenarios, end_llh, output_dir / 'darkflight.kml',

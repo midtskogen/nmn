@@ -4038,9 +4038,16 @@ def _write_brightness_plot(report, out_svg, translations=None):
             c2, c1, c0 = np.polyfit(tt, hh, 2)
             if c2 < 0:
                 c1, c0 = np.polyfit(tt, hh, 1)
-                hh = np.polyval([c1, c0], tt)
+                hh_fit = np.polyval([c1, c0], tt)
             else:
-                hh = np.polyval([c2, c1, c0], tt)
+                hh_fit = np.polyval([c2, c1, c0], tt)
+            # pin the fit to the measured start/end heights — adding a
+            # linear ramp does not change the curvature, so the pinned
+            # curve stays convex while agreeing with the trajectory's
+            # stated endpoints
+            ramp = np.linspace(hh[0] - hh_fit[0],
+                               hh[-1] - hh_fit[-1], len(tt))
+            hh = hh_fit + ramp
         hh = np.minimum.accumulate(hh)
         hi_level = math.floor(float(np.nanmax(hh)) / 5.0) * 5.0
         levels = np.arange(hi_level, float(np.nanmin(hh)), -5.0)

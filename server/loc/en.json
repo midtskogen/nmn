@@ -251,5 +251,5 @@
  "df_bright_ylabel": "Absolute magnitude (100 km)",
  "df_bright_peak": "peak {mag:.2f} mag at {alt:.1f} km altitude",
  "df_bright_peak_noalt": "peak {mag:.2f} mag",
- "df_bright_phot": "photometric mass ≈ {mass:.1f} kg · radiated energy ≈ {energy}"
+ "df_bright_phot": "photometric mass ≈ {mass} · radiated energy ≈ {energy}"
 }

@@ -246,5 +246,5 @@
  "df_bright_ylabel": "Absolutní magnituda (100 km)",
  "df_bright_peak": "maximum {mag:.2f} mag ve výšce {alt:.1f} km",
  "df_bright_peak_noalt": "maximum {mag:.2f} mag",
- "df_bright_phot": "fotometrická hmotnost ≈ {mass:.1f} kg · vyzářená energie ≈ {energy}"
+ "df_bright_phot": "fotometrická hmotnost ≈ {mass} · vyzářená energie ≈ {energy}"
 }

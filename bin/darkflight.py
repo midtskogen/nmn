@@ -3952,6 +3952,28 @@ def _observed_peak_magnitude_estimate(observed):
             'method': 'median of independent camera peak fluxes at 100 km'}
 
 
+def _fmt_mass_energy(mass_kg, energy_j):
+    """Human-scale strings for photometric mass [kg] and energy [J]:
+    kg above 1 kg, grams above 1 g, mg below; J/kJ/MJ/GJ for energy."""
+    if mass_kg >= 1.0:
+        m_str = f'{mass_kg:.1f} kg'
+    elif mass_kg >= 1e-3:
+        m_str = (f'{mass_kg * 1e3:.0f} g' if mass_kg >= 0.1
+                 else f'{mass_kg * 1e3:.1f} g')
+    else:
+        m_str = f'{mass_kg * 1e6:.0f} mg'
+    if energy_j >= 1e9:
+        e_str = f'{energy_j / 1e9:.2f} GJ'
+    elif energy_j >= 1e6:
+        e_str = f'{energy_j / 1e6:.0f} MJ'
+    elif energy_j >= 1e3:
+        e_str = (f'{energy_j / 1e3:.0f} kJ' if energy_j >= 1e5
+                 else f'{energy_j / 1e3:.1f} kJ')
+    else:
+        e_str = f'{energy_j:.0f} J'
+    return m_str, e_str
+
+
 def _write_brightness_plot(report, out_svg, translations=None):
     """Unified absolute light curve: per-time median of the inlier
     cameras' 100-km magnitudes, shifted so its peak sits on the
@@ -4101,13 +4123,12 @@ def _write_brightness_plot(report, out_svg, translations=None):
     phot = lc.get('photometric_entry_mass_kg')
     e_j = lc.get('radiated_energy_j')
     if phot and e_j:
-        e_str = (f'{e_j / 1e9:.2f} GJ' if e_j >= 1e9
-                 else f'{e_j / 1e6:.0f} MJ')
+        m_str, e_str = _fmt_mass_energy(phot, e_j)
         phot_txt = t.get(
             'df_bright_phot',
-            'photometric mass ≈ {mass:.1f} kg · '
+            'photometric mass ≈ {mass} · '
             'radiated energy ≈ {energy}').format(
-                mass=phot, energy=e_str)
+                mass=m_str, energy=e_str)
         if dec != '.':
             phot_txt = phot_txt.replace('.', dec)
         ax.text(0.01, 0.012, phot_txt, transform=ax.transAxes,
@@ -4920,13 +4941,12 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                 m_phot = 2.0 * e_med / (tau * speed ** 2)
                 dur = (max(max(c['t']) for c in lc_curves)
                        - min(min(c['t']) for c in lc_curves))
-                e_txt = (f'{e_med / 1e9:.2f} GJ' if e_med >= 1e9
-                         else f'{e_med / 1e6:.0f} MJ')
+                m_txt, e_txt = _fmt_mass_energy(m_phot, e_med)
                 logging.info(
-                    'Forward entry: photometric entry mass %.1f kg — '
+                    'Forward entry: photometric entry mass %s — '
                     'integrated inlier light curve %s over %.1f s '
                     'at %.1f km/s (luminous efficiency %.3f)',
-                    m_phot, e_txt, dur, speed / 1000.0, tau)
+                    m_txt, e_txt, dur, speed / 1000.0, tau)
                 light_curve['photometric_entry_mass_kg'] = m_phot
                 light_curve['radiated_energy_j'] = e_med
         else:

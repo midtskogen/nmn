@@ -246,5 +246,5 @@
  "df_bright_ylabel": "Absolute Magnitude (100 km)",
  "df_bright_peak": "Maximum {mag:.2f} mag in {alt:.1f} km Höhe",
  "df_bright_peak_noalt": "Maximum {mag:.2f} mag",
- "df_bright_phot": "photometrische Masse ≈ {mass:.1f} kg · abgestrahlte Energie ≈ {energy}"
+ "df_bright_phot": "photometrische Masse ≈ {mass} · abgestrahlte Energie ≈ {energy}"
 }

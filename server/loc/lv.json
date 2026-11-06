@@ -251,5 +251,5 @@
  "df_bright_ylabel": "Absolūtā zvaigžņu lieluma (100 km)",
  "df_bright_peak": "maksimums {mag:.2f} mag {alt:.1f} km augstumā",
  "df_bright_peak_noalt": "maksimums {mag:.2f} mag",
- "df_bright_phot": "fotometriskā masa ≈ {mass:.1f} kg · izstarotā enerģija ≈ {energy}"
+ "df_bright_phot": "fotometriskā masa ≈ {mass} · izstarotā enerģija ≈ {energy}"
 }

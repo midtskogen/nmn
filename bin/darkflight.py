@@ -4275,7 +4275,7 @@ def _observed_peak_magnitude_bound(observed):
             peaks.append((camera.get('cam'), peak_flux, peak_sat,
                           peak_range))
     if not peaks:
-        return None, [], False
+        return None, [], False, []
     peak_mags = np.asarray([-2.5 * math.log10(p[1] / 1500.0)
                             for p in peaks])
     # asymmetric consistency: a camera can read DIMMER than truth —

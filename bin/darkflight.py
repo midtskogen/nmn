@@ -4009,6 +4009,7 @@ def _write_brightness_plot(report, out_svg, translations=None):
             label=t.get('df_bright_legend', 'unified estimate'))
     ax.scatter([peak_t], [peak_m], marker='*', s=140, color='crimson',
                zorder=5)
+    dec = t.get('dec_sep', '.')
     if np.isfinite(h_peak):
         label = t.get(
             'df_bright_peak',
@@ -4017,13 +4018,55 @@ def _write_brightness_plot(report, out_svg, translations=None):
     else:
         label = t.get('df_bright_peak_noalt',
                       'peak {mag:.2f} mag').format(mag=peak_m)
+    if dec != '.':
+        label = label.replace('.', dec)
     ax.annotate(label, (peak_t, peak_m), xytext=(-8, 10),
                 textcoords='offset points', fontsize=9,
                 fontweight='bold', ha='right')
+    # altitude markers along the curve every 5 km, with leader lines
+    if times.size > 1 and heights.size == times.size:
+        order = np.argsort(times)
+        tt, hh = times[order], heights[order]
+        hi_level = math.floor(float(np.nanmax(hh)) / 5.0) * 5.0
+        levels = np.arange(hi_level, float(np.nanmin(hh)), -5.0)
+        for n, level in enumerate(levels):
+            below = np.nonzero(hh <= level)[0]
+            if not len(below):
+                continue
+            t_lvl = float(tt[below[0]])
+            if not lo < t_lvl < hi:
+                continue
+            m_lvl = float(np.interp(t_lvl, grid, med_s))
+            ax.plot([t_lvl], [m_lvl], marker='+', ms=7,
+                    color='crimson', mew=1.4, zorder=6)
+            alt_txt = f'{level:.1f} km'
+            if dec != '.':
+                alt_txt = alt_txt.replace('.', dec)
+            # labels above the curve alternate sides; near the peak
+            # move them below so they keep clear of the annotation,
+            # and flip inward near the time edges
+            dx = -12 if n % 2 else 12
+            ha = 'right' if n % 2 else 'left'
+            dy = -20 if abs(t_lvl - peak_t) < 0.6 else 10
+            if t_lvl > hi - 0.9:
+                dx, ha = -14, 'right'
+            elif t_lvl < lo + 0.9:
+                dx, ha = 14, 'left'
+            ax.annotate(alt_txt, (t_lvl, m_lvl), xytext=(dx, dy),
+                        textcoords='offset points', fontsize=7,
+                        color='0.25', ha=ha,
+                        arrowprops={'arrowstyle': '-', 'lw': 0.5,
+                                    'color': '0.5'})
     ax.invert_yaxis()
     ax.set_xlabel(t.get('df_bright_xlabel', 'Time (s)'))
     ax.set_ylabel(t.get('df_bright_ylabel',
                         'Absolute magnitude (100 km)'))
+    if dec != '.':
+        from matplotlib.ticker import FuncFormatter
+        fmt = FuncFormatter(
+            lambda v, pos: f'{v:g}'.replace('.', dec))
+        ax.xaxis.set_major_formatter(fmt)
+        ax.yaxis.set_major_formatter(fmt)
     ax.legend(loc='lower right', fontsize=8, framealpha=.8)
     ax.grid(alpha=.3)
     fig.tight_layout()

@@ -245,10 +245,10 @@
  "df_frag_light_unavailable": "Modellsammenlikning utilgjengelig: ingen brukbar observert kamera-lyskurve.",
  "df_frag_warn_inversion": "Masseinversjonen for toppmagnitude feila for dette eksperimentet; det vises som utilgjengelig i stedet for å få en erstatningsmasse.",
  "df_frag_disintegration": "Desintegrasjon (illustrativ)",
- "df_bright_caption": "Samlet lysstyrkeestimat (absolutt størrelsesklasse)",
- "df_bright_legend": "samlet estimat",
+ "df_bright_caption": "Samla lysstyrkeestimat (absolutt størrelse)",
+ "df_bright_legend": "samla estimat",
  "df_bright_xlabel": "Tid (s)",
- "df_bright_ylabel": "Absolutt størrelsesklasse (100 km)",
- "df_bright_peak": "topp {mag:.2f} mag ved {alt:.1f} km høyde",
+ "df_bright_ylabel": "Absolutt størrelse (100 km)",
+ "df_bright_peak": "topp {mag:.2f} mag ved {alt:.1f} km høgde",
  "df_bright_peak_noalt": "topp {mag:.2f} mag"
 }

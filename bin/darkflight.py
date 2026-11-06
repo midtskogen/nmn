@@ -4023,12 +4023,15 @@ def _write_brightness_plot(report, out_svg, translations=None):
     ax.annotate(label, (peak_t, peak_m), xytext=(-8, 10),
                 textcoords='offset points', fontsize=9,
                 fontweight='bold', ha='right')
-    # altitude markers along the curve every 5 km, with leader lines
+    # altitude markers along the curve every 5 km; labels sit in a
+    # row along the bottom edge at each marker's time, connected by
+    # thin leader lines — guaranteed clear of the curve
     if times.size > 1 and heights.size == times.size:
         order = np.argsort(times)
         tt, hh = times[order], heights[order]
         hi_level = math.floor(float(np.nanmax(hh)) / 5.0) * 5.0
         levels = np.arange(hi_level, float(np.nanmin(hh)), -5.0)
+        marks = []
         for n, level in enumerate(levels):
             below = np.nonzero(hh <= level)[0]
             if not len(below):
@@ -4042,21 +4045,21 @@ def _write_brightness_plot(report, out_svg, translations=None):
             alt_txt = f'{level:.1f} km'
             if dec != '.':
                 alt_txt = alt_txt.replace('.', dec)
-            # labels above the curve alternate sides; near the peak
-            # move them below so they keep clear of the annotation,
-            # and flip inward near the time edges
-            dx = -12 if n % 2 else 12
-            ha = 'right' if n % 2 else 'left'
-            dy = -20 if abs(t_lvl - peak_t) < 0.6 else 10
-            if t_lvl > hi - 0.9:
-                dx, ha = -14, 'right'
-            elif t_lvl < lo + 0.9:
-                dx, ha = 14, 'left'
-            ax.annotate(alt_txt, (t_lvl, m_lvl), xytext=(dx, dy),
-                        textcoords='offset points', fontsize=7,
-                        color='0.25', ha=ha,
-                        arrowprops={'arrowstyle': '-', 'lw': 0.5,
-                                    'color': '0.5'})
+            marks.append((t_lvl, m_lvl, alt_txt))
+        if marks:
+            # vertical label column at the dim end of the axis;
+            # expand ylim so it is inside the plot (axis is inverted)
+            top_lim, bot_lim = ax.get_ylim()
+            label_y = bot_lim - 0.4
+            ax.set_ylim(top_lim, bot_lim + 1.1)
+            for t_lvl, m_lvl, alt_txt in marks:
+                ax.annotate(alt_txt, (t_lvl, m_lvl),
+                            xytext=(t_lvl, label_y), textcoords='data',
+                            fontsize=7, color='0.25', rotation=90,
+                            ha='center', va='bottom',
+                            arrowprops={'arrowstyle': '-', 'lw': 0.5,
+                                        'color': '0.6',
+                                        'shrinkB': 2})
     ax.invert_yaxis()
     ax.set_xlabel(t.get('df_bright_xlabel', 'Time (s)'))
     ax.set_ylabel(t.get('df_bright_ylabel',

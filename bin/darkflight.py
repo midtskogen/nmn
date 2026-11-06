@@ -4883,6 +4883,37 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                            'times': np.asarray(times, dtype=float).tolist(),
                            'heights': lc_heights,
                            'centre_mag': peak_mag}
+            # photometric entry mass: integrate each inlier camera's
+            # radiated power L = 1500*10^(-0.4*M) over its coverage,
+            # take the median integral, scale it onto the magnitude
+            # centre, and divide by tau*v^2 — an independent
+            # energy-based entry-mass estimate
+            if lc_curves and np.isfinite(speed) and speed > 0:
+                energies = []
+                for c in lc_curves:
+                    _tc = np.asarray(c['t'])
+                    _mc = np.asarray(c['m'])
+                    _o = np.argsort(_tc)
+                    _L = 1500.0 * 10.0 ** (-0.4 * _mc[_o])
+                    energies.append(
+                        float(np.trapz(_L, _tc[_o])))
+                anchor_off = (peak_mag - bound_mag
+                              if bound_mag is not None else 0.0)
+                e_med = (float(np.median(energies))
+                         * 10.0 ** (-0.4 * anchor_off))
+                tau = min(0.20, max(0.001, 0.0007 * speed / 1000.0))
+                m_phot = 2.0 * e_med / (tau * speed ** 2)
+                dur = (max(max(c['t']) for c in lc_curves)
+                       - min(min(c['t']) for c in lc_curves))
+                e_txt = (f'{e_med / 1e9:.2f} GJ' if e_med >= 1e9
+                         else f'{e_med / 1e6:.0f} MJ')
+                logging.info(
+                    'Forward entry: photometric entry mass %.1f kg — '
+                    'integrated inlier light curve %s over %.1f s '
+                    'at %.1f km/s (luminous efficiency %.3f)',
+                    m_phot, e_txt, dur, speed / 1000.0, tau)
+                light_curve['photometric_entry_mass_kg'] = m_phot
+                light_curve['radiated_energy_j'] = e_med
         else:
             logging.info('Forward entry: magnitude sweep found no model '
                          'fit; falling back to deceleration masses')

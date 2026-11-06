@@ -4029,14 +4029,18 @@ def _write_brightness_plot(report, out_svg, translations=None):
     if times.size > 1 and heights.size == times.size:
         order = np.argsort(times)
         tt, hh = times[order], heights[order]
-        # smooth out fit wobble so the descent is monotonic — a
-        # meteor cannot speed up; raw merged heights have kinks that
-        # would place the crossings at misleading times
-        try:
-            from scipy.ndimage import gaussian_filter1d
-            hh = gaussian_filter1d(hh, 2.0)
-        except Exception:
-            pass
+        # constant-deceleration fit: h(t) must be a CONVEX curve —
+        # the descent slope can only flatten, never steepen (a meteor
+        # cannot speed up). Raw merged heights have fit wobble and
+        # steps that would place the crossings at misleading times.
+        # A concave fit would imply acceleration — fall back to linear.
+        if len(tt) > 3:
+            c2, c1, c0 = np.polyfit(tt, hh, 2)
+            if c2 < 0:
+                c1, c0 = np.polyfit(tt, hh, 1)
+                hh = np.polyval([c1, c0], tt)
+            else:
+                hh = np.polyval([c2, c1, c0], tt)
         hh = np.minimum.accumulate(hh)
         hi_level = math.floor(float(np.nanmax(hh)) / 5.0) * 5.0
         levels = np.arange(hi_level, float(np.nanmin(hh)), -5.0)

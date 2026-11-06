@@ -272,6 +272,7 @@ class Config:
     SVG_DEFAULT_DPI = 300
     SVG_MAP_DPI = 80
     SVG_DARKFLIGHT_DPI = 450
+    SVG_BRIGHT_DPI = 240
     SVG_ORBIT_DPI = 100
     
     # Tweet settings
@@ -1569,7 +1570,7 @@ def _run_darkflight(event_dir, darkflight_options=None, analysis_results=None, f
         if bright_svg.exists():
             svg_to_jpg(bright_svg,
                        event_dir / f'{file_prefix}map_darkflight_bright.jpg',
-                       Config.SVG_DARKFLIGHT_DPI)
+                       Config.SVG_BRIGHT_DPI)
     if (not options.fragmentation_model and df_results
             and df_results.get('scenarios')):
         _append_darkflight_table(event_dir, df_results, SUPPORTED_LANGS, DEFAULT_LANG)

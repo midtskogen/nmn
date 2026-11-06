@@ -4197,14 +4197,23 @@ def _observed_peak_magnitude_bound(observed):
         return None, [], False
     peak_mags = np.asarray([-2.5 * math.log10(p[1] / 1500.0)
                             for p in peaks])
-    # consistency via a majority inlier test: a single miscalibrated
-    # camera must not veto a cluster that actually agrees — the bound
-    # is consistent when at least half the cameras sit within ±1.25
-    # mag of the median, and the bound itself is the inlier median
-    med = float(np.median(peak_mags))
-    inlier = np.abs(peak_mags - med) <= 1.25
-    consistent = len(peaks) >= 2 and int(inlier.sum()) >= max(
-        2, len(peaks) // 2)
+    # asymmetric consistency: a camera can read DIMMER than truth —
+    # trees, clouds and horizon haze attenuate the glare — but
+    # attenuation cannot make it record a bound BRIGHTER than the
+    # true peak. Anchor on the brightest bound that has support
+    # (another camera within ±1.25 mag); lone overbright excursions
+    # get no support and fall through to the next candidate.
+    order = np.argsort(peak_mags)
+    anchor = None
+    for idx in order:
+        if int((np.abs(peak_mags - peak_mags[idx])
+                <= 1.25).sum()) >= 2:
+            anchor = float(peak_mags[idx])
+            break
+    if anchor is None:
+        anchor = float(np.median(peak_mags))
+    inlier = np.abs(peak_mags - anchor) <= 1.25
+    consistent = len(peaks) >= 2 and int(inlier.sum()) >= 2
     bound_flux = ([p[1] for p, ok in zip(peaks, inlier) if ok]
                   if inlier.any() else [p[1] for p in peaks])
     bound = float(-2.5 * math.log10(

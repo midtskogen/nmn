@@ -3196,6 +3196,8 @@ def load_language_files():
 def _clean_outputs(event_dir):
     """Remove generated dark-flight artifacts (maps, tables, exports)."""
     for pat in ('map_darkflight.*', '*_map_darkflight.*',
+                'map_darkflight_bright.*',
+                '*_map_darkflight_bright.*',
                 'darkflight_map3d.html', '*_darkflight_map3d.html',
                 'darkflight.geojson', 'darkflight.kml',
                 'fragmentation.json', 'fragmentation_summary.csv',
@@ -5274,6 +5276,8 @@ def _install_fragmentation_outputs(staged, event_dir):
     for product in staged.iterdir():
         product.replace(event_dir / product.name)
     for pattern in ('map_darkflight.*', '*_map_darkflight.*',
+                    'map_darkflight_bright.*',
+                    '*_map_darkflight_bright.*',
                     'darkflight_map3d.html', '*_darkflight_map3d.html',
                     'darkflight.json', 'darkflight.geojson', 'darkflight.kml',
                     'fragmentation.json', 'fragmentation_summary.csv',
@@ -5439,17 +5443,18 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
         if preferred_experiment else None)
     event_wind_csv = (Path(report['event_dir']) / 'wind_profile.csv'
                       if report.get('event_dir') else None)
-    try:
-        _write_brightness_plot(
-            report, output_dir / 'map_darkflight_bright.svg')
-    except Exception as e:
-        logging.warning(f'brightness light-curve plot failed: {e}')
     write_geojson(scenarios, output_dir / 'darkflight.geojson',
                   mc_impacts=mc_impacts)
     write_kml(interactive_scenarios, end_llh, output_dir / 'darkflight.kml',
               mc_impacts=interactive_mc, mc_assumed=True)
     has_impacts = any(s['results'] for s in interactive_scenarios)
     for prefix, translations in (lang_files or load_language_files()).items():
+        try:
+            _write_brightness_plot(
+                report, output_dir / f'{prefix}map_darkflight_bright.svg',
+                translations=translations)
+        except Exception as e:
+            logging.warning(f'brightness light-curve plot failed: {e}')
         title = translations.get(
             'df_frag_map_title' if has_impacts else 'df_frag_map_no_impacts',
             'Modelled fragmentation impacts' if has_impacts else

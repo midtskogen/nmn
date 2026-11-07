@@ -4827,6 +4827,90 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
         except Exception as e:
             logging.info('Forward entry: deceleration-consistency mass '
                          'unavailable: %s', e)
+    def _build_observed_light_curve(centre_mag, bound_mag, bound_rows):
+        """Unified brightness-curve inputs: per-camera 100-km
+        magnitudes vs time gated by the peak-bound rows, plus the
+        photometric entry-mass integration.  Shared by the sweep path
+        and a supplied --mag."""
+        inlier_cams = ({cam for cam, *_, ok in bound_rows if ok}
+                       if bound_rows else None)
+        # dim-side outliers are attenuation suspects for the peak
+        # bound, but their time series still carries the fade —
+        # often the only cameras still tracking at the end.  Include
+        # them in the curve unless grossly occluded (>2.5 mag below
+        # the bound — e.g. a camera behind a tree)
+        if bound_rows and bound_mag is not None:
+            inlier_cams = (inlier_cams or set()) | {
+                cam for cam, m_norm, _app, _sat, _r, ok in bound_rows
+                if not ok and bound_mag < m_norm <= bound_mag + 2.5}
+        lc_curves = []
+        for cam in observed or []:
+            if (inlier_cams is not None
+                    and cam.get('cam') not in inlier_cams):
+                continue
+            if cam.get('source') not in ('video', 'event_txt'):
+                continue
+            _t = np.asarray(cam.get('t'), dtype=float) \
+                if cam.get('t') is not None else np.array([])
+            _f = np.asarray(cam.get('flux'), dtype=float) \
+                if cam.get('flux') is not None else np.array([])
+            _s = np.asarray(cam.get('sat'), dtype=bool) \
+                if cam.get('sat') is not None else np.array([])
+            _n = min(_t.size, _f.size)
+            _m = ((_f > 0) & np.isfinite(_f)
+                  & np.isfinite(_t))[:_n]
+            _sat = np.zeros(_n, dtype=bool)
+            _k = min(_s.size, _n)
+            _sat[:_k] = _s[:_k]  # sat may lag flux by a point
+            _sat = _sat[_m]
+            if _m.sum() >= 3:
+                lc_curves.append({
+                    'cam': cam.get('cam'), 't': _t[:_n][_m].tolist(),
+                    'm': (-2.5 * np.log10(
+                        _f[:_n][_m] / 1500.0)).tolist(),
+                    'sat': _sat.tolist()})
+        try:
+            lc_heights = np.asarray(
+                plot_data['final_merged_data']['height'],
+                dtype=float).tolist()
+        except (KeyError, TypeError, ValueError):
+            lc_heights = []
+        light_curve = {'curves': lc_curves,
+                       'times': np.asarray(times, dtype=float).tolist(),
+                       'heights': lc_heights,
+                       'centre_mag': centre_mag}
+        # photometric entry mass: integrate each inlier camera's
+        # radiated power L = 1500*10^(-0.4*M) over its coverage,
+        # take the median integral, scale it onto the magnitude
+        # centre, and divide by tau*v^2 — an independent
+        # energy-based entry-mass estimate
+        if lc_curves and np.isfinite(speed) and speed > 0:
+            energies = []
+            for c in lc_curves:
+                _tc = np.asarray(c['t'])
+                _mc = np.asarray(c['m'])
+                _o = np.argsort(_tc)
+                _L = 1500.0 * 10.0 ** (-0.4 * _mc[_o])
+                energies.append(
+                    float(np.trapz(_L, _tc[_o])))
+            anchor_off = (centre_mag - bound_mag
+                          if bound_mag is not None else 0.0)
+            e_med = (float(np.median(energies))
+                     * 10.0 ** (-0.4 * anchor_off))
+            tau = min(0.20, max(0.001, 0.0007 * speed / 1000.0))
+            m_phot = 2.0 * e_med / (tau * speed ** 2)
+            dur = (max(max(c['t']) for c in lc_curves)
+                   - min(min(c['t']) for c in lc_curves))
+            m_txt, e_txt = _fmt_mass_energy(m_phot, e_med)
+            logging.info(
+                'Forward entry: photometric entry mass %s — '
+                'integrated inlier light curve %s over %.1f s '
+                'at %.1f km/s (luminous efficiency %.3f)',
+                m_txt, e_txt, dur, speed / 1000.0, tau)
+            light_curve['photometric_entry_mass_kg'] = m_phot
+            light_curve['radiated_energy_j'] = e_med
+        return light_curve
+
     pair_best_mag = {}
     if (entry_masses is None and not invert_mass and observed
             and observed_peak_estimate is None):
@@ -4981,89 +5065,21 @@ def run_fragmentation_models(event_dir, resdat, plot_data, output_dir,
                         '' if adj_app is None else
                         f'app {"≤" if sat else "="}{adj_app:>5.1f}',
                         '' if ok else '   [outlier: excluded]')
-            # unified brightness plot inputs: calibrated inlier
-            # cameras' per-point 100-km magnitudes vs time, plus the
-            # trajectory height table for the peak annotation
-            inlier_cams = ({cam for cam, *_, ok in bound_rows if ok}
-                           if bound_rows else None)
-            # dim-side outliers are attenuation suspects for the peak
-            # bound, but their time series still carries the fade —
-            # often the only cameras still tracking at the end.
-            # Include them in the curve unless grossly occluded
-            # (>2.5 mag below the bound — e.g. a camera behind a tree)
-            if bound_rows and bound_mag is not None:
-                inlier_cams = (inlier_cams or set()) | {
-                    cam for cam, m_norm, _app, _sat, _r, ok in bound_rows
-                    if not ok and bound_mag < m_norm <= bound_mag + 2.5}
-            lc_curves = []
-            for cam in observed or []:
-                if (inlier_cams is not None
-                        and cam.get('cam') not in inlier_cams):
-                    continue
-                if cam.get('source') not in ('video', 'event_txt'):
-                    continue
-                _t = np.asarray(cam.get('t'), dtype=float) \
-                    if cam.get('t') is not None else np.array([])
-                _f = np.asarray(cam.get('flux'), dtype=float) \
-                    if cam.get('flux') is not None else np.array([])
-                _s = np.asarray(cam.get('sat'), dtype=bool) \
-                    if cam.get('sat') is not None else np.array([])
-                _n = min(_t.size, _f.size)
-                _m = ((_f > 0) & np.isfinite(_f)
-                      & np.isfinite(_t))[:_n]
-                _sat = np.zeros(_n, dtype=bool)
-                _k = min(_s.size, _n)
-                _sat[:_k] = _s[:_k]  # sat may lag flux by a point
-                _sat = _sat[_m]
-                if _m.sum() >= 3:
-                    lc_curves.append({
-                        'cam': cam.get('cam'), 't': _t[:_n][_m].tolist(),
-                        'm': (-2.5 * np.log10(
-                            _f[:_n][_m] / 1500.0)).tolist(),
-                        'sat': _sat.tolist()})
-            try:
-                lc_heights = np.asarray(
-                    plot_data['final_merged_data']['height'],
-                    dtype=float).tolist()
-            except (KeyError, TypeError, ValueError):
-                lc_heights = []
-            light_curve = {'curves': lc_curves,
-                           'times': np.asarray(times, dtype=float).tolist(),
-                           'heights': lc_heights,
-                           'centre_mag': peak_mag}
-            # photometric entry mass: integrate each inlier camera's
-            # radiated power L = 1500*10^(-0.4*M) over its coverage,
-            # take the median integral, scale it onto the magnitude
-            # centre, and divide by tau*v^2 — an independent
-            # energy-based entry-mass estimate
-            if lc_curves and np.isfinite(speed) and speed > 0:
-                energies = []
-                for c in lc_curves:
-                    _tc = np.asarray(c['t'])
-                    _mc = np.asarray(c['m'])
-                    _o = np.argsort(_tc)
-                    _L = 1500.0 * 10.0 ** (-0.4 * _mc[_o])
-                    energies.append(
-                        float(np.trapz(_L, _tc[_o])))
-                anchor_off = (peak_mag - bound_mag
-                              if bound_mag is not None else 0.0)
-                e_med = (float(np.median(energies))
-                         * 10.0 ** (-0.4 * anchor_off))
-                tau = min(0.20, max(0.001, 0.0007 * speed / 1000.0))
-                m_phot = 2.0 * e_med / (tau * speed ** 2)
-                dur = (max(max(c['t']) for c in lc_curves)
-                       - min(min(c['t']) for c in lc_curves))
-                m_txt, e_txt = _fmt_mass_energy(m_phot, e_med)
-                logging.info(
-                    'Forward entry: photometric entry mass %s — '
-                    'integrated inlier light curve %s over %.1f s '
-                    'at %.1f km/s (luminous efficiency %.3f)',
-                    m_txt, e_txt, dur, speed / 1000.0, tau)
-                light_curve['photometric_entry_mass_kg'] = m_phot
-                light_curve['radiated_energy_j'] = e_med
+            light_curve = _build_observed_light_curve(
+                peak_mag, bound_mag, bound_rows)
         else:
             logging.info('Forward entry: magnitude sweep found no model '
                          'fit; falling back to deceleration masses')
+    if (locals().get('light_curve') is None and entry_masses is None
+            and observed and peak_mag is not None):
+        # a supplied --mag still anchors the unified light curve —
+        # the dynamical sweep is skipped but the photometry is real
+        b_mag, _bd, b_cons, b_rows = _observed_peak_magnitude_bound(
+            observed)
+        if not b_cons:
+            b_mag = None
+        light_curve = _build_observed_light_curve(
+            peak_mag, b_mag, b_rows)
     if sweep_only:
         logging.info('--sweep-only: stopping after centre diagnostics '
                      '(peak_mag=%s, source=%s)', peak_mag, peak_mag_source)

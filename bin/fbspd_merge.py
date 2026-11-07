@@ -879,6 +879,29 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
     station_obs_split = _split_obs_by_gaps(station_obs, debug=debug)
     if not station_obs_split: print("Error: No data fragments left after splitting."); return None, None
 
+    # Stuck-centroid guard: a glowing or saturated trail can hold the
+    # centroid at one pixel through the trailing frames — identical
+    # along-track positions with advancing time inject bogus (t, s)
+    # pairs into the timing fit.  Drop the repeats, keep the first.
+    for obs in station_obs_split:
+        _pos = obs.get('pos')
+        if not isinstance(_pos, np.ndarray) or _pos.size < 2:
+            continue
+        drop = np.zeros(_pos.size, dtype=bool)
+        for j in range(_pos.size - 1, 0, -1):
+            if abs(_pos[j] - _pos[j - 1]) < 0.02:
+                drop[j] = True
+            else:
+                break
+        if drop.any():
+            keep = ~drop
+            for k, a in list(obs.items()):
+                if (isinstance(a, np.ndarray) and a.shape[:1]
+                        == (_pos.size,)):
+                    obs[k] = a[keep]
+            print(f"Trimmed {int(drop.sum())} stuck-centroid tail "
+                  f"point(s) from '{obs['site_info']['name']}'.")
+
     print("\n--- Trying Timing Strategy 1: Triplet-based physical fit ---")
     offsets_A_initial = _find_offsets_by_triplet_method(list(station_obs_split), debug=debug); offsets_A_final = _refine_offsets_by_projection_method(list(station_obs_split), offsets_A_initial, debug=debug, min_speed=min_speed); merged_A, _, _ = _merge_and_sort_station_data(station_obs_split, offsets_A_final); time_A = merged_A['reltime'] - merged_A['reltime'][0] if merged_A['reltime'].size > 0 else merged_A['reltime']; params_A, n_ok_A, pcov_A, cost_A = _fit_merged_data_with_cost(time_A, merged_A['pos'], merged_A['sig'], debug, fscale, min_speed)
 
@@ -895,6 +918,37 @@ def calculate_speed_profile(resname: str, cennames: List[str], datname: str, deb
         
     final_merged_data, station_id_array, station_names = _merge_and_sort_station_data(station_obs_split, final_offsets); first_obs_time = final_merged_data['reltime'][0]; final_merged_data['reltime'] -= first_obs_time
     if debug: print(f"Time axis shifted by {-first_obs_time:.4f}s to set t=0 at first observation.")
+
+    # Per-point rejection: a stuck or flash-snapped centroid injects
+    # isolated bad (t, s) pairs that station-level outlier checks
+    # cannot see.  They can only lag the head — a detection cannot
+    # physically run ahead of it — so only large NEGATIVE residuals
+    # are rejected; positive tail residuals are model saturation, not
+    # bad data.  Refit once without them.
+    _resid = final_merged_data['pos'] - expfunc(
+        final_merged_data['reltime'], *final_params)
+    _mad = median_abs_deviation(_resid, scale='normal')
+    _cut = max(3.0, 4.0 * _mad)
+    _bad = _resid < -_cut
+    if np.any(_bad) and int((~_bad).sum()) >= MIN_POINTS_FOR_EXP_FIT:
+        _keep = ~_bad
+        _refit, _n_ok_r, _pcov_r, _ = _fit_merged_data_with_cost(
+            final_merged_data['reltime'][_keep],
+            final_merged_data['pos'][_keep],
+            final_merged_data['sig'][_keep], debug, fscale, min_speed)
+        if _refit is not None:
+            _rej = sorted({station_names[int(s)]
+                           for s in station_id_array[_bad]})
+            for k, a in list(final_merged_data.items()):
+                if (isinstance(a, np.ndarray)
+                        and a.shape[:1] == (_bad.size,)):
+                    final_merged_data[k] = a[_keep]
+            station_id_array = station_id_array[_keep]
+            final_params, n_ok, pcov = _refit, _n_ok_r, _pcov_r
+            print(f"Rejected {int(_bad.sum())} along-track outlier "
+                  f"point(s) ({', '.join(_rej)}) lagging >{_cut:.1f} "
+                  f"km behind the head — stuck/flash centroid "
+                  f"artifacts.")
 
     print("\n--- Per-Station Fit Error ---"); station_errors, worst_station_idx = [], None
     worst_source_index, worst_station_code = None, None

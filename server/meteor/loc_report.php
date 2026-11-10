@@ -291,7 +291,7 @@ table img {
           <?php if ($map_jpg_display) echo "<a href='obs_{$date}_{$time}.kml'><img src='{$map_jpg_display}' alt='map'></a>"; ?>
         </div>
         <?php if ($map_html_display):
-            echo "<script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('map-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '$map_html_display'; ph.parentNode.replaceChild(iframe, ph); } });</script>";
+            echo "<script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('map-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.loading='lazy'; iframe.src = '$map_html_display'; ph.parentNode.replaceChild(iframe, ph); } });</script>";
             if ($map_jpg_display) echo "<p class='text-center'><a href='{$map_jpg_display}'>" . htmlspecialchars($t['non_interactive_map'] ?? 'Non-interactive map') . "</a> | <a href='obs_{$date}_{$time}.kml'>" . htmlspecialchars($t['kml_file'] ?? 'KML file') . "</a></p>";
         endif; ?>
       </div>
@@ -311,7 +311,7 @@ table img {
           <?php if ($orbit_jpg_display) echo "<img src='{$orbit_jpg_display}' alt='orbit plot'>"; ?>
         </div>
         <?php if ($orbit_html_display):
-          echo "<script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('orbit-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.src = '$orbit_html_display'; ph.parentNode.replaceChild(iframe, ph); } });</script>";
+          echo "<script>document.addEventListener('DOMContentLoaded', function() { var ph = document.getElementById('orbit-placeholder'); if (ph) { var iframe = document.createElement('iframe'); iframe.loading='lazy'; iframe.src = '$orbit_html_display'; ph.parentNode.replaceChild(iframe, ph); } });</script>";
           if ($orbit_jpg_display) echo "<p class='text-center'><a href='{$orbit_jpg_display}'>" . htmlspecialchars($t['non_interactive_plot'] ?? 'Non-interactive plot') . "</a></p>";
         endif; ?>
       </div>

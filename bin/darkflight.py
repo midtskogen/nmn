@@ -2983,13 +2983,25 @@ def write_map3d(scenarios, end_llh, mc_impacts, out_html,
     # MC impacts — lifted slightly above the ground plane so they
     # don't z-fight with the textured surface
     if mc_impacts:
-        for impact in mc_impacts:
+        # cap the faint member corridors — one ~200-point trace per
+        # MC member is ~10 MB of serialized coordinates in every
+        # language file; a few dozen evenly spaced members show the
+        # same ensemble shape.  Impact markers below still show all.
+        mc_paths = mc_impacts
+        if len(mc_paths) > 25:
+            mc_paths = [mc_impacts[i] for i in
+                        np.linspace(0, len(mc_impacts) - 1,
+                                    25).astype(int)]
+        for impact in mc_paths:
             trajectory = impact.get('trajectory') or {}
             lon_mc, lat_mc, h_mc = _clip_track_max_h(
                 trajectory.get('lon', []), trajectory.get('lat', []),
                 trajectory.get('h', []))
             if len(lon_mc) < 2:
                 continue
+            st = max(1, len(lon_mc) // 120)
+            lon_mc = lon_mc[::st]; lat_mc = lat_mc[::st]
+            h_mc = h_mc[::st]
             mx_path, my_path = project_points(lon_mc, lat_mc)
             traces.append(go.Scatter3d(
                 x=mx_path, y=my_path, z=h_mc / 1000.0,
@@ -5778,6 +5790,18 @@ def _publish_fragmentation(report, output_dir, lang_files=None):
                              + html.escape(unavailable) + '</p>', encoding='utf-8')
         _write_fragmentation_table(report, output_dir / f'{prefix}darkflight_table.html', translations)
     write_json(report, output_dir / 'darkflight.json')
+    # fragmentation.json is the same report under a legacy name —
+    # hardlink it instead of storing ~40 MB twice
+    frag_json = output_dir / 'fragmentation.json'
+    try:
+        if (frag_json.exists()
+                and not os.path.samefile(
+                    frag_json, output_dir / 'darkflight.json')):
+            frag_json.unlink()
+        if not frag_json.exists():
+            os.link(output_dir / 'darkflight.json', frag_json)
+    except OSError:
+        pass
 
 
 def _fragmentation_warning_text(warning, translations):

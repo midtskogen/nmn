@@ -511,7 +511,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
     <div class="row">
       <?php if ($map_html && $map_jpg): ?>
         <div class="col">
-          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4mp');if(p){var f=document.createElement('iframe');f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>
+          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4mp');if(p){var f=document.createElement('iframe');f.loading='lazy';f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>
           <div id="s4mp"></div>
           <p class="caption">
             <a href="obs_<?php echo $date;?>_<?php echo $time;?>.kml"><?php echo htmlspecialchars($t['kml_file']??'KML'); ?></a>
@@ -524,7 +524,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
         </div>
       <?php elseif ($map_html): ?>
         <div class="col">
-          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4mp');if(p){var f=document.createElement('iframe');f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);}});</script>
+          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4mp');if(p){var f=document.createElement('iframe');f.loading='lazy';f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);}});</script>
           <div id="s4mp"></div>
           <p class="caption">
             <a href="obs_<?php echo $date;?>_<?php echo $time;?>.kml"><?php echo htmlspecialchars($t['kml_file']??'KML'); ?></a>
@@ -556,7 +556,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
       <div class="col">
         <div id="s4op"><?php if ($orbit_jpg) echo "<img class='plot' src='{$orbit_jpg}' alt='orbit'>"; ?></div>
         <?php if ($orbit_html):
-          echo "<script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4op');if(p){var f=document.createElement('iframe');f.src='{$orbit_html}';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>";
+          echo "<script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4op');if(p){var f=document.createElement('iframe');f.loading='lazy';f.src='{$orbit_html}';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>";
           echo "<p class='caption'>";
           if ($orbit_jpg) echo "<a href='{$orbit_jpg}'>".htmlspecialchars($t['non_interactive_plot']??'Static')."</a> | ";
           echo "<a href='{$orbit_html}'>".htmlspecialchars($t['interactive_plot']??'Interactive')."</a></p>";
@@ -587,7 +587,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
       <div class="col">
         <?php if ($df_table) readfile($df_table); ?>
         <?php if ($df_3d): ?>
-          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4df');if(p){var f=document.createElement('iframe');f.src='<?php echo $df_3d;?>';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>
+          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4df');if(p){var f=document.createElement('iframe');f.loading='lazy';f.src='<?php echo $df_3d;?>';p.parentNode.replaceChild(f,p);nmnMatchIframeHeight(f);}});</script>
           <div id="s4df"></div>
           <p class="caption"><a href="<?php echo $df_3d;?>"><?php echo htmlspecialchars($t['interactive_map']??'Interactive map'); ?></a></p>
         <?php endif; ?>
@@ -771,7 +771,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
     <div class="row">
       <?php if ($map_html && $map_jpg): ?>
         <div class="col">
-          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4smp');if(p){var f=document.createElement('iframe');f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);}});</script>
+          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4smp');if(p){var f=document.createElement('iframe');f.loading='lazy';f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);}});</script>
           <div id="s4smp"></div>
           <p class="caption">
             <a href="obs_<?php echo $date;?>_<?php echo $time;?>.kml"><?php echo htmlspecialchars($t['kml_file']??'KML'); ?></a>
@@ -784,7 +784,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
         </div>
       <?php elseif ($map_html): ?>
         <div class="col">
-          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4smp');if(p){var f=document.createElement('iframe');f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);}});</script>
+          <script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4smp');if(p){var f=document.createElement('iframe');f.loading='lazy';f.src='<?php echo $map_html;?>';p.parentNode.replaceChild(f,p);}});</script>
           <div id="s4smp"></div>
           <p class="caption">
             <a href="obs_<?php echo $date;?>_<?php echo $time;?>.kml"><?php echo htmlspecialchars($t['kml_file']??'KML'); ?></a>
@@ -815,7 +815,7 @@ body.theme-dark iframe { mix-blend-mode: lighten; }
       <div class="col">
         <div id="s4sop"><?php if ($orbit_jpg) echo "<img class='plot' src='{$orbit_jpg}' alt='orbit'>"; ?></div>
         <?php if ($orbit_html):
-          echo "<script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4sop');if(p){var f=document.createElement('iframe');f.src='{$orbit_html}';p.parentNode.replaceChild(f,p);}});</script>";
+          echo "<script>document.addEventListener('DOMContentLoaded',function(){var p=document.getElementById('s4sop');if(p){var f=document.createElement('iframe');f.loading='lazy';f.src='{$orbit_html}';p.parentNode.replaceChild(f,p);}});</script>";
           echo "<p class='caption'>";
           if ($orbit_jpg) echo "<a href='{$orbit_jpg}'>".htmlspecialchars($t['non_interactive_plot']??'Static')."</a> | ";
           echo "<a href='{$orbit_html}'>".htmlspecialchars($t['interactive_plot']??'Interactive')."</a></p>";

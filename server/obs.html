@@ -1634,25 +1634,64 @@
             if (parts.length === 2) return parts.pop().split(';').shift();
         }
 
-        function getLanguage() {
-            const supportedLangs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI', 'lv_LV'];
-            const urlParams = new URLSearchParams(window.location.search);
-            const langParam = urlParams.get('lang');
+        const SUPPORTED_LANGS = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI', 'lv_LV'];
+        const NORWEGIAN_CODES = ['nb', 'nn', 'no'];
+        const NORWEGIAN_TIMEZONES = ['Europe/Oslo', 'Arctic/Longyearbyen'];
 
-            if (langParam && supportedLangs.includes(langParam)) return langParam;
-            const cookieLang = getCookie('lang');
-            if (cookieLang && supportedLangs.includes(cookieLang)) return cookieLang;
-            
-            const browserLangs = navigator.languages || [navigator.language];
-            for (const browserLang of browserLangs) {
-                const browserLangCode = browserLang.replace('-', '_');
-                if (supportedLangs.includes(browserLangCode)) return browserLangCode;
-                const shortCode = browserLangCode.substring(0, 2);
-                const matchedLang = supportedLangs.find(l => l.startsWith(shortCode));
-                if (matchedLang) return matchedLang;
+        function matchSupportedLang(tag) {
+            const code = (tag || '').replace('-', '_');
+            if (SUPPORTED_LANGS.includes(code)) return code;
+            const shortCode = code.substring(0, 2).toLowerCase();
+            if (NORWEGIAN_CODES.includes(shortCode)) return 'nb_NO';
+            return SUPPORTED_LANGS.find(l => l.startsWith(shortCode)) || null;
+        }
+
+        // Hints that the visitor is Norwegian or in Norway: Norwegian anywhere
+        // in the browser's language list, or a Norwegian time zone.
+        function hasNorwegianHint(browserLangs) {
+            if (browserLangs.some(l => NORWEGIAN_CODES.includes((l || '').substring(0, 2).toLowerCase()))) return true;
+            try {
+                return NORWEGIAN_TIMEZONES.includes(Intl.DateTimeFormat().resolvedOptions().timeZone);
+            } catch (e) {
+                return false;
             }
-            
-            return DEFAULT_LANG;
+        }
+
+        function getStoredLang() {
+            try { return localStorage.getItem('lang'); } catch (e) { return null; }
+        }
+
+        // Remember an explicit choice. The cookie is shared with /meteor/ and /data/;
+        // localStorage covers the case where /data/ has set an HttpOnly cookie that
+        // JavaScript can neither read nor overwrite.
+        function storeLang(langCode) {
+            document.cookie = `lang=${langCode};path=/;max-age=31536000;SameSite=Lax`;
+            try { localStorage.setItem('lang', langCode); } catch (e) {}
+        }
+
+        function getLangParam() {
+            const langParam = new URLSearchParams(window.location.search).get('lang');
+            return SUPPORTED_LANGS.includes(langParam) ? langParam : null;
+        }
+
+        function getLanguage() {
+            const langParam = getLangParam();
+            if (langParam) return langParam;
+            const cookieLang = getCookie('lang');
+            if (SUPPORTED_LANGS.includes(cookieLang)) return cookieLang;
+            const storedLang = getStoredLang();
+            if (SUPPORTED_LANGS.includes(storedLang)) return storedLang;
+
+            const browserLangs = (navigator.languages && navigator.languages.length) ? navigator.languages : [navigator.language || ''];
+            let browserLang = null;
+            for (const tag of browserLangs) {
+                browserLang = matchSupportedLang(tag);
+                if (browserLang) break;
+            }
+            // Norwegian wins over English when there are signs the visitor is Norwegian or in Norway.
+            if (browserLang && browserLang !== 'en_GB') return browserLang;
+            if (hasNorwegianHint(browserLangs)) return 'nb_NO';
+            return browserLang || DEFAULT_LANG;
         }
 
         function t(key) {
@@ -1665,7 +1704,6 @@
             currentTranslation = translations[langCode];
             
             document.documentElement.lang = currentLang.substring(0, 2);
-            document.cookie = `lang=${currentLang};path=/;max-age=31536000`;
 
             document.querySelectorAll('[data-translate]').forEach(el => {
                 const key = el.dataset.translate;
@@ -3530,6 +3568,7 @@ document.getElementById("submit-btn").addEventListener("click", async (e) => {
 
         document.addEventListener('DOMContentLoaded', () => {
             const lang = getLanguage();
+            if (getLangParam()) storeLang(lang);
             translatePage(lang);
             setTimeout(resizeSkyView, 10);
 

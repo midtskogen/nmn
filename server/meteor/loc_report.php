@@ -51,6 +51,8 @@ function get_language($default_lang) {
     if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
         return $_COOKIE['lang'];
     }
+    $browser_match = null;
+    $norwegian_hint = false;
     if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
         preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1|0\.[0-9]+))?/i', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $matches);
         if (count($matches[1])) {
@@ -59,14 +61,21 @@ function get_language($default_lang) {
             arsort($langs, SORT_NUMERIC);
             foreach (array_keys($langs) as $browser_lang) {
                 $browser_lang_code = str_replace('-', '_', $browser_lang);
-                if (in_array($browser_lang_code, $supported_langs)) return $browser_lang_code;
-                $short_code = substr($browser_lang_code, 0, 2);
+                $short_code = strtolower(substr($browser_lang_code, 0, 2));
+                $is_norwegian = in_array($short_code, ['nb', 'nn', 'no'], true);
+                if ($is_norwegian) $norwegian_hint = true;
+                if ($browser_match !== null) continue;
+                if (in_array($browser_lang_code, $supported_langs)) { $browser_match = $browser_lang_code; continue; }
+                if ($is_norwegian) { $browser_match = 'nb_NO'; continue; }
                 foreach ($supported_langs as $supported) {
-                    if (substr($supported, 0, 2) === $short_code) return $supported;
+                    if (substr($supported, 0, 2) === $short_code) { $browser_match = $supported; break; }
                 }
             }
         }
     }
+    // Prefer Norwegian over English when the visitor appears to be Norwegian or in Norway.
+    if ($browser_match !== null && $browser_match !== 'en_GB') return $browser_match;
+    if ($norwegian_hint) return 'nb_NO';
     $country_to_lang_map = [
         'NO' => 'nb_NO', 'SE' => 'nb_NO', 'DK' => 'nb_NO',
         'GB' => 'en_GB', 'US' => 'en_GB', 'CA' => 'en_GB', 'AU' => 'en_GB', 'NZ' => 'en_GB', 'IE' => 'en_GB',
@@ -79,11 +88,12 @@ function get_language($default_lang) {
     $geo_data_json = geo_lookup($user_ip);
     if ($geo_data_json) {
         $geo_data = json_decode($geo_data_json);
-        if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
+        if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])
+            && ($browser_match === null || $geo_data->countryCode === 'NO')) {
             return $country_to_lang_map[$geo_data->countryCode];
         }
     }
-    return $default_lang;
+    return $browser_match ?? $default_lang;
 }
 
 // --- Main Logic ---

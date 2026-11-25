@@ -88,8 +88,7 @@ function get_user_ip() {
 function get_language($default_lang) {
     $supported_langs = ['nb_NO', 'en_GB', 'de_DE', 'cs_CZ', 'fi_FI', 'lv_LV'];
 
-    // Priority 0: Explicit ?lang= override (used by the language switcher,
-    // since JS cannot overwrite the HttpOnly lang cookie directly).
+    // Priority 0: Explicit ?lang= override (used by the language switcher).
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs, true)) {
         return $_GET['lang'];
     }
@@ -100,20 +99,32 @@ function get_language($default_lang) {
     }
 
     // Priority 2: Check the browser's Accept-Language header.
+    $browser_match = null;
+    $norwegian_hint = false;
     if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
-        $browser_lang_code = substr($_SERVER['HTTP_ACCEPT_LANGUAGE'], 0, 5);
-        $browser_lang_code = str_replace('-', '_', $browser_lang_code);
-        if (in_array($browser_lang_code, $supported_langs)) {
-            return $browser_lang_code;
-        }
-        // Fallback for partial codes like 'en'
-        $short_code = substr($browser_lang_code, 0, 2);
-        foreach ($supported_langs as $supported) {
-            if (substr($supported, 0, 2) === $short_code) {
-                return $supported;
+        preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1(?:\.0{0,3})?|0(?:\.[0-9]{0,3})?))?/i', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $matches);
+        if (count($matches[1])) {
+            $langs = array_combine($matches[1], $matches[4]);
+            foreach ($langs as $lang => $val) { if ($val === '') $langs[$lang] = 1; }
+            arsort($langs, SORT_NUMERIC);
+            foreach ($langs as $browser_lang => $q) {
+                if ((float) $q <= 0) continue;
+                $browser_lang_code = str_replace('-', '_', $browser_lang);
+                $short_code = strtolower(substr($browser_lang_code, 0, 2));
+                $is_norwegian = in_array($short_code, ['nb', 'nn', 'no'], true);
+                if ($is_norwegian) $norwegian_hint = true;
+                if ($browser_match !== null) continue;
+                if (in_array($browser_lang_code, $supported_langs)) { $browser_match = $browser_lang_code; continue; }
+                if ($is_norwegian) { $browser_match = 'nb_NO'; continue; }
+                foreach ($supported_langs as $supported) {
+                    if (substr($supported, 0, 2) === $short_code) { $browser_match = $supported; break; }
+                }
             }
         }
     }
+    // Prefer Norwegian over English when the visitor appears to be Norwegian or in Norway.
+    if ($browser_match !== null && $browser_match !== 'en_GB') return $browser_match;
+    if ($norwegian_hint) return 'nb_NO';
 
     // Priority 3: Check the user's country via their IP address.
     $country_to_lang_map = [
@@ -156,16 +167,17 @@ function get_language($default_lang) {
             'timeout' => 1,
         ],
     ]);
-    $geo_data_json = @file_get_contents("https://ip-api.com/json/{$user_ip}?fields=countryCode,status", false, $ctx);
+    $geo_data_json = @file_get_contents("http://ip-api.com/json/{$user_ip}?fields=countryCode,status", false, $ctx);
     if ($geo_data_json) {
         $geo_data = json_decode($geo_data_json);
-        if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])) {
+        if ($geo_data && $geo_data->status === 'success' && isset($country_to_lang_map[$geo_data->countryCode])
+            && ($browser_match === null || $geo_data->countryCode === 'NO')) {
             return $country_to_lang_map[$geo_data->countryCode];
         }
     }
 
-    // Priority 4: Return the hardcoded default language.
-    return $default_lang;
+    // Priority 4: Browser match, or the hardcoded default language.
+    return $browser_match ?? $default_lang;
 }
 
 $action = $_GET['action'] ?? 'get_page';
@@ -332,7 +344,6 @@ switch ($action) {
         setcookie('lang', $lang_code, [
             'expires'  => time() + 86400 * 365,
             'path'     => '/',
-            'httponly' => true,
             'secure'   => true,
             'samesite' => 'Lax',
         ]);

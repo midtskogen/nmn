@@ -38,29 +38,40 @@ function s4_get_language($default_lang) {
     $supported = ['nb_NO','en_GB','de_DE','cs_CZ','fi_FI','lv_LV'];
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported)) return $_GET['lang'];
     if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported)) return $_COOKIE['lang'];
+    $browser_match = null;
+    $norwegian_hint = false;
     if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
-        preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1|0\.[0-9]+))?/i',
-            $_SERVER['HTTP_ACCEPT_LANGUAGE'], $m);
+        preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1(?:\.0{0,3})?|0(?:\.[0-9]{0,3})?))?/i', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $m);
         if (count($m[1])) {
             $langs = array_combine($m[1], $m[4]);
-            foreach ($langs as $l => $v) { if ($v==='') $langs[$l]=1; }
+            foreach ($langs as $lang => $val) { if ($val === '') $langs[$lang] = 1; }
             arsort($langs, SORT_NUMERIC);
-            foreach (array_keys($langs) as $bl) {
-                $c = str_replace('-','_',$bl);
-                if (in_array($c,$supported)) return $c;
-                $s = substr($c,0,2);
-                foreach ($supported as $sup) { if (substr($sup,0,2)===$s) return $sup; }
+            foreach ($langs as $browser_lang => $q) {
+                if ((float) $q <= 0) continue;
+                $browser_lang_code = str_replace('-', '_', $browser_lang);
+                $short_code = strtolower(substr($browser_lang_code, 0, 2));
+                $is_norwegian = in_array($short_code, ['nb', 'nn', 'no'], true);
+                if ($is_norwegian) $norwegian_hint = true;
+                if ($browser_match !== null) continue;
+                if (in_array($browser_lang_code, $supported)) { $browser_match = $browser_lang_code; continue; }
+                if ($is_norwegian) { $browser_match = 'nb_NO'; continue; }
+                foreach ($supported as $sup) {
+                    if (substr($sup, 0, 2) === $short_code) { $browser_match = $sup; break; }
+                }
             }
         }
     }
+    // Prefer Norwegian over English when the visitor appears to be Norwegian or in Norway.
+    if ($browser_match !== null && $browser_match !== 'en_GB') return $browser_match;
+    if ($norwegian_hint) return 'nb_NO';
     $cmap = ['NO'=>'nb_NO','SE'=>'nb_NO','DK'=>'nb_NO','GB'=>'en_GB','US'=>'en_GB',
              'CA'=>'en_GB','AU'=>'en_GB','DE'=>'de_DE','AT'=>'de_DE','CH'=>'de_DE',
              'CZ'=>'cs_CZ','SK'=>'cs_CZ','FI'=>'fi_FI','LV'=>'lv_LV'];
     $ip = s4_get_user_ip();
     if (!filter_var($ip, FILTER_VALIDATE_IP)) $ip = '';
     $gj = $ip !== '' ? s4_geo_lookup($ip) : false;
-    if ($gj) { $g=json_decode($gj); if ($g&&$g->status==='success'&&isset($cmap[$g->countryCode])) return $cmap[$g->countryCode]; }
-    return $default_lang;
+    if ($gj) { $g=json_decode($gj); if ($g&&$g->status==='success'&&isset($cmap[$g->countryCode])&&($browser_match===null||$g->countryCode==='NO')) return $cmap[$g->countryCode]; }
+    return $browser_match ?? $default_lang;
 }
 
 $lang_code = s4_get_language($DEFAULT_LANG);

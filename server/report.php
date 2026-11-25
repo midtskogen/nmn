@@ -476,7 +476,7 @@ HTML;
     file_put_contents($report_file_path, $file_html);
 
     // 9. Send Email Notification (Forced to Norwegian)
-    $to = "Steinar Midtskogen <steinar@norskmeteornettverk.no>, GEOTOP <mbgeotop@gmail.com>, Tor Einar Aslesen <taslesen@gmail.com>, Arne Danielsen <arne@soleskogobservatory.com>, Runar Sandnes <post@runarsandnes.com>, Vegard Lundby Rekaa <vegard@rekaa.no>";
+    $to = "Steinar Midtskogen <steinar@norskmeteornettverk.no>, GEOTOP <mbgeotop@gmail.com>, Tor Einar Aslesen <taslesen@gmail.com>, Arne Danielsen <arne@soleskogobservatory.com>, Runar Sandnes <post@runarsandnes.com>";
 
     // Always use Norwegian for email subject and content
     $email_lang = 'nb_NO';

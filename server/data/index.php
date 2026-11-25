@@ -102,12 +102,13 @@ function get_language($default_lang) {
     $browser_match = null;
     $norwegian_hint = false;
     if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
-        preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1|0\.[0-9]+))?/i', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $matches);
+        preg_match_all('/([a-z]{1,8}(-[a-z]{1,8})?)\s*(;\s*q\s*=\s*(1(?:\.0{0,3})?|0(?:\.[0-9]{0,3})?))?/i', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $matches);
         if (count($matches[1])) {
             $langs = array_combine($matches[1], $matches[4]);
             foreach ($langs as $lang => $val) { if ($val === '') $langs[$lang] = 1; }
             arsort($langs, SORT_NUMERIC);
-            foreach (array_keys($langs) as $browser_lang) {
+            foreach ($langs as $browser_lang => $q) {
+                if ((float) $q <= 0) continue;
                 $browser_lang_code = str_replace('-', '_', $browser_lang);
                 $short_code = strtolower(substr($browser_lang_code, 0, 2));
                 $is_norwegian = in_array($short_code, ['nb', 'nn', 'no'], true);

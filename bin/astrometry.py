@@ -626,9 +626,8 @@ for (x, y, _, _, _, _, ra, dec, _, _, w, _, _) in corr[1].data:
             body.compute(pos)
             az = math.degrees(float(repr(body.az)))
             alt = math.degrees(float(repr(body.alt)))
-            alt2 = alt + 0.01666 / math.tan(math.pi/180*(alt + (7.31/(alt + 4.4))))
-            coords.append((x, y, az, alt2, ra, dec, name, mag))
-            #print(x, y, az, alt2, body.ra, body.dec, w, name, mag)
+            coords.append((x, y, az, alt, ra, dec, name, mag))
+            #print(x, y, az, alt, body.ra, body.dec, w, name, mag)
             print('%4.0f %4.0f: %s' % (x, y, name))
 
 with open(args.outfile, 'w') as f:

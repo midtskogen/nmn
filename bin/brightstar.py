@@ -79,14 +79,8 @@ def brightstar(pto_data, pos, faintest, brightest, objects, map_to_source_image=
         if not map_to_source_image:
             return (az_deg, alt_deg, name, mag)
 
-        try:
-            alt2_deg = alt_deg + 0.006 / math.tan(math.radians(alt_deg + (7.31 / (alt_deg + 4.4))))
-            alt2_rad = math.radians(alt2_deg)
-        except ValueError:
-            return None
-        
         pano_x = (az_rad / (2 * math.pi)) * pano_w
-        pano_y = (0.5 - alt2_rad / math.pi) * pano_h
+        pano_y = (0.5 - alt_rad / math.pi) * pano_h
 
         mapping = pto_mapper.map_pano_to_image(pto_data, pano_x, pano_y)
 

@@ -193,17 +193,13 @@ def recalibrate(timestamp, infile, picture, outfile, pos, **kwargs):
         # Ignore objects below the horizon (with a small margin)
         if alt_deg < -0.5:
             return 0
-        
-        # Apply a simple atmospheric refraction correction
-        alt_corrected_deg = alt_deg + 0.01666 / math.tan(math.radians(alt_deg + (7.31/(alt_deg + 4.4))))
-        alt_corrected_rad = math.radians(alt_corrected_deg)
 
         if not (brightest <= body.mag <= faintest):
             return 0
 
         # Convert celestial coordinates (az, alt) to panoramic coordinates (x, y)
         pano_x = (az_rad / (2 * math.pi)) * pano_width
-        pano_y = ((-alt_corrected_rad / math.pi) + 0.5) * pano_height
+        pano_y = ((-alt_rad / math.pi) + 0.5) * pano_height
 
         # Map panoramic coordinates to a specific image's pixel coordinates
         result = pto_mapper.map_pano_to_image(pto_data, pano_x, pano_y, restrict_to_bounds=True)

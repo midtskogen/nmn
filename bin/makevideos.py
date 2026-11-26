@@ -109,16 +109,6 @@ except Exception:
 LAST_AZALT_COORDS = None
 
 # --- Helper Functions ---
-def refraction(alt):
-    """
-    Applies atmospheric refraction correction to an altitude in degrees.
-    """
-    if alt + 4.4 == 0: return alt
-    tan_arg = math.radians(alt + (7.31 / (alt + 4.4)))
-    if abs(math.tan(tan_arg)) < 1e-9: return alt
-    corrected_alt = alt - 0.006 / math.tan(tan_arg)
-    return round(corrected_alt, 2)
-
 def get_dynamic_mag_limit(pto_path):
     """
     Parses the PTO file to find the Field of View (v parameter) and Image Width (w parameter).
@@ -291,9 +281,9 @@ def _convert_refined_pixels_to_azalt(refined_pixels, gnomonic_pto_data, scale):
     if not (start_pano_coords and end_pano_coords): return None
 
     corr_startaz = round(start_pano_coords[0] / scale, 2)
-    corr_startalt = refraction(90 - (start_pano_coords[1] / scale))
+    corr_startalt = round(90 - (start_pano_coords[1] / scale), 2)
     corr_endaz = round(end_pano_coords[0] / scale, 2)
-    corr_endalt = refraction(90 - (end_pano_coords[1] / scale))
+    corr_endalt = round(90 - (end_pano_coords[1] / scale), 2)
     return corr_startaz, corr_startalt, corr_endaz, corr_endalt
 
 def calculate_refined_endpoints(event_data, filenames, verbose=False):
@@ -956,7 +946,7 @@ def update_event_file(event_data, filepath="event.txt"):
                         if not pano:
                             continue
                         az = round(pano[0] / scale, 2)
-                        alt = refraction(90 - (pano[1] / scale))
+                        alt = round(90 - (pano[1] / scale), 2)
                         new_coords.append(f"{az:.2f},{alt:.2f}")
 
                     if len(new_coords) >= 2:

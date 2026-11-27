@@ -94,8 +94,8 @@ function get_language($default_lang) {
     }
 
     // Priority 1: Check for an existing language cookie.
-    if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
-        return $_COOKIE['lang'];
+    if (isset($_COOKIE['lang_choice']) && in_array($_COOKIE['lang_choice'], $supported_langs)) {
+        return $_COOKIE['lang_choice'];
     }
 
     // Priority 2: Check the browser's Accept-Language header.
@@ -341,12 +341,14 @@ switch ($action) {
             http_response_code(500);
             die("Language file not found for code: " . htmlspecialchars($lang_code, ENT_QUOTES, 'UTF-8'));
         }
-        setcookie('lang', $lang_code, [
-            'expires'  => time() + 86400 * 365,
-            'path'     => '/',
-            'secure'   => true,
-            'samesite' => 'Lax',
-        ]);
+        if (isset($_GET['lang']) && $_GET['lang'] === $lang_code) {
+            setcookie('lang_choice', $lang_code, [
+                'expires'  => time() + 86400 * 365,
+                'path'     => '/',
+                'secure'   => true,
+                'samesite' => 'Lax',
+            ]);
+        }
         $command = $PYTHON_EXECUTABLE . ' ' . escapeshellarg($PYTHON_SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($lang_file) . ' ' . escapeshellarg($csrf_token);
         echo shell_exec($command);
         break;

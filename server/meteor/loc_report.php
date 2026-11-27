@@ -48,8 +48,8 @@ function get_language($default_lang) {
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs)) {
         return $_GET['lang'];
     }
-    if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
-        return $_COOKIE['lang'];
+    if (isset($_COOKIE['lang_choice']) && in_array($_COOKIE['lang_choice'], $supported_langs)) {
+        return $_COOKIE['lang_choice'];
     }
     $browser_match = null;
     $norwegian_hint = false;
@@ -99,7 +99,9 @@ function get_language($default_lang) {
 
 // --- Main Logic ---
 $lang_code = get_language($DEFAULT_LANG);
-setcookie('lang', $lang_code, time() + (86400 * 365), "/");
+if (isset($_GET['lang']) && $_GET['lang'] === $lang_code) {
+    setcookie('lang_choice', $lang_code, time() + (86400 * 365), "/");
+}
 
 // Use the short 2-letter language code to build the filename (e.g., 'nb', 'en')
 // This matches the actual filenames like 'nb.json', 'en.json', etc.

@@ -1661,11 +1661,9 @@
             try { return localStorage.getItem('lang'); } catch (e) { return null; }
         }
 
-        // Remember an explicit choice. The cookie is shared with /meteor/ and /data/;
-        // localStorage covers the case where /data/ has set an HttpOnly cookie that
-        // JavaScript can neither read nor overwrite.
+        // Remember an explicit choice. The cookie is shared with /meteor/ and /data/.
         function storeLang(langCode) {
-            document.cookie = `lang=${langCode};path=/;max-age=31536000;SameSite=Lax`;
+            document.cookie = `lang_choice=${langCode};path=/;max-age=31536000;SameSite=Lax`;
             try { localStorage.setItem('lang', langCode); } catch (e) {}
         }
 
@@ -1677,7 +1675,7 @@
         function getLanguage() {
             const langParam = getLangParam();
             if (langParam) return langParam;
-            const cookieLang = getCookie('lang');
+            const cookieLang = getCookie('lang_choice');
             if (SUPPORTED_LANGS.includes(cookieLang)) return cookieLang;
             const storedLang = getStoredLang();
             if (SUPPORTED_LANGS.includes(storedLang)) return storedLang;

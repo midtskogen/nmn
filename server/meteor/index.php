@@ -190,8 +190,8 @@ function get_language($default_lang) {
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported_langs)) {
         return $_GET['lang'];
     }
-    if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported_langs)) {
-        return $_COOKIE['lang'];
+    if (isset($_COOKIE['lang_choice']) && in_array($_COOKIE['lang_choice'], $supported_langs)) {
+        return $_COOKIE['lang_choice'];
     }
     $browser_match = null;
     $norwegian_hint = false;
@@ -242,7 +242,10 @@ function get_language($default_lang) {
 
 // --- Main Logic ---
 $lang_code = get_language($DEFAULT_LANG);
-setcookie('lang', $lang_code, time() + (86400 * 365), "/"); // Set cookie for 1 year
+// Only remember an explicit choice; a stored guess would override detection for a year.
+if (isset($_GET['lang']) && $_GET['lang'] === $lang_code) {
+    setcookie('lang_choice', $lang_code, time() + (86400 * 365), "/");
+}
 
 // Get the translation array for the selected language, falling back to default
 $t = $translations[$lang_code] ?? $translations[$DEFAULT_LANG];

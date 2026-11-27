@@ -37,7 +37,7 @@ function s4_geo_lookup($ip) {
 function s4_get_language($default_lang) {
     $supported = ['nb_NO','en_GB','de_DE','cs_CZ','fi_FI','lv_LV'];
     if (isset($_GET['lang']) && in_array($_GET['lang'], $supported)) return $_GET['lang'];
-    if (isset($_COOKIE['lang']) && in_array($_COOKIE['lang'], $supported)) return $_COOKIE['lang'];
+    if (isset($_COOKIE['lang_choice']) && in_array($_COOKIE['lang_choice'], $supported)) return $_COOKIE['lang_choice'];
     $browser_match = null;
     $norwegian_hint = false;
     if (isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
@@ -75,7 +75,7 @@ function s4_get_language($default_lang) {
 }
 
 $lang_code = s4_get_language($DEFAULT_LANG);
-setcookie('lang', $lang_code, time()+(86400*365), "/");
+if (isset($_GET['lang']) && $_GET['lang'] === $lang_code) setcookie('lang_choice', $lang_code, time()+(86400*365), "/");
 $lang_short = substr($lang_code, 0, 2);
 $t = [];
 $lf = $LANG_DIR.'/'.$lang_short.'.json';
